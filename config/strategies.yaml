@@ -1,0 +1,76 @@
+# ============================================================
+# 매매 전략 파라미터 설정
+# ============================================================
+
+# --- 활성 전략 ---
+active_strategy: "scoring"    # scoring, mean_reversion, trend_following
+
+# --- 기술 지표 파라미터 ---
+indicators:
+  rsi:
+    period: 14                # RSI 계산 기간
+    oversold: 30              # 과매도 기준
+    overbought: 70            # 과매수 기준
+
+  macd:
+    fast_period: 12           # 단기 EMA 기간
+    slow_period: 26           # 장기 EMA 기간
+    signal_period: 9          # 시그널선 기간
+
+  bollinger:
+    period: 20                # 이동평균 기간
+    std_dev: 2.0              # 표준편차 배수
+
+  moving_average:
+    short_period: 5           # 단기 이동평균
+    mid_period: 20            # 중기 이동평균
+    long_period: 60           # 장기 이동평균
+    trend_period: 200         # 추세 판단용 (200일선)
+
+  stochastic:
+    k_period: 5               # %K 기간
+    d_period: 3               # %D 기간
+    smooth: 3                 # 스무딩
+    oversold: 20              # 과매도 기준
+    overbought: 80            # 과매수 기준
+
+  adx:
+    period: 14                # ADX 기간
+    trend_threshold: 25       # 추세 강함 기준
+
+  atr:
+    period: 14                # ATR 기간
+
+  volume:
+    avg_period: 20            # 평균 거래량 계산 기간
+    surge_ratio: 1.5          # 거래량 급증 기준 (평균 대비 비율)
+
+# --- 멀티 지표 스코어링 전략 ---
+scoring:
+  buy_threshold: 5            # 매수 실행 최소 점수
+  sell_threshold: -4          # 매도 실행 최소 점수
+
+  weights:
+    rsi_oversold: 2           # RSI 과매도 점수
+    rsi_overbought: -2        # RSI 과매수 점수
+    macd_golden_cross: 2      # MACD 골든크로스 점수
+    macd_dead_cross: -2       # MACD 데드크로스 점수
+    bollinger_lower: 1        # 볼린저 하단 이탈 점수
+    bollinger_upper: -1       # 볼린저 상단 이탈 점수
+    volume_surge: 1           # 거래량 급증 점수
+    ma_golden_cross: 1        # 이동평균 골든크로스 점수
+    ma_dead_cross: -1         # 이동평균 데드크로스 점수
+
+# --- 평균 회귀 전략 ---
+mean_reversion:
+  z_score_buy: -2.0           # 매수 Z-Score 기준
+  z_score_sell: 2.0           # 매도 Z-Score 기준
+  lookback_period: 20         # 이동평균 기간
+  adx_filter: 20              # ADX 이 값 미만일 때만 전략 활성화
+
+# --- 추세 추종 전략 ---
+trend_following:
+  adx_threshold: 25           # 추세 존재 확인 ADX 기준
+  trend_ma_period: 200        # 추세 판단 이동평균 기간
+  atr_stop_multiplier: 2.0    # ATR 기반 손절 배수
+  trailing_atr_multiplier: 3.0  # ATR 기반 트레일링 스탑 배수

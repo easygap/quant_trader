@@ -1,0 +1,34 @@
+# === 퀀트 트레이더 시스템 의존성 (Python 3.14 호환) ===
+
+# 데이터 처리 & 분석
+pandas>=2.0.0
+numpy>=2.0.0
+scipy>=1.14.0
+
+# 기술적 지표 (Python 3.14 미지원 시 자체 폴백 계산 사용)
+# pandas-ta>=0.3.14  # 선택: Python 3.12 이하에서만 가능
+
+# 데이터 수집 (Python 3.14 미지원 시 KIS API 직접 사용)
+# FinanceDataReader>=0.9.50  # 선택: Python 3.12 이하에서만 가능
+# yfinance>=0.2.18           # 선택: Python 3.12 이하에서만 가능
+requests>=2.32.0
+aiohttp>=3.10.0
+websockets>=14.0
+
+# 데이터베이스
+sqlalchemy>=2.0.0
+
+# 설정 관리
+pyyaml>=6.0
+
+# 로깅
+loguru>=0.7.0
+
+# 모니터링 & 알림 (디스코드 웹훅은 requests로 동작)
+
+# 테스트
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+
+# CLI
+click>=8.1.0
