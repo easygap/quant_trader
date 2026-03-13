@@ -1,0 +1,48 @@
+# ============================================================
+# 리스크 관리 파라미터 설정
+# ============================================================
+
+# --- 포지션 사이징 ---
+position_sizing:
+  max_risk_per_trade: 0.01    # 1% 룰: 1회 거래 최대 손실 = 자본의 1%
+  initial_capital: 10000000   # 초기 투자 자본 (원) - 1천만원
+
+# --- 손절매 (Stop Loss) ---
+stop_loss:
+  type: "atr"                 # fixed (고정 비율) 또는 atr (변동성 기반)
+  fixed_rate: 0.03            # 고정 손절 비율 (3%)
+  atr_multiplier: 2.0         # ATR 기반 손절 배수
+
+# --- 익절매 (Take Profit) ---
+take_profit:
+  type: "fixed"               # fixed (고정 비율)
+  fixed_rate: 0.10            # 고정 익절 비율 (10%)
+  partial_exit: true          # 부분 익절 활성화
+  partial_ratio: 0.5          # 1차 익절 시 매도 비율 (50%)
+  partial_target: 0.06        # 1차 익절 목표 (6%)
+
+# --- 트레일링 스탑 ---
+trailing_stop:
+  enabled: true               # 트레일링 스탑 활성화
+  type: "fixed"               # fixed (고정 비율) 또는 atr (변동성 기반)
+  fixed_rate: 0.03            # 고점 대비 하락 비율 (3%)
+  atr_multiplier: 3.0         # ATR 기반 트레일링 배수
+
+# --- 분산 투자 ---
+diversification:
+  max_position_ratio: 0.20    # 단일 종목 최대 비중 (20%)
+  max_sector_ratio: 0.40      # 단일 섹터 최대 비중 (40%)
+  max_positions: 10           # 최대 동시 보유 종목 수
+  min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
+
+# --- 최대 낙폭 (MDD) 제한 ---
+drawdown:
+  max_portfolio_mdd: 0.15     # 전체 포트폴리오 MDD 한도 (15%)
+  max_daily_loss: 0.03        # 일일 최대 손실 한도 (3%)
+  recovery_scale: 0.5         # MDD 회복 후 복귀 시 축소 비율 (50%)
+
+# --- 거래 비용 ---
+transaction_costs:
+  commission_rate: 0.00015    # 편도 수수료 (0.015%)
+  tax_rate: 0.002             # 매도 세금 (0.2% - 코스피/코스닥)
+  slippage: 0.0005            # 슬리피지 (0.05%)

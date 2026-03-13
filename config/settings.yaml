@@ -1,0 +1,54 @@
+# ============================================================
+# 퀀트 트레이더 시스템 - 전체 설정
+# ============================================================
+
+# --- KIS (한국투자증권) API 설정 ---
+kis_api:
+  app_key: "YOUR_APP_KEY_HERE"          # KIS Developers에서 발급받은 APP KEY
+  app_secret: "YOUR_APP_SECRET_HERE"    # KIS Developers에서 발급받은 APP SECRET
+  account_no: "00000000-00"             # 계좌번호 (8자리-2자리)
+  base_url: "https://openapi.koreainvestment.com:9443"   # 실전 도메인
+  mock_url: "https://openapivts.koreainvestment.com:29443" # 모의투자 도메인
+  use_mock: true                        # true: 모의투자, false: 실전
+
+# --- 데이터베이스 설정 ---
+database:
+  type: "sqlite"                        # sqlite 또는 postgresql
+  sqlite_path: "data/quant_trader.db"   # SQLite 파일 경로
+  # postgresql:                         # PostgreSQL (운영 단계)
+  #   host: "localhost"
+  #   port: 5432
+  #   database: "quant_trader"
+  #   user: "admin"
+  #   password: "password"
+
+# --- 로깅 설정 ---
+logging:
+  level: "INFO"                         # DEBUG, INFO, WARNING, ERROR
+  log_dir: "logs"                       # 로그 파일 저장 디렉토리
+  rotation: "10 MB"                     # 로그 파일 로테이션 크기
+  retention: "30 days"                  # 로그 보관 기간
+  console_output: true                  # 콘솔 출력 여부
+
+# --- 매매 시간 설정 ---
+trading:
+  market_open: "09:00"                  # 장 시작 시간
+  market_close: "15:30"                 # 장 종료 시간
+  pre_market_prep: "08:50"             # 장 시작 전 준비 시간
+  mode: "paper"                         # backtest, paper, live
+
+# --- 디스코드 알림 설정 ---
+discord:
+  enabled: false                        # 디스코드 알림 활성화 여부
+  webhook_url: "YOUR_DISCORD_WEBHOOK_URL_HERE"  # 디스코드 웹훅 URL
+  username: "퀀트 트레이더"              # 봇 표시 이름
+  avatar_url: ""                        # 봇 아바타 URL (선택)
+
+# --- 대상 종목 설정 ---
+watchlist:
+  symbols:
+    - "005930"    # 삼성전자
+    - "000660"    # SK하이닉스
+    - "035720"    # 카카오
+    - "035420"    # NAVER
+    - "051910"    # LG화학
