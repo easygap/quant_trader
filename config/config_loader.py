@@ -29,29 +29,29 @@ def load_yaml(file_path: str) -> dict:
 
 
 def _override_with_env(settings: dict) -> dict:
-    """환경변수(.env) 값으로 yaml 설정을 덮어씁니다."""
-    
-    # KIS API 시크릿
-    if "kis_api" in settings:
-        settings["kis_api"]["app_key"] = os.environ.get("KIS_APP_KEY", settings["kis_api"].get("app_key"))
-        settings["kis_api"]["app_secret"] = os.environ.get("KIS_APP_SECRET", settings["kis_api"].get("app_secret"))
-        settings["kis_api"]["account_no"] = os.environ.get("KIS_ACCOUNT_NO", settings["kis_api"].get("account_no"))
-        
-        # Rate Limiting
-        if "MAX_CALLS_PER_SEC" in os.environ:
-            settings["kis_api"]["max_calls_per_sec"] = float(os.environ["MAX_CALLS_PER_SEC"])
-        if "MAX_RETRY" in os.environ:
-            settings["kis_api"]["max_retry"] = int(os.environ["MAX_RETRY"])
+    """환경변수(.env) 값으로 yaml 설정을 덮어씁니다. API 키/시크릿은 환경변수 전용(보안)."""
+    if "kis_api" not in settings:
+        settings["kis_api"] = {}
+    # 민감 정보: YAML 값 무시, 환경변수 전용 (settings.yaml 커밋 시에도 노출 방지)
+    settings["kis_api"]["app_key"] = os.environ.get("KIS_APP_KEY", "")
+    settings["kis_api"]["app_secret"] = os.environ.get("KIS_APP_SECRET", "")
+    settings["kis_api"]["account_no"] = os.environ.get("KIS_ACCOUNT_NO", settings["kis_api"].get("account_no", ""))
+    if "MAX_CALLS_PER_SEC" in os.environ:
+        settings["kis_api"]["max_calls_per_sec"] = float(os.environ["MAX_CALLS_PER_SEC"])
+    if "MAX_RETRY" in os.environ:
+        settings["kis_api"]["max_retry"] = int(os.environ["MAX_RETRY"])
 
-    # Discord 알림
     if "discord" in settings:
         settings["discord"]["webhook_url"] = os.environ.get("DISCORD_WEBHOOK_URL", settings["discord"].get("webhook_url"))
 
     return settings
 
 def load_settings() -> dict:
-    """전체 설정(settings.yaml) 및 환경변수 오버라이드 로드"""
-    settings = load_yaml(CONFIG_DIR / "settings.yaml")
+    """전체 설정 로드. settings.yaml 없으면 기본 dict 사용(키는 환경변수 전용)."""
+    try:
+        settings = load_yaml(CONFIG_DIR / "settings.yaml")
+    except FileNotFoundError:
+        settings = {"kis_api": {}, "database": {}, "trading": {}, "discord": {}, "watchlist": {}}
     return _override_with_env(settings)
 
 

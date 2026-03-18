@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant_trader"
+version = "0.1.0"
+description = "Python 자동 주식 매매 실험 프로젝트 (KIS API, 백테스트, 리스크 관리)"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["api*", "backtest*", "config*", "core*", "database*", "monitoring*", "strategies*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pandas.errors.Pandas4Warning",
+    "ignore:Bitwise inversion.*bool.*deprecated:DeprecationWarning",
+]

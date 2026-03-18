@@ -1,0 +1,45 @@
+# ============================================================
+# 퀀트 트레이더 - 설정 예시 (이 파일을 settings.yaml 로 복사 후 사용)
+# ============================================================
+# 중요: app_key, app_secret, account_no, webhook_url 은 환경변수에서만 로드됩니다.
+# .env 에 KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_NO, DISCORD_WEBHOOK_URL 설정하세요.
+
+kis_api:
+  app_key: ""
+  app_secret: ""
+  account_no: "00000000-00"
+  base_url: "https://openapi.koreainvestment.com:9443"
+  mock_url: "https://openapivts.koreainvestment.com:29443"
+  use_mock: true
+
+database:
+  type: "sqlite"
+  sqlite_path: "data/quant_trader.db"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  rotation: "10 MB"
+  retention: "30 days"
+  console_output: true
+
+trading:
+  market_open: "09:00"
+  market_close: "15:30"
+  pre_market_prep: "08:50"
+  mode: "paper"
+  auto_entry: false
+
+discord:
+  enabled: false
+  webhook_url: ""
+  username: "퀀트 트레이더"
+  avatar_url: ""
+
+watchlist:
+  symbols:
+    - "005930"
+    - "000660"
+    - "035720"
+    - "035420"
+    - "051910"

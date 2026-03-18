@@ -12,6 +12,29 @@ from loguru import logger
 from config.config_loader import Config
 
 
+def _get_tick_size(price: float) -> int:
+    """
+    KRX 호가 단위 (원).
+    가격대별: 2천원미만 1원, 5천원미만 5원, 2만원미만 10원, 5만원미만 50원,
+    20만원미만 100원, 50만원미만 500원, 이상 1000원.
+    """
+    if price <= 0:
+        return 1
+    if price < 2000:
+        return 1
+    if price < 5000:
+        return 5
+    if price < 20000:
+        return 10
+    if price < 50000:
+        return 50
+    if price < 200000:
+        return 100
+    if price < 500000:
+        return 500
+    return 1000
+
+
 class RiskManager:
     """
     리스크 관리자
@@ -52,6 +75,15 @@ class RiskManager:
         Returns:
             매수 가능 수량
         """
+        # 진입가 유효성 검사 (분모 0 방지)
+        if entry_price <= 0:
+            logger.warning("진입가가 0 이하 — 포지션 계산 불가 (entry_price={})", entry_price)
+            return 0
+
+        if capital <= 0:
+            logger.warning("자본이 0 이하 — 포지션 계산 불가")
+            return 0
+
         max_risk = self.risk_params.get("position_sizing", {}).get("max_risk_per_trade", 0.01)
         risk_amount = capital * max_risk  # 최대 손실 가능 금액
 
@@ -60,14 +92,24 @@ class RiskManager:
             logger.warning("손절 폭이 0 이하 — 포지션 계산 불가")
             return 0
 
+        # ATR≈0 등 극단적으로 작은 손절 폭 방어 (진입가 대비 최소 0.1% 이상)
+        min_risk_per_share = entry_price * 0.001
+        if risk_per_share < min_risk_per_share:
+            logger.warning(
+                "손절 폭이 극소 — 포지션 계산 불가 (risk_per_share={:.2f} < min={:.2f})",
+                risk_per_share, min_risk_per_share,
+            )
+            return 0
+
         quantity = int(risk_amount / risk_per_share)
 
-        # 분산 투자 제한 확인
+        # 분산 투자 제한 확인 (entry_price > 0 검증 완료됨)
         max_ratio = self.risk_params.get("diversification", {}).get("max_position_ratio", 0.20)
         max_invest = capital * max_ratio
         max_by_ratio = int(max_invest / entry_price)
 
         final_qty = min(quantity, max_by_ratio)
+        final_qty = max(final_qty, 0)
 
         logger.info(
             "포지션 계산: 자본={:,.0f} | 진입가={:,.0f} | 손절가={:,.0f} | "
@@ -76,7 +118,7 @@ class RiskManager:
             quantity, max_by_ratio, final_qty,
         )
 
-        return max(final_qty, 0)
+        return final_qty
 
     # =============================================================
     # 손절/익절 가격 계산
@@ -211,8 +253,9 @@ class RiskManager:
                 )
                 self._is_halted = True
         else:
-            if self._is_halted and mdd < max_mdd * 0.5:
-                # MDD가 한도의 50% 이하로 회복되면 재개
+            recovery_scale = self.risk_params.get("drawdown", {}).get("recovery_scale", 0.5)
+            if self._is_halted and mdd < max_mdd * (1 - recovery_scale):
+                # MDD가 한도 대비 회복되면 재개 (recovery_scale: 복귀 시 축소 비율)
                 logger.info("MDD 회복 — 매매 재개 (축소 규모)")
                 self._is_halted = False
 
@@ -254,6 +297,7 @@ class RiskManager:
         current_positions: int,
         position_value: float,
         total_value: float,
+        available_cash: float = None,
     ) -> dict:
         """
         분산 투자 규칙 확인
@@ -281,6 +325,15 @@ class RiskManager:
         # 단일 종목 비중 초과
         if total_value > 0 and (position_value / total_value) > max_ratio:
             return {"can_buy": False, "reason": f"단일 종목 비중 {max_ratio*100:.0f}% 초과"}
+
+        if available_cash is not None and total_value > 0:
+            remaining_cash = available_cash - position_value
+            remaining_cash_ratio = remaining_cash / total_value
+            if remaining_cash_ratio < min_cash:
+                return {
+                    "can_buy": False,
+                    "reason": f"최소 현금 비중 {min_cash*100:.0f}% 미만",
+                }
 
         return {"can_buy": True, "reason": ""}
 
@@ -315,7 +368,13 @@ class RiskManager:
         amount = price * quantity
 
         commission = amount * costs.get("commission_rate", 0.00015)
-        slippage = amount * costs.get("slippage", 0.0005)
+        # 호가 단위 기반 슬리피지: max(고정 비율, tick_size * N틱)
+        slippage_rate_fixed = costs.get("slippage", 0.0005)
+        slippage_ticks = costs.get("slippage_ticks", 2)
+        tick = _get_tick_size(price)
+        slippage_per_share = max(price * slippage_rate_fixed, tick * slippage_ticks)
+        slippage = slippage_per_share * quantity
+        slippage_rate_effective = slippage_per_share / price if price > 0 else 0
 
         tax = 0
         if action.upper() == "SELL":
@@ -325,10 +384,10 @@ class RiskManager:
 
         # 실효 가격 (매수 시 높게, 매도 시 낮게)
         if action.upper() == "BUY":
-            effective_price = price * (1 + costs.get("commission_rate", 0) + costs.get("slippage", 0))
+            effective_price = price * (1 + costs.get("commission_rate", 0) + slippage_rate_effective)
         else:
             effective_price = price * (
-                1 - costs.get("commission_rate", 0) - costs.get("slippage", 0) - costs.get("tax_rate", 0)
+                1 - costs.get("commission_rate", 0) - slippage_rate_effective - costs.get("tax_rate", 0)
             )
 
         return {

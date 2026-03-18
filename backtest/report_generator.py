@@ -107,6 +107,26 @@ class ReportGenerator:
         logger.info("텍스트 리포트 저장: {}", filepath)
         return report_text
 
+    def generate_all(self, result: dict) -> dict:
+        """텍스트/HTML 리포트를 한 번에 생성하고 경로를 반환."""
+        if not result or "metrics" not in result:
+            return {}
+
+        self.generate_text_report(result)
+        html_path = self.generate_html_report(result)
+
+        txt_files = sorted(
+            self.output_dir.glob(f"backtest_{result.get('strategy', 'unknown')}_*.txt"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        latest_txt = str(txt_files[0]) if txt_files else ""
+
+        return {
+            "text_path": latest_txt,
+            "html_path": html_path,
+        }
+
     def generate_html_report(self, result: dict, filename: str = None) -> str:
         """
         HTML 형식 백테스팅 리포트 생성

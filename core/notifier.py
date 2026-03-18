@@ -18,17 +18,38 @@ class Notifier:
     통합 알림 시스템
     디스코드 알림을 기본으로 하되, 실패 시 이메일로 Fallback.
     치명적인 알림(블랙스완, 서킷브레이커 등)은 양쪽 모두 발송.
+    알림 실패 누적 시 일정 횟수 초과하면 시스템 상태 점검 알림.
     """
+
+    # 알림 실패 누적 카운터 (클래스 공유), 일정 횟수 초과 시 점검 알림
+    _alert_failure_count = 0
+    _alert_failure_threshold = 5
+    _alert_health_notified = False
 
     def __init__(self):
         self.discord = DiscordBot()
-        
+
         # SMTP Fallback 설정
         self.smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
         self.smtp_port = int(os.environ.get("SMTP_PORT", 465))
         self.smtp_user = os.environ.get("SMTP_USER", "")
         self.smtp_password = os.environ.get("SMTP_PASSWORD", "")
         self.alert_email = os.environ.get("ALERT_EMAIL_BCC", self.smtp_user)
+
+    def _record_alert_failure(self):
+        """알림 실패 시 누적 카운터 증가, 임계치 초과 시 시스템 점검 알림 1회 발송."""
+        Notifier._alert_failure_count += 1
+        if Notifier._alert_failure_count >= Notifier._alert_failure_threshold and not Notifier._alert_health_notified:
+            Notifier._alert_health_notified = True
+            msg = (
+                f"[ALERT_FAILED] 알림 실패가 {Notifier._alert_failure_count}회 누적되었습니다. "
+                "디스코드 웹훅 URL 및 이메일(SMTP) 설정을 점검하세요."
+            )
+            logger.warning(msg)
+            try:
+                self._send_email(subject="퀀트 트레이더 알림 경로 점검 필요", body=msg)
+            except Exception:
+                pass
 
     def _send_email(self, subject: str, body: str) -> bool:
         """이메일 발송 내부 메서드"""
@@ -58,35 +79,40 @@ class Notifier:
             logger.info("📧 Fallback 이메일 발송 성공: {}", subject)
             return True
         except Exception as e:
-            logger.error("이메일 발송 실패: {}", e)
+            logger.error("[ALERT_FAILED] 이메일 발송 실패: {}", e)
+            self._record_alert_failure()
             return False
 
     def send_message(self, text: str, critical: bool = False):
         """
-        일반 메시지 전송
+        일반 메시지 전송. 알림 실패는 주문 로직과 분리되며, 실패 시 [ALERT_FAILED] 로그.
         Args:
             text: 내용
             critical: 치명적 오류/이벤트 여부 (True면 이메일 무조건 동시 발송)
         """
-        success = self.discord.send_message(text)
-        
-        # 디스코드 실패 시 이메일 폴백, 또는 치명적 메시지일 경우 무조건 이메일
-        if not success or critical:
-            self._send_email(subject="긴급 알림", body=text)
+        try:
+            success = self.discord.send_message(text)
+            if not success or critical:
+                self._send_email(subject="긴급 알림", body=text)
+        except Exception as e:
+            logger.error("[ALERT_FAILED] 알림 전송 실패 (주문 실행과 무관): {}", e)
+            self._record_alert_failure()
 
     def send_embed(self, title: str, description: str, color: int = 0x4F9EF8, fields: list = None, critical: bool = False):
         """
         임베드/리치 메시지 전송 (포맷 변경 후 디스코드 / 이메일 발송)
         """
-        success = self.discord.send_embed(title, description, color, fields)
-        
-        if not success or critical:
-            # Embed 필드를 Plain Text로 변환
-            body = f"{title}\n{description}\n"
-            if fields:
-                for f in fields:
-                    body += f"- {f.get('name')}: {f.get('value')}\n"
-            self._send_email(subject=title, body=body)
+        try:
+            success = self.discord.send_embed(title, description, color, fields)
+            if not success or critical:
+                body = f"{title}\n{description}\n"
+                if fields:
+                    for f in fields:
+                        body += f"- {f.get('name')}: {f.get('value')}\n"
+                self._send_email(subject=title, body=body)
+        except Exception as e:
+            logger.error("[ALERT_FAILED] 임베드 알림 전송 실패: {}", e)
+            self._record_alert_failure()
 
     def send_trade_alert(self, trade_info: dict):
         """매매 알림 발송 - 디스코드 래핑"""

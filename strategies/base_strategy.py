@@ -23,13 +23,14 @@ class BaseStrategy(ABC):
     @abstractmethod
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        주가 데이터를 분석하여 필요한 지표들을 추가
+        주가 데이터를 분석하여 필요한 지표들과 전략 신호를 추가.
+        반환 DataFrame은 최소한 `signal` 컬럼(BUY/SELL/HOLD)을 포함해야 합니다.
 
         Args:
             df: OHLCV 데이터프레임
 
         Returns:
-            지표가 추가된 DataFrame
+            지표 및 signal 컬럼이 추가된 DataFrame
         """
         pass
 
