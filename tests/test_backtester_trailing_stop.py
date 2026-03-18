@@ -30,6 +30,7 @@ class _MockConfig:
             "commission_rate": 0.0,
             "tax_rate": 0.0,
             "slippage": 0.0,
+            "slippage_ticks": 0,
         },
     }
 

@@ -25,13 +25,22 @@ KR_HOLIDAYS_FALLBACK = {
 
 def _load_holidays() -> set:
     """
-    공휴일 세트 로드: 1) config/holidays.yaml 2) pykrx 3) 하드코딩 fallback
+    공휴일 세트 로드: 1) config/holidays.yaml 2) pykrx 3) 하드코딩 fallback.
+    holidays.yaml이 없으면 자동 생성 시도(pykrx+fallback) 후 재로드.
     """
-    # 1) config/holidays.yaml
+    import yaml
     holidays_path = _PROJECT_ROOT / "config" / "holidays.yaml"
+
+    # 파일 없으면 자동 갱신 시도 (매년 수동 관리 부담 감소)
+    if not holidays_path.exists():
+        try:
+            from core.holidays_updater import update_holidays_yaml
+            update_holidays_yaml(path=holidays_path)
+        except Exception as e:
+            logger.debug("휴장일 파일 자동 생성 스킵: {}", e)
+
     if holidays_path.exists():
         try:
-            import yaml
             with open(holidays_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             lst = data.get("holidays", data.get("dates", []))
