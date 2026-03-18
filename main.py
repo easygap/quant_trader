@@ -161,24 +161,90 @@ def run_param_optimize(args):
         logger.info("상위 5개: {}", [r["params"] for r in result["all_results"][:5]])
 
 
+def run_check_indicator_correlation(args):
+    """스코어링 지표 독립성 검증: 지표 간 상관계수 계산, 0.7 이상 쌍에 대해 제거/가중치 축소 권고."""
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    from core.data_collector import DataCollector
+    from core.indicator_engine import IndicatorEngine
+    from core.signal_generator import SignalGenerator
+    from core.indicator_correlation import run_indicator_correlation_check, render_correlation_report
+
+    symbol = args.symbol or "005930"
+    years = getattr(args, "validation_years", 5)
+    end_date = args.end
+    start_date = args.start
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
+
+    collector = DataCollector()
+    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    if df.empty or len(df) < 120:
+        logger.error("지표 상관 검증용 데이터 부족: {} ({}~{}, {}일)", symbol, start_date, end_date, len(df))
+        return
+
+    config = Config.get()
+    engine = IndicatorEngine(config)
+    generator = SignalGenerator(config)
+    df_ind = engine.calculate_all(df.copy())
+    df_scores = generator.generate(df_ind)
+    if df_scores.empty:
+        logger.error("스코어 생성 실패")
+        return
+
+    threshold = args.correlation_threshold
+    result = run_indicator_correlation_check(df_scores, threshold=threshold)
+    report_text = render_correlation_report(result)
+
+    out_dir = Path(getattr(args, "output_dir", "reports"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = out_dir / f"indicator_correlation_{symbol}_{timestamp}.txt"
+    report_path.write_text(report_text, encoding="utf-8")
+
+    print(report_text)
+    logger.info("지표 독립성 검증 리포트 저장: {}", report_path)
+
+
 def run_strategy_validation(args):
-    """전략 검증 모드 실행."""
+    """전략 검증 모드 실행. --walk-forward 시 슬라이딩 윈도우 워크포워드 검증."""
     from backtest.strategy_validator import StrategyValidator
 
     validator = StrategyValidator(output_dir=args.output_dir)
-    result = validator.run(
-        symbol=args.symbol or "005930",
-        strategy_name=args.strategy,
-        start_date=args.start,
-        end_date=args.end,
-        benchmark_symbol=args.benchmark_symbol,
-        validation_years=args.validation_years,
-        split_ratio=args.split_ratio,
-        min_sharpe=args.min_sharpe,
-        max_mdd=args.max_mdd,
-    )
-    validator.print_report(result)
-    logger.info("전략 검증 리포트 저장 완료: {}", result["report_path"])
+    if getattr(args, "walk_forward", False):
+        result = validator.run_walk_forward(
+            symbol=args.symbol or "005930",
+            strategy_name=args.strategy,
+            start_date=args.start,
+            end_date=args.end,
+            benchmark_symbol=args.benchmark_symbol,
+            validation_years=args.validation_years,
+            train_days=504,
+            test_days=252,
+            step_days=252,
+            min_sharpe=args.min_sharpe,
+            max_mdd=args.max_mdd,
+        )
+        print(validator._render_walk_forward_report(result))
+        logger.info("워크포워드 검증 리포트 저장 완료: {}", result["report_path"])
+    else:
+        result = validator.run(
+            symbol=args.symbol or "005930",
+            strategy_name=args.strategy,
+            start_date=args.start,
+            end_date=args.end,
+            benchmark_symbol=args.benchmark_symbol,
+            validation_years=args.validation_years,
+            split_ratio=args.split_ratio,
+            min_sharpe=args.min_sharpe,
+            max_mdd=args.max_mdd,
+            use_benchmark_top50=not getattr(args, "no_benchmark_top50", False),
+        )
+        validator.print_report(result)
+        logger.info("전략 검증 리포트 저장 완료: {}", result["report_path"])
 
 
 def run_paper_trading(args):
@@ -244,8 +310,8 @@ def run_paper_trading(args):
                 logger.warning("종목 {} 데이터 부족 — 스킵", symbol)
                 continue
 
-            # 신호 생성
-            signal_info = strategy.generate_signal(df)
+            # 신호 생성 (평균회귀 시 symbol 전달 → 펀더멘털 필터 사용)
+            signal_info = strategy.generate_signal(df, symbol=symbol)
 
             logger.info(
                 "종목 {} | 신호: {} | 점수: {} | 상세: {}",
@@ -256,6 +322,10 @@ def run_paper_trading(args):
                 discord.send_signal_alert(symbol, signal_info)
 
             if signal_info["signal"] == "BUY" and not get_position(symbol, account_key=account_key):
+                from core.market_regime import allow_new_buys_by_market_regime
+                if not allow_new_buys_by_market_regime(config, collector):
+                    logger.info("하락장(코스피 200일선 이하)으로 신규 매수 중단 — {} 스킵", symbol)
+                    continue
                 capital_summary = portfolio.get_portfolio_summary()
                 avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1]) if "volume" in df.columns and not df["volume"].empty else None
                 order_result = executor.execute_buy(
@@ -542,8 +612,8 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard"],
-        help="실행 모드 (기본: backtest)",
+        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation"],
+        help="실행 모드 (기본: backtest). check_correlation: 스코어링 지표 간 상관계수·독립성 검증",
     )
     parser.add_argument(
         "--strategy", type=str, default="scoring",
@@ -595,12 +665,24 @@ def main():
         help="전략 검증 최대 허용 MDD(%, 음수값, 기본: -20)",
     )
     parser.add_argument(
+        "--walk-forward", action="store_true",
+        help="[validate 모드] 슬라이딩 윈도우 워크포워드 검증 (train 2년→test 1년, 1년 스텝 반복). 미지정 시 1회 train/test 분할",
+    )
+    parser.add_argument(
+        "--no-benchmark-top50", action="store_true",
+        help="[validate 모드] 코스피 상위 50종목 동일비중 벤치마크 비활성화 (기본: 사용)",
+    )
+    parser.add_argument(
         "--compare-symbol", type=str, default=None,
         help="[compare 모드] 백테스트 대상 종목. 미지정 시 기간 내 모의투자 거래 최다 종목 사용",
     )
     parser.add_argument(
         "--dashboard-port", type=int, default=None,
         help="[dashboard 모드] 웹 대시보드 포트 (기본: config dashboard.port 또는 8080)",
+    )
+    parser.add_argument(
+        "--correlation-threshold", type=float, default=0.7,
+        help="[check_correlation 모드] 고상관 판단 기준 (기본: 0.7). 이 값 이상이면 제거/가중치 축소 권고",
     )
 
     args = parser.parse_args()
@@ -640,6 +722,8 @@ def main():
             run_param_optimize(args)
         elif args.mode == "dashboard":
             run_dashboard(args)
+        elif args.mode == "check_correlation":
+            run_check_indicator_correlation(args)
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:

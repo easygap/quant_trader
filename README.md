@@ -10,6 +10,10 @@
 * 백테스트 / 모의투자 / 실전 매매
 * RSI, MACD, 볼린저밴드, 스토캐스틱, ATR 기반 신호 생성
 * 스코어링 / 평균회귀 / 추세추종 전략 지원
+* 앙상블 전략(기술지표 + 모멘텀 팩터 + 변동성 조건)
+* 워치리스트: 모멘텀·저변동성 팩터 모드(momentum_top, low_vol_top, momentum_lowvol)
+* 시장 국면 필터(코스피 200일선 이하 시 신규 매수 중단)
+* 전략 검증 시 KS11 + 코스피 상위 50 동일비중 벤치마크
 * 손절, 익절, 트레일링 스탑, 포지션 제한 등 기본 리스크 관리
 * 디스코드 알림 및 KIS 웹소켓 기반 실시간 처리
 * 웹 대시보드로 포트폴리오 상태 확인
@@ -44,6 +48,7 @@ trading.auto_entry: true
 ```bash
 # 백테스트
 python main.py --mode backtest --strategy scoring --symbol 005930
+python main.py --mode backtest --strategy ensemble --symbol 005930
 
 # 모의투자
 python main.py --mode paper --strategy scoring
@@ -53,6 +58,9 @@ python main.py --mode live --strategy scoring --confirm-live
 
 # 전략 검증
 python main.py --mode validate --strategy scoring --symbol 005930 --validation-years 5
+python main.py --mode validate --strategy scoring --symbol 005930 --no-benchmark-top50  # Top50 벤치마크 제외
+python main.py --mode validate --walk-forward --strategy scoring --symbol 005930 --validation-years 6  # 워크포워드 검증
+python main.py --mode check_correlation --symbol 005930 --validation-years 5  # 스코어링 지표 간 상관계수·독립성 검증
 
 # 성과 비교
 python main.py --mode compare --start 2025-01-01 --end 2025-03-18 --strategy scoring
@@ -74,6 +82,7 @@ python main.py --mode dashboard
 * 자금 비중 제한과 동시 보유 종목 수 제한 지원
 * 미체결 주문 확인 및 중복 주문 방지 로직 포함
 * 전략 성과가 일정 기준 이하로 떨어지면 신규 진입 제한 가능
+* 시장 국면 필터: 코스피 200일선 이하(하락장) 시 신규 매수 전면 중단
 * DB 백업 및 잔고 크로스체크 지원
 * 긴급 전체 청산 기능 제공
 
@@ -102,7 +111,7 @@ pytest tests/ -q
 
 * 백테스트 데이터가 비어 있으면 설정 파일과 `.env` 값을 먼저 확인해주세요.
 * `FinanceDataReader` 또는 `yfinance` 설치 여부도 같이 확인하면 됩니다.
-* 상세 내용은 `docs/PROJECT_GUIDE.md`와 `reports/current_project_deep_report.md`에 정리해두었습니다.
+* 상세 내용은 `docs/PROJECT_GUIDE.md`와 `quant_trader_design.md`에 정리해두었습니다.
 
 ## 주의
 

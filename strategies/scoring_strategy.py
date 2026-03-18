@@ -41,7 +41,7 @@ class ScoringStrategy(BaseStrategy):
             df["strategy_score"] = df["total_score"]
         return df
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """최신 매매 신호 반환"""
         df = self.analyze(df)
         return self.signal_generator.get_latest_signal(df)
