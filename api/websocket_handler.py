@@ -2,6 +2,8 @@
 실시간 웹소켓 데이터 핸들러
 - KIS API 웹소켓을 통한 실시간 체결/호가 스트리밍
 - asyncio 기반 비동기 처리
+- connect() 시 KISApi.get_approval_key()로 웹소켓 전용 승인키 발급 후 구독 메시지에 사용.
+  KIS 공식 문서(웹소켓 인증) 변경 시 해당 로직 재검증 필요.
 """
 
 import json
@@ -43,6 +45,7 @@ class WebSocketHandler:
         self.use_mock = kis.get("use_mock", True)
 
         self.ws_url = self.MOCK_WS_URL if self.use_mock else self.REAL_WS_URL
+        self.approval_key = ""
 
         # 콜백 함수 저장소
         self._on_price_callbacks: list[Callable] = []
@@ -56,6 +59,7 @@ class WebSocketHandler:
         # 상태 추적용 변수 (Heartbeat)
         self._last_ping_time: float = 0.0
         self._last_pong_time: float = 0.0
+        self._first_data_logged: bool = False
 
         logger.info(
             "WebSocketHandler 초기화 (모드: {})",
@@ -92,6 +96,18 @@ class WebSocketHandler:
             logger.warning("KIS API 키 미설정 — 웹소켓 연결 불가")
             return
 
+        from api.kis_api import KISApi
+        api = KISApi()
+        self.approval_key = api.get_approval_key()
+        if not self.approval_key:
+            logger.error("approval key 발급 실패 — 웹소켓 연결 중단")
+            return
+
+        masked_key = api._mask_key(self.approval_key) if self.approval_key else "****"
+        logger.info(
+            "웹소켓 연결 준비 완료 (url: {}, 종목 수: {}, approval_key: {})",
+            self.ws_url, len(symbols), masked_key,
+        )
         self._should_reconnect = True
         retry_count = 0
 
@@ -108,7 +124,10 @@ class WebSocketHandler:
                     self._last_ping_time = asyncio.get_event_loop().time()
                     self._last_pong_time = self._last_ping_time
 
-                    logger.info("웹소켓 연결 성공")
+                    logger.info(
+                        "웹소켓 연결 성공 (url: {}, 구독 종목: {})",
+                        self.ws_url, symbols,
+                    )
 
                     # 종목 구독 요청
                     for symbol in symbols:
@@ -131,7 +150,10 @@ class WebSocketHandler:
                 logger.info("웹소켓 연결 강제 취소")
                 break
             except Exception as e:
-                logger.error("웹소켓 연결 오류: {}", e)
+                logger.error(
+                    "웹소켓 연결 오류: {} (url: {}, 예외: {})",
+                    e, self.ws_url, type(e).__name__,
+                )
 
             self._is_connected = False
             self._ws = None
@@ -203,7 +225,7 @@ class WebSocketHandler:
         # KIS 웹소켓 구독 메시지 포맷
         subscribe_msg = {
             "header": {
-                "approval_key": self.app_key,
+                "approval_key": self.approval_key,
                 "custtype": "P",
                 "tr_type": "1",         # 1: 등록
                 "content-type": "utf-8",
@@ -243,6 +265,12 @@ class WebSocketHandler:
                 # 실시간 데이터 정합성 검증
                 from core.data_validator import DataValidator
                 if price_data and DataValidator.validate_realtime_data(price_data):
+                    if not self._first_data_logged:
+                        self._first_data_logged = True
+                        logger.info(
+                            "웹소켓 첫 실시간 데이터 수신 (tr_id: {}, symbol: {}, price: {})",
+                            tr_id, price_data.get("symbol"), price_data.get("price"),
+                        )
                     for callback in self._on_price_callbacks:
                         callback(price_data)
                 elif price_data:
