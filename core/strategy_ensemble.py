@@ -1,6 +1,7 @@
 """
 전략 앙상블 모듈
 - 복수 전략의 신호를 다수결/가중합/보수적 방식으로 통합
+- 정보 소스 분리: 기술적 지표 + 모멘텀 팩터 + 변동성 조건 (quant_trader_design.md §4.4)
 """
 
 import pandas as pd
@@ -16,11 +17,13 @@ VALUE_TO_SIGNAL = {1: "BUY", 0: "HOLD", -1: "SELL"}
 
 class StrategyEnsemble:
     """
-    전략 앙상블: scoring, mean_reversion, trend_following 등 복수 전략 신호 통합.
+    전략 앙상블: 서로 다른 정보 소스 세 가지를 통합.
 
-    - majority_vote: 다수결
-    - weighted_sum: 전략별 신뢰도 가중 후 합산, 임계값으로 BUY/SELL 판단
-    - conservative: 모든 전략이 동일 신호일 때만 매매
+    - technical: 기술적 지표(RSI, MACD, 볼린저, 거래량, MA) 기반 스코어링
+    - momentum_factor: 가격 모멘텀(N일 수익률)만 사용
+    - volatility_condition: 실현변동성 구간만 사용 (저변동성=매수, 고변동성=매도)
+
+    모드: majority_vote | weighted_sum | conservative
     """
 
     def __init__(self, config: Config = None):
@@ -34,15 +37,15 @@ class StrategyEnsemble:
         logger.info("StrategyEnsemble 초기화 (모드: {}, 전략 수: {})", self.mode, len(self._strategies))
 
     def _load_strategies(self):
-        """전략 인스턴스 로드"""
+        """전략 인스턴스 로드 — 정보 소스가 다른 세 전략"""
         from strategies.scoring_strategy import ScoringStrategy
-        from strategies.mean_reversion import MeanReversionStrategy
-        from strategies.trend_following import TrendFollowingStrategy
+        from strategies.momentum_factor import MomentumFactorStrategy
+        from strategies.volatility_condition import VolatilityConditionStrategy
 
         for name, cls in [
-            ("scoring", ScoringStrategy),
-            ("mean_reversion", MeanReversionStrategy),
-            ("trend_following", TrendFollowingStrategy),
+            ("technical", ScoringStrategy),
+            ("momentum_factor", MomentumFactorStrategy),
+            ("volatility_condition", VolatilityConditionStrategy),
         ]:
             try:
                 self._strategies.append((name, cls(self.config)))
@@ -89,7 +92,7 @@ class StrategyEnsemble:
         base_df["strategy_score"] = score_frame.mean(axis=1).fillna(0.0)
         return base_df
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """각 전략 신호를 수집 후 앙상블 모드에 따라 통합 신호 반환"""
         if not self._strategies:
             return {"signal": "HOLD", "score": 0, "details": {"ensemble": "전략 없음"}}
@@ -114,7 +117,8 @@ class StrategyEnsemble:
         }
 
     def _resolve_row_signal(self, row: pd.Series) -> str:
-        signals = [(name, row.get(name, "HOLD"), 0) for name in row.index]
+        names = [name for name, _ in self._strategies]
+        signals = [(name, row.get(name, "HOLD"), 0) for name in names]
         if self.mode == "conservative":
             return self._resolve_conservative(signals)
         if self.mode == "weighted_sum":

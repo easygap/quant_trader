@@ -3,6 +3,8 @@
 
 - 오버피팅 주의: train_ratio로 in-sample 구간에서만 최적화하고,
   best params에 대해 out-of-sample 구간 성과를 함께 보고해 과적합 여부를 확인할 수 있음.
+- 스코어링 가중치(weights): 검색 공간에 포함하지 않음. 가중치를 과거 데이터로 최적화하면
+  과적합 가능성이 크고 실전 성과 이탈이 흔하므로, OOS·walk-forward 등 별도 검증 없이는 권장하지 않음.
 """
 
 from copy import deepcopy
@@ -17,15 +19,17 @@ from backtest.backtester import Backtester
 
 
 # 전략별 기본 검색 공간 (Grid Search용: 파라미터명 -> 값 목록)
+# scoring: 가중치(weights)는 탐색하지 않음. 임계값은 대칭 쌍만 탐색 (비대칭 시 매도 타이밍 이탈 위험).
 DEFAULT_SEARCH_SPACES = {
     "scoring": {
-        "buy_threshold": [3, 4, 5, 6, 7],
-        "sell_threshold": [-6, -5, -4, -3],
+        "buy_threshold": [2, 3, 4, 5],
+        "sell_threshold": [-2, -3, -4, -5],  # grid_search에서 (buy, sell) 동일 인덱스로만 짝지어 대칭만 탐색
     },
+    # mean_reversion: lookback_period가 Z-Score "평균"의 정의. 20일 vs 60일이면 신호가 완전히 달라지므로 구간 확장.
     "mean_reversion": {
         "z_score_buy": [-2.5, -2.0, -1.5],
         "z_score_sell": [1.5, 2.0, 2.5],
-        "lookback_period": [15, 20, 25],
+        "lookback_period": [15, 20, 25, 40, 60],
     },
     "trend_following": {
         "adx_threshold": [20, 25, 30],
@@ -118,7 +122,19 @@ def grid_search(
     df_train = df.iloc[:train_end]
     df_oos = df.iloc[train_end:] if train_end < n else None
 
-    candidates = _grid_candidates(search_space)
+    # scoring 전략: 임계값 대칭만 탐색 (buy_threshold와 sell_threshold를 동일 인덱스로 짝지음)
+    if strategy_name == "scoring" and "buy_threshold" in search_space and "sell_threshold" in search_space:
+        buy_vals = search_space["buy_threshold"]
+        sell_vals = search_space["sell_threshold"]
+        if len(buy_vals) == len(sell_vals):
+            candidates = [
+                {"buy_threshold": b, "sell_threshold": s}
+                for b, s in zip(buy_vals, sell_vals)
+            ]
+        else:
+            candidates = _grid_candidates(search_space)
+    else:
+        candidates = _grid_candidates(search_space)
     logger.info(
         "Grid Search 시작: 전략={}, 조합 수={}, 학습 구간={}~{} ({}일)",
         strategy_name, len(candidates),
@@ -233,9 +249,10 @@ def bayesian_optimize(
     risk = config.risk_params
     initial_capital = initial_capital or risk.get("position_sizing", {}).get("initial_capital", 10_000_000)
 
+    # scoring: 대칭 권장. 아래는 구간만 정의하며, 실전에서는 sell_threshold = -buy_threshold 로 맞추는 것을 권장.
     default_bounds = {
-        "scoring": {"buy_threshold": (3, 8), "sell_threshold": (-8, -2)},
-        "mean_reversion": {"z_score_buy": (-3.0, -1.0), "z_score_sell": (1.0, 3.0), "lookback_period": (10, 40)},
+        "scoring": {"buy_threshold": (2, 6), "sell_threshold": (-6, -2)},
+        "mean_reversion": {"z_score_buy": (-3.0, -1.0), "z_score_sell": (1.0, 3.0), "lookback_period": (10, 60)},
         "trend_following": {"adx_threshold": (15, 35), "trend_ma_period": (100, 250), "atr_stop_multiplier": (1.0, 3.0)},
     }
     bounds = param_bounds or default_bounds.get(strategy_name, {})

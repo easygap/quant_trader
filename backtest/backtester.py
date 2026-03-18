@@ -45,7 +45,7 @@ class Backtester:
             strategy_name: 전략명
             initial_capital: 초기 투자금 (None이면 설정값 사용)
             strict_lookahead: True면 매 시점 T에서 df[:T+1]만으로 지표/신호 계산 (Look-Ahead Bias 완전 방어, 느림)
-            param_overrides: 전략 파라미터 덮어쓰기 (최적화 시 사용). 예: {"scoring": {"buy_threshold": 5}}
+            param_overrides: 전략 파라미터 덮어쓰기 (최적화 시 사용). 예: {"scoring": {"buy_threshold": 3, "sell_threshold": -3}}
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -214,6 +214,7 @@ class Backtester:
                         "date": date, "action": "STOP_LOSS", "price": sell_price,
                         "quantity": position, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        "commission": commission,
                     })
                     position = 0
                     avg_price = 0
@@ -236,6 +237,7 @@ class Backtester:
                         "date": date, "action": "TAKE_PROFIT_PARTIAL", "price": sell_price,
                         "quantity": sell_qty, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        "commission": commission,
                     })
                     position -= sell_qty
                     partial_exit_done = True
@@ -259,6 +261,7 @@ class Backtester:
                         "date": date, "action": "TAKE_PROFIT", "price": sell_price,
                         "quantity": position, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        "commission": commission,
                     })
                     position = 0
                     avg_price = 0
@@ -282,6 +285,7 @@ class Backtester:
                             "date": date, "action": "TRAILING_STOP", "price": sell_price,
                             "quantity": position, "pnl": pnl,
                             "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                            "commission": commission,
                         })
                         position = 0
                         avg_price = 0
@@ -331,6 +335,7 @@ class Backtester:
                     trades.append({
                         "date": date, "action": "BUY", "price": buy_price,
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
+                        "commission": commission,
                     })
 
             elif signal == "SELL" and position > 0:
@@ -348,6 +353,7 @@ class Backtester:
                     "date": date, "action": "SELL", "price": sell_price,
                     "quantity": position, "pnl": pnl,
                     "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                    "commission": commission,
                 })
                 position = 0
                 avg_price = 0
@@ -412,6 +418,23 @@ class Backtester:
         annual_return_pct = total_return / years
         calmar = abs(annual_return_pct / max_drawdown) if max_drawdown != 0 else 0
 
+        # 과매매 분석: 총 수수료, 평균 보유 기간(일)
+        total_commission = sum(t.get("commission", 0) for t in trades)
+        position_open_date = None
+        holding_days_list = []
+        for t in trades:
+            if t["action"] == "BUY":
+                position_open_date = t["date"]
+            elif t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP") and position_open_date is not None:
+                try:
+                    delta = t["date"] - position_open_date
+                    holding_days_list.append(delta.days if hasattr(delta, "days") else 0)
+                except (TypeError, ValueError):
+                    pass
+                if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP"):
+                    position_open_date = None
+        avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0
+
         return {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
@@ -427,6 +450,8 @@ class Backtester:
             "avg_loss": round(avg_loss, 0),
             "final_value": round(final_value, 0),
             "initial_capital": initial_capital,
+            "total_commission": round(total_commission, 0),
+            "avg_holding_days": avg_holding_days,
         }
 
     @staticmethod
@@ -437,6 +462,7 @@ class Backtester:
             "calmar_ratio": 0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "avg_win": 0, "avg_loss": 0,
             "final_value": 0, "initial_capital": 0,
+            "total_commission": 0, "avg_holding_days": 0,
         }
 
     def print_report(self, result: dict):
@@ -467,4 +493,9 @@ class Backtester:
         print(f"  손익비        : {m['profit_factor']:>13.2f}")
         print(f"  평균 수익     : {m['avg_win']:>14,.0f}원")
         print(f"  평균 손실     : {m['avg_loss']:>14,.0f}원")
+        print("-" * 60)
+        print(f"  평균 보유 기간 : {m.get('avg_holding_days', 0):>11.1f}일")
+        n_trades = m.get("total_trades", 0)
+        total_comm = m.get("total_commission", 0)
+        print(f"  총 수수료     : {total_comm:>14,.0f}원 (총 거래 {n_trades}회)")
         print("=" * 60 + "\n")

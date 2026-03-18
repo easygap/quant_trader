@@ -31,6 +31,9 @@ class Scheduler:
     1. 장전 준비 (08:50): 데이터 수집, 지표 계산, 관심 종목 분석
     2. 장중 모니터링 (09:00~15:30): 10분 간격 신호 확인, 손절/익절 체크
     3. 장마감 (15:35): 일일 리포트, 포트폴리오 스냅샷 저장
+
+    거래 빈도·수수료: 10분마다 신호를 보므로 신호가 자주 바뀌는 전략은 과매매(수수료만 나감) 위험.
+    왕복 비용 약 0.23%를 상회하는 기대 수익이 나오도록 전략·임계값 설계 권장. quant_trader_design.md §8.3.
     """
 
     def __init__(self, strategy_name: str = "scoring", config: Config = None):
@@ -111,6 +114,9 @@ class Scheduler:
             watchlist = WatchlistManager(self.config).resolve()
             self._entry_candidates = []
 
+            from core.market_regime import allow_new_buys_by_market_regime
+            allow_buys = allow_new_buys_by_market_regime(self.config, collector)
+
             signals = []
             for symbol in watchlist:
                 try:
@@ -118,7 +124,7 @@ class Scheduler:
                     if df.empty or len(df) < 30:
                         continue
 
-                    signal_info = strategy.generate_signal(df)
+                    signal_info = strategy.generate_signal(df, symbol=symbol)
                     signal_info["symbol"] = symbol
                     signals.append(signal_info)
 
@@ -127,6 +133,7 @@ class Scheduler:
 
                     if (
                         self.auto_entry
+                        and allow_buys
                         and signal_info["signal"] == "BUY"
                         and not get_position(symbol)
                     ):
@@ -207,6 +214,13 @@ class Scheduler:
             return
 
         from core.order_executor import OrderExecutor
+        from core.data_collector import DataCollector
+        from core.market_regime import allow_new_buys_by_market_regime
+
+        if not allow_new_buys_by_market_regime(self.config, DataCollector()):
+            logger.info("하락장(코스피 200일선 이하)으로 신규 매수 전면 중단 — 진입 후보 실행 생략")
+            self._entry_candidates = []
+            return
 
         executor = OrderExecutor(self.config, account_key=self.strategy_name)
         remaining = []

@@ -57,13 +57,17 @@ class SignalGenerator:
 
     def generate(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        멀티 지표 스코어링 방식으로 매매 신호 생성
+        멀티 지표 스코어링 방식으로 매매 신호 생성.
+
+        다중공선성 완화: RSI/MACD/볼린저/MA는 모두 "가격 강도"를 다르게 표현하므로
+        합산하지 않고, 매수 방향 점수(양수 중 최대) + 매도 방향 점수(음수 중 최대)만
+        사용해 동일 신호의 중복 가산을 막는다. 거래량은 독립 정보로 그대로 가산.
 
         Args:
             df: 기술 지표가 계산된 DataFrame
 
         Returns:
-            신호 컬럼(signal, score, score_details)이 추가된 DataFrame
+            신호 컬럼(signal, score, score_price_group, score_volume 등)이 추가된 DataFrame
         """
         if df.empty:
             return df
@@ -77,17 +81,21 @@ class SignalGenerator:
         result["score_volume"] = self._score_volume(result)
         result["score_ma"] = self._score_ma(result)
 
-        # 총점 합산
-        score_columns = [
-            "score_rsi", "score_macd", "score_bollinger",
-            "score_volume", "score_ma"
-        ]
-        result["total_score"] = result[score_columns].sum(axis=1)
+        # 다중공선성 완화: 가격 강도 그룹(RSI/MACD/볼린저/MA)은 같은 정보를 반복하므로
+        # 방향별로 최대 1개만 반영. 매수 쪽은 양수 중 최대, 매도 쪽은 음수 중 최대만 사용.
+        price_columns = ["score_rsi", "score_macd", "score_bollinger", "score_ma"]
+        price_df = result[price_columns]
+        buy_side = price_df.clip(lower=0).max(axis=1)   # 양수만 취해 최대
+        sell_side = price_df.clip(upper=0).min(axis=1)  # 음수만 취해 최소
+        result["score_price_group"] = buy_side + sell_side
+
+        # 총점 = 가격 그룹 점수(중복 제거) + 거래량(독립 정보)
+        result["total_score"] = result["score_price_group"] + result["score_volume"]
 
         # 매수/매도 임계값
         scoring = self.strategy_params.get("scoring", {})
-        buy_threshold = scoring.get("buy_threshold", 5)
-        sell_threshold = scoring.get("sell_threshold", -4)
+        buy_threshold = scoring.get("buy_threshold", 3)
+        sell_threshold = scoring.get("sell_threshold", -3)
 
         # 신호 생성
         result["signal"] = self.HOLD
@@ -125,6 +133,7 @@ class SignalGenerator:
             "signal": last.get("signal", self.HOLD),
             "score": last.get("total_score", 0),
             "details": {
+                "가격그룹": last.get("score_price_group", 0),  # RSI/MACD/볼린저/MA 방향별 최대 1개
                 "RSI": last.get("score_rsi", 0),
                 "MACD": last.get("score_macd", 0),
                 "볼린저": last.get("score_bollinger", 0),
