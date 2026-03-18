@@ -36,6 +36,12 @@ def _override_with_env(settings: dict) -> dict:
     settings["kis_api"]["app_key"] = os.environ.get("KIS_APP_KEY", "")
     settings["kis_api"]["app_secret"] = os.environ.get("KIS_APP_SECRET", "")
     settings["kis_api"]["account_no"] = os.environ.get("KIS_ACCOUNT_NO", settings["kis_api"].get("account_no", ""))
+    # 전략별 계좌 (다중 계좌): KIS_ACCOUNT_NO_SCORING, KIS_ACCOUNT_NO_MEAN_REVERSION 등으로 덮어씀
+    accounts = settings["kis_api"].get("accounts", {}) or {}
+    for key in list(accounts.keys()):
+        env_key = f"KIS_ACCOUNT_NO_{key.upper().replace('-', '_')}"
+        accounts[key] = os.environ.get(env_key, accounts[key])
+    settings["kis_api"]["accounts"] = accounts
     if "MAX_CALLS_PER_SEC" in os.environ:
         settings["kis_api"]["max_calls_per_sec"] = float(os.environ["MAX_CALLS_PER_SEC"])
     if "MAX_RETRY" in os.environ:
@@ -149,6 +155,11 @@ class Config:
         return wl.get("symbols", [])
 
     @property
+    def watchlist_settings(self) -> dict:
+        """관심 종목 원본 설정"""
+        return self._settings.get("watchlist", {})
+
+    @property
     def indicators(self) -> dict:
         """기술 지표 파라미터"""
         return self._strategies.get("indicators", {})
@@ -192,3 +203,41 @@ class Config:
     def transaction_costs(self) -> dict:
         """거래 비용 설정"""
         return self._risk_params.get("transaction_costs", {})
+
+    def get_account_no(self, strategy: str = "") -> str:
+        """
+        전략에 해당하는 계좌번호 반환 (다중 계좌 분리).
+        kis_api.accounts에 전략명이 있으면 해당 계좌, 없으면 kis_api.account_no(기본) 사용.
+        """
+        kis = self.kis_api
+        accounts = kis.get("accounts", {}) or {}
+        if strategy and strategy in accounts:
+            return accounts[strategy] or kis.get("account_no", "")
+        return kis.get("account_no", "")
+
+    def with_strategy_overrides(self, strategy_name: str, overrides: dict) -> "ConfigOverlay":
+        """
+        전략 파라미터만 덮어쓴 Config 래퍼 반환 (파라미터 최적화 등에서 사용).
+        """
+        return ConfigOverlay(self, strategy_name, overrides)
+
+
+class ConfigOverlay:
+    """
+    Config 래퍼: 특정 전략의 파라미터만 덮어써서 전략 인스턴스에 전달.
+    나머지 속성은 base_config 에 위임.
+    """
+    def __init__(self, base_config: Config, strategy_name: str, overrides: dict):
+        self._base = base_config
+        self._strategy_name = strategy_name
+        self._overrides = overrides or {}
+
+    @property
+    def strategies(self) -> dict:
+        merged = dict(self._base.strategies)
+        section = merged.get(self._strategy_name, {})
+        merged[self._strategy_name] = {**section, **self._overrides}
+        return merged
+
+    def __getattr__(self, name: str):
+        return getattr(self._base, name)

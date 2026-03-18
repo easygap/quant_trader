@@ -7,14 +7,22 @@
 kis_api:
   app_key: ""
   app_secret: ""
-  account_no: "00000000-00"
+  account_no: "00000000-00"   # 기본 계좌 (단일 계좌 또는 미지정 전략용)
+  # 다중 계좌(전략별 분리): 전략A용/전략B용 계좌를 나누려면 accounts 에 전략명별 계좌번호 설정
+  # 환경변수: KIS_ACCOUNT_NO_SCORING, KIS_ACCOUNT_NO_MEAN_REVERSION 등으로 덮어쓰기 가능
+  # accounts:
+  #   scoring: "11111111-01"
+  #   mean_reversion: "22222222-02"
   base_url: "https://openapi.koreainvestment.com:9443"
   mock_url: "https://openapivts.koreainvestment.com:29443"
   use_mock: true
 
+# SQLite 손상 시 포지션/거래 기록 전체 소실 가능 — 일일 자동 백업 권장
 database:
   type: "sqlite"
   sqlite_path: "data/quant_trader.db"
+  backup_path: "data/backups"   # 설정 시 장마감 후 일일 백업 생성 (손상 시 복구용)
+  backup_retention_days: 7      # 보관 일수, 초과 분 삭제
 
 logging:
   level: "INFO"
@@ -29,6 +37,8 @@ trading:
   pre_market_prep: "08:50"
   mode: "paper"
   auto_entry: false
+  pending_order_ttl_seconds: 600
+  sync_broker_interval_minutes: 30   # live 모드에서 KIS 잔고와 DB 포지션 크로스체크 주기 (분)
 
 discord:
   enabled: false
@@ -36,10 +46,19 @@ discord:
   username: "퀀트 트레이더"
   avatar_url: ""
 
+# 웹 대시보드 (python main.py --mode dashboard)
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+
+# 관심 종목(watchlist): 수작업 없이 시가총액·코스피200 기준으로 자동 선정 가능
+# mode: manual(수동) | top_market_cap(시가총액 상위 N개) | kospi200(코스피200 유사 시총 상위 N개)
 watchlist:
-  symbols:
+  mode: "top_market_cap"   # top_market_cap 또는 kospi200 이면 symbols 자동 생성, manual 이면 symbols 사용
+  market: "KOSPI"          # top_market_cap 시: KOSPI 또는 KOSDAQ
+  top_n: 20                # 시가총액 상위 N개 (top_market_cap 시)
+  # kospi200 모드 시: kospi200_top_n: 200  (기본 200)
+  symbols:                 # manual 모드에서 사용. 자동 모드 실패 시 fallback
     - "005930"
     - "000660"
-    - "035720"
     - "035420"
-    - "051910"

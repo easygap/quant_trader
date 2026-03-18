@@ -1,0 +1,283 @@
+"""
+실시간 웹 대시보드
+- 콘솔 대시보드(monitoring/dashboard.py)를 확장한 웹 UI
+- 포트폴리오 요약·포지션·스냅샷 추이를 실시간(폴링)으로 표시
+"""
+
+from datetime import datetime
+from typing import Optional
+
+from aiohttp import web
+from loguru import logger
+
+from config.config_loader import Config
+from monitoring.dashboard import Dashboard
+from database.repositories import get_portfolio_snapshots
+
+
+# 기본 바인드 주소·포트 (settings.yaml dashboard 섹션으로 오버라이드 가능)
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8080
+
+
+def _serialize_snapshots(df):
+    """DataFrame 스냅샷을 JSON 직렬화 가능한 리스트로 변환"""
+    if df.empty:
+        return []
+    out = []
+    for _, row in df.iterrows():
+        d = row.to_dict()
+        if "date" in d and hasattr(d["date"], "strftime"):
+            d["date"] = d["date"].strftime("%Y-%m-%d")
+        # numpy 타입 → Python 네이티브
+        for k, v in d.items():
+            if hasattr(v, "item"):
+                d[k] = v.item()
+        out.append(d)
+    return out
+
+
+def get_portfolio_json(current_prices: Optional[dict] = None) -> dict:
+    """현재 포트폴리오 요약을 JSON 친화적 dict로 반환"""
+    config = Config.get()
+    dash = Dashboard(config=config)
+    summary = dash.portfolio_manager.get_portfolio_summary(current_prices or {})
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "initial_capital": dash.initial_capital,
+        "total_value": summary["total_value"],
+        "cash": summary["cash"],
+        "invested": summary["invested"],
+        "current_value": summary["current_value"],
+        "total_return": summary["total_return"],
+        "mdd": summary["mdd"],
+        "position_count": summary["position_count"],
+        "realized_pnl": summary["realized_pnl"],
+        "unrealized_pnl": summary["unrealized_pnl"],
+        "positions": summary["positions"],
+    }
+
+
+def get_snapshots_json(days: int = 30, account_key: Optional[str] = None) -> dict:
+    """최근 N일 스냅샷을 JSON으로 반환"""
+    df = get_portfolio_snapshots(days=days, account_key=account_key)
+    return {"snapshots": _serialize_snapshots(df), "days": days}
+
+
+def _html_page() -> str:
+    """대시보드 단일 페이지 HTML (인라인 CSS/JS, Chart.js CDN)"""
+    return """<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>퀀트 트레이더 대시보드</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg: #0f1419; --card: #1a2332; --text: #e6edf3; --muted: #8b949e; --up: #3fb950; --down: #f85149; --border: #30363d; }
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: var(--text); min-height: 100vh; }
+    h1 { font-size: 1.5rem; margin: 0 0 8px 0; }
+    .meta { color: var(--muted); font-size: 0.875rem; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+    .card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; margin-bottom: 4px; }
+    .card .value { font-size: 1.25rem; font-weight: 600; }
+    .card .value.positive { color: var(--up); }
+    .card .value.negative { color: var(--down); }
+    section { margin-bottom: 24px; }
+    section h2 { font-size: 1.1rem; margin: 0 0 12px 0; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    .num { text-align: right; }
+    .positive { color: var(--up); }
+    .negative { color: var(--down); }
+    .chart-wrap { max-width: 800px; height: 260px; }
+    .error { color: var(--down); font-size: 0.875rem; }
+    #loading { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>📊 퀀트 트레이더 대시보드</h1>
+  <p class="meta">마지막 갱신: <span id="lastUpdate">-</span> · <span id="loading">자동 갱신 중 (10초 간격)</span></p>
+
+  <section>
+    <div class="grid" id="summary"></div>
+  </section>
+
+  <section>
+    <h2>보유 포지션</h2>
+    <div id="positionsWrap">
+      <table>
+        <thead><tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th><th class="num">평가액</th><th class="num">수익률</th></tr></thead>
+        <tbody id="positions"></tbody>
+      </table>
+    </div>
+    <p id="noPositions" style="display:none; color: var(--muted);">보유 종목 없음</p>
+  </section>
+
+  <section>
+    <h2>수익률 추이 (최근 30일)</h2>
+    <div class="chart-wrap"><canvas id="chartEquity"></canvas></div>
+  </section>
+
+  <script>
+    const summaryEl = document.getElementById('summary');
+    const positionsEl = document.getElementById('positions');
+    const positionsWrap = document.getElementById('positionsWrap');
+    const noPositions = document.getElementById('noPositions');
+    const lastUpdate = document.getElementById('lastUpdate');
+    let chartEquity = null;
+
+    function fmtNum(n) { return Number(n).toLocaleString('ko-KR'); }
+    function fmtPct(n) { return (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'; }
+
+    function renderSummary(data) {
+      const items = [
+        { label: '총 평가금', value: fmtNum(data.total_value) + '원', cls: '' },
+        { label: '총 수익률', value: fmtPct(data.total_return), cls: data.total_return >= 0 ? 'positive' : 'negative' },
+        { label: '현금', value: fmtNum(data.cash) + '원', cls: '' },
+        { label: '투자금', value: fmtNum(data.invested) + '원', cls: '' },
+        { label: '실현 손익', value: fmtNum(data.realized_pnl) + '원', cls: data.realized_pnl >= 0 ? 'positive' : 'negative' },
+        { label: '미실현 손익', value: fmtNum(data.unrealized_pnl) + '원', cls: data.unrealized_pnl >= 0 ? 'positive' : 'negative' },
+        { label: 'MDD', value: fmtPct(-Math.abs(data.mdd)), cls: 'negative' },
+        { label: '보유 종목', value: data.position_count + '개', cls: '' },
+      ];
+      summaryEl.innerHTML = items.map(i => '<div class="card"><div class="label">' + i.label + '</div><div class="value ' + i.cls + '">' + i.value + '</div></div>').join('');
+    }
+
+    function renderPositions(positions) {
+      if (!positions || positions.length === 0) {
+        positionsWrap.style.display = 'none';
+        noPositions.style.display = 'block';
+        return;
+      }
+      positionsWrap.style.display = 'block';
+      noPositions.style.display = 'none';
+      positionsEl.innerHTML = positions.map(p => {
+        const cls = (p.pnl_rate >= 0 ? 'positive' : 'negative');
+        return '<tr><td>' + (p.symbol || '-') + '</td><td class="num">' + (p.quantity ?? '-') + '</td><td class="num">' + fmtNum(p.avg_price) + '</td><td class="num">' + fmtNum(p.current_price) + '</td><td class="num">' + fmtNum(p.current_value) + '</td><td class="num ' + cls + '">' + fmtPct(p.pnl_rate) + '</td></tr>';
+      }).join('');
+    }
+
+    function updateChart(snapshots) {
+      if (!snapshots || snapshots.length === 0) return;
+      const labels = snapshots.map(s => s.date);
+      const values = snapshots.map(s => Number(s.total_value));
+      const returns = snapshots.map(s => Number(s.cumulative_return || 0));
+
+      if (!chartEquity) {
+        const ctx = document.getElementById('chartEquity').getContext('2d');
+        chartEquity = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              { label: '총 평가금 (원)', data: values, borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.1)', fill: true, yAxisID: 'y' },
+              { label: '누적 수익률 (%)', data: returns, borderColor: '#3fb950', borderDash: [4,2], yAxisID: 'y1' }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+              y: { type: 'linear', position: 'left', title: { display: true, text: '평가금' } },
+              y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '수익률 %' } }
+            }
+          }
+        });
+      } else {
+        chartEquity.data.labels = labels;
+        chartEquity.data.datasets[0].data = values;
+        chartEquity.data.datasets[1].data = returns;
+        chartEquity.update('none');
+      }
+    }
+
+    async function fetchData() {
+      try {
+        const [portRes, snapRes] = await Promise.all([
+          fetch('/api/portfolio'),
+          fetch('/api/snapshots?days=30')
+        ]);
+        if (!portRes.ok || !snapRes.ok) throw new Error('API 오류');
+        const portfolio = await portRes.json();
+        const snapData = await snapRes.json();
+        lastUpdate.textContent = portfolio.timestamp ? new Date(portfolio.timestamp).toLocaleString('ko-KR') : '-';
+        renderSummary(portfolio);
+        renderPositions(portfolio.positions || []);
+        updateChart(snapData.snapshots || []);
+      } catch (e) {
+        lastUpdate.textContent = '-';
+        summaryEl.innerHTML = '<p class="error">데이터 로드 실패: ' + e.message + '</p>';
+      }
+    }
+
+    fetchData();
+    setInterval(fetchData, 10000);
+  </script>
+</body>
+</html>"""
+
+
+async def handle_index(_request: web.Request) -> web.Response:
+    return web.Response(text=_html_page(), content_type="text/html; charset=utf-8")
+
+
+async def handle_api_portfolio(_request: web.Request) -> web.Response:
+    try:
+        data = get_portfolio_json()
+        return web.json_response(data)
+    except Exception as e:
+        logger.exception("API /api/portfolio 오류: {}", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_api_snapshots(request: web.Request) -> web.Response:
+    try:
+        days = int(request.query.get("days", 30))
+        account_key = request.query.get("account_key") or None
+        data = get_snapshots_json(days=days, account_key=account_key)
+        return web.json_response(data)
+    except Exception as e:
+        logger.exception("API /api/snapshots 오류: {}", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+def create_app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/portfolio", handle_api_portfolio)
+    app.router.add_get("/api/snapshots", handle_api_snapshots)
+    return app
+
+
+def run_web_dashboard(host: Optional[str] = None, port: Optional[int] = None):
+    """웹 대시보드 서버 실행 (블로킹). host/port 미지정 시 config dashboard 섹션 또는 기본값 사용."""
+    try:
+        cfg = Config.get()
+        settings = cfg.settings() if hasattr(cfg, "settings") else {}
+        dash_cfg = (settings.get("dashboard") or {}) if isinstance(settings, dict) else {}
+        host = host or dash_cfg.get("host") or DEFAULT_HOST
+        port = port if port is not None else dash_cfg.get("port") or DEFAULT_PORT
+    except Exception:
+        host = host or DEFAULT_HOST
+        port = port if port is not None else DEFAULT_PORT
+    app = create_app()
+    logger.info("웹 대시보드 서버 시작: http://{}:{}/", host if host != "0.0.0.0" else "127.0.0.1", port)
+    web.run_app(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser(description="퀀트 트레이더 웹 대시보드")
+    p.add_argument("--host", default=None, help="바인드 주소 (기본: config 또는 0.0.0.0)")
+    p.add_argument("--port", type=int, default=None, help="포트 (기본: config 또는 8080)")
+    args = p.parse_args()
+    from database.models import init_database
+    from monitoring.logger import setup_logger
+    setup_logger()
+    init_database()
+    run_web_dashboard(host=args.host, port=args.port)

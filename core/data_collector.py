@@ -255,7 +255,7 @@ class DataCollector:
             start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
-        ticker = f"{symbol}.KS"
+        ticker = "^KS11" if symbol.upper() == "KS11" else f"{symbol}.KS"
         logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
         try:
             df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
