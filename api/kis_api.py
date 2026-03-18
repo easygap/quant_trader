@@ -32,13 +32,17 @@ class KISApi:
         price = api.get_current_price("005930")
     """
 
-    def __init__(self):
+    def __init__(self, account_no: str = None):
+        """
+        account_no: 지정 시 해당 계좌 사용 (다중 계좌/전략별 분리).
+        None이면 설정의 kis_api.account_no 사용.
+        """
         config = Config.get()
         kis = config.kis_api
 
         self.app_key = kis.get("app_key", "")
         self.app_secret = kis.get("app_secret", "")
-        self.account_no = kis.get("account_no", "")
+        self.account_no = (account_no if account_no is not None else "") or kis.get("account_no", "")
         self.use_mock = kis.get("use_mock", True)
 
         # 도메인 설정 (모의투자 / 실전)
@@ -70,6 +74,24 @@ class KISApi:
             self.account_no,
             self.max_calls_per_sec
         )
+
+    def _notify_auth_failure(self, message: str):
+        """토큰 발급/갱신 실패 시 즉시 디스코드 등 알림. 실전 모드에서 주문이 조용히 실패하는 것을 방지."""
+        text = (
+            f"🚨 **KIS API 토큰 만료·갱신 실패**\n"
+            f"{message}\n"
+            "실전 모드에서는 이후 주문이 **조용히 실패**할 수 있으니 **즉시 확인**하세요."
+        )
+        try:
+            from core.notifier import Notifier
+            Notifier().send_message(text, critical=True)
+        except Exception as exc:
+            logger.error("KIS 인증 실패 알림 전송 실패: {}", exc)
+        try:
+            from monitoring.discord_bot import DiscordBot
+            DiscordBot().send_message(text)
+        except Exception as exc:
+            logger.debug("KIS 인증 실패 디스코드 직접 발송 실패: {}", exc)
 
     def _is_configured(self) -> bool:
         """API 키가 설정되었는지 확인"""
@@ -125,6 +147,9 @@ class KISApi:
                     "KIS API 토큰 발급 실패 [{}] {} (app_key: {})",
                     response.status_code, err_msg, self._mask_key(self.app_key),
                 )
+                self._notify_auth_failure(
+                    f"HTTP {response.status_code} / {err_msg or '토큰 발급 실패'}"
+                )
                 return False
             response.raise_for_status()
             data = response.json()
@@ -144,9 +169,11 @@ class KISApi:
                 "KIS API 토큰 발급 네트워크 오류: {} (url: {})",
                 e, url.split("?")[0],
             )
+            self._notify_auth_failure(str(e))
             return False
         except Exception as e:
             logger.error("KIS API 토큰 발급 실패: {}", e)
+            self._notify_auth_failure(str(e))
             return False
 
     def _ensure_token(self):
@@ -254,9 +281,10 @@ class KISApi:
                 return response.json()
 
             except KISTokenExpiredError:
-                # 토큰 만료는 CircuitBreaker 실패로 누적하지 않음
+                # 토큰 만료는 CircuitBreaker 실패로 누적하지 않음. 갱신 실패 시 즉시 디스코드 알림
                 logger.error("[401] 토큰 만료. 갱신 후 재시도 ({}/{})", attempt, max_retries)
-                self.authenticate()
+                if not self.authenticate():
+                    self._notify_auth_failure("401 응답 후 토큰 자동 갱신 실패. API 키·네트워크를 확인하세요.")
                 if attempt < max_retries:
                     continue
                 return {}
@@ -462,6 +490,58 @@ class KISApi:
             msg = data.get("msg1", "알 수 없는 오류") if data else "API 응답 없음"
             logger.error("매도 주문 실패: {} - {}", symbol, msg)
             return None
+
+    # =============================================================
+    # 미체결 주문 조회 (주문 중복 방지용)
+    # =============================================================
+
+    def has_unfilled_orders(self, symbol: str) -> bool:
+        """
+        해당 종목에 대한 미체결 주문이 있는지 조회.
+        주문 전 중복 방지·타이밍 리스크 대응용. 실패(API 오류/타임아웃/응답 형식 상이) 시 False 반환하여
+        OrderGuard(TTL)에만 의존(주문 차단하지 않음).
+
+        Returns:
+            True: 미체결 주문이 있음(주문 보류 권장). False: 없음 또는 조회 실패.
+        """
+        try:
+            tr_id = "VTTC8001R" if self.use_mock else "TTTC8001R"
+            today = datetime.now().strftime("%Y%m%d")
+            params = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "INQR_STRT_DT": today,
+                "INQR_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",  # 전체
+                "CCLD_DVSN": "02",        # 미체결
+                "PDNO": symbol,
+                "ORD_NO": "",
+                "INQR_DVSN": "00",
+            }
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+                tr_id,
+                params=params,
+            )
+            if not data or data.get("rt_cd") != "0":
+                return False
+            output = data.get("output1") or data.get("output") or []
+            if isinstance(output, dict):
+                output = [output] if output else []
+            for item in output:
+                if isinstance(item, dict) and item.get("pdno", "").strip() == symbol.strip():
+                    try:
+                        qty = int(item.get("ord_qty", 0) or item.get("rmn_qty", 0) or 0)
+                    except (TypeError, ValueError):
+                        qty = 0
+                    if qty > 0:
+                        logger.info("종목 {} 미체결 주문 존재 — 중복 주문 방지를 위해 이번 주문을 보류합니다.", symbol)
+                        return True
+            return False
+        except Exception as e:
+            logger.debug("미체결 조회 실패(OrderGuard만 적용): {} — {}", symbol, e)
+            return False
 
     # =============================================================
     # 잔고 조회

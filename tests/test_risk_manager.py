@@ -7,8 +7,22 @@ from core.risk_manager import RiskManager, _get_tick_size
 class _MockConfig:
     risk_params = {
         "position_sizing": {"max_risk_per_trade": 0.01},
-        "diversification": {"max_position_ratio": 0.20, "min_cash_ratio": 0.20},
-        "transaction_costs": {"slippage": 0.0005, "slippage_ticks": 2},
+        "diversification": {
+            "max_position_ratio": 0.20,
+            "max_investment_ratio": 0.70,
+            "min_cash_ratio": 0.20,
+        },
+        "transaction_costs": {
+            "slippage": 0.0005,
+            "slippage_ticks": 2,
+            "dynamic_slippage": {
+                "enabled": True,
+                "warn_at_volume_ratio": 0.01,
+                "warn_slippage_multiplier": 2.0,
+                "critical_at_volume_ratio": 0.03,
+                "critical_slippage_multiplier": 4.0,
+            },
+        },
     }
 
 
@@ -76,3 +90,32 @@ def test_diversification_allows_when_cash_ratio_is_safe(risk_manager):
         available_cash=450_000,
     )
     assert result["can_buy"] is True
+
+
+def test_diversification_blocks_when_total_investment_ratio_exceeds_limit(risk_manager):
+    result = risk_manager.check_diversification(
+        current_positions=2,
+        position_value=150_000,
+        total_value=1_000_000,
+        available_cash=400_000,
+        current_invested=600_000,
+    )
+    assert result["can_buy"] is False
+    assert "전체 투자 비중" in result["reason"]
+
+
+def test_dynamic_slippage_increases_when_order_participation_is_high(risk_manager):
+    low = risk_manager.calculate_transaction_costs(
+        price=50_000,
+        quantity=100,
+        action="BUY",
+        avg_daily_volume=1_000_000,
+    )
+    high = risk_manager.calculate_transaction_costs(
+        price=50_000,
+        quantity=30_000,
+        action="BUY",
+        avg_daily_volume=1_000_000,
+    )
+    assert high["slippage"] > low["slippage"]
+    assert high["slippage_multiplier"] >= 2.0

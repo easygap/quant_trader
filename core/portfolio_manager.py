@@ -17,24 +17,27 @@ from database.repositories import (
 class PortfolioManager:
     """
     포트폴리오 관리자
+    - account_key: 전략별 계좌 구분 (다중 계좌 시)
     """
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config = None, account_key: str = ""):
         self.config = config or Config.get()
+        self.account_key = account_key or ""
         self.initial_capital = self.config.risk_params.get(
             "position_sizing", {}
         ).get("initial_capital", 10000000)
         self._peak_value = self.initial_capital
         self._is_live = self.config.trading.get("mode", "paper") == "live"
         logger.info(
-            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, 모드: {})",
+            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, 모드: {}, 계좌: {})",
             self.initial_capital,
             "live" if self._is_live else "paper",
+            self.account_key or "default",
         )
 
     def _build_position_state(self, current_prices: dict = None) -> dict:
         """보유 포지션과 평가손익 상태 계산."""
-        positions = get_all_positions()
+        positions = get_all_positions(account_key=self.account_key if self.account_key else None)
         current_prices = current_prices or {}
 
         invested = 0.0
@@ -72,7 +75,10 @@ class PortfolioManager:
 
     def _get_db_financials(self, invested: float, current_value: float, mode: str) -> dict:
         """trade_history 기준 현금/실현손익/총 평가금 계산."""
-        cash_summary = get_trade_cash_summary(mode=mode)
+        cash_summary = get_trade_cash_summary(
+            mode=mode,
+            account_key=self.account_key if self.account_key else None,
+        )
         cash = self.initial_capital + cash_summary["cash_delta"]
         total_value = cash + current_value
         realized_pnl = cash + invested - self.initial_capital
@@ -106,7 +112,8 @@ class PortfolioManager:
         if self._is_live:
             try:
                 from api.kis_api import KISApi
-                balance = KISApi().get_balance()
+                account_no = self.config.get_account_no(self.account_key)
+                balance = KISApi(account_no=account_no).get_balance()
                 if balance and "total_value" in balance:
                     total_value = float(balance["total_value"])
                     cash = float(balance.get("cash", total_value - current_value))
@@ -157,6 +164,7 @@ class PortfolioManager:
             cumulative_return=summary["total_return"],
             mdd=summary["mdd"],
             position_count=summary["position_count"],
+            account_key=self.account_key,
         )
 
         logger.info(
@@ -190,7 +198,8 @@ class PortfolioManager:
         """
         try:
             from api.kis_api import KISApi
-            kis = KISApi()
+            account_no = self.config.get_account_no(self.account_key)
+            kis = KISApi(account_no=account_no)
             balance = kis.get_balance()
         except Exception as e:
             logger.error("sync_with_broker: KIS 잔고 조회 실패 — {}", e)
@@ -201,7 +210,7 @@ class PortfolioManager:
             return {"ok": False, "mismatches": [], "message": "잔고 응답 없음"}
 
         kis_positions = {p["symbol"]: p for p in balance["positions"] if p.get("symbol")}
-        db_positions = {p.symbol: p for p in get_all_positions()}
+        db_positions = {p.symbol: p for p in get_all_positions(account_key=self.account_key if self.account_key else None)}
 
         mismatches = []
         for symbol, kp in kis_positions.items():

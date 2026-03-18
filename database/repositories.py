@@ -126,11 +126,13 @@ def save_trade(
     signal_score: float = 0,
     reason: str = "",
     mode: str = "paper",
+    account_key: str = "",
 ) -> TradeHistory:
-    """매매 기록 저장"""
+    """매매 기록 저장 (account_key: 전략별 계좌 구분, 다중 계좌 시 사용)."""
     session = get_session()
     try:
         trade = TradeHistory(
+            account_key=account_key or "",
             symbol=symbol,
             action=action,
             price=price,
@@ -161,11 +163,14 @@ def get_trade_history(
     mode: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    account_key: Optional[str] = None,
 ) -> List[TradeHistory]:
-    """매매 기록 조회"""
+    """매매 기록 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
     try:
         query = session.query(TradeHistory)
+        if account_key is not None:
+            query = query.filter(TradeHistory.account_key == (account_key or ""))
         if symbol:
             query = query.filter(TradeHistory.symbol == symbol)
         if mode:
@@ -180,13 +185,30 @@ def get_trade_history(
         session.close()
 
 
+def get_recent_sell_trades(
+    limit: int = 20,
+    mode: Optional[str] = None,
+    account_key: Optional[str] = None,
+) -> List[TradeHistory]:
+    """최근 매도 거래만 시간 역순으로 조회 (성과 열화 감지용)."""
+    all_trades = get_trade_history(mode=mode, account_key=account_key)
+    sells = []
+    for t in all_trades:
+        if (t.action or "").upper() in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP"):
+            sells.append(t)
+            if len(sells) >= limit:
+                break
+    return sells
+
+
 def get_trade_cash_summary(
     mode: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    account_key: Optional[str] = None,
 ) -> dict:
     """매매 기록 기준 현금 흐름 요약."""
-    trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date)
+    trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date, account_key=account_key)
 
     cash_delta = 0.0
     buy_count = 0
@@ -238,12 +260,13 @@ def _extract_pnl_from_reason(reason: str) -> float:
 def get_daily_trade_summary(
     date: Optional[datetime] = None,
     mode: Optional[str] = None,
+    account_key: Optional[str] = None,
 ) -> dict:
     """특정 일자의 매매 요약."""
     dt = date or datetime.now()
     start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
-    trades = get_trade_history(mode=mode, start_date=start, end_date=end)
+    trades = get_trade_history(mode=mode, start_date=start, end_date=end, account_key=account_key)
 
     realized_pnl = 0.0
     winning_trades = 0
@@ -259,7 +282,7 @@ def get_daily_trade_summary(
         else:
             losing_trades += 1
 
-    cash_summary = get_trade_cash_summary(mode=mode, start_date=start, end_date=end)
+    cash_summary = get_trade_cash_summary(mode=mode, start_date=start, end_date=end, account_key=account_key)
 
     return {
         "date": start,
@@ -286,11 +309,15 @@ def save_position(
     take_profit_price: float = None,
     trailing_stop_price: float = None,
     strategy: str = "",
+    account_key: str = "",
 ) -> Position:
-    """포지션 저장 (신규 또는 업데이트)"""
+    """포지션 저장 (신규 또는 업데이트). account_key: 전략별 계좌 구분."""
     session = get_session()
     try:
-        position = session.query(Position).filter(Position.symbol == symbol).first()
+        ak = account_key or ""
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
 
         if position:
             # 기존 포지션 업데이트 (추가 매수 시 평균 단가 재계산)
@@ -309,6 +336,7 @@ def save_position(
         else:
             # 신규 포지션
             position = Position(
+                account_key=ak,
                 symbol=symbol,
                 avg_price=avg_price,
                 quantity=quantity,
@@ -332,29 +360,38 @@ def save_position(
         session.close()
 
 
-def get_position(symbol: str) -> Optional[Position]:
-    """특정 종목의 포지션 조회"""
+def get_position(symbol: str, account_key: str = "") -> Optional[Position]:
+    """특정 종목의 포지션 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
     try:
-        return session.query(Position).filter(Position.symbol == symbol).first()
+        ak = account_key or ""
+        return session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
     finally:
         session.close()
 
 
-def get_all_positions() -> List[Position]:
-    """모든 포지션 조회"""
+def get_all_positions(account_key: Optional[str] = None) -> List[Position]:
+    """모든 포지션 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
     try:
-        return session.query(Position).all()
+        query = session.query(Position)
+        if account_key is not None:
+            query = query.filter(Position.account_key == (account_key or ""))
+        return query.all()
     finally:
         session.close()
 
 
-def delete_position(symbol: str):
-    """포지션 삭제 (전량 매도 시)"""
+def delete_position(symbol: str, account_key: str = ""):
+    """포지션 삭제 (전량 매도 시)."""
     session = get_session()
     try:
-        session.query(Position).filter(Position.symbol == symbol).delete()
+        ak = account_key or ""
+        session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).delete()
         session.commit()
         logger.info("포지션 삭제: {}", symbol)
     except Exception as e:
@@ -365,16 +402,19 @@ def delete_position(symbol: str):
         session.close()
 
 
-def reduce_position(symbol: str, sell_qty: int) -> Optional[Position]:
+def reduce_position(symbol: str, sell_qty: int, account_key: str = "") -> Optional[Position]:
     """
     부분 매도: 수량만 감소, 평균 단가 유지.
     남은 수량이 0이면 delete_position 후 None 반환.
     """
     if sell_qty <= 0:
-        return get_position(symbol)
+        return get_position(symbol, account_key=account_key)
     session = get_session()
     try:
-        position = session.query(Position).filter(Position.symbol == symbol).first()
+        ak = account_key or ""
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
         if not position:
             return None
         remaining = position.quantity - sell_qty
@@ -396,14 +436,17 @@ def reduce_position(symbol: str, sell_qty: int) -> Optional[Position]:
         session.close()
 
 
-def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float):
+def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float, account_key: str = ""):
     """
     트레일링 스탑 가격 업데이트
     - 현재가가 최고가를 경신하면 스탑가도 갱신
     """
     session = get_session()
     try:
-        position = session.query(Position).filter(Position.symbol == symbol).first()
+        ak = account_key or ""
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
         if position and current_price > (position.highest_price or 0):
             position.highest_price = current_price
             position.trailing_stop_price = current_price * (1 - trailing_rate)
@@ -427,12 +470,15 @@ def save_portfolio_snapshot(
     cumulative_return: float = 0,
     mdd: float = 0,
     position_count: int = 0,
+    account_key: str = "",
 ):
-    """일일 포트폴리오 스냅샷 저장"""
+    """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분)."""
     session = get_session()
     try:
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        ak = account_key or ""
         snapshot = PortfolioSnapshot(
+            account_key=ak,
             date=today,
             total_value=total_value,
             cash=cash,
@@ -442,7 +488,20 @@ def save_portfolio_snapshot(
             mdd=mdd,
             position_count=position_count,
         )
-        session.merge(snapshot)
+        # merge by (account_key, date)
+        existing = session.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.account_key == ak, PortfolioSnapshot.date == today
+        ).first()
+        if existing:
+            existing.total_value = total_value
+            existing.cash = cash
+            existing.invested = invested
+            existing.daily_return = daily_return
+            existing.cumulative_return = cumulative_return
+            existing.mdd = mdd
+            existing.position_count = position_count
+        else:
+            session.add(snapshot)
         session.commit()
     except Exception as e:
         session.rollback()
@@ -451,14 +510,15 @@ def save_portfolio_snapshot(
         session.close()
 
 
-def get_portfolio_snapshots(days: int = 30) -> pd.DataFrame:
-    """최근 N일간 포트폴리오 스냅샷 조회"""
+def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
+    """최근 N일간 포트폴리오 스냅샷 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
     try:
         since = datetime.now() - timedelta(days=days)
-        results = session.query(PortfolioSnapshot).filter(
-            PortfolioSnapshot.date >= since
-        ).order_by(PortfolioSnapshot.date).all()
+        query = session.query(PortfolioSnapshot).filter(PortfolioSnapshot.date >= since)
+        if account_key is not None:
+            query = query.filter(PortfolioSnapshot.account_key == (account_key or ""))
+        results = query.order_by(PortfolioSnapshot.date).all()
 
         if not results:
             return pd.DataFrame()
@@ -479,6 +539,95 @@ def get_portfolio_snapshots(days: int = 30) -> pd.DataFrame:
         session.close()
 
 
+def get_portfolio_snapshots_between(
+    start_date: datetime,
+    end_date: datetime,
+    account_key: Optional[str] = None,
+) -> List[dict]:
+    """지정 기간 내 포트폴리오 스냅샷 목록 조회 (일별, 시간 무시). account_key 지정 시 해당 계좌만."""
+    session = get_session()
+    try:
+        start_naive = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_naive = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        query = session.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.date >= start_naive,
+            PortfolioSnapshot.date <= end_naive,
+        )
+        if account_key is not None:
+            query = query.filter(PortfolioSnapshot.account_key == (account_key or ""))
+        results = query.order_by(PortfolioSnapshot.date).all()
+        return [
+            {
+                "date": r.date,
+                "total_value": r.total_value,
+                "cash": r.cash,
+                "invested": r.invested,
+                "cumulative_return": r.cumulative_return,
+            }
+            for r in results
+        ]
+    finally:
+        session.close()
+
+
+def get_paper_performance_metrics(
+    start_date: datetime,
+    end_date: datetime,
+    mode: str = "paper",
+    initial_capital: Optional[float] = None,
+    account_key: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    모의투자(paper) 기간별 성과 지표 계산.
+    스냅샷이 있으면 구간 시가/종가 포트폴리오 가치로 수익률 계산,
+    없으면 해당 구간 매도 거래의 실현손익 합계로 대체 수익률 추정.
+    account_key 지정 시 해당 계좌만 집계.
+    """
+    snapshots = get_portfolio_snapshots_between(start_date, end_date, account_key=account_key)
+    trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date, account_key=account_key)
+    sell_actions = ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")
+    sell_trades = [t for t in trades if (t.action or "").upper() in sell_actions]
+
+    total_return_pct = None
+    initial_value = initial_capital
+    final_value = initial_capital
+
+    if len(snapshots) >= 2:
+        initial_value = snapshots[0]["total_value"]
+        final_value = snapshots[-1]["total_value"]
+        if initial_value and initial_value > 0:
+            total_return_pct = ((final_value / initial_value) - 1) * 100
+    elif initial_capital is not None and initial_capital > 0:
+        if len(snapshots) == 1:
+            final_value = snapshots[0]["total_value"]
+            total_return_pct = ((final_value / initial_capital) - 1) * 100
+            initial_value = initial_capital
+        else:
+            realized_pnl = sum(
+                _extract_pnl_from_reason(t.reason or "") for t in sell_trades
+            )
+            total_return_pct = (realized_pnl / initial_capital) * 100
+            initial_value = initial_capital
+            final_value = initial_capital + realized_pnl
+
+    if total_return_pct is None:
+        return None
+
+    winning = sum(1 for t in sell_trades if _extract_pnl_from_reason(t.reason or "") > 0)
+    losing = len(sell_trades) - winning
+    win_rate = (winning / len(sell_trades) * 100) if sell_trades else 0.0
+
+    return {
+        "total_return_pct": round(total_return_pct, 2),
+        "win_rate": round(win_rate, 1),
+        "total_trades": len(sell_trades),
+        "winning_trades": winning,
+        "losing_trades": losing,
+        "initial_value": round(initial_value, 0),
+        "final_value": round(final_value, 0),
+    }
+
+
 # =============================================================
 # 일일 리포트 관련
 # =============================================================
@@ -495,15 +644,19 @@ def save_daily_report(
     winning_trades: int = 0,
     losing_trades: int = 0,
     report_text: str = "",
+    account_key: str = "",
 ):
-    """일일 리포트 저장 또는 업데이트."""
+    """일일 리포트 저장 또는 업데이트 (account_key: 전략별 계좌 구분)."""
     session = get_session()
     try:
         report_date = date.replace(hour=0, minute=0, second=0, microsecond=0)
-        report = session.query(DailyReport).filter(DailyReport.date == report_date).first()
+        ak = account_key or ""
+        report = session.query(DailyReport).filter(
+            DailyReport.account_key == ak, DailyReport.date == report_date
+        ).first()
 
         if report is None:
-            report = DailyReport(date=report_date)
+            report = DailyReport(account_key=ak, date=report_date)
             session.add(report)
 
         report.total_trades = total_trades
@@ -526,14 +679,15 @@ def save_daily_report(
         session.close()
 
 
-def get_daily_reports(days: int = 30) -> pd.DataFrame:
-    """최근 N일 일일 리포트 조회."""
+def get_daily_reports(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
+    """최근 N일 일일 리포트 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
     try:
         since = datetime.now() - timedelta(days=days)
-        results = session.query(DailyReport).filter(
-            DailyReport.date >= since
-        ).order_by(DailyReport.date.desc()).all()
+        query = session.query(DailyReport).filter(DailyReport.date >= since)
+        if account_key is not None:
+            query = query.filter(DailyReport.account_key == (account_key or ""))
+        results = query.order_by(DailyReport.date.desc()).all()
 
         if not results:
             return pd.DataFrame()

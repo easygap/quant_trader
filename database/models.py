@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, Text,
-    create_engine, Index
+    create_engine, Index, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -49,10 +49,12 @@ class TradeHistory(Base):
     """
     매매 기록 테이블
     - 실행된 모든 주문의 기록
+    - account_key: 전략별 계좌 구분 (다중 계좌 시)
     """
     __tablename__ = "trade_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    account_key = Column(String(64), default="", nullable=False, index=True)  # 전략/계좌 구분
     symbol = Column(String(20), nullable=False, index=True)     # 종목 코드
     action = Column(String(20), nullable=False)                 # BUY / SELL
     price = Column(Float, nullable=False)                       # 체결 가격
@@ -76,11 +78,13 @@ class Position(Base):
     """
     보유 포지션 테이블
     - 현재 보유 중인 종목 관리
+    - account_key: 전략별 계좌 구분 (동일 종목을 전략별로 따로 보유 가능)
     """
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String(20), nullable=False, unique=True)    # 종목 코드
+    account_key = Column(String(64), default="", nullable=False, index=True)  # 전략/계좌 구분
+    symbol = Column(String(20), nullable=False)                # 종목 코드
     avg_price = Column(Float, nullable=False)                   # 평균 매수가
     quantity = Column(Integer, nullable=False)                   # 보유 수량
     total_invested = Column(Float, nullable=False)              # 총 투자 금액
@@ -92,8 +96,10 @@ class Position(Base):
     bought_at = Column(DateTime, default=datetime.now)          # 최초 매수 시점
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+    __table_args__ = (UniqueConstraint("account_key", "symbol", name="uq_positions_account_symbol"),)
+
     def __repr__(self):
-        return f"<Position({self.symbol}, {self.quantity}주, 평균가={self.avg_price:,.0f})>"
+        return f"<Position(account={self.account_key!r}, {self.symbol}, {self.quantity}주, 평균가={self.avg_price:,.0f})>"
 
     @property
     def current_value(self):
@@ -105,11 +111,13 @@ class PortfolioSnapshot(Base):
     """
     포트폴리오 스냅샷 테이블
     - 일별 포트폴리오 상태 기록 (수익률 추적용)
+    - account_key: 전략별 계좌 구분
     """
     __tablename__ = "portfolio_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(DateTime, nullable=False, unique=True)        # 기록 날짜
+    account_key = Column(String(64), default="", nullable=False, index=True)
+    date = Column(DateTime, nullable=False)                     # 기록 날짜
     total_value = Column(Float, nullable=False)                 # 총 평가 금액
     cash = Column(Float, nullable=False)                        # 현금 잔고
     invested = Column(Float, nullable=False)                    # 투자 금액
@@ -119,19 +127,23 @@ class PortfolioSnapshot(Base):
     position_count = Column(Integer, default=0)                 # 보유 종목 수
     created_at = Column(DateTime, default=datetime.now)
 
+    __table_args__ = (UniqueConstraint("account_key", "date", name="uq_snapshots_account_date"),)
+
     def __repr__(self):
-        return f"<Snapshot({self.date}, 총={self.total_value:,.0f}, 수익={self.cumulative_return:.2f}%)>"
+        return f"<Snapshot(account={self.account_key!r}, {self.date}, 총={self.total_value:,.0f})>"
 
 
 class DailyReport(Base):
     """
     일일 리포트 테이블
     - 매일 장 마감 후 생성되는 요약 리포트
+    - account_key: 전략별 계좌 구분
     """
     __tablename__ = "daily_reports"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(DateTime, nullable=False, unique=True)
+    account_key = Column(String(64), default="", nullable=False, index=True)
+    date = Column(DateTime, nullable=False)
     total_trades = Column(Integer, default=0)                   # 당일 매매 횟수
     buy_count = Column(Integer, default=0)                      # 매수 횟수
     sell_count = Column(Integer, default=0)                     # 매도 횟수
@@ -144,8 +156,10 @@ class DailyReport(Base):
     report_text = Column(Text)                                  # 리포트 본문
     created_at = Column(DateTime, default=datetime.now)
 
+    __table_args__ = (UniqueConstraint("account_key", "date", name="uq_daily_reports_account_date"),)
+
     def __repr__(self):
-        return f"<DailyReport({self.date}, 매매={self.total_trades}건, PnL={self.realized_pnl:,.0f})>"
+        return f"<DailyReport(account={self.account_key!r}, {self.date}, 매매={self.total_trades}건)>"
 
 
 # =============================================================
@@ -191,11 +205,45 @@ def get_session():
     return _SessionLocal()
 
 
+def _migrate_add_account_key(engine):
+    """기존 DB에 account_key 컬럼 추가 (다중 계좌 분리용). 한 번만 실행해도 됨."""
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    tables_columns = [
+        ("trade_history", "account_key"),
+        ("positions", "account_key"),
+        ("portfolio_snapshots", "account_key"),
+        ("daily_reports", "account_key"),
+    ]
+    with engine.connect() as conn:
+        for table, col in tables_columns:
+            try:
+                if dialect == "sqlite":
+                    r = conn.execute(text(f"PRAGMA table_info({table})"))
+                    if any(row[1] == col for row in r.fetchall()):
+                        continue
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} VARCHAR(64) DEFAULT '' NOT NULL"))
+                else:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} VARCHAR(64) DEFAULT '' NOT NULL"))
+                conn.commit()
+            except Exception as e:
+                if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                    conn.rollback()
+                else:
+                    conn.rollback()
+                    raise
+
+
 def init_database():
     """
     데이터베이스 초기화
     - 모든 테이블 생성 (존재하지 않는 경우에만)
+    - 기존 DB에 account_key 컬럼 없으면 마이그레이션
     """
     engine = get_engine()
     Base.metadata.create_all(engine)
+    try:
+        _migrate_add_account_key(engine)
+    except Exception:
+        pass  # 마이그레이션 실패해도 기동은 유지
     return engine
