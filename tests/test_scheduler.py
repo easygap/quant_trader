@@ -79,3 +79,23 @@ def test_scheduler_post_market_runs():
     scheduler = Scheduler(strategy_name="scoring")
     scheduler._run_post_market()
     assert True
+
+
+def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
+    from core.scheduler import Scheduler
+
+    scheduler = Scheduler(strategy_name="scoring")
+    scheduler.monitor_interval = 1
+    scheduler.auto_entry = True
+    scheduler._entry_candidates = [{"symbol": "005930", "price": 50000}]
+
+    def slow_entry():
+        import time
+        time.sleep(1.1)
+
+    monkeypatch.setattr(scheduler, "_execute_entry_candidates", slow_entry)
+    monkeypatch.setattr(scheduler, "_check_exit_signals", lambda: None)
+    scheduler._run_monitoring()
+
+    assert scheduler._skip_next_monitor_cycle is True
+    assert scheduler._should_monitor() is False

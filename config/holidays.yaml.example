@@ -1,5 +1,7 @@
-# 한국 증시 휴장일 (선택)
-# 이 파일을 holidays.yaml 로 복사 후 연도별로 수정하여 사용.
+# 한국 증시 휴장일 (참고용 예시)
+# 실제 사용 시에는 아래 명령으로 자동 갱신 권장 (매년 수동 관리 불필요):
+#   python main.py --update-holidays
+# pykrx 조회 + fallback으로 config/holidays.yaml 이 생성·갱신됩니다.
 # 존재하면 pykrx 대신 이 목록을 사용합니다.
 holidays:
   - "2026-01-01"

@@ -19,6 +19,7 @@ from database.repositories import (
     get_position, get_all_positions,
 )
 from monitoring.logger import log_trade
+from core.order_guard import OrderGuard
 from core.position_lock import PositionLock
 
 
@@ -28,6 +29,7 @@ class OrderExecutor:
 
     - mode == "paper": 가상 매매 (로그만 기록)
     - mode == "live": 실제 KIS API 주문
+    - account_key: 전략별 계좌 구분 (다중 계좌 시 DB·KIS 계좌 분리)
     - 거래 시간 외 주문 방지
     - 블랙스완 쿨다운 중 주문 차단
     - 주문 실패 시 최대 3회 재시도
@@ -35,11 +37,13 @@ class OrderExecutor:
 
     MAX_RETRIES = 3  # 주문 재시도 최대 횟수
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config = None, account_key: str = ""):
         self.config = config or Config.get()
+        self.account_key = account_key or ""
         self.mode = self.config.trading.get("mode", "paper")
         self.risk_manager = RiskManager(self.config)
-        self.kis_api = KISApi()
+        account_no = self.config.get_account_no(self.account_key) if self.account_key else None
+        self.kis_api = KISApi(account_no=account_no)
 
         # 거래 시간 / 블랙스완 체크 모듈
         from core.trading_hours import TradingHours
@@ -58,10 +62,12 @@ class OrderExecutor:
         price: float,
         capital: float,
         available_cash: float = None,
+        current_invested: float = None,
         atr: float = None,
         signal_score: float = 0,
         reason: str = "",
         strategy: str = "",
+        avg_daily_volume: float = None,
     ) -> dict:
         """
         매수 주문 실행
@@ -74,13 +80,14 @@ class OrderExecutor:
             signal_score: 매매 신호 점수
             reason: 매매 사유
             strategy: 전략명
+            avg_daily_volume: 일평균 거래량 (제공 시 거래량 기반 동적 슬리피지 적용, 소형주 등 고슬리피지 반영)
 
         Returns:
             주문 결과 딕셔너리
         """
         with PositionLock():
             return self._execute_buy_impl(
-                symbol, price, capital, available_cash, atr, signal_score, reason, strategy
+                symbol, price, capital, available_cash, current_invested, atr, signal_score, reason, strategy, avg_daily_volume
             )
 
     def _execute_buy_impl(
@@ -89,10 +96,12 @@ class OrderExecutor:
         price: float,
         capital: float,
         available_cash: float = None,
+        current_invested: float = None,
         atr: float = None,
         signal_score: float = 0,
         reason: str = "",
         strategy: str = "",
+        avg_daily_volume: float = None,
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
         # 손절가 계산
@@ -112,13 +121,26 @@ class OrderExecutor:
             price * quantity,
             capital,
             available_cash=available_cash,
+            current_invested=current_invested or 0,
         )
         if not div_check["can_buy"]:
             logger.warning("종목 {} 매수 불가: {}", symbol, div_check["reason"])
             return {"success": False, "reason": div_check["reason"]}
 
-        # 거래 비용 계산
-        costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY")
+        # 전략 성과 열화 감지 (최근 N건 승률 하한)
+        from database.repositories import get_recent_sell_trades
+        recent_sells = get_recent_sell_trades(
+            limit=self.risk_manager.risk_params.get("performance_degradation", {}).get("recent_trades", 20),
+            mode=self.mode,
+            account_key=self.account_key if self.account_key else None,
+        )
+        perf_check = self.risk_manager.check_recent_performance(recent_sells)
+        if not perf_check.get("allowed", True):
+            logger.warning("종목 {} 매수 불가 (성과 열화): {}", symbol, perf_check.get("reason", ""))
+            return {"success": False, "reason": perf_check.get("reason", "성과 열화로 매수 중단")}
+
+        # 거래 비용 계산 (avg_daily_volume 있으면 거래량 기반 동적 슬리피지 적용)
+        costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY", avg_daily_volume=avg_daily_volume)
         available_cash = capital if available_cash is None else available_cash
         total_required = (price * quantity) + costs["total_cost"]
         if available_cash > 0 and total_required > available_cash:
@@ -142,11 +164,21 @@ class OrderExecutor:
         # 주문 실행 (재시도 포함)
         order_result = None
         if self.mode == "live":
+            # 중복 주문 방지: ① 앱 레벨 TTL 가드 ② 해당 종목 미체결 주문 존재 여부(KIS 조회)
+            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            if OrderGuard.has_pending(symbol):
+                reason_text = f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."
+                logger.warning(reason_text)
+                return {"success": False, "reason": reason_text}
+            if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
+                reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
+                return {"success": False, "reason": reason_text}
             order_result = self._execute_with_retry(
                 self.kis_api.buy_order, symbol, quantity, int(price)
             )
             if order_result is None:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후)"}
+            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
         # DB에 매매 기록 저장
         save_trade(
@@ -161,6 +193,7 @@ class OrderExecutor:
             signal_score=signal_score,
             reason=reason,
             mode=self.mode,
+            account_key=self.account_key,
         )
 
         # 포지션 저장
@@ -172,6 +205,7 @@ class OrderExecutor:
             take_profit_price=tp_info["target_final"],
             trailing_stop_price=trailing_stop,
             strategy=strategy,
+            account_key=self.account_key,
         )
 
         # 매매 로그
@@ -206,6 +240,7 @@ class OrderExecutor:
         signal_score: float = 0,
         reason: str = "",
         strategy: str = "",
+        avg_daily_volume: float = None,
     ) -> dict:
         """
         매도 주문 실행
@@ -217,12 +252,13 @@ class OrderExecutor:
             signal_score: 매매 신호 점수
             reason: 매매 사유
             strategy: 전략명
+            avg_daily_volume: 일평균 거래량 (제공 시 거래량 기반 동적 슬리피지 적용)
 
         Returns:
             주문 결과 딕셔너리
         """
         with PositionLock():
-            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy)
+            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy, avg_daily_volume)
 
     def _execute_sell_impl(
         self,
@@ -232,20 +268,26 @@ class OrderExecutor:
         signal_score: float = 0,
         reason: str = "",
         strategy: str = "",
+        avg_daily_volume: float = None,
     ) -> dict:
         """매도 주문 실제 로직 (Lock 내부에서 호출)."""
-        position = get_position(symbol)
+        position = get_position(symbol, account_key=self.account_key)
         if not position:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
             return {"success": False, "reason": "보유 포지션 없음"}
 
         sell_qty = quantity or position.quantity
 
-        # 거래 비용 계산
-        costs = self.risk_manager.calculate_transaction_costs(price, sell_qty, "SELL")
+        # 거래 비용 계산 (증권거래세 0.18% + 설정 시 양도소득세; avg_price로 양도소득세 계산)
+        costs = self.risk_manager.calculate_transaction_costs(
+            price, sell_qty, "SELL",
+            avg_daily_volume=avg_daily_volume,
+            avg_price=float(position.avg_price),
+        )
+        total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
 
-        # 수익률 계산
-        pnl = (price - position.avg_price) * sell_qty
+        # 수익률 계산 (세금·수수료 반영 후 순손익)
+        pnl = (price - position.avg_price) * sell_qty - costs["commission"] - total_tax
         pnl_rate = ((price / position.avg_price) - 1) * 100
 
         # 주문 전 안전 체크
@@ -255,32 +297,43 @@ class OrderExecutor:
 
         # 주문 실행 (재시도 포함)
         if self.mode == "live":
+            # 중복 주문 방지: ① 앱 레벨 TTL 가드 ② 해당 종목 미체결 주문 존재 여부(KIS 조회)
+            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            if OrderGuard.has_pending(symbol):
+                reason_text = f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."
+                logger.warning(reason_text)
+                return {"success": False, "reason": reason_text}
+            if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
+                reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
+                return {"success": False, "reason": reason_text}
             order_result = self._execute_with_retry(
                 self.kis_api.sell_order, symbol, sell_qty, int(price)
             )
             if order_result is None:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후)"}
+            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
-        # DB에 매매 기록 저장
+        # DB에 매매 기록 저장 (tax = 증권거래세 + 양도소득세)
         save_trade(
             symbol=symbol,
             action="SELL",
             price=price,
             quantity=sell_qty,
             commission=costs["commission"],
-            tax=costs["tax"],
+            tax=total_tax,
             slippage=costs["slippage"],
             strategy=strategy,
             signal_score=signal_score,
             reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
             mode=self.mode,
+            account_key=self.account_key,
         )
 
         # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position
         if sell_qty >= position.quantity:
-            delete_position(symbol)
+            delete_position(symbol, account_key=self.account_key)
         else:
-            reduce_position(symbol, sell_qty)
+            reduce_position(symbol, sell_qty, account_key=self.account_key)
 
         # 매매 로그
         log_trade("SELL", symbol, price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")
@@ -317,7 +370,7 @@ class OrderExecutor:
         Returns:
             {"action": "STOP_LOSS" / "TAKE_PROFIT" / "TRAILING_STOP" / None}
         """
-        position = get_position(symbol)
+        position = get_position(symbol, account_key=self.account_key)
         if not position:
             return {"action": None}
 
@@ -327,7 +380,7 @@ class OrderExecutor:
         ).get("fixed_rate", 0.03)
 
         from database.repositories import update_trailing_stop
-        update_trailing_stop(symbol, current_price, trailing_rate)
+        update_trailing_stop(symbol, current_price, trailing_rate, account_key=self.account_key)
 
         # 손절 체크
         if position.stop_loss_price and current_price <= position.stop_loss_price:

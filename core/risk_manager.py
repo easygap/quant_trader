@@ -298,6 +298,7 @@ class RiskManager:
         position_value: float,
         total_value: float,
         available_cash: float = None,
+        current_invested: float = 0,
     ) -> dict:
         """
         분산 투자 규칙 확인
@@ -316,6 +317,7 @@ class RiskManager:
         div_config = self.risk_params.get("diversification", {})
         max_positions = div_config.get("max_positions", 10)
         max_ratio = div_config.get("max_position_ratio", 0.20)
+        max_investment_ratio = div_config.get("max_investment_ratio", 0.70)
         min_cash = div_config.get("min_cash_ratio", 0.20)
 
         # 최대 종목 수 초과
@@ -325,6 +327,15 @@ class RiskManager:
         # 단일 종목 비중 초과
         if total_value > 0 and (position_value / total_value) > max_ratio:
             return {"can_buy": False, "reason": f"단일 종목 비중 {max_ratio*100:.0f}% 초과"}
+
+        # 전체 주식 투자 비중 초과
+        if total_value > 0:
+            projected_invested_ratio = (current_invested + position_value) / total_value
+            if projected_invested_ratio > max_investment_ratio:
+                return {
+                    "can_buy": False,
+                    "reason": f"전체 투자 비중 {max_investment_ratio*100:.0f}% 초과",
+                }
 
         if available_cash is not None and total_value > 0:
             remaining_cash = available_cash - position_value
@@ -338,6 +349,54 @@ class RiskManager:
         return {"can_buy": True, "reason": ""}
 
     # =============================================================
+    # 전략 성과 열화 감지
+    # =============================================================
+
+    def check_recent_performance(self, recent_sell_trades: list) -> dict:
+        """
+        최근 매도 거래 승률로 성과 열화 여부 판단.
+        시장 국면 변화로 전략이 손실을 낼 경우 신규 매수 중단.
+
+        Args:
+            recent_sell_trades: 최근 매도 거래 리스트 (각 항목에 reason 등 PnL 정보 있음)
+
+        Returns:
+            {"allowed": 매수 허용 여부, "win_rate": 승률(0~1), "reason": 사유}
+        """
+        cfg = self.risk_params.get("performance_degradation", {})
+        if not cfg.get("enabled", False):
+            return {"allowed": True, "win_rate": None, "reason": ""}
+
+        min_win_rate = float(cfg.get("min_win_rate", 0.35))
+        min_sample = max(5, int(cfg.get("recent_trades", 20)) // 2)
+
+        if not recent_sell_trades or len(recent_sell_trades) < min_sample:
+            return {"allowed": True, "win_rate": None, "reason": ""}
+
+        wins = 0
+        for t in recent_sell_trades:
+            pnl = getattr(t, "pnl", None)
+            if pnl is None and getattr(t, "reason", None):
+                from database.repositories import _extract_pnl_from_reason
+                pnl = _extract_pnl_from_reason(t.reason or "")
+            if pnl is not None and pnl > 0:
+                wins += 1
+        n = len(recent_sell_trades)
+        win_rate = wins / n if n > 0 else 0
+
+        if win_rate < min_win_rate:
+            logger.warning(
+                "🚨 전략 성과 열화: 최근 {}건 승률 {:.1f}% (기준 {:.0f}% 미만) — 신규 매수 중단",
+                n, win_rate * 100, min_win_rate * 100,
+            )
+            return {
+                "allowed": False,
+                "win_rate": win_rate,
+                "reason": f"최근 {n}건 승률 {win_rate*100:.1f}% (기준 {min_win_rate*100:.0f}% 미만)",
+            }
+        return {"allowed": True, "win_rate": win_rate, "reason": ""}
+
+    # =============================================================
     # 거래 비용 계산
     # =============================================================
 
@@ -346,54 +405,89 @@ class RiskManager:
         price: float,
         quantity: int,
         action: str = "BUY",
+        avg_daily_volume: float = None,
+        avg_price: float = None,
     ) -> dict:
         """
-        거래 비용 계산 (수수료 + 세금 + 슬리피지)
+        거래 비용 계산 (수수료 + 증권거래세 + 슬리피지 + 양도소득세(선택))
 
         Args:
             price: 체결 가격
             quantity: 체결 수량
             action: "BUY" 또는 "SELL"
+            avg_daily_volume: 일평균 거래량 (동적 슬리피지용)
+            avg_price: 매도 시 평균 매입 단가 (양도소득세 계산용; 대주주 해당 시)
 
         Returns:
-            {
-                "commission": 수수료,
-                "tax": 세금 (매도 시만),
-                "slippage": 슬리피지,
-                "total_cost": 총 비용,
-                "effective_price": 비용 반영 실효 가격,
-            }
+            commission(수수료), tax(증권거래세 매도 시 0.18%), capital_gains_tax(양도소득세, 설정 시),
+            slippage, total_cost, effective_price 등.
         """
         costs = self.risk_params.get("transaction_costs", {})
         amount = price * quantity
 
         commission = amount * costs.get("commission_rate", 0.00015)
-        # 호가 단위 기반 슬리피지: max(고정 비율, tick_size * N틱)
+        dynamic = costs.get("dynamic_slippage", {})
         slippage_rate_fixed = costs.get("slippage", 0.0005)
         slippage_ticks = costs.get("slippage_ticks", 2)
         tick = _get_tick_size(price)
+        participation_rate = 0.0
+        slippage_multiplier = 1.0
+
+        if avg_daily_volume and avg_daily_volume > 0:
+            participation_rate = quantity / avg_daily_volume
+
+        if dynamic.get("enabled", True) and participation_rate > 0:
+            warn_threshold = dynamic.get("warn_at_volume_ratio", 0.01)
+            critical_threshold = dynamic.get("critical_at_volume_ratio", 0.03)
+            warn_multiplier = dynamic.get("warn_slippage_multiplier", 2.0)
+            critical_multiplier = dynamic.get("critical_slippage_multiplier", 4.0)
+
+            if participation_rate >= critical_threshold:
+                slippage_multiplier = critical_multiplier
+            elif participation_rate >= warn_threshold:
+                slippage_multiplier = warn_multiplier
+
+        # 호가 단위/거래량 기반 슬리피지: max(고정 비율, tick_size * N틱) * multiplier
         slippage_per_share = max(price * slippage_rate_fixed, tick * slippage_ticks)
+        slippage_per_share *= slippage_multiplier
         slippage = slippage_per_share * quantity
         slippage_rate_effective = slippage_per_share / price if price > 0 else 0
 
+        # 증권거래세: 매도 금액의 0.18% (국내 상장주 매도 시 의무)
         tax = 0
         if action.upper() == "SELL":
-            tax = amount * costs.get("tax_rate", 0.002)
+            tax = amount * costs.get("tax_rate", 0.0018)
 
-        total_cost = commission + tax + slippage
+        # 양도소득세 (대주주 해당 시만; enabled 시 실현 이익에 대해 부과)
+        capital_gains_tax = 0
+        if action.upper() == "SELL" and avg_price is not None and quantity > 0:
+            cgt_cfg = costs.get("capital_gains_tax", {}) or {}
+            if cgt_cfg.get("enabled", False):
+                gain = (price - avg_price) * quantity
+                if gain > 0:
+                    capital_gains_tax = gain * cgt_cfg.get("rate", 0.20)
 
-        # 실효 가격 (매수 시 높게, 매도 시 낮게)
+        total_cost = commission + tax + slippage + capital_gains_tax
+
+        # 실효 가격 (매수 시 높게, 매도 시 낮게; 증권거래세·슬리피지 반영, 양도소득세는 별도)
         if action.upper() == "BUY":
             effective_price = price * (1 + costs.get("commission_rate", 0) + slippage_rate_effective)
+            execution_price = price + slippage_per_share
         else:
             effective_price = price * (
                 1 - costs.get("commission_rate", 0) - slippage_rate_effective - costs.get("tax_rate", 0)
             )
+            execution_price = max(0, price - slippage_per_share)
 
         return {
             "commission": round(commission, 0),
             "tax": round(tax, 0),
+            "capital_gains_tax": round(capital_gains_tax, 0),
             "slippage": round(slippage, 0),
             "total_cost": round(total_cost, 0),
             "effective_price": round(effective_price, 0),
+            "execution_price": round(execution_price, 0),
+            "slippage_per_share": round(slippage_per_share, 4),
+            "slippage_multiplier": round(slippage_multiplier, 2),
+            "participation_rate": round(participation_rate, 6),
         }
