@@ -78,6 +78,10 @@ class ReportGenerator:
             f"  평균 수익     : {m['avg_win']:>14,.0f}원",
             f"  평균 손실     : {m['avg_loss']:>14,.0f}원",
             "",
+            "[ 과매매 분석 ]",
+            f"  평균 보유 기간 : {m.get('avg_holding_days', 0):>11.1f}일",
+            f"  총 수수료     : {m.get('total_commission', 0):>14,.0f}원 (총 거래 {m['total_trades']}회)",
+            "",
         ]
 
         # 최근 거래 요약 (최대 10건)
@@ -214,6 +218,14 @@ class ReportGenerator:
         <div class="card">
             <div class="label">손익비</div>
             <div class="value">{m['profit_factor']:.2f}</div>
+        </div>
+        <div class="card">
+            <div class="label">평균 보유 기간</div>
+            <div class="value">{m.get('avg_holding_days', 0):.1f}일</div>
+        </div>
+        <div class="card">
+            <div class="label">총 수수료 (총 거래 {m['total_trades']}회)</div>
+            <div class="value">{m.get('total_commission', 0):,.0f}원</div>
         </div>
     </div>
 

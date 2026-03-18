@@ -28,6 +28,7 @@ logs/
 # --- 백테스트 산출물 (로컬 생성물) ---
 reports/backtest_*.html
 reports/backtest_*.txt
+reports/*.md
 
 # --- quant_trader만 올리기 (fintics 제외) ---
 fintics/

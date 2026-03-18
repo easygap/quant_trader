@@ -1,6 +1,10 @@
 """
 추세 추종 전략
 - 강한 추세 방향으로 따라가는 전략
+
+주의: ADX·200일선·MACD 세 조건 동시 충족 시점은 이미 상승한 뒤라 진입이 늦는 구조.
+손실 거래가 잦아 승률 40% 이하일 수 있으므로, 손익비(Profit Factor) ≥ 2.0 인지 백테스트/검증에서 확인 필수.
+한국 시장: 코스피/코스닥은 박스권·추세 단명 특성으로 미국(나스닥) 대비 추세 추종 실증 근거가 약함. quant_trader_design.md §4.3 참고.
 """
 
 import pandas as pd
@@ -17,9 +21,12 @@ class TrendFollowingStrategy(BaseStrategy):
     추세 추종 전략 (중급)
 
     조건:
-    1. ADX > 25 → 강한 추세 존재
+    1. ADX > threshold → 강한 추세 존재
     2. 가격 > 200일선 → 상승 추세
     3. MACD 골든크로스 → 매수 진입
+
+    진입이 늦는 구조이므로 손익비(Profit Factor) ≥ 2.0 달성 여부를 반드시 검증하세요.
+    한국 시장에서는 추세 지속성이 미국(나스닥)보다 약해 실증 근거가 상대적으로 적으므로, 종목·기간별 검증 권장.
     """
 
     BUY = "BUY"
@@ -78,7 +85,7 @@ class TrendFollowingStrategy(BaseStrategy):
 
         return analyzed
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """추세 추종 신호 생성"""
         analyzed = self.analyze(df)
 
