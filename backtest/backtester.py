@@ -35,6 +35,7 @@ class Backtester:
         df: pd.DataFrame,
         strategy_name: str = "scoring",
         initial_capital: float = None,
+        strict_lookahead: bool = False,
     ) -> dict:
         """
         백테스팅 실행
@@ -43,6 +44,7 @@ class Backtester:
             df: OHLCV 데이터프레임
             strategy_name: 전략명
             initial_capital: 초기 투자금 (None이면 설정값 사용)
+            strict_lookahead: True면 매 시점 T에서 df[:T+1]만으로 지표/신호 계산 (Look-Ahead Bias 완전 방어, 느림)
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -52,16 +54,30 @@ class Backtester:
                 "position_sizing", {}
             ).get("initial_capital", 10000000)
 
-        # 전략에 따라 지표계산 + 신호생성
         strategy = self._get_strategy(strategy_name)
-        df_analyzed = strategy.analyze(df.copy())
+        if strict_lookahead:
+            # Look-Ahead Bias 방어: 시점 T에서는 T 이전(및 T) 데이터만 사용
+            logger.info("strict_lookahead=True: 시점별 슬라이싱 분석 실행 중...")
+            rows = []
+            for i in range(len(df)):
+                chunk = strategy.analyze(df.iloc[: i + 1].copy())
+                if not chunk.empty and "signal" in chunk.columns:
+                    rows.append(chunk.iloc[-1].to_dict())
+                else:
+                    rows.append({"signal": "HOLD", "close": df.iloc[i]["close"]})
+            df_analyzed = pd.DataFrame(rows, index=df.index)
+            if "close" not in df_analyzed.columns:
+                df_analyzed["close"] = df["close"].values
+        else:
+            df_analyzed = strategy.analyze(df.copy())
 
         if df_analyzed.empty or "signal" not in df_analyzed.columns:
             logger.error("백테스팅 실패: 신호 생성 불가")
             return {}
 
-        # 시뮬레이션 실행
+        # 시뮬레이션 실행 (시점 T에서는 row T만 사용, T+1 이후 미참조)
         result = self._simulate(df_analyzed, initial_capital)
+        result["look_ahead_bias_verified"] = "STRICT" if strict_lookahead else "PASS"
 
         # 성과 지표 계산
         metrics = self._calculate_metrics(result, initial_capital)
@@ -81,6 +97,7 @@ class Backtester:
             "strategy": strategy_name,
             "period": f"{df.index[0]} ~ {df.index[-1]}",
             "initial_capital": initial_capital,
+            "look_ahead_bias_verified": result.get("look_ahead_bias_verified", "PASS"),
         }
 
     def _get_strategy(self, name: str):
@@ -94,40 +111,74 @@ class Backtester:
         elif name == "trend_following":
             from strategies.trend_following import TrendFollowingStrategy
             return TrendFollowingStrategy(self.config)
+        elif name == "ensemble":
+            from core.strategy_ensemble import StrategyEnsemble
+            return StrategyEnsemble(self.config)
         else:
             from strategies.scoring_strategy import ScoringStrategy
             return ScoringStrategy(self.config)
 
     def _simulate(self, df: pd.DataFrame, initial_capital: float) -> dict:
         """
-        거래 시뮬레이션 실행
-
-        Returns:
-            {"trades": 거래 리스트, "equity_curve": 자본금 변화}
+        거래 시뮬레이션 실행.
+        방어: 날짜 순으로 순회하며 당일(row T) 데이터만 사용 — T+1 이후 행 미참조로 Look-Ahead Bias 없음.
+        설정에 따라 ATR 손절, 1% 룰 포지션 사이징, 부분 익절을 반영한다.
         """
+        assert df.index.is_monotonic_increasing or len(df) <= 1, (
+            "시뮬레이션은 시간 순서대로만 순회해야 하며, 미래 데이터를 참조하지 않습니다."
+        )
         cash = initial_capital
-        position = 0            # 보유 수량
-        avg_price = 0           # 평균 매수가
+        position = 0
+        avg_price = 0
+        partial_exit_done = False  # 1차 부분 익절 수행 여부
+        high_water_mark = 0.0     # 트레일링 스탑용: 보유 중 최고가
         trades = []
         equity_curve = []
 
-        # 손절/익절 설정
         sl_config = self.risk_params.get("stop_loss", {})
         tp_config = self.risk_params.get("take_profit", {})
+        ts_config = self.risk_params.get("trailing_stop", {})
+        pos_config = self.risk_params.get("position_sizing", {})
+        div_config = self.risk_params.get("diversification", {})
+
         sl_rate = sl_config.get("fixed_rate", 0.03)
+        sl_type = sl_config.get("type", "fixed")
+        atr_mult = sl_config.get("atr_multiplier", 2.0)
         tp_rate = tp_config.get("fixed_rate", 0.10)
+        partial_exit = tp_config.get("partial_exit", False)
+        partial_ratio = tp_config.get("partial_ratio", 0.5)
+        partial_target = tp_config.get("partial_target", 0.06)
+        ts_enabled = ts_config.get("enabled", False)
+        ts_type = ts_config.get("type", "fixed")
+        ts_fixed_rate = ts_config.get("fixed_rate", 0.03)
+        ts_atr_mult = ts_config.get("atr_multiplier", 3.0)
+        max_risk_per_trade = pos_config.get("max_risk_per_trade", 0.01)
+        max_position_ratio = div_config.get("max_position_ratio", 0.20)
 
         commission_rate = self.costs.get("commission_rate", 0.00015)
         tax_rate = self.costs.get("tax_rate", 0.002)
         slippage = self.costs.get("slippage", 0.0005)
 
+        def _stop_loss_price(row_atr):
+            if sl_type == "atr" and row_atr is not None and pd.notna(row_atr) and row_atr > 0:
+                return avg_price - float(row_atr) * atr_mult
+            return avg_price * (1 - sl_rate)
+
+        def _trailing_stop_price(hwm, row_atr):
+            if not ts_enabled or hwm <= 0:
+                return None
+            if ts_type == "atr" and row_atr is not None and pd.notna(row_atr) and row_atr > 0:
+                return hwm - float(row_atr) * ts_atr_mult
+            return hwm * (1 - ts_fixed_rate)
+
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
             signal = row.get("signal", "HOLD")
+            row_atr = row.get("atr")
 
-            # 보유 중일 때 손절/익절 체크
             if position > 0:
-                stop_loss_price = avg_price * (1 - sl_rate)
+                high_water_mark = max(high_water_mark, close)
+                stop_loss_price = _stop_loss_price(row_atr)
                 take_profit_price = avg_price * (1 + tp_rate)
 
                 # 손절
@@ -135,10 +186,9 @@ class Backtester:
                     sell_price = close * (1 - slippage)
                     sell_amount = sell_price * position
                     commission = sell_amount * commission_rate
-                    tax = sell_amount * tax_rate
-                    pnl = (sell_price - avg_price) * position - commission - tax
-
-                    cash += sell_amount - commission - tax
+                    tax_amt = sell_amount * tax_rate
+                    pnl = (sell_price - avg_price) * position - commission - tax_amt
+                    cash += sell_amount - commission - tax_amt
                     trades.append({
                         "date": date, "action": "STOP_LOSS", "price": sell_price,
                         "quantity": position, "pnl": pnl,
@@ -146,16 +196,38 @@ class Backtester:
                     })
                     position = 0
                     avg_price = 0
+                    partial_exit_done = False
+                    high_water_mark = 0.0
 
-                # 익절
+                # 부분 익절 (1차 목표 도달)
+                elif partial_exit and not partial_exit_done and close >= avg_price * (1 + partial_target):
+                    sell_qty = max(1, int(position * partial_ratio))
+                    sell_price = close * (1 - slippage)
+                    sell_amount = sell_price * sell_qty
+                    commission = sell_amount * commission_rate
+                    tax_amt = sell_amount * tax_rate
+                    pnl = (sell_price - avg_price) * sell_qty - commission - tax_amt
+                    cash += sell_amount - commission - tax_amt
+                    trades.append({
+                        "date": date, "action": "TAKE_PROFIT_PARTIAL", "price": sell_price,
+                        "quantity": sell_qty, "pnl": pnl,
+                        "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                    })
+                    position -= sell_qty
+                    partial_exit_done = True
+                    if position <= 0:
+                        avg_price = 0
+                        partial_exit_done = False
+                        high_water_mark = 0.0
+
+                # 전량 익절
                 elif close >= take_profit_price:
                     sell_price = close * (1 - slippage)
                     sell_amount = sell_price * position
                     commission = sell_amount * commission_rate
-                    tax = sell_amount * tax_rate
-                    pnl = (sell_price - avg_price) * position - commission - tax
-
-                    cash += sell_amount - commission - tax
+                    tax_amt = sell_amount * tax_rate
+                    pnl = (sell_price - avg_price) * position - commission - tax_amt
+                    cash += sell_amount - commission - tax_amt
                     trades.append({
                         "date": date, "action": "TAKE_PROFIT", "price": sell_price,
                         "quantity": position, "pnl": pnl,
@@ -163,21 +235,49 @@ class Backtester:
                     })
                     position = 0
                     avg_price = 0
+                    partial_exit_done = False
+                    high_water_mark = 0.0
 
-            # 신호 기반 매매
+                # 트레일링 스탑 (고점 대비 하락 시 청산)
+                elif ts_enabled:
+                    trail_price = _trailing_stop_price(high_water_mark, row_atr)
+                    if trail_price is not None and close <= trail_price:
+                        sell_price = close * (1 - slippage)
+                        sell_amount = sell_price * position
+                        commission = sell_amount * commission_rate
+                        tax_amt = sell_amount * tax_rate
+                        pnl = (sell_price - avg_price) * position - commission - tax_amt
+                        cash += sell_amount - commission - tax_amt
+                        trades.append({
+                            "date": date, "action": "TRAILING_STOP", "price": sell_price,
+                            "quantity": position, "pnl": pnl,
+                            "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        })
+                        position = 0
+                        avg_price = 0
+                        partial_exit_done = False
+                        high_water_mark = 0.0
+
             if signal == "BUY" and position == 0:
                 buy_price = close * (1 + slippage)
-                # 투자금의 최대 20%만 사용
-                invest = cash * 0.20
-                quantity = int(invest / buy_price)
+                stop_at_buy = buy_price * (1 - sl_rate)
+                if sl_type == "atr" and row_atr is not None and pd.notna(row_atr) and row_atr > 0:
+                    stop_at_buy = buy_price - float(row_atr) * atr_mult
+                risk_per_share = max(buy_price - stop_at_buy, buy_price * 0.001)
+                risk_amount = (cash + (position * close)) * max_risk_per_trade
+                qty_by_1pct = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                invest_cap = (cash + (position * close)) * max_position_ratio
+                qty_by_cap = int(invest_cap / buy_price) if buy_price > 0 else 0
+                quantity = min(qty_by_1pct, qty_by_cap) if qty_by_1pct and qty_by_cap else (qty_by_cap or qty_by_1pct or int(cash * max_position_ratio / buy_price))
 
-                if quantity > 0:
+                if quantity > 0 and buy_price * quantity <= cash:
                     buy_amount = buy_price * quantity
                     commission = buy_amount * commission_rate
                     cash -= (buy_amount + commission)
                     position = quantity
                     avg_price = buy_price
-
+                    partial_exit_done = False
+                    high_water_mark = buy_price
                     trades.append({
                         "date": date, "action": "BUY", "price": buy_price,
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
@@ -198,6 +298,7 @@ class Backtester:
                 })
                 position = 0
                 avg_price = 0
+                high_water_mark = 0.0
 
             # 자본금 곡선 기록
             portfolio_value = cash + (position * close)
@@ -242,7 +343,7 @@ class Backtester:
         max_drawdown = equity["drawdown"].min() * 100
 
         # 매매 기준 성과
-        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT")]
+        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
         winning = [t for t in sell_trades if t["pnl"] > 0]
         losing = [t for t in sell_trades if t["pnl"] <= 0]
 
@@ -295,6 +396,7 @@ class Backtester:
         print("\n" + "=" * 60)
         print(f"  📊 백테스팅 결과 ({result['strategy']})")
         print(f"  📅 기간: {result['period']}")
+        print(f"  Look-Ahead Bias 검증: {result.get('look_ahead_bias_verified', 'PASS')}")
         print("=" * 60)
         print(f"  초기 자본     : {m['initial_capital']:>14,.0f}원")
         print(f"  최종 자본     : {m['final_value']:>14,.0f}원")

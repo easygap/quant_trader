@@ -15,10 +15,11 @@ from config.config_loader import Config
 from api.kis_api import KISApi
 from core.risk_manager import RiskManager
 from database.repositories import (
-    save_trade, save_position, delete_position,
+    save_trade, save_position, delete_position, reduce_position,
     get_position, get_all_positions,
 )
 from monitoring.logger import log_trade
+from core.position_lock import PositionLock
 
 
 class OrderExecutor:
@@ -56,6 +57,7 @@ class OrderExecutor:
         symbol: str,
         price: float,
         capital: float,
+        available_cash: float = None,
         atr: float = None,
         signal_score: float = 0,
         reason: str = "",
@@ -76,6 +78,23 @@ class OrderExecutor:
         Returns:
             주문 결과 딕셔너리
         """
+        with PositionLock():
+            return self._execute_buy_impl(
+                symbol, price, capital, available_cash, atr, signal_score, reason, strategy
+            )
+
+    def _execute_buy_impl(
+        self,
+        symbol: str,
+        price: float,
+        capital: float,
+        available_cash: float = None,
+        atr: float = None,
+        signal_score: float = 0,
+        reason: str = "",
+        strategy: str = "",
+    ) -> dict:
+        """매수 주문 실제 로직 (Lock 내부에서 호출)."""
         # 손절가 계산
         stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
 
@@ -89,7 +108,10 @@ class OrderExecutor:
         # 분산 투자 체크
         positions = get_all_positions()
         div_check = self.risk_manager.check_diversification(
-            len(positions), price * quantity, capital
+            len(positions),
+            price * quantity,
+            capital,
+            available_cash=available_cash,
         )
         if not div_check["can_buy"]:
             logger.warning("종목 {} 매수 불가: {}", symbol, div_check["reason"])
@@ -97,6 +119,14 @@ class OrderExecutor:
 
         # 거래 비용 계산
         costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY")
+        available_cash = capital if available_cash is None else available_cash
+        total_required = (price * quantity) + costs["total_cost"]
+        if available_cash > 0 and total_required > available_cash:
+            logger.warning(
+                "종목 {} 매수 불가: 필요 현금 {:,.0f}원 > 사용 가능 현금 {:,.0f}원",
+                symbol, total_required, available_cash,
+            )
+            return {"success": False, "reason": "사용 가능 현금 부족"}
 
         # 익절가 계산
         tp_info = self.risk_manager.calculate_take_profit(price)
@@ -191,6 +221,19 @@ class OrderExecutor:
         Returns:
             주문 결과 딕셔너리
         """
+        with PositionLock():
+            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy)
+
+    def _execute_sell_impl(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int = None,
+        signal_score: float = 0,
+        reason: str = "",
+        strategy: str = "",
+    ) -> dict:
+        """매도 주문 실제 로직 (Lock 내부에서 호출)."""
         position = get_position(symbol)
         if not position:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
@@ -233,18 +276,11 @@ class OrderExecutor:
             mode=self.mode,
         )
 
-        # 전량 매도 시 포지션 삭제, 부분 매도 시 수량 업데이트
+        # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position
         if sell_qty >= position.quantity:
             delete_position(symbol)
         else:
-            # 부분 매도 — 남은 수량으로 포지션 업데이트
-            remaining = position.quantity - sell_qty
-            save_position(
-                symbol=symbol,
-                avg_price=position.avg_price,
-                quantity=-sell_qty,  # save_position이 기존에 더하므로 빼기
-                strategy=strategy,
-            )
+            reduce_position(symbol, sell_qty)
 
         # 매매 로그
         log_trade("SELL", symbol, price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")

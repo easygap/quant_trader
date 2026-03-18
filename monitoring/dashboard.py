@@ -8,7 +8,8 @@ from datetime import datetime
 from loguru import logger
 
 from config.config_loader import Config
-from database.repositories import get_all_positions, get_portfolio_snapshots
+from core.portfolio_manager import PortfolioManager
+from database.repositories import get_portfolio_snapshots
 
 
 class Dashboard:
@@ -25,6 +26,7 @@ class Dashboard:
         self.initial_capital = self.config.risk_params.get(
             "position_sizing", {}
         ).get("initial_capital", 10000000)
+        self.portfolio_manager = PortfolioManager(self.config)
         logger.info("Dashboard 초기화 완료")
 
     def show_portfolio(self, current_prices: dict = None):
@@ -34,52 +36,38 @@ class Dashboard:
         Args:
             current_prices: {종목코드: 현재가} 딕셔너리
         """
-        current_prices = current_prices or {}
-        positions = get_all_positions()
+        summary = self.portfolio_manager.get_portfolio_summary(current_prices or {})
+        positions = summary["positions"]
 
         print("\n" + "=" * 70)
         print(f"  📊 포트폴리오 대시보드  ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
         print("=" * 70)
-
-        total_invested = 0
-        total_current = 0
 
         if positions:
             print(f"\n  {'종목':^8} {'수량':>6} {'평균가':>10} {'현재가':>10} {'평가액':>12} {'수익률':>8}")
             print("  " + "-" * 62)
 
             for pos in positions:
-                price = current_prices.get(pos.symbol, pos.avg_price)
-                value = price * pos.quantity
-                invested = pos.avg_price * pos.quantity
-                pnl_rate = ((price / pos.avg_price) - 1) * 100 if pos.avg_price > 0 else 0
-
-                total_invested += invested
-                total_current += value
-
-                emoji = "📈" if pnl_rate >= 0 else "📉"
+                emoji = "📈" if pos["pnl_rate"] >= 0 else "📉"
                 print(
-                    f"  {pos.symbol:^8} {pos.quantity:>6d} "
-                    f"{pos.avg_price:>10,.0f} {price:>10,.0f} "
-                    f"{value:>12,.0f} {emoji}{pnl_rate:>6.2f}%"
+                    f"  {pos['symbol']:^8} {pos['quantity']:>6d} "
+                    f"{pos['avg_price']:>10,.0f} {pos['current_price']:>10,.0f} "
+                    f"{pos['current_value']:>12,.0f} {emoji}{pos['pnl_rate']:>6.2f}%"
                 )
         else:
             print("\n  보유 종목 없음")
 
-        # 요약
-        cash = self.initial_capital - total_invested
-        total_value = cash + total_current
-        total_return = ((total_value / self.initial_capital) - 1) * 100
-
         print("\n  " + "-" * 62)
         print(f"  {'초기 자본':>12}: {self.initial_capital:>14,.0f}원")
-        print(f"  {'투자 금액':>12}: {total_invested:>14,.0f}원")
-        print(f"  {'현금 잔고':>12}: {cash:>14,.0f}원")
-        print(f"  {'총 평가금':>12}: {total_value:>14,.0f}원")
+        print(f"  {'투자 금액':>12}: {summary['invested']:>14,.0f}원")
+        print(f"  {'현금 잔고':>12}: {summary['cash']:>14,.0f}원")
+        print(f"  {'총 평가금':>12}: {summary['total_value']:>14,.0f}원")
+        print(f"  {'실현 손익':>12}: {summary['realized_pnl']:>14,.0f}원")
+        print(f"  {'미실현 손익':>12}: {summary['unrealized_pnl']:>14,.0f}원")
 
-        return_emoji = "📈" if total_return >= 0 else "📉"
-        print(f"  {'총 수익률':>12}: {return_emoji} {total_return:>13.2f}%")
-        print(f"  {'보유 종목':>12}: {len(positions):>14d}개")
+        return_emoji = "📈" if summary["total_return"] >= 0 else "📉"
+        print(f"  {'총 수익률':>12}: {return_emoji} {summary['total_return']:>13.2f}%")
+        print(f"  {'보유 종목':>12}: {summary['position_count']:>14d}개")
         print("=" * 70 + "\n")
 
     def show_recent_snapshots(self, days: int = 7):
@@ -111,22 +99,11 @@ class Dashboard:
 
     def show_summary_line(self, current_prices: dict = None) -> str:
         """한 줄 요약 (로그용)"""
-        current_prices = current_prices or {}
-        positions = get_all_positions()
+        summary = self.portfolio_manager.get_portfolio_summary(current_prices or {})
 
-        total_invested = sum(p.avg_price * p.quantity for p in positions)
-        total_current = sum(
-            current_prices.get(p.symbol, p.avg_price) * p.quantity
-            for p in positions
+        return (
+            f"포트폴리오: {summary['total_value']:,.0f}원 | "
+            f"수익률: {summary['total_return']:.2f}% | "
+            f"보유: {summary['position_count']}종목 | "
+            f"현금: {summary['cash']:,.0f}원"
         )
-        cash = self.initial_capital - total_invested
-        total_value = cash + total_current
-        total_return = ((total_value / self.initial_capital) - 1) * 100
-
-        summary = (
-            f"포트폴리오: {total_value:,.0f}원 | "
-            f"수익률: {total_return:.2f}% | "
-            f"보유: {len(positions)}종목 | "
-            f"현금: {cash:,.0f}원"
-        )
-        return summary

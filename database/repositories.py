@@ -4,6 +4,7 @@
 - 주가 데이터, 매매 기록, 포지션, 포트폴리오 스냅샷 관리
 """
 
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -157,6 +158,7 @@ def save_trade(
 
 def get_trade_history(
     symbol: Optional[str] = None,
+    mode: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> List[TradeHistory]:
@@ -166,6 +168,8 @@ def get_trade_history(
         query = session.query(TradeHistory)
         if symbol:
             query = query.filter(TradeHistory.symbol == symbol)
+        if mode:
+            query = query.filter(TradeHistory.mode == mode)
         if start_date:
             query = query.filter(TradeHistory.executed_at >= start_date)
         if end_date:
@@ -174,6 +178,100 @@ def get_trade_history(
         return query.order_by(TradeHistory.executed_at.desc()).all()
     finally:
         session.close()
+
+
+def get_trade_cash_summary(
+    mode: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> dict:
+    """매매 기록 기준 현금 흐름 요약."""
+    trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date)
+
+    cash_delta = 0.0
+    buy_count = 0
+    sell_count = 0
+    total_commission = 0.0
+    total_tax = 0.0
+    total_slippage = 0.0
+
+    for trade in trades:
+        action = (trade.action or "").upper()
+        total_amount = trade.total_amount or 0
+        costs = (trade.commission or 0) + (trade.tax or 0) + (trade.slippage or 0)
+
+        total_commission += trade.commission or 0
+        total_tax += trade.tax or 0
+        total_slippage += trade.slippage or 0
+
+        if action == "BUY":
+            buy_count += 1
+            cash_delta -= (total_amount + costs)
+        else:
+            sell_count += 1
+            cash_delta += (total_amount - costs)
+
+    return {
+        "cash_delta": round(cash_delta, 0),
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "total_trades": len(trades),
+        "commission": round(total_commission, 0),
+        "tax": round(total_tax, 0),
+        "slippage": round(total_slippage, 0),
+    }
+
+
+def _extract_pnl_from_reason(reason: str) -> float:
+    """OrderExecutor가 reason에 남긴 'PnL: 12,345원' 값을 파싱."""
+    if not reason:
+        return 0.0
+    match = re.search(r"PnL:\s*([\-0-9,]+)원", reason)
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(1).replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+def get_daily_trade_summary(
+    date: Optional[datetime] = None,
+    mode: Optional[str] = None,
+) -> dict:
+    """특정 일자의 매매 요약."""
+    dt = date or datetime.now()
+    start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    trades = get_trade_history(mode=mode, start_date=start, end_date=end)
+
+    realized_pnl = 0.0
+    winning_trades = 0
+    losing_trades = 0
+
+    for trade in trades:
+        if (trade.action or "").upper() == "BUY":
+            continue
+        pnl = _extract_pnl_from_reason(trade.reason or "")
+        realized_pnl += pnl
+        if pnl > 0:
+            winning_trades += 1
+        else:
+            losing_trades += 1
+
+    cash_summary = get_trade_cash_summary(mode=mode, start_date=start, end_date=end)
+
+    return {
+        "date": start,
+        "total_trades": cash_summary["total_trades"],
+        "buy_count": cash_summary["buy_count"],
+        "sell_count": cash_summary["sell_count"],
+        "realized_pnl": round(realized_pnl, 0),
+        "total_commission": cash_summary["commission"],
+        "total_tax": cash_summary["tax"],
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+    }
 
 
 # =============================================================
@@ -267,6 +365,37 @@ def delete_position(symbol: str):
         session.close()
 
 
+def reduce_position(symbol: str, sell_qty: int) -> Optional[Position]:
+    """
+    부분 매도: 수량만 감소, 평균 단가 유지.
+    남은 수량이 0이면 delete_position 후 None 반환.
+    """
+    if sell_qty <= 0:
+        return get_position(symbol)
+    session = get_session()
+    try:
+        position = session.query(Position).filter(Position.symbol == symbol).first()
+        if not position:
+            return None
+        remaining = position.quantity - sell_qty
+        if remaining <= 0:
+            session.delete(position)
+            session.commit()
+            logger.info("포지션 감소(전량): {} — 삭제됨", symbol)
+            return None
+        position.quantity = remaining
+        position.total_invested = position.avg_price * remaining
+        session.commit()
+        logger.info("포지션 감소: {} {}주 남음 (평균가 {:,.0f})", symbol, remaining, position.avg_price)
+        return position
+    except Exception as e:
+        session.rollback()
+        logger.error("포지션 감소 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
 def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float):
     """
     트레일링 스탑 가격 업데이트
@@ -346,5 +475,81 @@ def get_portfolio_snapshots(days: int = 30) -> pd.DataFrame:
         } for r in results]
 
         return pd.DataFrame(data)
+    finally:
+        session.close()
+
+
+# =============================================================
+# 일일 리포트 관련
+# =============================================================
+
+def save_daily_report(
+    date: datetime,
+    total_trades: int = 0,
+    buy_count: int = 0,
+    sell_count: int = 0,
+    realized_pnl: float = 0,
+    unrealized_pnl: float = 0,
+    total_commission: float = 0,
+    total_tax: float = 0,
+    winning_trades: int = 0,
+    losing_trades: int = 0,
+    report_text: str = "",
+):
+    """일일 리포트 저장 또는 업데이트."""
+    session = get_session()
+    try:
+        report_date = date.replace(hour=0, minute=0, second=0, microsecond=0)
+        report = session.query(DailyReport).filter(DailyReport.date == report_date).first()
+
+        if report is None:
+            report = DailyReport(date=report_date)
+            session.add(report)
+
+        report.total_trades = total_trades
+        report.buy_count = buy_count
+        report.sell_count = sell_count
+        report.realized_pnl = realized_pnl
+        report.unrealized_pnl = unrealized_pnl
+        report.total_commission = total_commission
+        report.total_tax = total_tax
+        report.winning_trades = winning_trades
+        report.losing_trades = losing_trades
+        report.report_text = report_text
+        session.commit()
+        return report
+    except Exception as e:
+        session.rollback()
+        logger.error("일일 리포트 저장 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
+def get_daily_reports(days: int = 30) -> pd.DataFrame:
+    """최근 N일 일일 리포트 조회."""
+    session = get_session()
+    try:
+        since = datetime.now() - timedelta(days=days)
+        results = session.query(DailyReport).filter(
+            DailyReport.date >= since
+        ).order_by(DailyReport.date.desc()).all()
+
+        if not results:
+            return pd.DataFrame()
+
+        return pd.DataFrame([{
+            "date": r.date,
+            "total_trades": r.total_trades,
+            "buy_count": r.buy_count,
+            "sell_count": r.sell_count,
+            "realized_pnl": r.realized_pnl,
+            "unrealized_pnl": r.unrealized_pnl,
+            "total_commission": r.total_commission,
+            "total_tax": r.total_tax,
+            "winning_trades": r.winning_trades,
+            "losing_trades": r.losing_trades,
+            "report_text": r.report_text,
+        } for r in results])
     finally:
         session.close()

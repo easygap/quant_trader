@@ -64,9 +64,10 @@ scoring:
 # --- 평균 회귀 전략 ---
 mean_reversion:
   z_score_buy: -2.0           # 매수 Z-Score 기준
-  z_score_sell: 2.0           # 매도 Z-Score 기준
+  z_score_sell: 2.0          # 매도 Z-Score 기준
   lookback_period: 20         # 이동평균 기간
   adx_filter: 20              # ADX 이 값 미만일 때만 전략 활성화
+  volume_spike_filter: 3.0    # 거래량 급변 시 매수 차단 (평균 대비 N배 초과)
 
 # --- 추세 추종 전략 ---
 trend_following:
@@ -74,3 +75,13 @@ trend_following:
   trend_ma_period: 200        # 추세 판단 이동평균 기간
   atr_stop_multiplier: 2.0    # ATR 기반 손절 배수
   trailing_atr_multiplier: 3.0  # ATR 기반 트레일링 스탑 배수
+
+# --- 전략 앙상블 (복수 전략 신호 통합) ---
+ensemble:
+  mode: "majority_vote"       # majority_vote | weighted_sum | conservative
+  confidence_weight:          # weighted_sum 모드 시 전략별 가중치
+    scoring: 1.0
+    mean_reversion: 1.0
+    trend_following: 1.0
+  weighted_buy_threshold: 0.3
+  weighted_sell_threshold: -0.3

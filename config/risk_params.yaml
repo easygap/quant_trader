@@ -31,7 +31,7 @@ trailing_stop:
 # --- 분산 투자 ---
 diversification:
   max_position_ratio: 0.20    # 단일 종목 최대 비중 (20%)
-  max_sector_ratio: 0.40      # 단일 섹터 최대 비중 (40%)
+  max_sector_ratio: 0.40      # (미구현) 단일 섹터 최대 비중 — 섹터 정보 연동 후 적용 예정
   max_positions: 10           # 최대 동시 보유 종목 수
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
 
@@ -45,4 +45,5 @@ drawdown:
 transaction_costs:
   commission_rate: 0.00015    # 편도 수수료 (0.015%)
   tax_rate: 0.002             # 매도 세금 (0.2% - 코스피/코스닥)
-  slippage: 0.0005            # 슬리피지 (0.05%)
+  slippage: 0.0005            # 슬리피지 기본 비율 (0.05%)
+  slippage_ticks: 2           # 호가 단위 기준 슬리피지 틱 수 (실제 적용 = max(비율, tick*N))

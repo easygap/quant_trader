@@ -1,0 +1,81 @@
+"""
+Scheduler 장전/장중/장마감 시뮬레이션 테스트.
+- 네트워크·KIS API 호출을 모킹하여 단위 테스트로 실행 가능.
+"""
+
+from datetime import datetime
+
+import pandas as pd
+
+import pytest
+
+
+def _sample_ohlcv(days=60):
+    import numpy as np
+    np.random.seed(42)
+    dates = pd.date_range(end=datetime.now(), periods=days, freq="B")
+    returns = np.random.normal(0.0002, 0.015, days)
+    prices = 50000 * np.cumprod(1 + returns)
+    df = pd.DataFrame({
+        "open": prices * (1 + np.random.uniform(-0.01, 0.01, days)),
+        "high": prices * (1 + np.random.uniform(0, 0.02, days)),
+        "low": prices * (1 - np.random.uniform(0, 0.02, days)),
+        "close": prices,
+        "volume": np.random.randint(100000, 3000000, days),
+    }, index=dates)
+    df.index.name = "date"
+    return df
+
+
+class _MockConfig:
+    """테스트용 설정: watchlist만 주고 나머지는 최소."""
+    watchlist = ["005930"]
+    trading = {"mode": "paper", "auto_entry": False}
+
+
+def test_scheduler_pre_market_runs_without_network(monkeypatch):
+    """장전 준비: DataCollector를 모킹해 네트워크 없이 _run_pre_market 완료."""
+    from core.scheduler import Scheduler
+
+    sample = _sample_ohlcv(60)
+
+    class FakeCollector:
+        def fetch_korean_stock(self, symbol, start=None, end=None):
+            return sample.copy()
+
+    monkeypatch.setattr("core.data_collector.DataCollector", FakeCollector)
+    scheduler = Scheduler(strategy_name="scoring")
+    if not scheduler.config.watchlist:
+        scheduler.config._settings.setdefault("watchlist", {})["symbols"] = ["005930"]
+
+    scheduler._run_pre_market()
+    assert True
+
+
+def test_scheduler_monitoring_runs_without_api(monkeypatch):
+    """장중 모니터링: 포지션 없음 + KIS get_current_price 모킹으로 _run_monitoring 완료."""
+    from core.scheduler import Scheduler
+
+    def fake_get_all():
+        return []
+
+    monkeypatch.setattr("core.scheduler.get_all_positions", fake_get_all)
+
+    class FakeKIS:
+        def get_current_price(self, symbol):
+            return None
+
+    monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
+    scheduler = Scheduler(strategy_name="scoring")
+
+    scheduler._run_monitoring()
+    assert True
+
+
+def test_scheduler_post_market_runs():
+    """장마감: _run_post_market 호출 시 DB 저장·디스코드 시도만 하고 예외 없이 완료."""
+    from core.scheduler import Scheduler
+
+    scheduler = Scheduler(strategy_name="scoring")
+    scheduler._run_post_market()
+    assert True
