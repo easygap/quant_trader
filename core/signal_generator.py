@@ -25,11 +25,35 @@ class SignalGenerator:
     SELL = "SELL"
     HOLD = "HOLD"
 
+    # 스코어링 가중치 필수 키 (YAML에 반드시 정의, 코드 내 기본값 없음)
+    REQUIRED_WEIGHT_KEYS = (
+        "rsi_oversold", "rsi_overbought",
+        "macd_golden_cross", "macd_dead_cross",
+        "bollinger_lower", "bollinger_upper",
+        "volume_surge", "ma_golden_cross", "ma_dead_cross",
+    )
+
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
         self.strategy_params = self.config.strategies
         self.indicator_params = self.config.indicators
         logger.info("SignalGenerator 초기화 완료")
+
+    def _get_weights(self) -> dict:
+        """스코어링 가중치 dict 반환. 미설정 또는 필수 키 누락 시 KeyError."""
+        weights = (self.strategy_params.get("scoring") or {}).get("weights")
+        if not weights:
+            raise KeyError(
+                "config/strategies.yaml에 scoring.weights 섹션이 없습니다. "
+                "가중치를 완전히 외부화하려면 해당 섹션을 정의하세요."
+            )
+        missing = [k for k in self.REQUIRED_WEIGHT_KEYS if k not in weights]
+        if missing:
+            raise KeyError(
+                f"scoring.weights에 필수 키가 없습니다: {missing}. "
+                "strategies.yaml의 scoring.weights를 확인하세요."
+            )
+        return weights
 
     def generate(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -111,6 +135,7 @@ class SignalGenerator:
             "close": last.get("close", 0),
             "rsi": last.get("rsi", 0),
             "adx": last.get("adx", 0),
+            "atr": last.get("atr", 0),
         }
 
     # =============================================================
@@ -128,9 +153,9 @@ class SignalGenerator:
         oversold = rsi_params.get("oversold", 30)
         overbought = rsi_params.get("overbought", 70)
 
-        weights = self.strategy_params.get("scoring", {}).get("weights", {})
-        buy_weight = weights.get("rsi_oversold", 2)
-        sell_weight = weights.get("rsi_overbought", -2)
+        weights = self._get_weights()
+        buy_weight = weights["rsi_oversold"]
+        sell_weight = weights["rsi_overbought"]
 
         score = pd.Series(0.0, index=df.index)
 
@@ -146,9 +171,9 @@ class SignalGenerator:
         - MACD > Signal 이고 이전에 MACD < Signal (골든크로스) → +2점
         - MACD < Signal 이고 이전에 MACD > Signal (데드크로스) → -2점
         """
-        weights = self.strategy_params.get("scoring", {}).get("weights", {})
-        buy_weight = weights.get("macd_golden_cross", 2)
-        sell_weight = weights.get("macd_dead_cross", -2)
+        weights = self._get_weights()
+        buy_weight = weights["macd_golden_cross"]
+        sell_weight = weights["macd_dead_cross"]
 
         score = pd.Series(0.0, index=df.index)
 
@@ -186,9 +211,9 @@ class SignalGenerator:
         - 종가 < 하단 밴드 → +1점 (과매도)
         - 종가 > 상단 밴드 → -1점 (과매수)
         """
-        weights = self.strategy_params.get("scoring", {}).get("weights", {})
-        buy_weight = weights.get("bollinger_lower", 1)
-        sell_weight = weights.get("bollinger_upper", -1)
+        weights = self._get_weights()
+        buy_weight = weights["bollinger_lower"]
+        sell_weight = weights["bollinger_upper"]
 
         score = pd.Series(0.0, index=df.index)
 
@@ -206,7 +231,7 @@ class SignalGenerator:
         - 가격 하락 + 거래량 급증 → -1점
         """
         surge_ratio = self.indicator_params.get("volume", {}).get("surge_ratio", 1.5)
-        weight = self.strategy_params.get("scoring", {}).get("weights", {}).get("volume_surge", 1)
+        weight = self._get_weights()["volume_surge"]
 
         score = pd.Series(0.0, index=df.index)
 
@@ -225,9 +250,9 @@ class SignalGenerator:
         - 5일선이 20일선을 상향 돌파 (골든크로스) → +1점
         - 5일선이 20일선을 하향 돌파 (데드크로스) → -1점
         """
-        weights = self.strategy_params.get("scoring", {}).get("weights", {})
-        buy_weight = weights.get("ma_golden_cross", 1)
-        sell_weight = weights.get("ma_dead_cross", -1)
+        weights = self._get_weights()
+        buy_weight = weights["ma_golden_cross"]
+        sell_weight = weights["ma_dead_cross"]
 
         score = pd.Series(0.0, index=df.index)
 

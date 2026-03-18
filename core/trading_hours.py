@@ -1,34 +1,80 @@
 """
 거래 시간 관리 모듈
 - 장 운영 시간 확인
-- 공휴일/주말 판별
+- 공휴일/주말 판별 (pykrx 또는 holidays.yaml 동적 로드, 최종 fallback 하드코딩)
 - 주문 실행 전 시간 검증
 """
 
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from loguru import logger
 
 from config.config_loader import Config
 
-# 한국 증시 공휴일 (임시 — 실제 운영 시 매년 업데이트 필요)
-# 2026년 한국 공휴일 (주식시장 휴장일)
-KR_HOLIDAYS_2026 = {
-    "2026-01-01",  # 신정
-    "2026-01-27",  # 설날 연휴
-    "2026-01-28",  # 설날
-    "2026-01-29",  # 설날 연휴
-    "2026-03-01",  # 삼일절
-    "2026-05-05",  # 어린이날
-    "2026-05-24",  # 석가탄신일
-    "2026-06-06",  # 현충일
-    "2026-08-15",  # 광복절
-    "2026-09-24",  # 추석 연휴
-    "2026-09-25",  # 추석
-    "2026-09-26",  # 추석 연휴
-    "2026-10-03",  # 개천절
-    "2026-10-09",  # 한글날
-    "2026-12-25",  # 성탄절
+# 프로젝트 루트 (config 상위)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 한국 증시 공휴일 — 최종 fallback (네트워크/파일 불가 시)
+KR_HOLIDAYS_FALLBACK = {
+    "2026-01-01", "2026-01-27", "2026-01-28", "2026-01-29",
+    "2026-03-01", "2026-05-05", "2026-05-24", "2026-06-06",
+    "2026-08-15", "2026-09-24", "2026-09-25", "2026-09-26",
+    "2026-10-03", "2026-10-09", "2026-12-25",
 }
+
+
+def _load_holidays() -> set:
+    """
+    공휴일 세트 로드: 1) config/holidays.yaml 2) pykrx 3) 하드코딩 fallback
+    """
+    # 1) config/holidays.yaml
+    holidays_path = _PROJECT_ROOT / "config" / "holidays.yaml"
+    if holidays_path.exists():
+        try:
+            import yaml
+            with open(holidays_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            lst = data.get("holidays", data.get("dates", []))
+            if isinstance(lst, list):
+                out = {str(d) for d in lst}
+                logger.info("공휴일 로드: config/holidays.yaml ({}일)", len(out))
+                return out
+        except Exception as e:
+            logger.warning("holidays.yaml 로드 실패 — fallback: {}", e)
+
+    # 2) pykrx (거래일 제외 = 휴장일)
+    try:
+        from pykrx import stock
+        now = datetime.now()
+        start = f"{now.year}0101"
+        end = f"{now.year + 1}1231"
+        trading = stock.get_market_trading_date_by_date(start, end)
+        if trading is not None and not trading.empty:
+            from datetime import date
+            all_days = set()
+            d = date(now.year, 1, 1)
+            end_d = date(now.year + 1, 12, 31)
+            while d <= end_d:
+                all_days.add(d.strftime("%Y-%m-%d"))
+                d += timedelta(days=1)
+            trading_dates = set(trading.index.strftime("%Y-%m-%d").tolist())
+            weekends = set()
+            d = date(now.year, 1, 1)
+            while d <= end_d:
+                if d.weekday() >= 5:
+                    weekends.add(d.strftime("%Y-%m-%d"))
+                d += timedelta(days=1)
+            out = all_days - trading_dates - weekends
+            logger.info("공휴일 로드: pykrx ({}일)", len(out))
+            return out
+    except ImportError:
+        logger.debug("pykrx 미설치 — 공휴일 하드코딩 fallback 사용")
+    except Exception as e:
+        logger.warning("pykrx 공휴일 조회 실패 — fallback: {}", e)
+
+    # 3) 하드코딩
+    logger.info("공휴일 로드: 하드코딩 fallback ({}일)", len(KR_HOLIDAYS_FALLBACK))
+    return KR_HOLIDAYS_FALLBACK.copy()
 
 
 class TradingHours:
@@ -54,8 +100,8 @@ class TradingHours:
         self.market_close = time(*map(int, close_str.split(":")))
         self.pre_market = time(*map(int, prep_str.split(":")))
 
-        # 공휴일 세트
-        self.holidays = KR_HOLIDAYS_2026
+        # 공휴일 세트 (동적 로드)
+        self.holidays = _load_holidays()
 
         logger.info(
             "TradingHours 초기화 (장: {} ~ {}, 준비: {})",

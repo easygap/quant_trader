@@ -37,6 +37,8 @@ class ScoringStrategy(BaseStrategy):
         df = self.indicator_engine.calculate_all(df)
         # 신호 생성
         df = self.signal_generator.generate(df)
+        if "total_score" in df.columns:
+            df["strategy_score"] = df["total_score"]
         return df
 
     def generate_signal(self, df: pd.DataFrame) -> dict:

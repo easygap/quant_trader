@@ -37,18 +37,56 @@ class TrendFollowingStrategy(BaseStrategy):
         logger.info("TrendFollowingStrategy 초기화 완료")
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
-        """모든 지표 계산"""
-        return self.indicator_engine.calculate_all(df)
+        """모든 지표 계산 + 전략 signal 컬럼 추가"""
+        analyzed = self.indicator_engine.calculate_all(df.copy())
+        if analyzed.empty:
+            return analyzed
+
+        adx_threshold = self.params.get("adx_threshold", 25)
+
+        adx = analyzed.get("adx", pd.Series(np.nan, index=analyzed.index))
+        close = analyzed.get("close", pd.Series(np.nan, index=analyzed.index))
+        sma_200 = analyzed.get("sma_200", pd.Series(np.nan, index=analyzed.index))
+        macd = analyzed.get("macd", pd.Series(np.nan, index=analyzed.index))
+        macd_signal = analyzed.get("macd_signal", pd.Series(np.nan, index=analyzed.index))
+
+        has_trend = adx > adx_threshold
+        above_200 = sma_200.notna() & (sma_200 > 0) & (close > sma_200)
+        below_200 = sma_200.notna() & (sma_200 > 0) & (close < sma_200)
+
+        macd_golden = (
+            macd.notna() & macd_signal.notna()
+            & (macd > macd_signal)
+            & (macd.shift(1) <= macd_signal.shift(1))
+        )
+        macd_dead = (
+            macd.notna() & macd_signal.notna()
+            & (macd < macd_signal)
+            & (macd.shift(1) >= macd_signal.shift(1))
+        )
+
+        analyzed["strategy_score"] = (
+            has_trend.astype(int)
+            + above_200.astype(int)
+            + (macd_golden.astype(int) * 2)
+        ).astype(float)
+
+        analyzed["signal"] = self.HOLD
+        analyzed.loc[(has_trend & above_200 & macd_golden).fillna(False), "signal"] = self.BUY
+        analyzed.loc[(macd_dead | (below_200 & has_trend)).fillna(False), "signal"] = self.SELL
+        analyzed.loc[analyzed["signal"] == self.SELL, "strategy_score"] *= -1
+
+        return analyzed
 
     def generate_signal(self, df: pd.DataFrame) -> dict:
         """추세 추종 신호 생성"""
-        df = self.analyze(df)
+        analyzed = self.analyze(df)
 
-        if df.empty or len(df) < 200:
+        if analyzed.empty or len(analyzed) < 200:
             return {"signal": self.HOLD, "score": 0, "details": {"이유": "데이터 부족(200일 필요)"}}
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2] if len(df) >= 2 else last
+        last = analyzed.iloc[-1]
+        prev = analyzed.iloc[-2] if len(analyzed) >= 2 else last
 
         adx = last.get("adx", 0)
         close = last.get("close", 0)
@@ -60,8 +98,8 @@ class TrendFollowingStrategy(BaseStrategy):
 
         adx_threshold = self.params.get("adx_threshold", 25)
 
-        signal = self.HOLD
-        score = 0
+        signal = last.get("signal", self.HOLD)
+        score = last.get("strategy_score", 0)
         reasons = []
 
         # 조건 1: 강한 추세 존재
@@ -85,24 +123,15 @@ class TrendFollowingStrategy(BaseStrategy):
             reasons.append("MACD 골든크로스")
             score += 2
 
-        # 매수: 3가지 조건 모두 충족
-        if has_trend and above_200 and macd_golden:
-            signal = self.BUY
-
-        # 매도: 추세 반전 감지
         below_200 = pd.notna(sma_200) and sma_200 > 0 and close < sma_200
         macd_dead = (
             pd.notna(macd) and pd.notna(macd_signal) and
             macd < macd_signal and prev_macd >= prev_signal
         )
-
-        if macd_dead or (below_200 and has_trend):
-            signal = self.SELL
-            score = -score
-            if macd_dead:
-                reasons.append("MACD 데드크로스")
-            if below_200:
-                reasons.append("종가 < 200일선")
+        if macd_dead:
+            reasons.append("MACD 데드크로스")
+        if below_200:
+            reasons.append("종가 < 200일선")
 
         return {
             "signal": signal,
@@ -116,4 +145,5 @@ class TrendFollowingStrategy(BaseStrategy):
             },
             "date": last.name if hasattr(last, "name") else None,
             "close": close,
+            "atr": last.get("atr", 0),
         }

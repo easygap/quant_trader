@@ -7,7 +7,6 @@
 
 import time
 import json
-import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import threading
@@ -17,6 +16,10 @@ from loguru import logger
 
 from config.config_loader import Config
 from api.circuit_breaker import get_breaker
+
+
+class KISTokenExpiredError(Exception):
+    """KIS API 401 응답(토큰 만료) 시 사용. CircuitBreaker 실패로 누적하지 않음."""
 
 
 class KISApi:
@@ -59,6 +62,7 @@ class KISApi:
         self._tokens = self.max_calls_per_sec
         self._last_refill = time.monotonic()
         self._token_lock = threading.Lock()
+        self._auth_lock = threading.Lock()  # 토큰 갱신 동시 호출 방지
 
         logger.info(
             "KIS API 초기화 완료 (모드: {}, 계좌: {}, RateLimit: {}/sec)",
@@ -75,17 +79,28 @@ class KISApi:
             and len(self.app_key) > 0
         )
 
+    @staticmethod
+    def _mask_key(key: str, head: int = 4, tail: int = 4) -> str:
+        """민감 정보 마스킹 (앞뒤 일부만 노출). 빈 문자열은 그대로 반환."""
+        if not key or len(key) <= head + tail:
+            return "****" if key else ""
+        return f"{key[:head]}...{key[-tail:]}"
+
     # =============================================================
     # 인증
     # =============================================================
 
     def authenticate(self) -> bool:
         """
-        OAuth 토큰 발급
-
+        OAuth 토큰 발급 (동시 갱신 방지를 위해 Lock 사용)
         Returns:
             성공 여부
         """
+        with self._auth_lock:
+            return self._authenticate_impl()
+
+    def _authenticate_impl(self) -> bool:
+        """토큰 발급 실제 로직 (Lock 내부에서만 호출)."""
         if not self._is_configured():
             logger.warning("KIS API 키가 설정되지 않았습니다. settings.yaml을 확인해주세요.")
             return False
@@ -99,6 +114,18 @@ class KISApi:
 
         try:
             response = requests.post(url, json=body, timeout=10)
+            domain = "모의투자" if self.use_mock else "실전"
+            if not response.ok:
+                try:
+                    err_body = response.json()
+                    err_msg = err_body.get("msg", err_body.get("error_description", str(err_body)))[:200]
+                except Exception:
+                    err_msg = response.text[:200] if response.text else ""
+                logger.error(
+                    "KIS API 토큰 발급 실패 [{}] {} (app_key: {})",
+                    response.status_code, err_msg, self._mask_key(self.app_key),
+                )
+                return False
             response.raise_for_status()
             data = response.json()
 
@@ -107,8 +134,17 @@ class KISApi:
             expires_in = int(data.get("expires_in", 86400))
             self._token_expires_at = datetime.now() + timedelta(seconds=expires_in - 3600)
 
-            logger.info("KIS API 토큰 발급 성공 (만료: {})", self._token_expires_at)
+            logger.info(
+                "KIS API 토큰 발급 성공 (도메인: {}, 만료: {})",
+                domain, self._token_expires_at,
+            )
             return True
+        except requests.RequestException as e:
+            logger.error(
+                "KIS API 토큰 발급 네트워크 오류: {} (url: {})",
+                e, url.split("?")[0],
+            )
+            return False
         except Exception as e:
             logger.error("KIS API 토큰 발급 실패: {}", e)
             return False
@@ -132,10 +168,10 @@ class KISApi:
         }
 
     def _wait_for_token(self):
-        """Token Bucket Rate Limiter 알고리즘: 요청 전 토큰 확보"""
+        """Token Bucket Rate Limiter 알고리즘: 요청 전 토큰 확보 (동기 컨텍스트용 monotonic)"""
         with self._token_lock:
             while True:
-                now = asyncio.get_event_loop().time()
+                now = time.monotonic()
                 elapsed = now - self._last_refill
 
                 # 시간 경과에 따른 토큰 보충
@@ -207,11 +243,7 @@ class KISApi:
                     continue
 
                 if response.status_code == 401:
-                    logger.error("[401 Unauthorized] 인증 실패. 토큰을 갱신합니다.")
-                    self.authenticate()  # 토큰 강제 갱신
-                    if attempt < max_retries:
-                        continue
-                    return {}
+                    raise KISTokenExpiredError("KIS API 401 Unauthorized — 토큰 만료")
 
                 if response.status_code in (400, 403):
                     logger.error("[{}] 복구 불가 오류 즉시 중단 - 경로: {}", response.status_code, path)
@@ -220,6 +252,14 @@ class KISApi:
                 response.raise_for_status()
                 breaker.on_success()  # 성공 시 서킷 초기화
                 return response.json()
+
+            except KISTokenExpiredError:
+                # 토큰 만료는 CircuitBreaker 실패로 누적하지 않음
+                logger.error("[401] 토큰 만료. 갱신 후 재시도 ({}/{})", attempt, max_retries)
+                self.authenticate()
+                if attempt < max_retries:
+                    continue
+                return {}
 
             except requests.exceptions.Timeout:
                 breaker.on_failure()  # 서킷 누적
@@ -487,3 +527,68 @@ class KISApi:
             "total_pnl": float(summary.get("evlu_pfls_smtl_amt", 0)),  # 총 평가손익
             "positions": positions,
         }
+
+    def get_approval_key(self) -> str:
+        """
+        KIS 웹소켓 접속용 approval key 발급.
+
+        KIS 실시간 웹소켓은 app_key 직접 사용이 아니라 접속키 발급 절차가 필요하다.
+        """
+        if not self._is_configured():
+            logger.warning("KIS API 미설정 — approval key 발급 불가")
+            return ""
+
+        domain = "모의투자" if self.use_mock else "실전"
+        url = f"{self.base_url}/oauth2/Approval"
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "secretkey": self.app_secret,
+        }
+
+        try:
+            response = requests.post(url, json=body, timeout=10)
+            if not response.ok:
+                try:
+                    err_body = response.json()
+                    err_msg = err_body.get("msg", err_body.get("error_description", str(err_body)))[:200]
+                except Exception:
+                    err_msg = response.text[:200] if response.text else ""
+                logger.error(
+                    "KIS approval key 발급 실패 [{}] {} (도메인: {})",
+                    response.status_code, err_msg, domain,
+                )
+                return ""
+            response.raise_for_status()
+            data = response.json()
+            approval_key = data.get("approval_key", "")
+            if not approval_key:
+                logger.error("KIS approval key 발급 실패: 응답에 approval_key 없음 (도메인: {})", domain)
+                return ""
+            logger.info(
+                "KIS approval key 발급 성공 (도메인: {}, 키: {})",
+                domain, self._mask_key(approval_key),
+            )
+            return approval_key
+        except requests.RequestException as e:
+            logger.error("KIS approval key 발급 네트워크 오류: {} (도메인: {})", e, domain)
+            return ""
+        except Exception as e:
+            logger.error("KIS approval key 발급 실패: {} (도메인: {})", e, domain)
+            return ""
+
+    def verify_connection(self) -> bool:
+        """
+        토큰 발급 후 실환경 연결 검증용: 잔고 조회 1회 수행 후 성공/실패 로깅.
+        live 모드 진입 시 REST API 도달 가능 여부 확인에 사용.
+        """
+        domain = "모의투자" if self.use_mock else "실전"
+        balance = self.get_balance()
+        if balance is not None:
+            logger.info(
+                "KIS 실환경 연결 검증 성공 (도메인: {}, 예수금: {:.0f})",
+                domain, balance.get("cash", 0),
+            )
+            return True
+        logger.warning("KIS 실환경 연결 검증 실패: 잔고 조회 실패 (도메인: {})", domain)
+        return False

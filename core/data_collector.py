@@ -57,8 +57,12 @@ class DataCollector:
             정규화된 OHLCV DataFrame
         """
         if not HAS_FDR:
-            # FDR 미지원 시 KIS API로 폴백
-            logger.info("FDR 미지원 — KIS API 일봉 조회로 대체")
+            # FDR 미지원 시 yfinance(한국 티커 .KS) 시도 후 KIS API 폴백
+            if HAS_YF:
+                df = self._fetch_korean_stock_via_yfinance(symbol, start_date, end_date)
+                if not df.empty:
+                    return df
+            logger.info("FDR/yfinance 미사용 — KIS API 일봉 조회로 대체")
             return self.fetch_korean_stock_via_kis(symbol)
 
         if start_date is None:
@@ -236,6 +240,35 @@ class DataCollector:
         stocks = fdr.StockListing("KRX")
         logger.info("KRX 종목 총 {}개 조회 완료", len(stocks))
         return stocks
+
+    def _fetch_korean_stock_via_yfinance(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None,
+    ) -> pd.DataFrame:
+        """
+        yfinance로 한국 주식 일봉 수집 (티커: 005930.KS).
+        FDR 미설치 환경에서 백테스트용 폴백.
+        """
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        ticker = f"{symbol}.KS"
+        logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
+        try:
+            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+            if df.empty or len(df) < 2:
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            df = self._normalize_dataframe(df)
+            from core.data_validator import DataValidator
+            df = DataValidator.clean_dataframe(df, symbol)
+            logger.info("종목 {} 데이터 수집 완료 (yfinance): {}건", symbol, len(df))
+            return df
+        except Exception as e:
+            logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
     def fetch_korean_stock_via_kis(self, symbol: str) -> pd.DataFrame:
         """

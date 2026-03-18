@@ -70,7 +70,7 @@ class DiscordBot:
             )
             return response.status_code in (200, 204)
         except Exception as e:
-            logger.error("디스코드 발송 실패: {}", e)
+            logger.error("[ALERT_FAILED] 디스코드 발송 실패: {}", e)
             return False
 
     def send_embed(self, title: str, description: str, color: int = 0x4F9EF8, fields: list = None) -> bool:  # noqa

@@ -1,5 +1,5 @@
 """
-퀀트 트레이더 시스템 — 통합 검증 스크립트 (Python 3.14 호환)
+퀀트 트레이더 시스템 — 통합 검증 스크립트 (Python 3.11~3.12 기준)
 - 설정, DB, 지표, 신호, 리스크, 백테스팅, 리포트, 대시보드, 디스코드 봇 전체 검증
 """
 
@@ -123,6 +123,9 @@ result = bt.run(df, strategy_name="scoring")
 check("백테스팅 실행", lambda: assert_(result.get("metrics")))
 check("수익률 계산", lambda: assert_("total_return" in result["metrics"]))
 check("샤프 지수", lambda: assert_("sharpe_ratio" in result["metrics"]))
+check("평균회귀 백테스트", lambda: assert_(bt.run(df, strategy_name="mean_reversion").get("metrics")))
+check("추세추종 백테스트", lambda: assert_(bt.run(df, strategy_name="trend_following").get("metrics")))
+check("앙상블 백테스트", lambda: assert_(bt.run(df, strategy_name="ensemble").get("metrics")))
 
 # === 9. 리포트 생성 ===
 print("\n" + "=" * 55)
