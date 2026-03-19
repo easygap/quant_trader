@@ -16,7 +16,7 @@ from api.kis_api import KISApi
 from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position,
-    get_position, get_all_positions,
+    get_position, get_all_positions, save_failed_order,
 )
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
@@ -213,10 +213,12 @@ class OrderExecutor:
                 reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
                 return {"success": False, "reason": reason_text}
             order_result = self._execute_with_retry(
-                self.kis_api.buy_order, symbol, quantity, int(price)
+                self.kis_api.buy_order, symbol, quantity, int(price),
+                symbol=symbol, action="BUY", price=price, quantity=quantity,
+                strategy=strategy, signal_score=signal_score, reason=reason,
             )
             if order_result is None:
-                return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후)"}
+                return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
         # DB에 매매 기록 저장
@@ -315,6 +317,18 @@ class OrderExecutor:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
             return {"success": False, "reason": "보유 포지션 없음"}
 
+        # 최소 보유 기간 검사 (손절/블랙스완은 예외)
+        is_emergency = reason in ("STOP_LOSS", "블랙스완 긴급 매도", "TRAILING_STOP")
+        if not is_emergency:
+            min_hold = self._get_min_holding_days()
+            if min_hold > 0 and getattr(position, "bought_at", None):
+                bought_date = position.bought_at.date() if hasattr(position.bought_at, "date") else position.bought_at
+                holding_days = (datetime.now().date() - bought_date).days
+                if holding_days < min_hold:
+                    msg = f"최소 보유 기간 미달 ({holding_days}/{min_hold}일)"
+                    logger.info("종목 {} 매도 스킵: {}", symbol, msg)
+                    return {"success": False, "reason": msg}
+
         sell_qty = quantity or position.quantity
 
         # 거래 비용 계산 (증권거래세+농특세 0.20% + 설정 시 양도소득세; avg_price로 양도소득세 계산)
@@ -346,10 +360,12 @@ class OrderExecutor:
                 reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
                 return {"success": False, "reason": reason_text}
             order_result = self._execute_with_retry(
-                self.kis_api.sell_order, symbol, sell_qty, int(price)
+                self.kis_api.sell_order, symbol, sell_qty, int(price),
+                symbol=symbol, action="SELL", price=price, quantity=sell_qty,
+                strategy=strategy, signal_score=signal_score, reason=reason,
             )
             if order_result is None:
-                return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후)"}
+                return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
         # DB에 매매 기록 저장 (tax = 증권거래세 + 양도소득세)
@@ -447,6 +463,13 @@ class OrderExecutor:
 
         return {"action": None}
 
+    def _get_min_holding_days(self) -> int:
+        """risk_params.yaml의 최소 보유 기간(일) 반환. 미설정 시 0."""
+        return int(
+            (self.config.risk_params.get("position_limits") or {})
+            .get("min_holding_days", 0)
+        )
+
     # =============================================================
     # 안전 체크 및 재시도
     # =============================================================
@@ -476,17 +499,21 @@ class OrderExecutor:
 
         return {"allowed": True, "reason": ""}
 
-    def _execute_with_retry(self, order_func, *args) -> dict:
+    def _execute_with_retry(
+        self,
+        order_func,
+        *args,
+        symbol: str = "",
+        action: str = "",
+        price: float = 0,
+        quantity: int = 0,
+        strategy: str = "",
+        signal_score: float = 0,
+        reason: str = "",
+    ) -> dict:
         """
-        주문 함수를 최대 3회 재시도
-        지수 백오프: 1초 → 2초 → 4초
-
-        Args:
-            order_func: kis_api.buy_order 또는 kis_api.sell_order
-            *args: 주문 함수 인자
-
-        Returns:
-            주문 결과 또는 None (모든 재시도 실패)
+        주문 함수를 최대 3회 재시도 (지수 백오프: 1초 → 2초 → 4초).
+        모든 재시도 실패 시 dead-letter 테이블에 저장하여 주문 누락을 방지합니다.
         """
         for attempt in range(1, self.MAX_RETRIES + 1):
             result = order_func(*args)
@@ -496,7 +523,7 @@ class OrderExecutor:
                 return result
 
             if attempt < self.MAX_RETRIES:
-                wait = 2 ** (attempt - 1)  # 1, 2, 4초
+                wait = 2 ** (attempt - 1)
                 logger.warning(
                     "주문 실패 — {}초 후 재시도 ({}/{})",
                     wait, attempt, self.MAX_RETRIES,
@@ -504,4 +531,20 @@ class OrderExecutor:
                 time_mod.sleep(wait)
 
         logger.error("주문 최종 실패 ({}회 재시도 모두 실패)", self.MAX_RETRIES)
+
+        if symbol and action:
+            save_failed_order(
+                symbol=symbol,
+                action=action,
+                price=price,
+                quantity=quantity,
+                reason=reason or "KIS API 주문 실패",
+                strategy=strategy,
+                signal_score=signal_score,
+                retry_count=self.MAX_RETRIES,
+                mode=self.mode,
+                error_detail=f"{self.MAX_RETRIES}회 재시도 모두 실패",
+                account_key=self.account_key,
+            )
+
         return None

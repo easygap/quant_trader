@@ -24,18 +24,22 @@ stop_loss:
   atr_multiplier: 2.0         # ATR 기반 손절 배수
 
 # --- 익절매 (Take Profit) ---
+# 트레일링 스탑(5%)보다 먼저 도달 가능한 수준으로 설정.
+# 부분 익절 → 전량 익절 2단계로 수익 실현 확률을 높임.
 take_profit:
   type: "fixed"               # fixed (고정 비율)
-  fixed_rate: 0.10            # 고정 익절 비율 (10%)
+  fixed_rate: 0.08            # 전량 익절 비율 (8%)
   partial_exit: true          # 부분 익절 활성화
   partial_ratio: 0.5          # 1차 익절 시 매도 비율 (50%)
-  partial_target: 0.06        # 1차 익절 목표 (6%)
+  partial_target: 0.04        # 1차 부분 익절 목표 (4%) — 트레일링 스탑 5% 미만이라 도달 가능
 
 # --- 트레일링 스탑 ---
+# 한국 시장 일간 변동성(평균 1.5~2.5%)을 고려하면 3%는 정상 조정에도 발동됨.
+# 5%로 완화하여 추세가 유지되는 동안 보유를 허용함.
 trailing_stop:
   enabled: true               # 트레일링 스탑 활성화
   type: "fixed"               # fixed (고정 비율) 또는 atr (변동성 기반)
-  fixed_rate: 0.03            # 고점 대비 하락 비율 (3%)
+  fixed_rate: 0.05            # 고점 대비 하락 비율 (5%) — 기존 3%에서 완화
   atr_multiplier: 3.0         # ATR 기반 트레일링 배수
 
 # --- 유동성 필터 (watchlist 진입 대상 제외) ---
@@ -56,10 +60,12 @@ diversification:
   max_positions: 10           # 최대 동시 보유 종목 수 (이 개수 초과 시 신규 매수 불가)
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
 
-# --- 최대 보유 기간 ---
-# 신호가 없어도 N일 초과 보유 시 강제 정리. 물리는 상황 방지.
+# --- 보유 기간 제한 ---
+# max_holding_days: 신호가 없어도 N일 초과 보유 시 강제 정리 (물리는 상황 방지)
+# min_holding_days: 매수 후 최소 N일은 보유 강제 (손절/블랙스완은 예외). 과매매 방지용.
 position_limits:
   max_holding_days: 30        # 0이면 비활성. 이 일수 초과 보유 포지션은 자동 매도
+  min_holding_days: 3         # 0이면 비활성. 매수 후 이 일수 미만이면 매도 차단 (손절·블랙스완 예외)
 
 # --- 최대 낙폭 (MDD) 제한 ---
 drawdown:
@@ -103,7 +109,7 @@ transaction_costs:
   commission_rate: 0.00015    # 편도 수수료 (0.015%)
   tax_rate: 0.0020            # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일)
   slippage: 0.0005            # 슬리피지 기본 비율 (0.05%). 동적 슬리피지 배수 적용 시 이 값 위에 곱해짐
-  slippage_ticks: 2           # 호가 단위 기준 슬리피지 틱 수 (실제 적용 = max(비율, tick*N))
+  slippage_ticks: 1           # 호가 단위 기준 슬리피지 틱 수 (지정가 주문 기준 1틱이 현실적)
   # 양도소득세 (대주주 해당 시에만 적용; 일반 투자자는 해당 없음)
   capital_gains_tax:
     enabled: false            # true 시 매도 시 실현 이익에 대해 양도소득세 부과 (백테스트/실거래 일치용)
