@@ -2,18 +2,39 @@
 SQLite DB 일일 백업.
 - SQLite 파일 손상 시 포지션/거래 기록 전체 소실 가능 — 일일 자동 백업으로 복구 가능하게 함
 - 장마감 후(및 live 모드에서 KIS 잔고 크로스체크 후) backup_path에 날짜별 복사본 생성
+
+WAL 모드에서 shutil.copy2는 -wal/-shm 파일을 함께 복사하지 않으면 손상될 수 있다.
+→ SQLite Online Backup API (sqlite3.Connection.backup)를 사용해 라이브 DB를 안전하게 복사.
 """
 
 import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
 
 
+def _backup_via_sqlite_api(src_path: Path, dest_path: Path) -> bool:
+    """SQLite Online Backup API로 안전 백업. WAL 모드에서도 일관된 스냅샷 보장."""
+    src_conn = None
+    dst_conn = None
+    try:
+        src_conn = sqlite3.connect(str(src_path))
+        dst_conn = sqlite3.connect(str(dest_path))
+        src_conn.backup(dst_conn)
+        return True
+    finally:
+        if dst_conn:
+            dst_conn.close()
+        if src_conn:
+            src_conn.close()
+
+
 def run_daily_backup(config=None) -> bool:
     """
-    설정에 backup_path가 있으면 SQLite 파일을 날짜별로 복사.
+    설정에 backup_path가 있으면 SQLite 파일을 날짜별로 백업.
+    SQLite Online Backup API 우선 사용 → 실패 시 shutil.copy2 폴백.
 
     Args:
         config: Config 인스턴스 (None이면 Config.get())
@@ -43,13 +64,23 @@ def run_daily_backup(config=None) -> bool:
     dest = dest_dir / f"quant_trader_{date_str}.db"
 
     try:
-        shutil.copy2(src, dest)
-        logger.info("DB 백업 완료: {}", dest)
+        if _backup_via_sqlite_api(src, dest):
+            logger.info("DB 백업 완료 (Online Backup API): {}", dest)
+        else:
+            raise RuntimeError("backup API 반환값 False")
     except Exception as e:
-        logger.error("DB 백업 실패: {}", e)
-        return False
+        logger.warning("SQLite Online Backup 실패 ({}), shutil.copy2 폴백 시도", e)
+        try:
+            for suffix in ("-wal", "-shm"):
+                wal = src.parent / (src.name + suffix)
+                if wal.exists():
+                    shutil.copy2(wal, dest.parent / (dest.name + suffix))
+            shutil.copy2(src, dest)
+            logger.info("DB 백업 완료 (shutil 폴백, -wal/-shm 포함): {}", dest)
+        except Exception as e2:
+            logger.error("DB 백업 실패: {}", e2)
+            return False
 
-    # 오래된 백업 삭제 (보관 일수)
     retention_days = int(db_config.get("backup_retention_days", 7))
     _purge_old_backups(dest_dir, retention_days)
     return True

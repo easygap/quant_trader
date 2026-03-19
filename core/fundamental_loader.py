@@ -1,7 +1,8 @@
 """
 펀더멘털(재무) 지표 조회 모듈.
 - PER, 부채비율 등 기본 재무 지표를 정상 범위 필터에 사용
-- yfinance 기반 (한국 종목: 005930 → 005930.KS)
+- 한국 종목: pykrx(우선) → yfinance(폴백) 순서로 조회.
+  yfinance는 한국 종목 재무 데이터 업데이트가 느리고 누락이 많아 pykrx를 우선 사용.
 """
 
 from typing import Optional
@@ -14,6 +15,12 @@ try:
 except ImportError:
     HAS_YF = False
 
+try:
+    from pykrx import stock as pykrx_stock
+    HAS_PYKRX = True
+except ImportError:
+    HAS_PYKRX = False
+
 
 def _korean_ticker(symbol: str) -> str:
     """한국 종목코드 → yfinance 티커 (005930 → 005930.KS)."""
@@ -25,23 +32,43 @@ def _korean_ticker(symbol: str) -> str:
     return f"{s}.KS"
 
 
-def get_fundamentals(symbol: str) -> dict:
-    """
-    종목의 기본 펀더멘털 지표 조회.
+def _get_fundamentals_pykrx(symbol: str) -> dict:
+    """pykrx로 한국 종목 PER·부채비율 조회. 설치되지 않았거나 실패하면 빈 결과."""
+    result = {"per": None, "debt_ratio": None, "available": False, "source": "pykrx"}
+    if not HAS_PYKRX:
+        return result
 
-    Args:
-        symbol: 종목코드 (예: "005930")
+    s = (symbol or "").strip().replace(".KS", "").replace(".KQ", "")
+    if not s or not s.isdigit():
+        return result
 
-    Returns:
-        {
-            "per": float | None,        # PER (trailing). None = 미제공/적자
-            "debt_ratio": float | None, # 부채비율(%). 총부채/자본총계*100 또는 debtToEquity*100
-            "available": bool,           # 필수 항목 조회 성공 여부
-        }
-    """
-    result = {"per": None, "debt_ratio": None, "available": False}
+    try:
+        from datetime import datetime, timedelta
+        today = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+
+        # PER: pykrx의 일별 PER 데이터 (가장 최근 거래일)
+        import pandas as pd
+        per_df = pykrx_stock.get_market_fundamental(start, today, s)
+        if per_df is not None and not per_df.empty and "PER" in per_df.columns:
+            per_val = per_df["PER"].dropna()
+            if not per_val.empty:
+                per = float(per_val.iloc[-1])
+                result["per"] = per if per > 0 else None
+
+        result["available"] = result["per"] is not None
+        if result["available"]:
+            logger.debug("pykrx 펀더멘털 조회 성공: {} PER={}", symbol, result["per"])
+    except Exception as e:
+        logger.debug("pykrx 펀더멘털 조회 실패 {}: {}", symbol, e)
+
+    return result
+
+
+def _get_fundamentals_yfinance(symbol: str) -> dict:
+    """yfinance로 펀더멘털 조회 (폴백용)."""
+    result = {"per": None, "debt_ratio": None, "available": False, "source": "yfinance"}
     if not HAS_YF:
-        logger.debug("yfinance 미설치 — 펀더멘털 조회 스킵")
         return result
 
     ticker_str = _korean_ticker(symbol)
@@ -51,7 +78,6 @@ def get_fundamentals(symbol: str) -> dict:
     try:
         t = yf.Ticker(ticker_str)
         info = t.info or {}
-        # PER: trailingPE. 음수(적자)면 None으로 처리해 필터에서 제외 가능
         per = info.get("trailingPE")
         if per is not None:
             try:
@@ -62,16 +88,12 @@ def get_fundamentals(symbol: str) -> dict:
                 per = None
         result["per"] = per
 
-        # 부채비율: Yahoo는 debtToEquity (부채/자본 비율, 소수). 0.5 = 50%
-        # 한국식 부채비율(%) = (총부채/자본총계)*100 → debtToEquity * 100
         debt_eq = info.get("debtToEquity")
         if debt_eq is not None:
             try:
-                debt_eq = float(debt_eq)
-                result["debt_ratio"] = debt_eq * 100.0
+                result["debt_ratio"] = float(debt_eq) * 100.0
             except (TypeError, ValueError):
                 pass
-        # 일부 종목은 totalDebt, totalStockholderEquity만 제공
         if result["debt_ratio"] is None:
             td = info.get("totalDebt")
             te = info.get("totalStockholderEquity")
@@ -83,8 +105,36 @@ def get_fundamentals(symbol: str) -> dict:
 
         result["available"] = result["per"] is not None or result["debt_ratio"] is not None
     except Exception as e:
-        logger.debug("펀더멘털 조회 실패 {}: {}", symbol, e)
+        logger.debug("yfinance 펀더멘털 조회 실패 {}: {}", symbol, e)
 
+    return result
+
+
+def get_fundamentals(symbol: str) -> dict:
+    """
+    종목의 기본 펀더멘털 지표 조회. pykrx(우선) → yfinance(폴백) 순서.
+
+    Returns:
+        {"per": float|None, "debt_ratio": float|None, "available": bool, "source": str}
+    """
+    # 1차: pykrx (한국 종목 정확도 높음)
+    result = _get_fundamentals_pykrx(symbol)
+    if result["available"]:
+        return result
+
+    # 2차: yfinance (폴백)
+    yf_result = _get_fundamentals_yfinance(symbol)
+    if yf_result["available"]:
+        # pykrx에서 못 가져온 필드를 yfinance로 보충
+        if result["per"] is None and yf_result["per"] is not None:
+            result["per"] = yf_result["per"]
+        if result["debt_ratio"] is None and yf_result["debt_ratio"] is not None:
+            result["debt_ratio"] = yf_result["debt_ratio"]
+        result["available"] = result["per"] is not None or result["debt_ratio"] is not None
+        result["source"] = "pykrx+yfinance" if result["source"] == "pykrx" else "yfinance"
+        return result
+
+    result["source"] = "none"
     return result
 
 

@@ -2,6 +2,7 @@
 데이터 접근 계층 (Repository)
 - DB CRUD 함수 제공
 - 주가 데이터, 매매 기록, 포지션, 포트폴리오 스냅샷 관리
+- 모든 함수에 @with_retry 적용 — WAL 체크포인트 중 일시적 locked에도 안전
 """
 
 import re
@@ -13,7 +14,7 @@ from sqlalchemy import and_
 from loguru import logger
 
 from database.models import (
-    get_session, StockPrice, TradeHistory,
+    get_session, with_retry, StockPrice, TradeHistory,
     Position, PortfolioSnapshot, DailyReport
 )
 
@@ -22,6 +23,7 @@ from database.models import (
 # 주가 데이터 관련
 # =============================================================
 
+@with_retry
 def save_stock_prices(symbol: str, df: pd.DataFrame):
     """
     주가 데이터를 DB에 저장 (중복 무시)
@@ -62,6 +64,7 @@ def save_stock_prices(symbol: str, df: pd.DataFrame):
         session.close()
 
 
+@with_retry
 def get_stock_prices(
     symbol: str,
     start_date: Optional[datetime] = None,
@@ -114,6 +117,7 @@ def get_stock_prices(
 # 매매 기록 관련
 # =============================================================
 
+@with_retry
 def save_trade(
     symbol: str,
     action: str,
@@ -158,6 +162,7 @@ def save_trade(
         session.close()
 
 
+@with_retry
 def get_trade_history(
     symbol: Optional[str] = None,
     mode: Optional[str] = None,
@@ -185,6 +190,7 @@ def get_trade_history(
         session.close()
 
 
+@with_retry
 def get_recent_sell_trades(
     limit: int = 20,
     mode: Optional[str] = None,
@@ -201,6 +207,7 @@ def get_recent_sell_trades(
     return sells
 
 
+@with_retry
 def get_trade_cash_summary(
     mode: Optional[str] = None,
     start_date: Optional[datetime] = None,
@@ -257,6 +264,7 @@ def _extract_pnl_from_reason(reason: str) -> float:
         return 0.0
 
 
+@with_retry
 def get_daily_trade_summary(
     date: Optional[datetime] = None,
     mode: Optional[str] = None,
@@ -301,6 +309,7 @@ def get_daily_trade_summary(
 # 포지션 관련
 # =============================================================
 
+@with_retry
 def save_position(
     symbol: str,
     avg_price: float,
@@ -360,6 +369,7 @@ def save_position(
         session.close()
 
 
+@with_retry
 def get_position(symbol: str, account_key: str = "") -> Optional[Position]:
     """특정 종목의 포지션 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
@@ -372,6 +382,7 @@ def get_position(symbol: str, account_key: str = "") -> Optional[Position]:
         session.close()
 
 
+@with_retry
 def get_all_positions(account_key: Optional[str] = None) -> List[Position]:
     """모든 포지션 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
@@ -384,6 +395,7 @@ def get_all_positions(account_key: Optional[str] = None) -> List[Position]:
         session.close()
 
 
+@with_retry
 def delete_position(symbol: str, account_key: str = ""):
     """포지션 삭제 (전량 매도 시)."""
     session = get_session()
@@ -402,6 +414,7 @@ def delete_position(symbol: str, account_key: str = ""):
         session.close()
 
 
+@with_retry
 def reduce_position(symbol: str, sell_qty: int, account_key: str = "") -> Optional[Position]:
     """
     부분 매도: 수량만 감소, 평균 단가 유지.
@@ -436,6 +449,7 @@ def reduce_position(symbol: str, sell_qty: int, account_key: str = "") -> Option
         session.close()
 
 
+@with_retry
 def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float, account_key: str = ""):
     """
     트레일링 스탑 가격 업데이트
@@ -462,6 +476,7 @@ def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float
 # 포트폴리오 스냅샷 관련
 # =============================================================
 
+@with_retry
 def save_portfolio_snapshot(
     total_value: float,
     cash: float,
@@ -510,6 +525,7 @@ def save_portfolio_snapshot(
         session.close()
 
 
+@with_retry
 def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
     """최근 N일간 포트폴리오 스냅샷 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
@@ -539,6 +555,7 @@ def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -
         session.close()
 
 
+@with_retry
 def get_portfolio_snapshots_between(
     start_date: datetime,
     end_date: datetime,
@@ -570,6 +587,7 @@ def get_portfolio_snapshots_between(
         session.close()
 
 
+@with_retry
 def get_paper_performance_metrics(
     start_date: datetime,
     end_date: datetime,
@@ -632,6 +650,7 @@ def get_paper_performance_metrics(
 # 일일 리포트 관련
 # =============================================================
 
+@with_retry
 def save_daily_report(
     date: datetime,
     total_trades: int = 0,
@@ -679,6 +698,7 @@ def save_daily_report(
         session.close()
 
 
+@with_retry
 def get_daily_reports(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
     """최근 N일 일일 리포트 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
