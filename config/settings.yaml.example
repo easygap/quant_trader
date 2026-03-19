@@ -60,6 +60,7 @@ trading:
   auto_entry: false
   pending_order_ttl_seconds: 600
   sync_broker_interval_minutes: 30   # live 모드에서 KIS 잔고와 DB 포지션 크로스체크 주기 (분)
+  position_mismatch_auto_correct: false  # true면 KIS↔DB 불일치 시 DB를 KIS 기준으로 자동 보정. false면 알림만 발송.
   skip_earnings_days: 3             # 실적 발표일 전후 N일 신규 매수 금지 (0=비활성, yfinance 기반)
   blackswan_recovery_minutes: 120   # 블랙스완 쿨다운 해제 후 recovery 기간 (분)
   blackswan_recovery_scale: 0.5     # recovery 중 포지션 사이징 배수 (0.5 = 50%)

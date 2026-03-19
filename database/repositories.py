@@ -15,7 +15,7 @@ from loguru import logger
 
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
-    Position, PortfolioSnapshot, DailyReport
+    Position, PortfolioSnapshot, DailyReport, FailedOrder
 )
 
 
@@ -725,5 +725,82 @@ def get_daily_reports(days: int = 30, account_key: Optional[str] = None) -> pd.D
             "losing_trades": r.losing_trades,
             "report_text": r.report_text,
         } for r in results])
+    finally:
+        session.close()
+
+
+# =============================================================
+# 주문 실패 Dead-letter 큐
+# =============================================================
+
+@with_retry
+def save_failed_order(
+    symbol: str,
+    action: str,
+    price: float,
+    quantity: int,
+    reason: str = "",
+    strategy: str = "",
+    signal_score: float = 0,
+    retry_count: int = 0,
+    mode: str = "paper",
+    error_detail: str = "",
+    account_key: str = "",
+):
+    """재시도 실패한 주문을 dead-letter 테이블에 저장."""
+    session = get_session()
+    try:
+        record = FailedOrder(
+            account_key=account_key,
+            symbol=symbol,
+            action=action,
+            price=price,
+            quantity=quantity,
+            reason=reason,
+            strategy=strategy,
+            signal_score=signal_score,
+            retry_count=retry_count,
+            mode=mode,
+            error_detail=error_detail,
+        )
+        session.add(record)
+        session.commit()
+        logger.info("Dead-letter 저장: {} {} {}주 @{} (사유: {})", symbol, action, quantity, price, reason)
+        return record.id
+    except Exception as e:
+        session.rollback()
+        logger.error("Dead-letter 저장 실패: {}", e)
+        return None
+    finally:
+        session.close()
+
+
+@with_retry
+def get_pending_failed_orders(account_key: str = "") -> list:
+    """미처리(pending) 상태의 실패 주문 목록 반환."""
+    session = get_session()
+    try:
+        q = session.query(FailedOrder).filter(FailedOrder.status == "pending")
+        if account_key:
+            q = q.filter(FailedOrder.account_key == account_key)
+        return q.order_by(FailedOrder.failed_at).all()
+    finally:
+        session.close()
+
+
+@with_retry
+def resolve_failed_order(order_id: int, status: str = "retried"):
+    """실패 주문의 상태를 변경 (retried / cancelled)."""
+    session = get_session()
+    try:
+        record = session.query(FailedOrder).get(order_id)
+        if record:
+            record.status = status
+            record.resolved_at = datetime.now()
+            session.commit()
+            logger.info("Dead-letter #{} 상태 변경 → {}", order_id, status)
+    except Exception as e:
+        session.rollback()
+        logger.error("Dead-letter 상태 변경 실패: {}", e)
     finally:
         session.close()

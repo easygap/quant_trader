@@ -184,6 +184,35 @@ class DailyReport(Base):
         return f"<DailyReport(account={self.account_key!r}, {self.date}, 매매={self.total_trades}건)>"
 
 
+class FailedOrder(Base):
+    """
+    주문 실패 Dead-letter 테이블
+    - 재시도 모두 실패한 주문을 영구 저장하여 누락 방지
+    - status: pending(미처리) / retried(재시도 완료) / cancelled(수동 취소)
+    """
+    __tablename__ = "failed_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_key = Column(String(64), default="", nullable=False, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    action = Column(String(20), nullable=False)          # BUY / SELL
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    reason = Column(Text)
+    strategy = Column(String(50))
+    signal_score = Column(Float)
+    retry_count = Column(Integer, default=0)
+    status = Column(String(20), default="pending", index=True)  # pending / retried / cancelled
+    mode = Column(String(20), default="paper")
+    error_detail = Column(Text)
+    failed_at = Column(DateTime, default=datetime.now)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+    def __repr__(self):
+        return f"<FailedOrder({self.symbol} {self.action} {self.quantity}주 @{self.price}, status={self.status})>"
+
+
 # =============================================================
 # 데이터베이스 엔진 & 세션 관리
 # =============================================================

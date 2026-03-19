@@ -8,6 +8,8 @@
 
 import time
 import json
+import random
+import ssl
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -79,7 +81,11 @@ class KISApi:
         # 모니터링 카운터 (사용량 추적)
         self._total_requests = 0
         self._total_429s = 0
+        self._total_conn_errors = 0
         self._session_start = time.monotonic()
+
+        # 토큰 에러 쿨다운: 발급 실패 시 60초간 재시도 억제
+        self._token_error_until: float = 0.0
 
         logger.info(
             "KIS API 초기화 완료 (모드: {}, 계좌: {}, RateLimit: {}/sec, {}/min)",
@@ -270,12 +276,20 @@ class KISApi:
         return {
             "total_requests": self._total_requests,
             "total_429s": self._total_429s,
+            "total_conn_errors": self._total_conn_errors,
             "requests_last_60s": recent_minute,
             "max_per_sec": self.max_calls_per_sec,
             "max_per_min": self.max_calls_per_min,
             "avg_per_sec": round(self._total_requests / elapsed_sec, 2),
             "minute_utilization_pct": round(recent_minute / self.max_calls_per_min * 100, 1),
+            "token_cooldown_active": time.monotonic() < self._token_error_until,
         }
+
+    @staticmethod
+    def _backoff_with_jitter(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
+        """지수 백오프 + 랜덤 지터. 동시 요청의 thundering-herd 방지."""
+        exp = min(base * (2 ** (attempt - 1)), cap)
+        return exp * (0.5 + random.random() * 0.5)
 
     def _request(
         self,
@@ -288,6 +302,11 @@ class KISApi:
     ) -> Dict[str, Any]:
         """
         API 요청 공통 메서드 (에러별 재시도 로직 포함)
+
+        강화 사항:
+        - SSL/연결 오류 전용 재시도 + 서킷 누적
+        - 지수 백오프에 랜덤 지터 적용 (thundering-herd 방지)
+        - 토큰 발급 실패 시 60초 쿨다운으로 연속 실패 루프 방지
         """
         breaker = get_breaker()
         if not breaker.can_request():
@@ -296,6 +315,12 @@ class KISApi:
 
         if not self._is_configured():
             logger.warning("KIS API 미설정 — 빈 응답 반환")
+            return {}
+
+        # 토큰 에러 쿨다운 중이면 즉시 반환
+        if time.monotonic() < self._token_error_until:
+            remaining = self._token_error_until - time.monotonic()
+            logger.warning("토큰 에러 쿨다운 중 ({:.0f}초 남음) — 요청 스킵: {}", remaining, path)
             return {}
 
         url = f"{self.base_url}{path}"
@@ -311,7 +336,6 @@ class KISApi:
                 else:
                     response = requests.post(url, headers=headers, json=body, timeout=10)
 
-                # HTTP 에러 분기 처리
                 if response.status_code == 429:
                     self._total_429s += 1
                     retry_after = int(response.headers.get("Retry-After", 5))
@@ -323,11 +347,11 @@ class KISApi:
                     continue
 
                 if response.status_code in (500, 502, 503, 504):
-                    breaker.on_failure()  # 서킷 누적
-                    wait = 2 ** (attempt - 1)
+                    breaker.on_failure()
+                    wait = self._backoff_with_jitter(attempt)
                     logger.warning(
-                        "[{}] 서버 오류, {}초 후 재시도 ({}/{}) - 경로: {}",
-                        response.status_code, wait, attempt, max_retries, path
+                        "[{}] 서버 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {}",
+                        response.status_code, wait, attempt, max_retries, path,
                     )
                     time.sleep(wait)
                     continue
@@ -337,31 +361,44 @@ class KISApi:
 
                 if response.status_code in (400, 403):
                     logger.error("[{}] 복구 불가 오류 즉시 중단 - 경로: {}", response.status_code, path)
-                    return {}  # 즉시 중단 (재시도 금지)
+                    return {}
 
                 response.raise_for_status()
-                breaker.on_success()  # 성공 시 서킷 초기화
+                breaker.on_success()
                 return response.json()
 
             except KISTokenExpiredError:
-                # 토큰 만료는 CircuitBreaker 실패로 누적하지 않음. 갱신 실패 시 즉시 디스코드 알림
                 logger.error("[401] 토큰 만료. 갱신 후 재시도 ({}/{})", attempt, max_retries)
                 if not self.authenticate():
-                    self._notify_auth_failure("401 응답 후 토큰 자동 갱신 실패. API 키·네트워크를 확인하세요.")
+                    self._token_error_until = time.monotonic() + 60.0
+                    self._notify_auth_failure(
+                        "401 응답 후 토큰 자동 갱신 실패 (60초 쿨다운 진입). API 키·네트워크를 확인하세요."
+                    )
+                    return {}
                 if attempt < max_retries:
                     continue
                 return {}
 
-            except requests.exceptions.Timeout:
-                breaker.on_failure()  # 서킷 누적
-                wait = 2 ** (attempt - 1)
-                logger.warning("요청 타임아웃, {}초 후 재시도 ({}/{}) - 경로: {}", wait, attempt, max_retries, path)
+            except (requests.exceptions.ConnectionError, ssl.SSLError, ConnectionResetError, EOFError) as e:
+                self._total_conn_errors += 1
+                breaker.on_failure()
+                wait = self._backoff_with_jitter(attempt, base=2.0)
+                logger.warning(
+                    "연결/SSL 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {} - {} (누적: {}회)",
+                    wait, attempt, max_retries, path, type(e).__name__, self._total_conn_errors,
+                )
                 time.sleep(wait)
+
+            except requests.exceptions.Timeout:
+                breaker.on_failure()
+                wait = self._backoff_with_jitter(attempt)
+                logger.warning("요청 타임아웃, {:.1f}초 후 재시도 ({}/{}) - 경로: {}", wait, attempt, max_retries, path)
+                time.sleep(wait)
+
             except requests.exceptions.RequestException as e:
-                breaker.on_failure()  # 서킷 누적
+                breaker.on_failure()
                 logger.error("요청 실패: {} - {}", path, e)
-                # Client Error 계열(4xx 중 처리안된것)이면 중단할 수 있으나 기본적으로 로그만 찍고 재시도
-                time.sleep(1)
+                time.sleep(self._backoff_with_jitter(attempt, base=0.5))
 
         logger.error("API 요청 최종 실패 ({}회 모두 실패) - 경로: {}", max_retries, path)
         return {}

@@ -14,11 +14,12 @@ from config.config_loader import Config
 
 class ScoringStrategy(BaseStrategy):
     """
-    멀티 지표 스코어링 전략 (초급)
+    멀티 지표 스코어링 전략
 
     각 기술 지표를 점수화하여 합산 점수로 매수/매도 결정:
-    - 총점 ≥ 5 → 매수
-    - 총점 ≤ -4 → 매도
+    - 총점 ≥ buy_threshold (기본 2) → 매수
+    - 총점 ≤ sell_threshold (기본 -2) → 매도
+    - 히스터리시스 활성화 시 진입/청산 임계값 분리로 과매매 방지
     """
 
     def __init__(self, config: Config = None):

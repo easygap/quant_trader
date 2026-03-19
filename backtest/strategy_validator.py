@@ -472,7 +472,10 @@ class StrategyValidator:
                 self._format_section("IN_SAMPLE", result["in_sample"]["metrics"], top50.get("in_sample", {})),
                 self._format_section("OUT_OF_SAMPLE", result["out_sample"]["metrics"], top50.get("out_sample", {})),
                 "-" * 70,
-                f"out-of-sample Top50 벤치마크 초과수익: {f\"{validation['benchmark_top50_outperformance']:.2f}%\" if validation.get('benchmark_top50_outperformance') is not None else 'N/A'}",
+                f"out-of-sample Top50 벤치마크 초과수익: "
+                f"{validation['benchmark_top50_outperformance']:.2f}%"
+                if validation.get("benchmark_top50_outperformance") is not None
+                else "out-of-sample Top50 벤치마크 초과수익: N/A",
             ])
         else:
             lines.append("벤치마크(코스피 상위 50종목): 미사용 또는 데이터 없음")
