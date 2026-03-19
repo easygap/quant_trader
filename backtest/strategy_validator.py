@@ -21,29 +21,45 @@ from config.config_loader import Config
 from core.data_collector import DataCollector
 
 
-def _get_kospi_top_n_symbols(collector: DataCollector, top_n: int = 50) -> list:
-    """코스피 시가총액 상위 top_n 종목 코드 리스트 반환. KRX 목록 필요(FDR)."""
+def _get_kospi_top_n_symbols(
+    collector: DataCollector,
+    top_n: int = 50,
+    as_of_date: str = None,
+    config: Config = None,
+) -> list:
+    """
+    벤치마크용 종목 코드 리스트 반환.
+    config.backtest_universe.mode가 kospi200이면 해당 일자 코스피200 구성종목 사용(생존자 편향 완화).
+    그 외에는 코스피 시가총액 상위 top_n 종목.
+    """
+    cfg = config or Config.get()
+    universe = (cfg.risk_params or {}).get("backtest_universe") or {}
+    mode = (universe.get("mode") or "current").strip().lower()
+    exclude_admin = universe.get("exclude_administrative", True)
     try:
-        stocks = DataCollector.get_krx_stock_list()
+        stocks = DataCollector.get_krx_stock_list(
+            as_of_date=as_of_date,
+            exclude_administrative=exclude_admin,
+            universe_mode=mode,
+        )
     except Exception as e:
-        logger.warning("코스피 상위 종목 벤치마크용 KRX 목록 조회 실패: {}", e)
+        logger.warning("벤치마크용 KRX 목록 조회 실패: {}", e)
         return []
     if stocks.empty:
         return []
     df = stocks.copy()
-    market_col = next((c for c in ["Market", "market"] if c in df.columns), None)
     code_col = next((c for c in ["Code", "Symbol", "code", "symbol"] if c in df.columns), None)
-    marcap_col = next((c for c in ["Marcap", "marcap", "Amount", "amount"] if c in df.columns), None)
-    if not code_col or not marcap_col:
+    if not code_col:
         return []
+    market_col = next((c for c in ["Market", "market"] if c in df.columns), None)
     if market_col is not None:
         df = df[df[market_col].astype(str).str.upper().str.contains("KOSPI", na=False)]
-    df = df.dropna(subset=[code_col, marcap_col])
-    if df.empty:
-        return []
-    df[marcap_col] = pd.to_numeric(df[marcap_col], errors="coerce")
-    df = df.dropna(subset=[marcap_col]).sort_values(marcap_col, ascending=False)
-    symbols = [str(s).strip().zfill(6) for s in df[code_col].head(top_n).tolist()]
+    marcap_col = next((c for c in ["Marcap", "marcap", "Amount", "amount"] if c in df.columns), None)
+    if marcap_col and df[marcap_col].fillna(0).astype(float).gt(0).any():
+        df[marcap_col] = pd.to_numeric(df[marcap_col], errors="coerce")
+        df = df.dropna(subset=[marcap_col]).sort_values(marcap_col, ascending=False)
+    n = len(df) if mode == "kospi200" else min(top_n, len(df))
+    symbols = [str(s).strip().zfill(6) for s in df[code_col].head(n).tolist()]
     return symbols
 
 
@@ -198,7 +214,9 @@ class StrategyValidator:
 
         benchmark_top50 = {}
         if use_benchmark_top50:
-            symbols_top50 = _get_kospi_top_n_symbols(self.collector, 50)
+            symbols_top50 = _get_kospi_top_n_symbols(
+                self.collector, 50, as_of_date=start_date, config=self.config
+            )
             if symbols_top50:
                 s0, s1 = str(strategy_df.index[0].date()), str(strategy_df.index[-1].date())
                 panel = _build_equal_weight_panel(self.collector, symbols_top50, s0, s1)
@@ -238,6 +256,7 @@ class StrategyValidator:
                 out_sample_result["metrics"]["total_return"] - benchmark.get("out_sample", {}).get("total_return", 0),
                 2,
             ),
+            "warnings": [],
         }
         if benchmark_top50 and benchmark_top50.get("out_sample"):
             validation["benchmark_top50_outperformance"] = round(
@@ -247,6 +266,11 @@ class StrategyValidator:
             )
         else:
             validation["benchmark_top50_outperformance"] = None
+
+        # 손익비 자동 경고 (특히 추세 추종 전략은 profit_factor ≥ 2.0 필요)
+        self._check_profit_factor_warnings(
+            validation, strategy_name, full_result["metrics"], out_sample_result["metrics"]
+        )
 
         result = {
             "symbol": symbol,
@@ -348,6 +372,20 @@ class StrategyValidator:
         min_pass_ratio = 0.8
         ratio_passed = (n_passed >= int(n_total * min_pass_ratio)) if n_total > 0 else False
 
+        # 워크포워드 전체 창의 손익비 경고
+        wf_warnings = []
+        is_trend = strategy_name and "trend" in strategy_name.lower()
+        pf_threshold = 2.0 if is_trend else 1.0
+        for w in windows:
+            m = w.get("metrics")
+            if m and m.get("profit_factor", 0) < pf_threshold:
+                msg = (
+                    f"WARN: 창 {w['window']} ({w['test_period']}) 손익비 "
+                    f"{m['profit_factor']:.2f} < {pf_threshold:.1f}"
+                )
+                wf_warnings.append(msg)
+                logger.warning(msg)
+
         result = {
             "symbol": symbol,
             "strategy": strategy_name,
@@ -364,6 +402,7 @@ class StrategyValidator:
             "all_passed": all_passed,
             "ratio_passed": ratio_passed,
             "min_pass_ratio": min_pass_ratio,
+            "warnings": wf_warnings,
         }
         result["report_path"] = str(self._save_walk_forward_report(result))
         return result
@@ -389,9 +428,17 @@ class StrategyValidator:
             lines.append(f"[창 {w['window']}] {w['test_period']} {status}")
             if w.get("metrics"):
                 m = w["metrics"]
-                lines.append(f"  수익률 {m.get('total_return', 0):.2f}% | 샤프 {m.get('sharpe_ratio', 0):.2f} | MDD {m.get('max_drawdown', 0):.2f}%")
+                lines.append(
+                    f"  수익률 {m.get('total_return', 0):.2f}% | 샤프 {m.get('sharpe_ratio', 0):.2f} "
+                    f"| MDD {m.get('max_drawdown', 0):.2f}% | 손익비 {m.get('profit_factor', 0):.2f}"
+                )
             if w.get("error"):
                 lines.append(f"  오류: {w['error']}")
+        if result.get("warnings"):
+            lines.append("")
+            lines.append("⚠️ 경고:")
+            for w in result["warnings"]:
+                lines.append(f"  {w}")
         return "\n".join(lines) + "\n"
 
     def save_report(self, result: dict) -> Path:
@@ -431,9 +478,15 @@ class StrategyValidator:
             lines.append("벤치마크(코스피 상위 50종목): 미사용 또는 데이터 없음")
         lines.extend([
             "-" * 70,
+            f"손익비(Profit Factor): FULL {validation.get('full_profit_factor', 0):.2f} | OOS {validation.get('oos_profit_factor', 0):.2f}",
             f"샤프 기준({validation['min_sharpe']:.2f}) 충족: {validation['full_passed']}",
             f"Out-of-sample 기준 통과: {validation['out_sample_passed']}",
         ])
+        if validation.get("warnings"):
+            lines.append("")
+            lines.append("⚠️ 경고:")
+            for w in validation["warnings"]:
+                lines.append(f"  {w}")
         return "\n".join(lines) + "\n"
 
     def print_report(self, result: dict) -> None:
@@ -453,6 +506,54 @@ class StrategyValidator:
             metrics.get("sharpe_ratio", 0) >= min_sharpe
             and metrics.get("max_drawdown", 0) >= max_mdd
         )
+
+    @staticmethod
+    def _check_profit_factor_warnings(
+        validation: dict,
+        strategy_name: str,
+        full_metrics: dict,
+        oos_metrics: dict,
+        min_profit_factor: float = 2.0,
+    ):
+        """
+        손익비(profit_factor) 자동 경고.
+        추세 추종은 승률이 낮고 손익비로 수익을 내는 구조이므로 ≥ 2.0 필수.
+        다른 전략도 1.0 미만이면 순손실이므로 경고.
+        """
+        warnings = validation.setdefault("warnings", [])
+        is_trend = strategy_name and "trend" in strategy_name.lower()
+        threshold = min_profit_factor if is_trend else 1.0
+
+        full_pf = full_metrics.get("profit_factor", 0)
+        oos_pf = oos_metrics.get("profit_factor", 0)
+
+        if is_trend:
+            if full_pf < min_profit_factor:
+                msg = (
+                    f"WARN: 추세 추종 전략 FULL 기간 손익비 {full_pf:.2f} < {min_profit_factor:.1f} — "
+                    f"승률이 낮은 추세 추종은 손익비 ≥ {min_profit_factor:.1f} 필요"
+                )
+                warnings.append(msg)
+                logger.warning(msg)
+            if oos_pf < min_profit_factor:
+                msg = (
+                    f"WARN: 추세 추종 전략 OOS 기간 손익비 {oos_pf:.2f} < {min_profit_factor:.1f} — "
+                    f"실전 적용 전 검토 필요"
+                )
+                warnings.append(msg)
+                logger.warning(msg)
+        else:
+            if full_pf < threshold:
+                msg = f"WARN: FULL 기간 손익비 {full_pf:.2f} < {threshold:.1f} — 순손실 구조"
+                warnings.append(msg)
+                logger.warning(msg)
+            if oos_pf < threshold:
+                msg = f"WARN: OOS 기간 손익비 {oos_pf:.2f} < {threshold:.1f} — 순손실 구조"
+                warnings.append(msg)
+                logger.warning(msg)
+
+        validation["full_profit_factor"] = full_pf
+        validation["oos_profit_factor"] = oos_pf
 
     def _buy_and_hold_metrics(self, df: pd.DataFrame, initial_capital: float) -> dict:
         if df is None or df.empty or len(df) < 2:

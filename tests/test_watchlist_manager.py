@@ -16,6 +16,7 @@ def test_watchlist_manager_builds_top_market_cap(monkeypatch):
 
     class _Config:
         watchlist_settings = {"mode": "top_market_cap", "market": "KOSPI", "top_n": 2, "symbols": []}
+        risk_params = {}
 
     sample = pd.DataFrame(
         {
@@ -25,6 +26,9 @@ def test_watchlist_manager_builds_top_market_cap(monkeypatch):
         }
     )
 
-    monkeypatch.setattr("core.data_collector.DataCollector.get_krx_stock_list", staticmethod(lambda: sample))
+    monkeypatch.setattr(
+        "core.data_collector.DataCollector.get_krx_stock_list",
+        staticmethod(lambda *a, **kw: sample),
+    )
     symbols = WatchlistManager(_Config()).resolve()
     assert symbols == ["000002", "000001"]

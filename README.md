@@ -3,25 +3,29 @@
 국내 주식 자동매매를 공부하고 실험해보려고 만든 개인 프로젝트입니다.
 지표 기반으로 매매 신호를 만들고, 백테스트부터 모의투자·실전 매매까지 한 흐름으로 실행할 수 있도록 구성했습니다.
 
-현재는 KIS API를 사용하며, 기본적인 리스크 관리, 디스코드 알림, 실시간 대시보드를 지원합니다.
+현재는 KIS API를 사용하며, 리스크 관리, 알림 이중화, 실시간 대시보드를 지원합니다.
 
 ## 주요 기능
 
-* 백테스트 / 모의투자 / 실전 매매
-* RSI, MACD, 볼린저밴드, 스토캐스틱, ATR 기반 신호 생성
-* 스코어링 / 평균회귀 / 추세추종 전략 지원
-* 앙상블 전략(기술지표 + 모멘텀 팩터 + 변동성 조건)
-* 워치리스트: 모멘텀·저변동성 팩터 모드(momentum_top, low_vol_top, momentum_lowvol)
-* 시장 국면 필터(코스피 200일선 이하 시 신규 매수 중단)
-* 전략 검증 시 KS11 + 코스피 상위 50 동일비중 벤치마크
-* 손절, 익절, 트레일링 스탑, 포지션 제한 등 기본 리스크 관리
-* 디스코드 알림 및 KIS 웹소켓 기반 실시간 처리
-* 웹 대시보드로 포트폴리오 상태 확인
+* 백테스트 / 모의투자 / 실전 매매 (10개 CLI 모드)
+* RSI, MACD, 볼린저밴드, 스토캐스틱, ADX, ATR, OBV 기반 신호 생성
+* 스코어링 / 평균회귀 / 추세추종 전략 + 앙상블(기술지표 + 모멘텀 팩터 + 변동성 조건)
+* 워치리스트: 시가총액·코스피200·모멘텀·저변동성 팩터 모드 + 유동성 필터 + 리밸런싱 캐시
+* 시장 국면 필터: 3중 신호(200일선 + 단기 모멘텀 + MA 크로스) 단계적 대응(bearish/caution/bullish)
+* 블랙스완 감지 → 전량 매도 → 쿨다운 → 점진적 재진입(recovery)
+* 실적 발표일(어닝) 필터: 전후 N일 신규 매수 금지
+* 펀더멘털 필터(PER·부채비율): pykrx → yfinance 폴백
+* 전략 검증: KS11 + 코스피 상위 50 동일비중 벤치마크, 워크포워드 검증
+* 지표·앙상블 상관계수 분석 및 다중공선성 자동 검출
+* 파라미터 최적화: Grid / Bayesian + 가중치 대칭 Grid Search + OOS 샤프 게이트
+* 알림 이중화: 디스코드 → 텔레그램 → 이메일 (critical 시 전채널 동시 발송)
+* 손절, 익절, 트레일링 스탑, 업종별 비중 제한 등 리스크 관리
+* 모의투자 vs 백테스트 비교 + 실전 전환 준비 자동 평가
+* 웹 대시보드(aiohttp)로 포트폴리오 상태 확인
 
 ## 사용 환경
 
-* Python 3.11 ~ 3.12 권장
-* 3.14는 아직 호환성 확인 전
+* Python 3.11 ~ 3.12 (`pyproject.toml`: `>=3.11,<3.13`)
 
 ## 설치
 
@@ -33,9 +37,9 @@ pip install -r requirements.txt
 
 실행 전 설정 파일과 환경변수를 준비해야 합니다.
 
-* `config/settings.yaml.example` → `config/settings.yaml`
-* `.env.example` 참고 후 `.env` 작성
-* `config/holidays.yaml`은 없으면 자동 생성되며, 필요 시 갱신 가능
+* `config/settings.yaml.example` → `config/settings.yaml` 복사 후 수정
+* `.env.example` 참고 후 `.env` 작성 (KIS API 키, 디스코드 웹훅 등)
+* `config/holidays.yaml`은 없으면 자동 생성되며, `--update-holidays`로 갱신 가능
 
 실전 자동 매매를 사용할 경우 아래 설정을 활성화해야 합니다.
 
@@ -53,40 +57,50 @@ python main.py --mode backtest --strategy ensemble --symbol 005930
 # 모의투자
 python main.py --mode paper --strategy scoring
 
-# 실전 매매
+# 실전 매매 (ENABLE_LIVE_TRADING=true 필수)
 python main.py --mode live --strategy scoring --confirm-live
 
 # 전략 검증
 python main.py --mode validate --strategy scoring --symbol 005930 --validation-years 5
-python main.py --mode validate --strategy scoring --symbol 005930 --no-benchmark-top50  # Top50 벤치마크 제외
-python main.py --mode validate --walk-forward --strategy scoring --symbol 005930 --validation-years 6  # 워크포워드 검증
-python main.py --mode check_correlation --symbol 005930 --validation-years 5  # 스코어링 지표 간 상관계수·독립성 검증
+python main.py --mode validate --walk-forward --strategy scoring --symbol 005930 --validation-years 6
 
-# 성과 비교
-python main.py --mode compare --start 2025-01-01 --end 2025-03-18 --strategy scoring
+# 지표·앙상블 상관 분석
+python main.py --mode check_correlation --symbol 005930 --validation-years 5
+python main.py --mode check_ensemble_correlation --symbol 005930 --validation-years 5
 
-# 파라미터 최적화
-python main.py --mode optimize --strategy scoring
+# 파라미터 최적화 (가중치 포함, 상관 분석 자동 연동)
+python main.py --mode optimize --strategy scoring --include-weights --auto-correlation
+
+# 성과 비교 + 실전 전환 준비 평가
+python main.py --mode compare --start 2025-01-01 --end 2025-03-19 --strategy scoring
+
+# 긴급 전체 청산
+python main.py --mode liquidate
 
 # 웹 대시보드
 python main.py --mode dashboard
-```
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` 설정이 필요합니다.
+# 휴장일 갱신
+python main.py --update-holidays
+```
 
 ## 안정성 관련 메모
 
 실전 사용을 고려해서 몇 가지 안전장치를 넣어두었습니다.
 
-* 백테스트는 lookahead bias를 줄이도록 기본 설정 적용
-* 자금 비중 제한과 동시 보유 종목 수 제한 지원
-* 미체결 주문 확인 및 중복 주문 방지 로직 포함
-* 전략 성과가 일정 기준 이하로 떨어지면 신규 진입 제한 가능
-* 시장 국면 필터: 코스피 200일선 이하(하락장) 시 신규 매수 전면 중단
-* DB 백업 및 잔고 크로스체크 지원
-* 긴급 전체 청산 기능 제공
+* 백테스트는 strict-lookahead 기본 적용 (look-ahead bias 방지)
+* 자금 비중·업종별 비중 제한과 동시 보유 종목 수 제한
+* 미체결 주문 확인 및 중복 주문 방지(OrderGuard, TTL)
+* 전략 성과 열화 감지 시 신규 진입 자동 제한
+* 시장 국면 필터: 3중 신호 단계적 대응 (bearish 시 매수 전면 중단, caution 시 사이징 축소)
+* 블랙스완 감지 → 전량 매도 → 쿨다운 → 점진적 재진입
+* 실적 발표일 전후 신규 매수 금지
+* KIS API 이중 Rate Limiter (초당 + 분당) + Circuit Breaker
+* DB 백업(SQLite Online Backup API) 및 잔고 크로스체크
+* 알림 이중화: 디스코드 장애 시 텔레그램·이메일 fallback
+* 긴급 전체 청산 기능 (CLI + HTTP 트리거)
 
-세부 설정은 `config/risk_params.yaml`과 `docs/PROJECT_GUIDE.md`에서 확인할 수 있습니다.
+`config/risk_params.yaml`에서 생존자 편향 완화(`backtest_universe`), 유동성 필터(`liquidity_filter`) 등을 설정할 수 있습니다.
 
 ## 테스트
 
@@ -94,24 +108,21 @@ python main.py --mode dashboard
 pytest tests/ -q
 ```
 
-외부 API와 웹소켓이 필요한 부분은 모킹해서 테스트합니다.
+14개 테스트 파일로 지표, 신호, 리스크, 스케줄러, 거래시간, 블랙스완, OrderExecutor, KIS 웹소켓 등을 검증합니다. 외부 API는 모킹 처리합니다.
 
 ## 프로젝트 구조
 
-* `config/` : 설정 파일
-* `core/` : 데이터 수집, 지표 계산, 신호 생성, 리스크 관리, 주문 처리
-* `strategies/` : 매매 전략
-* `api/` : KIS 연동
-* `backtest/` : 백테스트 및 리포트
-* `database/` : DB 관련 코드
-* `tests/` : 테스트 코드
-* `main.py` : 실행 진입점
+* `config/` : YAML 설정 파일 + 로더
+* `core/` : 데이터 수집, 지표 계산, 신호 생성, 리스크 관리, 주문 실행, 스케줄러, 알림
+* `strategies/` : 매매 전략 (스코어링, 평균회귀, 추세추종, 모멘텀, 변동성, 앙상블)
+* `api/` : KIS REST API + 웹소켓 + Circuit Breaker
+* `backtest/` : 백테스트, 전략 검증, 파라미터 최적화, 성과 비교
+* `database/` : ORM 모델, CRUD, 백업
+* `monitoring/` : 로깅, 디스코드, 웹 대시보드, 긴급 청산 트리거
+* `tests/` : pytest 테스트
+* `docs/` : 프로젝트 가이드
 
-## 참고
-
-* 백테스트 데이터가 비어 있으면 설정 파일과 `.env` 값을 먼저 확인해주세요.
-* `FinanceDataReader` 또는 `yfinance` 설치 여부도 같이 확인하면 됩니다.
-* 상세 내용은 `docs/PROJECT_GUIDE.md`와 `quant_trader_design.md`에 정리해두었습니다.
+상세 내용은 `docs/PROJECT_GUIDE.md`와 `quant_trader_design.md`에 정리해두었습니다.
 
 ## 주의
 

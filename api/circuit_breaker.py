@@ -86,14 +86,15 @@ class CircuitBreaker:
                     self._trigger_alert()
 
     def _trigger_alert(self):
-        """서킷 브레이커 오픈 시 알림"""
+        """서킷 브레이커 오픈 시 알림 — 치명적 이벤트이므로 모든 채널 동시 발송."""
         try:
-            from monitoring.discord_bot import DiscordBot
-            bot = DiscordBot()
-            bot.send_message(
+            from core.notifier import Notifier
+            notifier = Notifier()
+            notifier.send_message(
                 f"🚨 **서킷 브레이커 발동 (API 차단)**\n"
                 f"연속 {self.failure_count}회 API 요청 실패로 인해 모든 통신을 {self.recovery_timeout}초간 차단합니다.\n"
-                f"서버 다운 또는 장애가 의심됩니다."
+                f"서버 다운 또는 장애가 의심됩니다.",
+                critical=True,
             )
         except Exception as e:
             logger.error("서킷 브레이커 알림 실패: {}", e)

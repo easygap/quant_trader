@@ -3,6 +3,7 @@
 - 급락 감지 및 긴급 전량 매도
 - 시장 전체 이상 탐지
 - 쿨다운 매매 중단
+- 쿨다운 해제 후 recovery 기간: 포지션 사이징을 축소(recovery_scale)해서 점진적 복구
 """
 
 from datetime import datetime, timedelta
@@ -25,11 +26,10 @@ class BlackSwanDetector:
     - 디스코드 경고 알림
     - 쿨다운 매매 중단 (기본 1시간)
 
-    사용법:
-        detector = BlackSwanDetector()
-        result = detector.check(current_prices, prev_prices)
-        if result["triggered"]:
-            # 긴급 매도 실행
+    쿨다운 해제 후:
+    - recovery_minutes 동안 recovery 기간 진입 (기본 120분)
+    - recovery 기간 중 포지션 사이징을 recovery_scale(기본 0.5)로 축소
+    - recovery 종료 후 정상 복귀
     """
 
     def __init__(self, config: Config = None):
@@ -45,6 +45,13 @@ class BlackSwanDetector:
         self.cooldown_minutes = 60             # 기본 1시간 매매 중단
         self._cooldown_until = None            # 매매 재개 시각
         self._triggered_count = 0              # 발동 횟수
+
+        # 쿨다운 해제 후 recovery 관리
+        trading = self.config.trading if hasattr(self.config, "trading") else self.config.get("trading", {})
+        self.recovery_minutes = int(trading.get("blackswan_recovery_minutes", 120))
+        self.recovery_scale = float(trading.get("blackswan_recovery_scale", 0.5))
+        self._recovery_until = None
+        self._cooldown_just_ended = False
 
         # 연속 하락 추적
         self._daily_returns: list[float] = []
@@ -137,10 +144,37 @@ class BlackSwanDetector:
             logger.debug("쿨다운 중 — 남은 시간: {}", remaining)
             return True
 
-        # 쿨다운 해제
-        logger.info("블랙스완 쿨다운 해제 — 매매 재개")
+        # 쿨다운 해제 → recovery 기간 시작
+        logger.info("블랙스완 쿨다운 해제 — recovery 기간 시작 ({}분, 사이징 {:.0f}%)",
+                     self.recovery_minutes, self.recovery_scale * 100)
         self._cooldown_until = None
+        self._cooldown_just_ended = True
+        if self.recovery_minutes > 0:
+            self._recovery_until = datetime.now() + timedelta(minutes=self.recovery_minutes)
         return False
+
+    def consume_cooldown_ended_flag(self) -> bool:
+        """쿨다운이 방금 해제되었는지 확인하고 플래그를 소비한다. Scheduler가 즉시 신호 재평가에 사용."""
+        if self._cooldown_just_ended:
+            self._cooldown_just_ended = False
+            return True
+        return False
+
+    def is_in_recovery(self) -> bool:
+        """쿨다운 해제 후 recovery 기간(점진적 복구)인지 확인"""
+        if self._recovery_until is None:
+            return False
+        if datetime.now() < self._recovery_until:
+            return True
+        logger.info("블랙스완 recovery 기간 종료 — 정상 사이징 복귀")
+        self._recovery_until = None
+        return False
+
+    def get_recovery_scale(self) -> float:
+        """현재 recovery 중이면 축소 배수, 아니면 1.0"""
+        if self.is_in_recovery():
+            return self.recovery_scale
+        return 1.0
 
     def can_trade(self) -> dict:
         """
@@ -193,4 +227,6 @@ class BlackSwanDetector:
         self._cooldown_until = None
         self._triggered_count = 0
         self._daily_returns.clear()
+        self._recovery_until = None
+        self._cooldown_just_ended = False
         logger.info("BlackSwanDetector 초기화 완료")

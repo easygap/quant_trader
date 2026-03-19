@@ -24,17 +24,24 @@ class StrategyEnsemble:
     - volatility_condition: 실현변동성 구간만 사용 (저변동성=매수, 고변동성=매도)
 
     모드: majority_vote | weighted_sum | conservative
+    auto_downgrade: 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
     """
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config = None, skip_independence_check: bool = False):
         self.config = config or Config.get()
         self.strategies_config = self.config.strategies
         ensemble_cfg = self.strategies_config.get("ensemble", {})
-        self.mode = ensemble_cfg.get("mode", "majority_vote")
+        self._configured_mode = ensemble_cfg.get("mode", "majority_vote")
+        self.mode = self._configured_mode
+        self.auto_downgrade = ensemble_cfg.get("auto_downgrade", True)
         self.confidence_weights = ensemble_cfg.get("confidence_weight", {})
+        self._independence_checked = False
+        self._downgraded = False
         self._strategies = []
         self._load_strategies()
-        logger.info("StrategyEnsemble 초기화 (모드: {}, 전략 수: {})", self.mode, len(self._strategies))
+        self._skip_independence_check = skip_independence_check
+        logger.info("StrategyEnsemble 초기화 (모드: {}, 전략 수: {}, auto_downgrade: {})",
+                     self.mode, len(self._strategies), self.auto_downgrade)
 
     def _load_strategies(self):
         """전략 인스턴스 로드 — 정보 소스가 다른 세 전략"""
@@ -88,9 +95,64 @@ class StrategyEnsemble:
             base_df[f"signal_{name}"] = signal_frame[name]
             base_df[f"score_{name}"] = score_frame[name]
 
+        # 첫 analyze 호출 시 독립성 검사 → 고상관이면 conservative로 자동 다운그레이드
+        if not self._independence_checked and not self._skip_independence_check and len(base_df) >= 60:
+            self._run_independence_check(base_df)
+
         base_df["signal"] = signal_frame.apply(self._resolve_row_signal, axis=1)
         base_df["strategy_score"] = score_frame.mean(axis=1).fillna(0.0)
         return base_df
+
+    def _run_independence_check(self, analyzed_df: pd.DataFrame):
+        """첫 analyze 호출 시 전략 신호 독립성을 검사하고, 필요 시 모드를 다운그레이드한다."""
+        self._independence_checked = True
+        try:
+            from core.ensemble_correlation import SIGNAL_TO_NUM, ENSEMBLE_SIGNAL_COLS, ENSEMBLE_LABELS
+
+            cols = [c for c in ENSEMBLE_SIGNAL_COLS if c in analyzed_df.columns]
+            if len(cols) < 2:
+                return
+
+            numeric = pd.DataFrame(index=analyzed_df.index)
+            for c in cols:
+                numeric[c] = analyzed_df[c].map(lambda s: SIGNAL_TO_NUM.get(str(s).strip().upper(), 0))
+
+            corr = numeric[cols].corr()
+            threshold = self.strategies_config.get("ensemble", {}).get("independence_threshold", 0.6)
+            high_pairs = []
+            for i, c1 in enumerate(cols):
+                for j, c2 in enumerate(cols):
+                    if i >= j:
+                        continue
+                    r = corr.loc[c1, c2]
+                    if pd.notna(r) and abs(r) >= threshold:
+                        high_pairs.append((c1, c2, float(r)))
+
+            if not high_pairs:
+                logger.info("앙상블 독립성 검사 통과: 모든 전략 쌍 |r| < {:.1f}", threshold)
+                return
+
+            for c1, c2, r in high_pairs:
+                l1 = ENSEMBLE_LABELS.get(c1, c1)
+                l2 = ENSEMBLE_LABELS.get(c2, c2)
+                logger.warning(
+                    "⚠️ 앙상블 독립성 위반: {}–{} 신호 상관계수 {:.2f} (>= {:.1f}). "
+                    "다수결 의미 퇴색 위험.",
+                    l1, l2, r, threshold,
+                )
+
+            if self.auto_downgrade and self.mode in ("majority_vote", "weighted_sum"):
+                old_mode = self.mode
+                self.mode = "conservative"
+                self._downgraded = True
+                logger.warning(
+                    "앙상블 모드 자동 전환: {} → conservative (고상관 쌍 {}개 감지). "
+                    "세 전략 모두 동의해야 BUY/SELL. 전략 구성 재검토 권장. "
+                    "auto_downgrade: false로 비활성화 가능.",
+                    old_mode, len(high_pairs),
+                )
+        except Exception as e:
+            logger.debug("앙상블 독립성 검사 중 오류 (무시): {}", e)
 
     def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """각 전략 신호를 수집 후 앙상블 모드에 따라 통합 신호 반환"""

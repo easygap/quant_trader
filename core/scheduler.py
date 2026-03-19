@@ -13,7 +13,7 @@ from core.watchlist_manager import WatchlistManager
 from core.trading_hours import TradingHours
 from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
-from monitoring.discord_bot import DiscordBot
+from core.notifier import Notifier
 from database.repositories import (
     get_all_positions,
     get_daily_trade_summary,
@@ -33,7 +33,7 @@ class Scheduler:
     3. 장마감 (15:35): 일일 리포트, 포트폴리오 스냅샷 저장
 
     거래 빈도·수수료: 10분마다 신호를 보므로 신호가 자주 바뀌는 전략은 과매매(수수료만 나감) 위험.
-    왕복 비용 약 0.23%를 상회하는 기대 수익이 나오도록 전략·임계값 설계 권장. quant_trader_design.md §8.3.
+    왕복 비용 약 0.23%(수수료+거래세 0.20%, 2026년 기준)를 상회하는 기대 수익이 나오도록 전략·임계값 설계 권장. quant_trader_design.md §8.3.
     """
 
     def __init__(self, strategy_name: str = "scoring", config: Config = None):
@@ -42,7 +42,7 @@ class Scheduler:
         self.trading_hours = TradingHours(self.config)
         self.blackswan = BlackSwanDetector(self.config)
         self.portfolio = PortfolioManager(self.config, account_key=self.strategy_name)
-        self.discord = DiscordBot(self.config)
+        self.discord = Notifier(self.config)
         self.auto_entry = self.config.trading.get("auto_entry", False)
 
         self.monitor_interval = 600  # 10분
@@ -114,8 +114,15 @@ class Scheduler:
             watchlist = WatchlistManager(self.config).resolve()
             self._entry_candidates = []
 
-            from core.market_regime import allow_new_buys_by_market_regime
-            allow_buys = allow_new_buys_by_market_regime(self.config, collector)
+            from core.market_regime import check_market_regime
+            regime_result = check_market_regime(self.config, collector)
+            allow_buys = regime_result["allow_buys"]
+            self._market_regime_scale = regime_result["position_scale"]
+
+            # API 요청 사전 예측: 종목당 ~2건(데이터 수집 + 포지션 조회) 가정
+            n_syms = len(watchlist)
+            est_requests = n_syms * 2
+            self._log_rate_limit_preflight(est_requests, n_syms, "장전 분석")
 
             signals = []
             for symbol in watchlist:
@@ -137,7 +144,6 @@ class Scheduler:
                         and signal_info["signal"] == "BUY"
                         and not get_position(symbol)
                     ):
-                        # 일평균 거래량(20일): 거래량 기반 동적 슬리피지용 (소형주 1~3% 슬리피지 반영)
                         avg_vol = None
                         if "volume" in df.columns and not df["volume"].empty:
                             avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
@@ -148,6 +154,7 @@ class Scheduler:
                             "score": signal_info.get("score", 0),
                             "reason": "live pre-market candidate",
                             "avg_daily_volume": avg_vol,
+                            "market_regime_scale": self._market_regime_scale,
                         })
 
                 except Exception as e:
@@ -159,6 +166,17 @@ class Scheduler:
                 sum(1 for s in signals if s["signal"] == "BUY"),
                 len(self._entry_candidates),
             )
+            self._log_rate_limit_stats("장전 분석")
+
+            mismatched = collector.check_source_consistency()
+            if mismatched:
+                msg = (
+                    f"⚠️ 데이터 소스 불일치 감지: {mismatched}. "
+                    "백테스트(수정주가)와 다른 소스(비수정주가 가능)를 사용 중. "
+                    "지표·신호가 달라질 수 있습니다. pip install FinanceDataReader 권장."
+                )
+                logger.warning(msg)
+                self.discord.send_message(msg, critical=True)
 
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
@@ -169,6 +187,12 @@ class Scheduler:
         started_at = datetime.now()
 
         try:
+            # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
+            if self.blackswan.consume_cooldown_ended_flag():
+                logger.info("블랙스완 쿨다운 해제 — 즉시 신호 재평가 트리거")
+                self.discord.send_message("🔄 블랙스완 쿨다운 해제 — 신호 재평가 후 recovery 사이징으로 재진입 검토")
+                self._run_post_cooldown_rescan()
+
             if self.auto_entry and self._entry_candidates and not self.blackswan.is_on_cooldown():
                 with PositionLock():
                     self._execute_entry_candidates()
@@ -208,6 +232,45 @@ class Scheduler:
         except Exception as e:
             logger.warning("장중 KIS 잔고 크로스체크 실패: {}", e)
 
+    def _run_post_cooldown_rescan(self):
+        """블랙스완 쿨다운 해제 직후: 워치리스트 전 종목을 재스캔해 진입 후보를 다시 채운다."""
+        try:
+            from core.data_collector import DataCollector
+
+            collector = DataCollector()
+            strategy = self._get_strategy()
+            watchlist = WatchlistManager(self.config).resolve()
+            new_candidates = []
+
+            for symbol in watchlist:
+                try:
+                    df = collector.fetch_korean_stock(symbol)
+                    if df.empty or len(df) < 30:
+                        continue
+                    signal_info = strategy.generate_signal(df, symbol=symbol)
+                    if signal_info.get("signal") == "BUY" and not get_position(symbol, account_key=self.strategy_name):
+                        avg_vol = None
+                        if "volume" in df.columns and not df["volume"].empty:
+                            avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
+                        new_candidates.append({
+                            "symbol": symbol,
+                            "price": signal_info.get("close", 0),
+                            "atr": signal_info.get("atr"),
+                            "score": signal_info.get("score", 0),
+                            "reason": "post-cooldown rescan",
+                            "avg_daily_volume": avg_vol,
+                        })
+                except Exception as e:
+                    logger.debug("쿨다운 후 재스캔 {} 실패: {}", symbol, e)
+
+            if new_candidates:
+                self._entry_candidates.extend(new_candidates)
+                logger.info("쿨다운 해제 재스캔: {}개 매수 후보 추가 (recovery 사이징 적용 예정)", len(new_candidates))
+            else:
+                logger.info("쿨다운 해제 재스캔: 매수 신호 종목 없음")
+        except Exception as e:
+            logger.error("쿨다운 해제 재스캔 실패: {}", e)
+
     def _execute_entry_candidates(self):
         """장전 분석에서 쌓인 BUY 후보를 장중 첫 사이클에 실행."""
         if not self._entry_candidates:
@@ -215,12 +278,16 @@ class Scheduler:
 
         from core.order_executor import OrderExecutor
         from core.data_collector import DataCollector
-        from core.market_regime import allow_new_buys_by_market_regime
+        from core.market_regime import check_market_regime
 
-        if not allow_new_buys_by_market_regime(self.config, DataCollector()):
-            logger.info("하락장(코스피 200일선 이하)으로 신규 매수 전면 중단 — 진입 후보 실행 생략")
+        regime_result = check_market_regime(self.config, DataCollector())
+        if not regime_result["allow_buys"]:
+            logger.info(
+                "시장 국면 [bearish] — 200일선 이탈 + 단기 모멘텀 하락 → 신규 매수 전면 중단, 진입 후보 실행 생략"
+            )
             self._entry_candidates = []
             return
+        regime_scale = regime_result["position_scale"]
 
         executor = OrderExecutor(self.config, account_key=self.strategy_name)
         remaining = []
@@ -231,11 +298,24 @@ class Scheduler:
                 continue
 
             summary = self.portfolio.get_portfolio_summary()
+            scale = candidate.get("market_regime_scale", regime_scale)
+            # 블랙스완 recovery 기간 중이면 추가 축소
+            bs_scale = self.blackswan.get_recovery_scale()
+            scale = scale * bs_scale
+            adjusted_capital = summary["total_value"] * scale
+            adjusted_cash = summary["cash"] * scale
+            if scale < 1.0:
+                parts = []
+                if regime_scale < 1.0:
+                    parts.append(f"시장 국면 {regime_scale*100:.0f}%")
+                if bs_scale < 1.0:
+                    parts.append(f"블랙스완 recovery {bs_scale*100:.0f}%")
+                logger.info("{} 포지션 사이징 {:.0f}%로 축소 ({})", symbol, scale * 100, " + ".join(parts))
             result = executor.execute_buy(
                 symbol=symbol,
                 price=candidate["price"],
-                capital=summary["total_value"],
-                available_cash=summary["cash"],
+                capital=adjusted_capital,
+                available_cash=adjusted_cash,
                 current_invested=summary["current_value"],
                 atr=candidate.get("atr"),
                 signal_score=candidate.get("score", 0),
@@ -290,7 +370,7 @@ class Scheduler:
                 bs_result = self.blackswan.check_stock(pos.symbol, current_price, prev_close)
 
                 if bs_result["triggered"]:
-                    self.discord.send_message(f"🚨 블랙스완 발동!\n{bs_result['reason']}")
+                    self.discord.send_message(f"🚨 블랙스완 발동!\n{bs_result['reason']}", critical=True)
                     executor.execute_sell(
                         pos.symbol, current_price,
                         reason="블랙스완 긴급 매도",
@@ -369,10 +449,52 @@ class Scheduler:
             except Exception as backup_err:
                 logger.warning("DB 백업 스킵/실패: {}", backup_err)
 
+            # paper 모드: 장마감 시 실전 전환 준비 자동 평가
+            if self.config.trading.get("mode") == "paper":
+                self._check_live_readiness()
+
             logger.info("장마감 리포트 저장 및 발송 완료")
 
         except Exception as e:
             logger.error("장마감 리포트 실패: {}", e)
+
+    def _check_live_readiness(self):
+        """paper 모드 장마감 시 실전 전환 준비 자동 평가."""
+        readiness_cfg = (
+            self.config.risk_params.get("paper_backtest_compare", {})
+            .get("live_readiness", {})
+        )
+        if not readiness_cfg.get("auto_check_in_scheduler", True):
+            return
+        try:
+            from datetime import timedelta
+            from backtest.paper_compare import check_live_readiness
+
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=30)
+            result = check_live_readiness(
+                start_date=start_date,
+                end_date=end_date,
+                strategy_name=self.strategy_name,
+                config=self.config,
+            )
+            if result["ready"]:
+                logger.info("✅ 실전 전환 준비 완료 — {}", result["message"])
+                if readiness_cfg.get("notify_on_ready", True):
+                    self.discord.send_embed(
+                        "✅ 실전 전환 준비 완료",
+                        result["message"],
+                        color=0x2ECC71,
+                        fields=[
+                            {"name": "방향성 일치율", "value": f"{result['direction_agreement_pct']:.1f}%", "inline": True},
+                            {"name": "수익률 차이", "value": f"{result.get('return_diff_pct', 0):.1f}%", "inline": True},
+                            {"name": "거래일수", "value": f"{result['trading_days']}일", "inline": True},
+                        ],
+                    )
+            else:
+                logger.info("⏳ 실전 전환 기준 미달 — {}", result["message"])
+        except Exception as e:
+            logger.warning("실전 전환 준비 평가 실패: {}", e)
 
     def _should_monitor(self) -> bool:
         """모니터링 주기 확인. 이전 루프가 10분 초과 시 다음 사이클 스킵(타이밍 리스크 방지)."""
@@ -391,6 +513,42 @@ class Scheduler:
         hours = wait.total_seconds() / 3600
         logger.info("비거래일 — 다음 거래일까지 {:.1f}시간 대기", hours)
         time_mod.sleep(min(wait.total_seconds(), 3600))
+
+    def _log_rate_limit_preflight(self, est_requests: int, n_symbols: int, phase: str):
+        """API 요청 사전 예측: 예상 건수와 소요 시간을 로그하고, 분당 한도 초과 시 경고."""
+        try:
+            from api.kis_api import KISApi
+            kis = KISApi()
+            per_sec = kis.max_calls_per_sec
+            per_min = kis.max_calls_per_min
+            est_seconds = est_requests / per_sec if per_sec > 0 else 0
+            logger.info(
+                "[{}] 종목 {}개, 예상 API 요청 ~{}건 (초당 {:.0f}건 → 약 {:.0f}초 소요)",
+                phase, n_symbols, est_requests, per_sec, est_seconds,
+            )
+            if est_requests > per_min:
+                logger.warning(
+                    "[{}] 예상 요청 {}건 > 분당 한도 {}건. 분당 슬라이딩 윈도우에 의해 자동 대기 발생 가능.",
+                    phase, est_requests, per_min,
+                )
+        except Exception:
+            pass
+
+    def _log_rate_limit_stats(self, phase: str):
+        """API 요청 사후 통계를 로그한다."""
+        try:
+            from api.kis_api import KISApi
+            kis = KISApi()
+            stats = kis.get_rate_limit_stats()
+            logger.info(
+                "[{}] API 사용량: 최근 60초 {}/{}건 (활용률 {:.0f}%), 누적 {}건, 429 {}회",
+                phase,
+                stats["requests_last_60s"], stats["max_per_min"],
+                stats["minute_utilization_pct"],
+                stats["total_requests"], stats["total_429s"],
+            )
+        except Exception:
+            pass
 
     def _get_strategy(self):
         """전략 인스턴스 반환."""
