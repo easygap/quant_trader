@@ -16,13 +16,28 @@ kis_api:
   base_url: "https://openapi.koreainvestment.com:9443"
   mock_url: "https://openapivts.koreainvestment.com:29443"
   use_mock: true
+  # 요청 한도: KIS는 초당/분당 제한이 있음. 20~50종목 관리 시 한꺼번에 호출하면 차단 위험.
+  # Token Bucket(초당) + 슬라이딩 윈도우(분당) 이중 제어. 환경변수 MAX_CALLS_PER_SEC / MAX_CALLS_PER_MIN 덮어쓰기 가능.
+  max_calls_per_sec: 10      # 초당 최대 요청 (10~15 권장)
+  max_calls_per_min: 300     # 분당 최대 요청 (KIS 분당 한도 이하로 설정)
+  max_retry: 3
 
-# SQLite 손상 시 포지션/거래 기록 전체 소실 가능 — 일일 자동 백업 권장
+# --- 데이터베이스 설정 ---
+# SQLite: WAL 모드(동시 읽기/쓰기) + busy_timeout(30s) + scoped_session(스레드 격리) 자동 적용
+# 실전 안정화 후 PostgreSQL 전환 권장 (SQLAlchemy 연동 완료, type만 변경하면 전환)
 database:
-  type: "sqlite"
+  type: "sqlite"                # "sqlite" 또는 "postgresql"
   sqlite_path: "data/quant_trader.db"
   backup_path: "data/backups"   # 설정 시 장마감 후 일일 백업 생성 (손상 시 복구용)
   backup_retention_days: 7      # 보관 일수, 초과 분 삭제
+  # --- PostgreSQL 전환 시 아래 주석 해제 ---
+  # type: "postgresql"
+  # postgresql:
+  #   host: "localhost"
+  #   port: 5432
+  #   database: "quant_trader"
+  #   user: "quant_admin"
+  #   password: "${DB_PASSWORD}"   # 환경변수 사용 권장
 
 logging:
   level: "INFO"
@@ -30,6 +45,12 @@ logging:
   rotation: "10 MB"
   retention: "30 days"
   console_output: true
+
+# 데이터 소스 (수정주가 일치). FDR 우선 권장.
+data_source:
+  preferred: "auto"             # auto | fdr | yfinance | kis
+  allow_kis_fallback: true      # false면 KIS 비수정주가 폴백 차단
+  warn_on_source_mismatch: true
 
 trading:
   market_open: "09:00"
@@ -39,24 +60,51 @@ trading:
   auto_entry: false
   pending_order_ttl_seconds: 600
   sync_broker_interval_minutes: 30   # live 모드에서 KIS 잔고와 DB 포지션 크로스체크 주기 (분)
+  skip_earnings_days: 3             # 실적 발표일 전후 N일 신규 매수 금지 (0=비활성, yfinance 기반)
+  blackswan_recovery_minutes: 120   # 블랙스완 쿨다운 해제 후 recovery 기간 (분)
+  blackswan_recovery_scale: 0.5     # recovery 중 포지션 사이징 배수 (0.5 = 50%)
+  # 시장 국면 필터 (단계적 대응): 3가지 독립 신호 중 2개↑ → bearish / 1개 → caution / 0 → bullish
+  #   A. 200일선 이탈 / B. 단기 모멘텀 하락 / C. 단기 MA 데드크로스 (선택적)
+  market_regime_filter: true
+  market_regime_index: "KS11"
+  market_regime_ma_days: 200
+  market_regime_short_momentum_days: 20       # 신호 B: 단기 모멘텀 산출 기간
+  market_regime_short_momentum_threshold: -5  # 신호 B: 수익률(%) 이하 시 하락 판단
+  market_regime_caution_scale: 0.5            # caution 시 포지션 사이징 배수
+  market_regime_ma_cross_enabled: true        # 신호 C: 단기 MA 크로스 활성화 (200일선보다 빠른 하락 감지)
+  market_regime_ma_short: 20                  # 신호 C: 단기 이동평균 일수
+  market_regime_ma_mid: 60                    # 신호 C: 중기 이동평균 일수
 
+# 1차 알림: 디스코드 웹훅
 discord:
   enabled: false
   webhook_url: ""
   username: "퀀트 트레이더"
   avatar_url: ""
 
+# 2차 Fallback: 텔레그램 Bot API (디스코드 장애 시 자동 전환)
+# 환경변수: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+
+# 3차 Fallback: 이메일(SMTP)
+# 환경변수: SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL_TO
+
 # 웹 대시보드 (python main.py --mode dashboard)
 dashboard:
   host: "0.0.0.0"
   port: 8080
 
-# 관심 종목(watchlist): 수작업 없이 시가총액·코스피200 기준으로 자동 선정 가능
-# mode: manual(수동) | top_market_cap(시가총액 상위 N개) | kospi200(코스피200 유사 시총 상위 N개)
+# 관심 종목(watchlist): 수작업 없이 시가총액·코스피200·모멘텀·저변동성 기준으로 자동 선정 가능
+# mode: manual | top_market_cap | kospi200 | momentum_top | low_vol_top | momentum_lowvol
 watchlist:
-  mode: "top_market_cap"   # top_market_cap 또는 kospi200 이면 symbols 자동 생성, manual 이면 symbols 사용
-  market: "KOSPI"          # top_market_cap 시: KOSPI 또는 KOSDAQ
-  top_n: 20                # 시가총액 상위 N개 (top_market_cap 시)
+  mode: "top_market_cap"
+  market: "KOSPI"
+  top_n: 20
+  # 리밸런싱 주기 (팩터 모드만 적용): Jegadeesh & Titman(1993) 기준 월 1회(≈20 거래일)
+  rebalance_interval_days: 20    # 마지막 갱신 후 N일 경과 시 재계산 (data/watchlist_cache.json)
   # kospi200 모드 시: kospi200_top_n: 200  (기본 200)
   symbols:                 # manual 모드에서 사용. 자동 모드 실패 시 fallback
     - "005930"

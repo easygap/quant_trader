@@ -2,18 +2,40 @@
 데이터베이스 모델 정의
 - SQLAlchemy ORM 모델
 - SQLite (개발) / PostgreSQL (운영) 지원
+- SQLite WAL 모드·busy_timeout·synchronous=NORMAL 로 동시성 완화
+- scoped_session 으로 스레드별 세션 격리 (Scheduler·aiohttp·LiquidateTrigger 동시 접근 안전)
 """
 
+import time
+import functools
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from loguru import logger
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, Boolean, Text,
-    create_engine, Index, UniqueConstraint
+    create_engine, Index, UniqueConstraint, event,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 
 from config.config_loader import Config
+
+
+def _sqlite_connect_pragmas(dbapi_conn, connection_record):
+    """
+    SQLite 연결 시 PRAGMA 설정 (동시성 완화).
+    - WAL: 읽기/쓰기가 서로 블로킹하지 않음. Scheduler·LiquidateTrigger·web_dashboard 동시 접근 시 필수.
+    - busy_timeout: 다른 프로세스가 write lock을 잡고 있으면 최대 30초 대기 후 예외.
+    - synchronous=NORMAL: WAL 모드에서 안전하면서 fsync 빈도를 줄여 쓰기 성능 향상.
+    - cache_size: WAL 캐시를 64MB로 확대해 대량 읽기 시 I/O 감소.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=-65536")
+    cursor.close()
 
 
 Base = declarative_base()
@@ -167,13 +189,19 @@ class DailyReport(Base):
 # =============================================================
 
 _engine = None
-_SessionLocal = None
+_ScopedSession = None
+_SessionFactory = None
+
+# SQLite "database is locked" 재시도 설정
+_SQLITE_RETRY_MAX = 3
+_SQLITE_RETRY_DELAY = 1.0
 
 
 def get_engine():
     """
-    SQLAlchemy 엔진 반환 (싱글톤)
-    - settings.yaml의 database 섹션 참조
+    SQLAlchemy 엔진 반환 (싱글톤).
+    - SQLite: WAL + 커넥션 풀(StaticPool 대신 QueuePool, pool_pre_ping=True)
+    - PostgreSQL: 기본 QueuePool
     """
     global _engine
     if _engine is None:
@@ -186,23 +214,81 @@ def get_engine():
                 f"postgresql://{pg.get('user')}:{pg.get('password')}"
                 f"@{pg.get('host')}:{pg.get('port')}/{pg.get('database')}"
             )
+            _engine = create_engine(
+                url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True,
+            )
         else:
-            # SQLite (기본값)
             project_root = Path(__file__).parent.parent
             db_path = project_root / db_config.get("sqlite_path", "data/quant_trader.db")
             db_path.parent.mkdir(parents=True, exist_ok=True)
             url = f"sqlite:///{db_path}"
-
-        _engine = create_engine(url, echo=False)
+            _engine = create_engine(
+                url, echo=False,
+                connect_args={"check_same_thread": False},
+                pool_pre_ping=True,
+            )
+            event.listen(_engine, "connect", _sqlite_connect_pragmas)
     return _engine
 
 
 def get_session():
-    """세션 팩토리 반환"""
-    global _SessionLocal
-    if _SessionLocal is None:
-        _SessionLocal = sessionmaker(bind=get_engine())
-    return _SessionLocal()
+    """
+    스레드 안전 세션 반환 (scoped_session).
+    Scheduler(메인 스레드), web_dashboard(aiohttp 이벤트 루프), LiquidateTrigger(HTTP 스레드)가
+    각각 독립 세션을 받으므로 세션 충돌이 방지됩니다.
+    """
+    global _ScopedSession, _SessionFactory
+    if _ScopedSession is None:
+        _SessionFactory = sessionmaker(bind=get_engine())
+        _ScopedSession = scoped_session(_SessionFactory)
+    return _ScopedSession()
+
+
+@contextmanager
+def db_session():
+    """
+    세션 컨텍스트 매니저: commit/rollback/close를 자동 처리.
+
+    사용법:
+        with db_session() as session:
+            session.add(...)
+    """
+    session = get_session()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def with_retry(func):
+    """
+    SQLite 'database is locked' 예외 시 자동 재시도 데코레이터.
+    WAL + busy_timeout으로 대부분 해결되지만, 극단적 동시 쓰기 시 안전장치.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exc = None
+        for attempt in range(_SQLITE_RETRY_MAX):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "database is locked" in err_msg or "locked" in err_msg:
+                    last_exc = e
+                    wait = _SQLITE_RETRY_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "DB locked 재시도 {}/{} ({}초 대기): {}",
+                        attempt + 1, _SQLITE_RETRY_MAX, wait, func.__name__,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
+        raise last_exc  # type: ignore[misc]
+    return wrapper
 
 
 def _migrate_add_account_key(engine):
@@ -239,11 +325,33 @@ def init_database():
     데이터베이스 초기화
     - 모든 테이블 생성 (존재하지 않는 경우에만)
     - 기존 DB에 account_key 컬럼 없으면 마이그레이션
+    - SQLite WAL 모드 활성화 확인
     """
     engine = get_engine()
     Base.metadata.create_all(engine)
     try:
         _migrate_add_account_key(engine)
     except Exception:
-        pass  # 마이그레이션 실패해도 기동은 유지
+        pass
+
+    if "sqlite" in engine.url.drivername:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            mode = conn.execute(text("PRAGMA journal_mode")).scalar()
+            busy = conn.execute(text("PRAGMA busy_timeout")).scalar()
+            sync = conn.execute(text("PRAGMA synchronous")).scalar()
+            if str(mode).lower() != "wal":
+                logger.error(
+                    "⚠️ SQLite journal_mode={} (WAL 아님). 동시 접근 시 'database is locked' 위험. "
+                    "DB 파일 권한 또는 파일 시스템(네트워크 드라이브 등) 확인 필요.",
+                    mode,
+                )
+            else:
+                logger.info(
+                    "SQLite 초기화 완료: journal_mode={}, busy_timeout={}ms, synchronous={}, "
+                    "scoped_session=ON, @with_retry=전체 함수",
+                    mode, busy, sync,
+                )
+    else:
+        logger.info("PostgreSQL 초기화 완료: pool_size=5, pool_pre_ping=ON")
     return engine

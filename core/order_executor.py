@@ -51,10 +51,22 @@ class OrderExecutor:
         self.trading_hours = TradingHours(self.config)
         self.blackswan = BlackSwanDetector(self.config)
 
+        self._sector_map: dict | None = None
+
         if self.mode == "live":
             self.kis_api.authenticate()
 
         logger.info("OrderExecutor 초기화 완료 (모드: {})", self.mode)
+
+    def _get_sector_map_cached(self) -> dict:
+        """업종 매핑을 한 번만 조회하고 캐시한다. 실패 시 빈 dict."""
+        if self._sector_map is None:
+            try:
+                from core.data_collector import DataCollector
+                self._sector_map = DataCollector.get_sector_map()
+            except Exception:
+                self._sector_map = {}
+        return self._sector_map
 
     def execute_buy(
         self,
@@ -114,14 +126,41 @@ class OrderExecutor:
             logger.warning("종목 {} 매수 수량 0 — 주문 스킵", symbol)
             return {"success": False, "reason": "계산된 수량이 0"}
 
-        # 분산 투자 체크
+        # 실적 발표일 필터: 전후 N일 이내이면 신규 매수 금지
+        skip_earnings_days = int(self.config.trading.get("skip_earnings_days", 0))
+        if skip_earnings_days > 0:
+            from core.earnings_filter import is_near_earnings
+            near, reason_earn = is_near_earnings(symbol, skip_days=skip_earnings_days)
+            if near:
+                logger.warning("종목 {} 매수 스킵 (실적 필터): {}", symbol, reason_earn)
+                return {"success": False, "reason": reason_earn}
+
+        # 진입 시점 유동성 재검증: watchlist 구축 이후 유동성이 변했을 수 있음
+        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        if liq.get("enabled", False) and liq.get("check_on_entry", True):
+            min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5e9))
+            if avg_daily_volume is not None and price > 0:
+                est_trading_value = avg_daily_volume * price
+                if est_trading_value < min_krw:
+                    msg = (
+                        f"유동성 부족: 추정 일평균 거래대금 {est_trading_value/1e8:.0f}억 원 "
+                        f"< 하한 {min_krw/1e8:.0f}억 원"
+                    )
+                    logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, msg)
+                    return {"success": False, "reason": msg}
+
+        # 분산 투자 체크 (업종 비중 포함)
         positions = get_all_positions()
+        sector_map = self._get_sector_map_cached()
         div_check = self.risk_manager.check_diversification(
             len(positions),
             price * quantity,
             capital,
             available_cash=available_cash,
             current_invested=current_invested or 0,
+            symbol=symbol,
+            sector_map=sector_map,
+            positions=positions,
         )
         if not div_check["can_buy"]:
             logger.warning("종목 {} 매수 불가: {}", symbol, div_check["reason"])
@@ -278,7 +317,7 @@ class OrderExecutor:
 
         sell_qty = quantity or position.quantity
 
-        # 거래 비용 계산 (증권거래세 0.18% + 설정 시 양도소득세; avg_price로 양도소득세 계산)
+        # 거래 비용 계산 (증권거래세+농특세 0.20% + 설정 시 양도소득세; avg_price로 양도소득세 계산)
         costs = self.risk_manager.calculate_transaction_costs(
             price, sell_qty, "SELL",
             avg_daily_volume=avg_daily_volume,

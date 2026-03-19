@@ -1,9 +1,14 @@
 """
 데이터 수집 모듈
-- FinanceDataReader로 한국 주식 과거 데이터 수집
+- FinanceDataReader로 한국 주식 과거 데이터 수집 (우선)
 - yfinance로 미국 주식 데이터 수집
-- KIS API 일봉 조회 (FDR 미지원 환경 폴백)
-- 데이터 정규화 및 DB 저장
+- KIS API 일봉 조회 (FDR 실패 시 폴백)
+
+수정주가(배당·액면분할 반영) 처리:
+- FinanceDataReader: 기본적으로 수정주가 제공. 백테스트·실전 동일 소스 권장.
+- yfinance: auto_adjust=True 로 수정주가 사용.
+- KIS API: 비수정(원시) 데이터를 반환하는 경우가 많음. FDR/yfinance와 혼용 시 지표값·신호가 달라질 수 있으므로,
+  백테스트와 실전에서 동일 소스를 쓰도록 FDR 설치·우선 사용을 권장하고, KIS fallback 시 로그로 경고.
 """
 
 from datetime import datetime, timedelta
@@ -20,6 +25,13 @@ except ImportError:
     logger.warning("FinanceDataReader가 설치되지 않았습니다. pip install FinanceDataReader")
 
 try:
+    from pykrx import stock as _pykrx_stock
+    HAS_PYKRX = True
+except ImportError:
+    HAS_PYKRX = False
+    _pykrx_stock = None
+
+try:
     import yfinance as yf
     HAS_YF = True
 except ImportError:
@@ -32,12 +44,59 @@ from database.repositories import save_stock_prices, get_stock_prices
 class DataCollector:
     """
     주가 데이터 수집기
-    - 한국 주식: FinanceDataReader
-    - 미국 주식: yfinance
+    - 한국 주식: FinanceDataReader (수정주가, 우선) → yfinance (수정주가) → KIS API (비수정 가능)
+    - 미국 주식: yfinance (auto_adjust=True, 수정주가)
+
+    데이터 소스 추적: 마지막 수집 시 사용된 소스와 수정주가 여부를 기록.
+    백테스트↔실전 간 소스 불일치 시 지표·신호가 달라질 수 있으므로 동일 소스 사용 권장.
     """
 
-    def __init__(self):
-        logger.info("DataCollector 초기화 완료")
+    # 소스별 수정주가 보장 여부
+    SOURCE_ADJUSTED_MAP = {
+        "FinanceDataReader": True,
+        "yfinance": True,       # auto_adjust=True
+        "KIS_API": False,       # 비수정(원시) 반환 가능
+    }
+
+    def __init__(self, config=None):
+        if config is None:
+            from config.config_loader import Config
+            config = Config.get()
+        self._config = config
+        ds_cfg = (config.settings or {}).get("data_source") or {}
+        self._preferred_source = ds_cfg.get("preferred", "auto")
+        self._allow_kis_fallback = ds_cfg.get("allow_kis_fallback", True)
+        self._warn_on_source_mismatch = ds_cfg.get("warn_on_source_mismatch", True)
+
+        self._last_source: str | None = None
+        self._last_adjusted: bool | None = None
+        self._source_history: dict[str, str] = {}
+        logger.info(
+            "DataCollector 초기화 완료 (preferred={}, allow_kis_fallback={})",
+            self._preferred_source, self._allow_kis_fallback,
+        )
+
+    def _record_source(self, symbol: str, source: str):
+        """수집에 사용된 소스를 기록하고 수정주가 여부를 갱신."""
+        self._last_source = source
+        self._last_adjusted = self.SOURCE_ADJUSTED_MAP.get(source, None)
+        self._source_history[symbol] = source
+
+    def get_last_source_info(self) -> dict:
+        """마지막 수집 시 사용된 소스 정보."""
+        return {
+            "source": self._last_source,
+            "adjusted": self._last_adjusted,
+            "history": dict(self._source_history),
+        }
+
+    def check_source_consistency(self, reference_source: str = "FinanceDataReader") -> list[str]:
+        """수집 이력에서 reference_source와 다른 소스를 사용한 종목 반환."""
+        mismatched = []
+        for symbol, src in self._source_history.items():
+            if src != reference_source:
+                mismatched.append(f"{symbol}({src})")
+        return mismatched
 
     def fetch_korean_stock(
         self,
@@ -46,7 +105,11 @@ class DataCollector:
         end_date: str = None,
     ) -> pd.DataFrame:
         """
-        한국 주식 일봉 데이터 수집 (FinanceDataReader)
+        한국 주식 일봉 데이터 수집.
+
+        우선순위: FinanceDataReader(수정주가) → yfinance(수정주가) → KIS API(비수정 가능).
+        settings.yaml data_source.preferred로 우선 소스 지정 가능 (fdr/yfinance/kis/auto).
+        data_source.allow_kis_fallback=false면 KIS 폴백을 차단하여 소스 불일치 방지.
 
         Args:
             symbol: 종목 코드 (예: "005930" 삼성전자)
@@ -56,35 +119,66 @@ class DataCollector:
         Returns:
             정규화된 OHLCV DataFrame
         """
-        if not HAS_FDR:
-            # FDR 미지원 시 yfinance(한국 티커 .KS) 시도 후 KIS API 폴백
-            if HAS_YF:
-                df = self._fetch_korean_stock_via_yfinance(symbol, start_date, end_date)
-                if not df.empty:
-                    return df
-            logger.info("FDR/yfinance 미사용 — KIS API 일봉 조회로 대체")
-            return self.fetch_korean_stock_via_kis(symbol)
-
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
+        # 1) FDR
+        if HAS_FDR and self._preferred_source in ("auto", "fdr"):
+            df = self._try_fdr(symbol, start_date, end_date)
+            if df is not None and not df.empty:
+                self._record_source(symbol, "FinanceDataReader")
+                return df
+
+        # 2) yfinance
+        if HAS_YF and self._preferred_source in ("auto", "fdr", "yfinance"):
+            df = self._fetch_korean_stock_via_yfinance(symbol, start_date, end_date)
+            if not df.empty:
+                self._record_source(symbol, "yfinance")
+                return df
+
+        # 3) KIS API (비수정주가 가능)
+        if not self._allow_kis_fallback:
+            logger.error(
+                "종목 {} 데이터 수집 실패. FDR/yfinance 모두 불가하고 "
+                "data_source.allow_kis_fallback=false로 KIS 폴백이 차단됨. "
+                "pip install FinanceDataReader 또는 allow_kis_fallback: true 설정.",
+                symbol,
+            )
+            return empty
+
+        logger.warning(
+            "⚠️ [데이터 소스 불일치] {} → KIS API 폴백. "
+            "KIS는 비수정주가(원시)를 반환할 수 있습니다. "
+            "백테스트를 FDR/yfinance(수정주가)로 했다면 지표·신호가 달라질 수 있습니다. "
+            "pip install FinanceDataReader 를 강력히 권장합니다.",
+            symbol,
+        )
+        df = self.fetch_korean_stock_via_kis(symbol)
+        if not df.empty:
+            self._record_source(symbol, "KIS_API")
+        return df
+
+    def _try_fdr(
+        self, symbol: str, start_date: str, end_date: str,
+    ) -> pd.DataFrame | None:
+        """FDR 수집 시도. 실패 시 None 반환."""
         logger.info("한국 주식 데이터 수집 (FDR): {} ({} ~ {})", symbol, start_date, end_date)
-
         try:
             df = fdr.DataReader(symbol, start_date, end_date)
             df = self._normalize_dataframe(df)
-            
-            # 수신 데이터 정합성 검증 추가
             from core.data_validator import DataValidator
             df = DataValidator.clean_dataframe(df, symbol)
-
-            logger.info("종목 {} 데이터 수집 완료: {}건", symbol, len(df))
+            logger.info(
+                "종목 {} 수집 완료 (소스=FinanceDataReader, 수정주가=Yes): {}건",
+                symbol, len(df),
+            )
             return df
         except Exception as e:
-            logger.warning("FDR 수집 실패 → KIS API 폴백: {}", e)
-            return self.fetch_korean_stock_via_kis(symbol)
+            logger.warning("FDR 수집 실패 ({}): yfinance 폴백 시도", e)
+            return None
 
     def fetch_us_stock(
         self,
@@ -226,20 +320,172 @@ class DataCollector:
         return df
 
     @staticmethod
-    def get_krx_stock_list() -> pd.DataFrame:
+    def get_krx_stock_list(
+        as_of_date: Optional[str] = None,
+        exclude_administrative: bool = True,
+        universe_mode: str = "current",
+    ) -> pd.DataFrame:
         """
-        KRX 전 종목 리스트 조회
+        KRX 종목 리스트 조회 (생존자 편향 완화 옵션 지원).
+
+        Args:
+            as_of_date: 기준일 (YYYY-MM-DD).
+                - "historical" 모드: 해당 일자에 상장되어 있던 전체 종목 조회 (pykrx).
+                - "kospi200" 모드: 해당 일자 코스피200 구성종목 조회 (pykrx).
+                - "current" 모드: 무시됨 (현재 상장 종목 FDR).
+            exclude_administrative: True면 관리종목(투자주의·투자위험 등) 제외.
+            universe_mode:
+                - "current": 현재 상장 종목 (FDR). 생존자 편향 있음.
+                - "historical": 과거 시점(as_of_date) 전체 상장 종목 (pykrx). 생존자 편향 완화.
+                - "kospi200": 과거 시점(as_of_date) 코스피200 구성종목 (pykrx). 대형주 한정.
 
         Returns:
-            종목 리스트 DataFrame (Code, Name, Market 등)
+            종목 리스트 DataFrame (Code, Name, Market, Marcap 등).
         """
+        mode = (universe_mode or "current").strip().lower()
+        if mode == "kospi200":
+            return DataCollector._get_kospi200_constituents(as_of_date)
+        if mode == "historical":
+            return DataCollector._get_historical_krx_list(as_of_date, exclude_administrative)
         if not HAS_FDR:
             raise ImportError("FinanceDataReader가 필요합니다")
-
-        logger.info("KRX 종목 리스트 조회 중...")
+        logger.info("KRX 종목 리스트 조회 중... (mode=current, 생존자 편향 주의)")
         stocks = fdr.StockListing("KRX")
+        if stocks.empty:
+            logger.warning("KRX 종목 리스트가 비어 있습니다.")
+            return stocks
+        if exclude_administrative:
+            stocks = DataCollector._exclude_administrative(stocks)
         logger.info("KRX 종목 총 {}개 조회 완료", len(stocks))
         return stocks
+
+    @staticmethod
+    def _exclude_administrative(stocks: pd.DataFrame) -> pd.DataFrame:
+        """FDR KRX-ADMINISTRATIVE 목록으로 관리종목 제외."""
+        if not HAS_FDR:
+            return stocks
+        try:
+            admin = fdr.StockListing("KRX-ADMINISTRATIVE")
+            if not admin.empty:
+                code_col = next((c for c in ["Code", "code", "Symbol", "symbol"] if c in admin.columns), None)
+                if code_col:
+                    admin_codes = set(admin[code_col].astype(str).str.strip().str.zfill(6))
+                    sc = next((c for c in ["Code", "code", "Symbol", "symbol"] if c in stocks.columns), None)
+                    if sc:
+                        before = len(stocks)
+                        stocks = stocks[~stocks[sc].astype(str).str.strip().str.zfill(6).isin(admin_codes)]
+                        logger.info("관리종목 제외: {} → {} 종목", before, len(stocks))
+        except Exception as e:
+            logger.warning("관리종목 목록 조회 실패 — 제외 생략: {}", e)
+        return stocks
+
+    @staticmethod
+    def _get_historical_krx_list(
+        as_of_date: Optional[str], exclude_administrative: bool = True,
+    ) -> pd.DataFrame:
+        """
+        pykrx로 과거 특정 날짜에 상장되어 있던 전체 종목 리스트 조회.
+        상장폐지 종목 포함 → 생존자 편향 완화.
+        """
+        if not HAS_PYKRX or _pykrx_stock is None:
+            logger.warning(
+                "pykrx 미설치 — historical 모드 사용 불가. "
+                "pip install pykrx 후 재시도하거나 mode: current/kospi200 사용."
+            )
+            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+        date_str = (as_of_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+        try:
+            rows = []
+            for market_name in ("KOSPI", "KOSDAQ"):
+                tickers = _pykrx_stock.get_market_ticker_list(date_str, market=market_name)
+                if not tickers:
+                    continue
+                for t in tickers:
+                    code = str(t).strip().zfill(6)
+                    try:
+                        name = _pykrx_stock.get_market_ticker_name(t) or ""
+                    except Exception:
+                        name = ""
+                    rows.append({"Code": code, "Name": name, "Market": market_name, "Marcap": 0})
+            if not rows:
+                logger.warning("historical 종목 리스트 조회 결과 없음 (기준일: {})", as_of_date)
+                return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+            df = pd.DataFrame(rows)
+            logger.info(
+                "historical 종목 리스트 {}개 조회 완료 (기준일: {}, KOSPI+KOSDAQ)",
+                len(df), as_of_date,
+            )
+            if exclude_administrative:
+                df = DataCollector._exclude_administrative(df)
+            return df
+        except Exception as e:
+            logger.warning("historical 종목 리스트 조회 실패 ({}): {}", as_of_date, e)
+            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+
+    @staticmethod
+    def get_sector_map() -> dict[str, str]:
+        """
+        KRX 종목코드 → 업종(Sector) 매핑 딕셔너리 반환.
+        FDR StockListing('KRX')의 Sector 컬럼을 사용한다.
+        FDR 미설치·조회 실패 시 빈 dict 반환.
+        """
+        if not HAS_FDR:
+            logger.debug("FDR 미설치 — 업종 매핑 불가")
+            return {}
+        try:
+            stocks = fdr.StockListing("KRX")
+            if stocks.empty:
+                return {}
+            code_col = next((c for c in ["Code", "code", "Symbol", "symbol"] if c in stocks.columns), None)
+            sector_col = next((c for c in ["Sector", "sector"] if c in stocks.columns), None)
+            if code_col is None or sector_col is None:
+                logger.debug("KRX 리스트에 Code/Sector 컬럼 없음")
+                return {}
+            mapping = {}
+            for _, row in stocks.iterrows():
+                code = str(row[code_col]).strip().zfill(6)
+                sector = str(row[sector_col]).strip() if pd.notna(row[sector_col]) else ""
+                if code and sector:
+                    mapping[code] = sector
+            logger.debug("업종 매핑 {}개 종목 로드", len(mapping))
+            return mapping
+        except Exception as e:
+            logger.warning("업종 매핑 조회 실패: {}", e)
+            return {}
+
+    @staticmethod
+    def _get_kospi200_constituents(as_of_date: Optional[str]) -> pd.DataFrame:
+        """pykrx로 해당 일자 코스피200 구성종목 조회 (생존자 편향 완화용)."""
+        if not HAS_PYKRX or _pykrx_stock is None:
+            logger.warning("pykrx 미설치 — 코스피200 유니버스 사용 불가. pip install pykrx")
+            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+        date_str = (as_of_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+        try:
+            # 1028 = KOSPI200. 버전에 따라 (code) 또는 (code, date) 시그니처
+            try:
+                tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028", date_str)
+            except TypeError:
+                tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028")
+            if not tickers:
+                logger.warning("코스피200 구성종목 조회 결과 없음 (일자: {})", as_of_date)
+                return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+            rows = []
+            for t in tickers:
+                code = str(t).strip().zfill(6)
+                try:
+                    name = _pykrx_stock.get_market_ticker_name(t, date_str) or ""
+                except (TypeError, Exception):
+                    try:
+                        name = _pykrx_stock.get_market_ticker_name(t) or ""
+                    except Exception:
+                        name = ""
+                rows.append({"Code": code, "Name": name, "Market": "KOSPI", "Marcap": 0})
+            df = pd.DataFrame(rows)
+            logger.info("코스피200 구성종목 {}개 조회 완료 (기준일: {})", len(df), as_of_date)
+            return df
+        except Exception as e:
+            logger.warning("코스피200 구성종목 조회 실패 ({}): {}", as_of_date, e)
+            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
 
     def _fetch_korean_stock_via_yfinance(
         self,
@@ -264,7 +510,10 @@ class DataCollector:
             df = self._normalize_dataframe(df)
             from core.data_validator import DataValidator
             df = DataValidator.clean_dataframe(df, symbol)
-            logger.info("종목 {} 데이터 수집 완료 (yfinance): {}건", symbol, len(df))
+            logger.info(
+                "종목 {} 데이터 수집 완료 (소스=yfinance, 수정주가=auto_adjust=True): {}건",
+                symbol, len(df),
+            )
             return df
         except Exception as e:
             logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
@@ -272,8 +521,11 @@ class DataCollector:
 
     def fetch_korean_stock_via_kis(self, symbol: str) -> pd.DataFrame:
         """
-        KIS API를 이용한 한국 주식 일봉 데이터 수집
-        (FinanceDataReader 미지원 환경에서 폴백으로 사용)
+        KIS API를 이용한 한국 주식 일봉 데이터 수집 (FDR/yfinance 실패 시 폴백).
+
+        주의: KIS API는 비수정주가(원시)를 반환하는 경우가 많습니다. 백테스트를 FDR/yfinance(수정주가)로
+        했다면 실전에서 KIS만 쓰면 지표값·신호가 달라질 수 있으므로, 가능하면 FinanceDataReader를 설치해
+        백테스트와 실전에서 동일 소스를 사용하세요.
 
         Args:
             symbol: 종목 코드
@@ -289,6 +541,9 @@ class DataCollector:
                 logger.warning("KIS API 미설정 — 빈 DataFrame 반환")
                 return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
+            logger.info(
+                "한국 주식 데이터 수집 (소스=KIS API, 수정주가=비수정(원시) 가능성 — 백테스트와 소스 불일치 시 지표 차이 주의)"
+            )
             kis.authenticate()
             raw_data = kis.get_daily_prices(symbol, period="D", count=100)
 
@@ -322,7 +577,10 @@ class DataCollector:
             from core.data_validator import DataValidator
             df = DataValidator.clean_dataframe(df, symbol)
 
-            logger.info("KIS API 일봉 수집 완료: {} {}건", symbol, len(df))
+            logger.info(
+                "KIS API 일봉 수집 완료: {} {}건 (소스=KIS_API, 수정주가=No/불확실)",
+                symbol, len(df),
+            )
             return df
 
         except Exception as e:

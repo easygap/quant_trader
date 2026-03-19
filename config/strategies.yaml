@@ -46,42 +46,76 @@ indicators:
     surge_ratio: 1.5          # 거래량 급증 기준 (평균 대비 비율)
 
 # --- 멀티 지표 스코어링 전략 ---
-# 다중공선성 완화: 가격 강도 그룹(RSI/MACD/볼린저/MA)은 방향별 최대 1개만 반영하므로
-# 총점 범위가 약 ±3 수준입니다. 임계값을 이에 맞춰 조정하세요.
+# 다중공선성: RSI/MACD/MA는 모두 가격·이동평균 변형이라 스코어가 1~2개 지표에 지배될 수 있음.
+# --mode check_correlation 필수 실행. |r|>=0.7 쌍은 하나 제거(가중치 0) 권장.
+# 실질적 독립 정보는 3그룹 각 대표 1개만 두는 것을 권장: (1) 가격모멘텀 MA 또는 MACD (2) 변동성 볼린저 (3) 거래량.
+# 가격 강도 그룹은 방향별 최대 1개만 반영하므로 총점 범위가 약 ±3 수준. 임계값을 이에 맞춰 조정.
+#
+# ⚠️ 가중치 최적화 파이프라인 (권장 순서):
+#   1. python main.py --mode check_correlation --symbol 005930 --validation-years 5
+#      → 상관계수 0.7 이상 지표 쌍 확인 (예: RSI-스토캐스틱 중복)
+#   2. python main.py --mode optimize --strategy scoring --include-weights --auto-correlation --symbol 005930
+#      → 상관 분석 자동 실행 → 고상관 지표 비활성화 → 가중치+임계값 Grid Search → OOS 샤프 ≥ 1.0 게이트
+#      → (수동) --disable-weights w_rsi,w_ma 로 특정 지표 강제 비활성화도 가능
+#   3. python main.py --mode validate --walk-forward --strategy scoring --symbol 005930 --validation-years 5
+#      → 여러 기간에서 안정적인지 최종 확인. 모든 윈도우 통과 시에만 실전 사용.
+#   OOS 게이트 미달 = 과적합 → 이 값을 그대로 두거나 다른 종목/기간으로 재시도.
+#
+# ⚠️ 아래 가중치는 *검증되지 않은 직관값*입니다. 이 상태로 실전 투입하면 신호가 노이즈이므로
+#    무작위 또는 손실 결과가 나올 수 있습니다. 반드시 위 파이프라인을 실행하세요.
 scoring:
-  # 대칭 권장: |buy_threshold| = |sell_threshold| (예: 3, -3). 비대칭이면 매도 타이밍이 늦어지거나 너무 빨라질 수 있음.
   buy_threshold: 3            # 매수 실행 최소 점수 (권장 2~3)
   sell_threshold: -3          # 매도 실행 최소 점수 (권장 -2~-3, buy와 절댓값 동일 권장)
 
-  # 아래 가중치는 예시/직관값이며, 한국 시장 데이터로 검증된 값이 아닙니다.
-  # 최적화(--mode optimize)로 찾은 값은 과거 데이터 과적합 가능성이 있으므로 OOS 검증 필수.
-  # 자세한 내용은 quant_trader_design.md "가중치 설정 유의사항" 참고.
+  # --- 다중공선성 완화 모드 ---
+  # RSI·MACD·MA·볼린저는 대부분 "가격이 최근 올랐냐 내렸냐"의 변형.
+  # 지표 5개가 합산되면 실질적으로 1~2개 정보가 스코어를 지배합니다.
+  #
+  # max_per_direction (기본): 가격 그룹(RSI/MACD/볼린저/MA) 점수를 매수 방향 최대 1개
+  #   + 매도 방향 최대 1개만 반영. 거래량은 별도 가산. 중간 수준 완화.
+  # representative_only (권장): 3그룹(가격 모멘텀/변동성/거래량)에서 대표 지표 1개씩만
+  #   사용하고 나머지 점수를 강제 0. 가격=MACD, 변동성=볼린저, 거래량=volume.
+  #   → 스코어 = MACD점수 + 볼린저점수 + 거래량점수 (실질적으로 독립 정보 3개만 합산)
+  collinearity_mode: "representative_only"   # "max_per_direction" | "representative_only"
+
+  # ⚠️ 미검증 직관값 — OOS 검증 없이 사용 금지.
+  # RSI·MACD·MA는 모두 가격 기반으로 다중공선성이 높음 (RSI↔스토캐스틱 r≈0.8, MACD↔MA r≈0.7).
+  # check_correlation에서 고상관 쌍을 확인하고, optimize --include-weights --auto-correlation으로
+  # 독립성 높은 지표만 남긴 최적 가중치를 찾은 뒤 교체하세요.
   weights:
-    rsi_oversold: 2           # RSI 과매도 (예시값, 미검증)
-    rsi_overbought: -2         # RSI 과매수 (예시값, 미검증)
-    macd_golden_cross: 2      # MACD 골든크로스 (예시값, 미검증)
-    macd_dead_cross: -2       # MACD 데드크로스 (예시값, 미검증)
-    bollinger_lower: 1        # 볼린저 하단 이탈 (예시값, 미검증)
-    bollinger_upper: -1       # 볼린저 상단 이탈 (예시값, 미검증)
-    volume_surge: 1           # 거래량 급증 (예시값, 미검증)
-    ma_golden_cross: 1        # 이동평균 골든크로스 (예시값, 미검증)
-    ma_dead_cross: -1         # 이동평균 데드크로스 (예시값, 미검증)
+    rsi_oversold: 2           # RSI 과매도 (⚠️ 직관값, 미검증)
+    rsi_overbought: -2         # RSI 과매수 (⚠️ 직관값, 미검증)
+    macd_golden_cross: 2      # MACD 골든크로스 (⚠️ 직관값, 미검증)
+    macd_dead_cross: -2       # MACD 데드크로스 (⚠️ 직관값, 미검증)
+    bollinger_lower: 1        # 볼린저 하단 이탈 (⚠️ 직관값, 미검증)
+    bollinger_upper: -1       # 볼린저 상단 이탈 (⚠️ 직관값, 미검증)
+    volume_surge: 1           # 거래량 급증 (⚠️ 직관값, 미검증)
+    ma_golden_cross: 1        # 이동평균 골든크로스 (⚠️ 직관값, 미검증)
+    ma_dead_cross: -1         # 이동평균 데드크로스 (⚠️ 직관값, 미검증)
 
 # --- 평균 회귀 전략 ---
 # 한계: 한국 시장에서 큰 폭 하락은 펀더멘털(실적·분식·대주주 등) 비중이 커서 평균 회귀가 성립하지 않는 종목이 많음.
-# Z-Score < -2 는 "기술적 과매도"와 "악화 기업"을 구분하지 못하며, ADX < adx_filter 도 하락 추세 구간에서 낮게 나와 필터가 불완전함. 유동성/퀄리티·손절 필수.
-# fundamental_filter: Z-Score 매수 조건 충족 시 PER·부채비율이 정상 범위인지 확인 후에만 매수 (yfinance 기반).
+# Z-Score < -2 는 "기술적 과매도"와 "악화 기업"을 구분하지 못하며, ADX < adx_filter 도 하락 추세 구간에서 낮게 나와 필터가 불완전함.
+# 실전 권장: exclude_52w_low_near 사용 + 유동성/퀄리티·손절 필수. 코스피200 대형주만 적용 시 상대적으로 안전.
+# fundamental_filter: Z-Score 매수 조건 충족 시 PER·부채비율 정상 범위 확인 (yfinance 기반, 한국 종목은 업데이트 느림·누락 많음 → pykrx/KRX 공시 병행 검토).
 mean_reversion:
   z_score_buy: -2.0           # 매수 Z-Score 기준
   z_score_sell: 2.0          # 매도 Z-Score 기준
-  lookback_period: 20         # Z-Score "평균" 정의: 이 기간 일봉의 이동평균·표준편차. 20 vs 60이면 신호가 완전히 달라짐. 고정값(미검증), 필요 시 조정 또는 --mode optimize
+  lookback_period: 20         # Z-Score "평균" 정의: 이 기간 일봉의 이동평균·표준편차. 20 vs 60이면 신호가 완전히 달라짐.
   adx_filter: 20              # ADX 이 값 미만일 때만 활성화 (횡보 가정, 단 하락 추세에서도 낮게 나올 수 있음)
   volume_spike_filter: 3.0    # 거래량 급변 시 매수 차단 (평균 대비 N배 초과)
-  fundamental_filter:         # 펀더멘털 필터 (enabled: true 시 매수 전 PER·부채비율 검사)
-    enabled: true
-    per_min: 0                # PER 하한 (0 = 적자 종목 제외). null 이면 검사 생략
-    per_max: 50               # PER 상한. null 이면 검사 생략
-    debt_ratio_max: 200       # 부채비율(%) 상한. null 이면 검사 생략
+  # 52주 고점/저점 필터: 실적 악화·장기 하락 구간 회피
+  exclude_52w_low_near: true            # true 권장 (한국 시장 실전)
+  max_drawdown_from_52w_high: 0.30      # 52주 고점 대비 30% 이상 하락한 종목 매수 제외 (0.30 = -30%)
+  near_52w_low_pct: 0.05                # 52주 저점 대비 5% 이내이면 신저가 근방 → 매수 제외
+  window_52w: 252                       # 52주 = 252 거래일
+  # 코스피200 제한: 소형주의 영구 하락 위험 회피. true면 코스피200 구성 종목만 매수 가능 (pykrx 필요)
+  restrict_to_kospi200: false           # true 권장 (실전 안전). false면 모든 종목 허용
+  fundamental_filter:                   # 펀더멘털 필터 (enabled: true 시 매수 전 PER·부채비율 검사)
+    enabled: true                       # pykrx(우선) → yfinance(폴백) 순서로 조회
+    per_min: 0                          # PER 하한 (0 = 적자 종목 제외). null 이면 검사 생략
+    per_max: 50                         # PER 상한. null 이면 검사 생략
+    debt_ratio_max: 200                 # 부채비율(%) 상한. null 이면 검사 생략
 
 # --- 추세 추종 전략 ---
 # 진입이 늦는 구조: ADX·200일선·MACD 세 조건 동시 충족 = 이미 상승한 뒤. 손실 거래 잦고 승률 40% 이하 가능.
@@ -109,6 +143,8 @@ volatility_condition:
 # technical = 스코어링(RSI/MACD/볼린저/MA/거래량), momentum_factor = N일 수익률, volatility_condition = N일 실현변동성
 ensemble:
   mode: "majority_vote"       # majority_vote | weighted_sum | conservative
+  auto_downgrade: true        # true면 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
+  independence_threshold: 0.6 # 전략 신호 상관계수 |r| >= 이 값이면 고상관 판단 → 다수결 의미 퇴색 경고
   confidence_weight:          # weighted_sum 모드 시 전략별 가중치
     technical: 1.0
     momentum_factor: 1.0

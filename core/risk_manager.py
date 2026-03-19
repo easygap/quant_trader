@@ -299,20 +299,25 @@ class RiskManager:
         total_value: float,
         available_cash: float = None,
         current_invested: float = 0,
+        symbol: str = "",
+        sector_map: dict | None = None,
+        positions: list | None = None,
     ) -> dict:
         """
-        분산 투자 규칙 확인
+        분산 투자 규칙 확인 (종목 수·비중·투자비율·현금 + 업종 비중)
 
         Args:
             current_positions: 현재 보유 종목 수
             position_value: 해당 종목 투자 금액
             total_value: 총 포트폴리오 가치
+            available_cash: 가용 현금
+            current_invested: 현재 총 투자 금액
+            symbol: 매수 대상 종목코드 (업종 체크용)
+            sector_map: {종목코드: 업종명} 딕셔너리 (None이면 업종 체크 스킵)
+            positions: 현재 보유 Position 객체 리스트 (업종 비중 계산용)
 
         Returns:
-            {
-                "can_buy": 매수 가능 여부,
-                "reason": 불가 사유 (해당 시),
-            }
+            {"can_buy": bool, "reason": str}
         """
         div_config = self.risk_params.get("diversification", {})
         max_positions = div_config.get("max_positions", 10)
@@ -320,15 +325,12 @@ class RiskManager:
         max_investment_ratio = div_config.get("max_investment_ratio", 0.70)
         min_cash = div_config.get("min_cash_ratio", 0.20)
 
-        # 최대 종목 수 초과
         if current_positions >= max_positions:
             return {"can_buy": False, "reason": f"최대 보유 종목({max_positions}개) 초과"}
 
-        # 단일 종목 비중 초과
         if total_value > 0 and (position_value / total_value) > max_ratio:
             return {"can_buy": False, "reason": f"단일 종목 비중 {max_ratio*100:.0f}% 초과"}
 
-        # 전체 주식 투자 비중 초과
         if total_value > 0:
             projected_invested_ratio = (current_invested + position_value) / total_value
             if projected_invested_ratio > max_investment_ratio:
@@ -345,6 +347,33 @@ class RiskManager:
                     "can_buy": False,
                     "reason": f"최소 현금 비중 {min_cash*100:.0f}% 미만",
                 }
+
+        # 업종별 최대 비중 체크
+        max_sector_ratio = div_config.get("max_sector_ratio")
+        if (
+            max_sector_ratio is not None
+            and max_sector_ratio > 0
+            and total_value > 0
+            and symbol
+            and sector_map
+            and positions is not None
+        ):
+            target_sector = sector_map.get(symbol, "")
+            if target_sector:
+                sector_invested = sum(
+                    float(getattr(p, "total_invested", 0) or 0)
+                    for p in positions
+                    if sector_map.get(getattr(p, "symbol", ""), "") == target_sector
+                )
+                projected = sector_invested + position_value
+                if projected / total_value > max_sector_ratio:
+                    return {
+                        "can_buy": False,
+                        "reason": (
+                            f"업종 '{target_sector}' 비중 {projected / total_value * 100:.0f}% > "
+                            f"상한 {max_sector_ratio * 100:.0f}%"
+                        ),
+                    }
 
         return {"can_buy": True, "reason": ""}
 
@@ -419,7 +448,7 @@ class RiskManager:
             avg_price: 매도 시 평균 매입 단가 (양도소득세 계산용; 대주주 해당 시)
 
         Returns:
-            commission(수수료), tax(증권거래세 매도 시 0.18%), capital_gains_tax(양도소득세, 설정 시),
+            commission(수수료), tax(증권거래세+농특세 매도 시 0.20%), capital_gains_tax(양도소득세, 설정 시),
             slippage, total_cost, effective_price 등.
         """
         costs = self.risk_params.get("transaction_costs", {})
@@ -453,10 +482,10 @@ class RiskManager:
         slippage = slippage_per_share * quantity
         slippage_rate_effective = slippage_per_share / price if price > 0 else 0
 
-        # 증권거래세: 매도 금액의 0.18% (국내 상장주 매도 시 의무)
+        # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일)
         tax = 0
         if action.upper() == "SELL":
-            tax = amount * costs.get("tax_rate", 0.0018)
+            tax = amount * costs.get("tax_rate", 0.0020)
 
         # 양도소득세 (대주주 해당 시만; enabled 시 실현 이익에 대해 부과)
         capital_gains_tax = 0

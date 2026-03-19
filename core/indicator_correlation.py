@@ -2,6 +2,8 @@
 스코어링 지표 독립성 검증.
 - 스코어링에 사용하는 지표(score_rsi, score_macd, score_bollinger, score_volume, score_ma) 간
   상관계수를 계산하고, 상관계수 0.7 이상인 쌍을 찾아 하나 제거 또는 가중치 축소를 권고.
+- 대부분의 지표는 가격·이동평균 변형이므로 다중공선성 위험: 실질적으로 독립 정보는
+  (1) 가격 모멘텀 (MA 또는 MACD 중 하나), (2) 변동성 (볼린저/ATR), (3) 거래량 — 3그룹 각 1개만 권장.
 """
 
 from typing import List, Tuple
@@ -17,6 +19,16 @@ SCORE_LABELS = {
     "score_bollinger": "볼린저",
     "score_volume": "거래량",
     "score_ma": "이동평균",
+}
+
+# 실질적 독립 정보 3그룹 (그룹당 대표 1개만 두면 다중공선성 완화)
+# 가격 모멘텀: RSI, MACD, MA — 같은 "가격 추세/강도" 정보 변형. 스토캐스틱 추가 시 RSI와 고상관.
+# 변동성: 볼린저 (ATR은 현재 스코어링 미사용)
+# 거래량: volume — 가격 외 독립
+INDICATOR_GROUPS = {
+    "가격 모멘텀": ["score_rsi", "score_macd", "score_ma"],
+    "변동성": ["score_bollinger"],
+    "거래량": ["score_volume"],
 }
 
 
@@ -64,13 +76,17 @@ def recommend_reduction(
 ) -> List[dict]:
     """
     고상관 쌍에 대해 '하나 제거 또는 가중치 축소' 권고를 생성.
-    가격 강도 그룹(RSI/MACD/볼린저/MA) 내 쌍은 이미 다중공선성 완화로 그룹당 1개만 반영되므로,
-    권고는 '가중치 축소' 또는 '둘 중 하나 비활성화(가중치 0)' 수준으로 제안.
+    가격 모멘텀 그룹(RSI/MACD/MA) 내 쌍은 같은 정보를 세는 것이므로 그룹당 1개만 남기고
+    나머지는 가중치 0 권장. 변동성(볼린저)·거래량은 독립이므로 유지.
     """
     recommendations = []
     for col1, col2, r in high_pairs:
         label1 = SCORE_LABELS.get(col1, col1)
         label2 = SCORE_LABELS.get(col2, col2)
+        group_note = (
+            "가격 모멘텀 그룹(RSI/MACD/MA) 내 고상관: 그룹당 대표 1개만 두고 나머지는 가중치 0 권장. "
+            "실질적 독립 정보는 (1) 가격모멘텀 (2) 변동성 (3) 거래량 3그룹 각 1개만 두세요."
+        )
         recommendations.append({
             "col1": col1,
             "col2": col2,
@@ -79,9 +95,8 @@ def recommend_reduction(
             "correlation": r,
             "suggestion": (
                 f"{label1}–{label2} 상관계수 {r:.2f}. "
-                "둘 중 하나 가중치 축소 또는 제거(0) 권장. "
-                "가격 강도 그룹(RSI/MACD/볼린저/MA)은 이미 방향별 최대 1개만 반영되므로, "
-                "동일 그룹 내 고상관은 strategies.yaml에서 해당 지표 가중치를 낮추는 것을 고려하세요."
+                "둘 중 하나 가중치 0(제거) 또는 축소 권장. "
+                f"{group_note}"
             ),
         })
     return recommendations
@@ -114,13 +129,101 @@ def run_indicator_correlation_check(
     }
 
 
-def render_correlation_report(result: dict) -> str:
+SCORE_COL_TO_WEIGHT_KEY = {
+    "score_rsi": "w_rsi",
+    "score_macd": "w_macd",
+    "score_bollinger": "w_bollinger",
+    "score_volume": "w_volume",
+    "score_ma": "w_ma",
+}
+
+
+def suggest_disable_weights(
+    high_pairs: List[Tuple[str, str, float]],
+) -> List[str]:
+    """
+    고상관 쌍에서 자동 비활성화할 가중치 키(w_*) 목록 반환.
+
+    전략: 가격 모멘텀 그룹(RSI/MACD/MA) 내 고상관 쌍이 있으면
+    가격 모멘텀 그룹에서 MACD를 대표로 남기고 나머지(RSI, MA)를 비활성화.
+    (MACD는 추세 강도+방향+모멘텀을 함께 제공하므로 대표성이 가장 높음)
+    """
+    if not high_pairs:
+        return []
+
+    momentum_group = {"score_rsi", "score_macd", "score_ma"}
+    momentum_representative = "score_macd"
+    to_disable = set()
+
+    for col1, col2, r in high_pairs:
+        if col1 in momentum_group and col2 in momentum_group:
+            for col in (col1, col2):
+                if col != momentum_representative:
+                    wk = SCORE_COL_TO_WEIGHT_KEY.get(col)
+                    if wk:
+                        to_disable.add(wk)
+        else:
+            for col in (col1, col2):
+                if col in momentum_group and col != momentum_representative:
+                    wk = SCORE_COL_TO_WEIGHT_KEY.get(col)
+                    if wk:
+                        to_disable.add(wk)
+    return sorted(to_disable)
+
+
+def build_next_step_commands(
+    symbol: str,
+    disable_weights: List[str],
+    start: str = None,
+    end: str = None,
+) -> dict:
+    """상관 분석 후 다음 단계 CLI 명령어 생성."""
+    dw_arg = f" --disable-weights {','.join(disable_weights)}" if disable_weights else ""
+    date_args = ""
+    if start:
+        date_args += f" --start {start}"
+    if end:
+        date_args += f" --end {end}"
+
+    step2 = (
+        f"python main.py --mode optimize --strategy scoring --include-weights"
+        f" --symbol {symbol}{dw_arg}{date_args}"
+    )
+    step3 = (
+        f"python main.py --mode validate --walk-forward --strategy scoring"
+        f" --symbol {symbol} --validation-years 5"
+    )
+    step_auto = (
+        f"python main.py --mode optimize --strategy scoring --include-weights"
+        f" --auto-correlation --symbol {symbol}{date_args}"
+    )
+    return {
+        "step2_optimize": step2,
+        "step3_validate": step3,
+        "step_auto": step_auto,
+    }
+
+
+def render_correlation_report(
+    result: dict,
+    symbol: str = "005930",
+    start: str = None,
+    end: str = None,
+) -> str:
     """지표 독립성 검증 결과를 텍스트 리포트로 렌더링."""
     lines = [
         "=" * 70,
         "스코어링 지표 독립성 검증 (상관계수)",
         f"기준: |상관계수| >= {result['threshold']} 인 쌍을 고상관으로 판단",
         "=" * 70,
+        "",
+        "[다중공선성 안내] 대부분의 지표는 가격·이동평균 변형입니다. 스코어가 실질적으로",
+        "1~2개 지표에 지배당하지 않으려면, 실질적 독립 정보 3그룹 각 대표 1개만 두는 것을 권장:",
+        "  (1) 가격 모멘텀: MA 골든/데드크로스 또는 MACD (택 1)",
+        "  (2) 변동성: 볼린저",
+        "  (3) 거래량: volume_surge",
+        "RSI·스토캐스틱은 둘 다 오실레이터로 고상관. MACD와 MA 크로스는 같은 추세 정보.",
+        "",
     ]
     if result["corr_matrix"].empty:
         lines.append("스코어 컬럼 부족으로 상관계수 행렬을 계산할 수 없습니다.")
@@ -131,11 +234,36 @@ def render_correlation_report(result: dict) -> str:
     lines.append(f"\n고상관 쌍 수: {result['n_high']}")
 
     if result["recommendations"]:
-        lines.append("\n[권고] 상관계수 0.7 이상 쌍 — 하나 제거 또는 가중치 축소 권장")
+        lines.append("\n[권고] |r| >= 0.7 쌍 — 하나 제거(가중치 0) 또는 가중치 축소 권장")
         for rec in result["recommendations"]:
             lines.append(f"  - {rec['label1']}–{rec['label2']}: r={rec['correlation']:.2f}")
             lines.append(f"    → {rec['suggestion']}")
     else:
         lines.append("\n고상관 쌍 없음. 현재 지표 조합은 독립성 기준을 만족합니다.")
+
+    disable_weights = suggest_disable_weights(result.get("high_correlation_pairs", []))
+    result["disable_weights"] = disable_weights
+    cmds = build_next_step_commands(symbol, disable_weights, start, end)
+
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("[자동 비활성화 대상 가중치]")
+    if disable_weights:
+        lines.append(f"  {', '.join(disable_weights)}")
+        lines.append(f"  (가격 모멘텀 대표: MACD 유지, 나머지 제거)")
+    else:
+        lines.append("  없음 (모든 지표 유지)")
+
+    lines.append("")
+    lines.append("[다음 단계 — 가중치 최적화 파이프라인]")
+    lines.append("  ① 상관 분석 (현재 단계) — 완료")
+    lines.append(f"  ② 가중치 최적화 (OOS 샤프 ≥ 1.0 게이트):")
+    lines.append(f"     {cmds['step2_optimize']}")
+    lines.append(f"  ③ 워크포워드 검증 (여러 기간 안정성):")
+    lines.append(f"     {cmds['step3_validate']}")
+    lines.append("")
+    lines.append("  [원스텝] 상관 분석 + 최적화를 한 번에 실행:")
+    lines.append(f"     {cmds['step_auto']}")
+    lines.append("=" * 70)
 
     return "\n".join(lines) + "\n"

@@ -6,37 +6,128 @@
 - 모멘텀 팩터: 12개월 수익률 상위 종목 (momentum_top)
 - 저변동성 팩터: 60일 실현변동성 하위 = 저변동성 상위 (low_vol_top)
 - 모멘텀+저변동성 복합: 12개월 수익률 상위이면서 저변동성 필터 (momentum_lowvol)
+- 유동성 필터: 20일 평균 거래대금(원) 하한으로 저유동 종목 진입 대상에서 제외 (risk_params.liquidity_filter)
+- 리밸런싱 주기: 팩터 모드(momentum_top/low_vol_top/momentum_lowvol)는 rebalance_interval_days(기본 20)마다
+  재계산하고 그 사이에는 캐시를 사용. 매일 재계산 시 종목 교체가 잦아 거래비용이 불필요하게 증가하고,
+  너무 드물면 팩터 효과가 희석됨(Jegadeesh & Titman 1993 기준 월 1회 리밸런싱이 일반적).
 """
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
+
 import numpy as np
 from loguru import logger
 
 from config.config_loader import Config
 from core.data_collector import DataCollector
 
+_FACTOR_MODES = {"momentum_top", "low_vol_top", "momentum_lowvol"}
+_CACHE_FILENAME = "watchlist_cache.json"
+
 
 class WatchlistManager:
-    """watchlist 설정을 실제 종목 리스트로 해석한다."""
+    """watchlist 설정을 실제 종목 리스트로 해석한다.
 
-    def __init__(self, config: Config = None):
+    as_of_date를 지정하면 해당 시점 기준 종목 유니버스를 사용하여 생존자 편향을 완화한다.
+    (backtest_universe.mode 설정에 따라 historical/kospi200/current 모드 적용)
+    """
+
+    def __init__(self, config: Config = None, as_of_date: str = None):
         self.config = config or Config.get()
+        self.as_of_date = as_of_date
+
+    # ------------------------------------------------------------------
+    # 리밸런싱 캐시
+    # ------------------------------------------------------------------
+
+    def _cache_path(self) -> Path:
+        db_path = (self.config.database or {}).get("sqlite_path", "data/quant_trader.db")
+        return Path(db_path).parent / _CACHE_FILENAME
+
+    def _load_cache(self, mode: str) -> dict | None:
+        """캐시 파일에서 해당 mode의 엔트리를 반환. 없거나 파싱 실패 시 None."""
+        path = self._cache_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entry = data.get(mode)
+            if entry and isinstance(entry.get("symbols"), list) and entry.get("date"):
+                return entry
+        except Exception as e:
+            logger.debug("watchlist 캐시 로드 실패: {}", e)
+        return None
+
+    def _save_cache(self, mode: str, symbols: list[str]):
+        path = self._cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data[mode] = {
+            "symbols": symbols,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+        }
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.debug("watchlist 캐시 저장: mode={}, {}개 종목, {}", mode, len(symbols), data[mode]["date"])
+
+    def _is_cache_valid(self, mode: str) -> bool:
+        """캐시가 존재하고 rebalance_interval_days 이내인지 확인."""
+        entry = self._load_cache(mode)
+        if entry is None:
+            return False
+        interval = max(1, int(self.config.watchlist_settings.get("rebalance_interval_days", 20)))
+        try:
+            cached_date = datetime.strptime(entry["date"], "%Y-%m-%d")
+            return (datetime.now() - cached_date).days < interval
+        except Exception:
+            return False
+
+    def _get_cached_symbols(self, mode: str) -> list[str] | None:
+        entry = self._load_cache(mode)
+        if entry and self._is_cache_valid(mode):
+            symbols = entry["symbols"]
+            interval = max(1, int(self.config.watchlist_settings.get("rebalance_interval_days", 20)))
+            logger.info(
+                "watchlist 캐시 사용: mode={}, {}개 종목, 갱신일={} (리밸런싱 주기 {}일)",
+                mode, len(symbols), entry["date"], interval,
+            )
+            return symbols
+        return None
+
+    def _resolve_factor_mode(self, mode: str, settings: dict, builder) -> list[str]:
+        """팩터 모드 공통: 캐시 유효하면 캐시 반환, 아니면 재계산 후 캐시 저장."""
+        cached = self._get_cached_symbols(mode)
+        if cached:
+            return cached
+        symbols = builder(settings)
+        if symbols:
+            self._save_cache(mode, symbols)
+        return symbols
+
+    # ------------------------------------------------------------------
+    # resolve
+    # ------------------------------------------------------------------
 
     def resolve(self) -> list[str]:
-        """설정 기준으로 관심 종목 리스트를 생성한다."""
+        """설정 기준으로 관심 종목 리스트를 생성한다. 유동성 필터 적용 시 저유동 종목은 제외된다."""
         settings = self.config.watchlist_settings
         mode = str(settings.get("mode", "manual")).lower()
         manual_symbols = self._normalize_symbols(settings.get("symbols", []))
 
         if mode == "manual" and manual_symbols:
-            return manual_symbols
+            out = self._apply_liquidity_filter(manual_symbols)
+            return out if out else manual_symbols
 
         if mode == "top_market_cap":
             auto_symbols = self._build_top_market_cap_watchlist(settings)
             if auto_symbols:
                 return auto_symbols
 
-        # 코스피200: 시총 상위 200개 (KRX 코스피200 구성과 유사)
         if mode == "kospi200":
             kospi_settings = {**settings, "market": "KOSPI", "top_n": settings.get("kospi200_top_n", 200)}
             auto_symbols = self._build_top_market_cap_watchlist(kospi_settings)
@@ -47,36 +138,47 @@ class WatchlistManager:
                 )
                 return auto_symbols
 
-        # 모멘텀 팩터: 12개월 수익률 상위 종목 매수
-        if mode == "momentum_top":
-            auto_symbols = self._build_momentum_top_watchlist(settings)
-            if auto_symbols:
-                return auto_symbols
-
-        # 저변동성 팩터: 60일 실현변동성 하위 = 저변동성 상위 종목
-        if mode == "low_vol_top":
-            auto_symbols = self._build_low_vol_top_watchlist(settings)
-            if auto_symbols:
-                return auto_symbols
-
-        # 모멘텀 + 저변동성: 12개월 수익률 상위이면서 저변동성 필터 통과
-        if mode == "momentum_lowvol":
-            auto_symbols = self._build_momentum_lowvol_watchlist(settings)
+        if mode in _FACTOR_MODES:
+            builder_map = {
+                "momentum_top": self._build_momentum_top_watchlist,
+                "low_vol_top": self._build_low_vol_top_watchlist,
+                "momentum_lowvol": self._build_momentum_lowvol_watchlist,
+            }
+            auto_symbols = self._resolve_factor_mode(mode, settings, builder_map[mode])
             if auto_symbols:
                 return auto_symbols
 
         if manual_symbols:
-            return manual_symbols
+            out = self._apply_liquidity_filter(manual_symbols)
+            return out if out else manual_symbols
 
         logger.warning("watchlist 설정이 비어 있어 기본 종목 005930을 사용합니다.")
         return ["005930"]
 
+    def _get_universe_mode(self) -> str:
+        """backtest_universe.mode 설정 반환. as_of_date가 있고 mode가 current면 historical로 자동 전환."""
+        universe = (self.config.risk_params or {}).get("backtest_universe") or {}
+        mode = (universe.get("mode") or "current").strip().lower()
+        if self.as_of_date and mode == "current":
+            return "historical"
+        return mode
+
     def _build_top_market_cap_watchlist(self, settings: dict) -> list[str]:
         market = str(settings.get("market", "KOSPI")).upper()
         top_n = max(1, int(settings.get("top_n", 20)))
+        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        use_liq = liq.get("enabled", False)
+        candidate_n = (min(100, top_n * 2) if use_liq else top_n)
 
+        universe = (self.config.risk_params or {}).get("backtest_universe") or {}
+        exclude_admin = universe.get("exclude_administrative", True)
+        u_mode = self._get_universe_mode()
         try:
-            stocks = DataCollector.get_krx_stock_list()
+            stocks = DataCollector.get_krx_stock_list(
+                as_of_date=self.as_of_date,
+                exclude_administrative=exclude_admin,
+                universe_mode=u_mode,
+            )
         except Exception as exc:
             logger.warning("KRX 종목 리스트 조회 실패 — 수동 watchlist로 대체: {}", exc)
             return []
@@ -85,7 +187,6 @@ class WatchlistManager:
             return []
 
         df = stocks.copy()
-
         market_col = self._pick_column(df, "Market", "market")
         code_col = self._pick_column(df, "Code", "code", "Symbol", "symbol")
         marcap_col = self._pick_column(df, "Marcap", "marcap", "Amount", "amount", "Close", "close")
@@ -103,7 +204,10 @@ class WatchlistManager:
 
         df[marcap_col] = df[marcap_col].astype(float)
         df = df.sort_values(marcap_col, ascending=False)
-        symbols = self._normalize_symbols(df[code_col].head(top_n).tolist())
+        symbols = self._normalize_symbols(df[code_col].head(candidate_n).tolist())
+        if use_liq:
+            symbols = self._apply_liquidity_filter(symbols)
+        symbols = symbols[:top_n]
 
         logger.info(
             "watchlist 자동 생성 완료: mode=top_market_cap market={} top_n={} 실제={}개",
@@ -114,9 +218,78 @@ class WatchlistManager:
         return symbols
 
     def _get_candidate_symbols(self, settings: dict, max_candidates: int) -> list[str]:
-        """팩터 계산용 후보 종목 리스트 (시총 상위 N개)."""
+        """팩터 계산용 후보 종목 리스트 (시총 상위 N개). 유동성 필터는 상위 호출에서 적용."""
         s = {**settings, "market": settings.get("market", "KOSPI"), "top_n": max_candidates}
         return self._build_top_market_cap_watchlist(s)
+
+    def _apply_liquidity_filter(self, symbols: list[str]) -> list[str]:
+        """
+        20일 평균 거래대금(원) 하한으로 저유동 종목을 제외한다.
+        risk_params.liquidity_filter.enabled=false 이면 원본 그대로 반환.
+
+        strict 모드 (기본 true): 거래대금 데이터를 조회할 수 없는 종목도 제외.
+          데이터 없는 종목을 통과시키면 거래대금 1억 미만 종목이 진입 대상에 포함될 위험.
+        strict=false: 데이터 없는 종목은 통과(기존 동작). 수동 watchlist에서 직접 지정한 종목 유지용.
+        """
+        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        if not liq.get("enabled", False):
+            return list(symbols) if symbols else []
+        min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5_000_000_000))
+        if min_krw <= 0:
+            return list(symbols) if symbols else []
+        strict = liq.get("strict", True)
+
+        collector = DataCollector(self.config)
+        passed = []
+        skipped_no_data = []
+        for sym in symbols:
+            avg_val = self._compute_avg_trading_value_20d(collector, sym)
+            if avg_val is not None and avg_val >= min_krw:
+                passed.append(sym)
+            elif avg_val is None:
+                if strict:
+                    skipped_no_data.append(sym)
+                else:
+                    passed.append(sym)
+            else:
+                logger.debug(
+                    "유동성 필터 제외: {} (20일 평균 거래대금 {:.0f}억 원 < {:.0f}억 원)",
+                    sym, avg_val / 1e8, min_krw / 1e8,
+                )
+        if skipped_no_data:
+            logger.warning(
+                "유동성 필터(strict): 거래대금 데이터 없어 제외된 종목 {}개: {}",
+                len(skipped_no_data), skipped_no_data[:10],
+            )
+        excluded = len(symbols) - len(passed)
+        if excluded > 0:
+            logger.info(
+                "유동성 필터 적용: {}개 중 {}개 통과 (20일 평균 거래대금 >= {:.0f}억 원, strict={})",
+                len(symbols), len(passed), min_krw / 1e8, strict,
+            )
+        return passed
+
+    @staticmethod
+    def _compute_avg_trading_value_20d(collector: DataCollector, symbol: str) -> float | None:
+        """최근 20거래일 평균 거래대금(원). close * volume 합계/일수. 데이터 부족 시 None."""
+        try:
+            end_d = datetime.now()
+            start_d = (end_d - timedelta(days=45)).strftime("%Y-%m-%d")
+            end_str = end_d.strftime("%Y-%m-%d")
+            df = collector.fetch_korean_stock(symbol, start_d, end_str)
+            if df.empty or len(df) < 15:
+                return None
+            if "close" not in df.columns or "volume" not in df.columns:
+                return None
+            close = df["close"].astype(float)
+            vol = df["volume"].astype(float)
+            trading_value = (close * vol).tail(20)
+            if trading_value.isna().all() or trading_value.sum() == 0:
+                return None
+            return float(trading_value.mean())
+        except Exception as e:
+            logger.debug("20일 평균 거래대금 계산 실패 {}: {}", symbol, e)
+            return None
 
     def _build_momentum_top_watchlist(self, settings: dict) -> list[str]:
         """모멘텀 팩터: 12개월 수익률 상위 종목. 후보 풀에서 1년 수익률 계산 후 상위 top_n 반환."""

@@ -44,11 +44,19 @@ def _override_with_env(settings: dict) -> dict:
     settings["kis_api"]["accounts"] = accounts
     if "MAX_CALLS_PER_SEC" in os.environ:
         settings["kis_api"]["max_calls_per_sec"] = float(os.environ["MAX_CALLS_PER_SEC"])
+    if "MAX_CALLS_PER_MIN" in os.environ:
+        settings["kis_api"]["max_calls_per_min"] = int(os.environ["MAX_CALLS_PER_MIN"])
     if "MAX_RETRY" in os.environ:
         settings["kis_api"]["max_retry"] = int(os.environ["MAX_RETRY"])
 
     if "discord" in settings:
         settings["discord"]["webhook_url"] = os.environ.get("DISCORD_WEBHOOK_URL", settings["discord"].get("webhook_url"))
+
+    tg = settings.setdefault("telegram", {})
+    if "TELEGRAM_BOT_TOKEN" in os.environ:
+        tg["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
+    if "TELEGRAM_CHAT_ID" in os.environ:
+        tg["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
 
     return settings
 
@@ -57,7 +65,7 @@ def load_settings() -> dict:
     try:
         settings = load_yaml(CONFIG_DIR / "settings.yaml")
     except FileNotFoundError:
-        settings = {"kis_api": {}, "database": {}, "trading": {}, "discord": {}, "watchlist": {}}
+        settings = {"kis_api": {}, "database": {}, "trading": {}, "discord": {}, "telegram": {}, "watchlist": {}}
     return _override_with_env(settings)
 
 

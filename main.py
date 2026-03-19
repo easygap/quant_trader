@@ -46,7 +46,28 @@ def run_backtest(args):
     logger.info("📊 백테스팅 모드 시작")
     logger.info("=" * 50)
 
-    # 데이터 수집
+    config = Config.get()
+    universe = (config.risk_params or {}).get("backtest_universe") or {}
+    u_mode = (universe.get("mode") or "current").strip().lower()
+    if u_mode == "current":
+        import sys
+        logger.warning(
+            "backtest_universe.mode=current — 현재 상장 종목 기준. "
+            "생존자 편향으로 수익률이 과대평가될 수 있습니다. "
+            "mode: historical 또는 kospi200 권장 (설계서 §8.2.1)."
+        )
+        print(
+            "\n" + "=" * 60 + "\n"
+            "  ⚠️  [경고] 생존자 편향 (Survivorship Bias)\n"
+            + "=" * 60 + "\n"
+            "  backtest_universe.mode = current (기본)\n"
+            "  → 현재 상장 종목만 사용하므로 상장폐지 종목이 제외됩니다.\n"
+            "  → 백테스트 수익률이 실전보다 과대평가될 수 있습니다.\n"
+            "  → config/risk_params.yaml에서 mode: historical 로 변경 권장.\n"
+            + "=" * 60 + "\n",
+            file=sys.stderr,
+        )
+
     collector = DataCollector()
     symbol = args.symbol or "005930"
 
@@ -107,15 +128,52 @@ def run_backtest(args):
         )        
 
 
+def _run_auto_correlation(df, config, threshold=0.7):
+    """상관 분석 실행 후 자동 비활성화 대상 가중치 키 반환."""
+    from core.indicator_engine import IndicatorEngine
+    from core.signal_generator import SignalGenerator
+    from core.indicator_correlation import (
+        run_indicator_correlation_check,
+        suggest_disable_weights,
+    )
+
+    engine = IndicatorEngine(config)
+    generator = SignalGenerator(config)
+    df_ind = engine.calculate_all(df.copy())
+    df_scores = generator.generate(df_ind)
+    if df_scores.empty:
+        logger.warning("상관 분석 실패: 스코어 생성 불가")
+        return []
+    result = run_indicator_correlation_check(df_scores, threshold=threshold)
+    disable = suggest_disable_weights(result.get("high_correlation_pairs", []))
+    if result.get("high_correlation_pairs"):
+        logger.info(
+            "[auto-correlation] 고상관 쌍 {}개 발견: {}",
+            len(result["high_correlation_pairs"]),
+            [(p[0], p[1], f"r={p[2]:.2f}") for p in result["high_correlation_pairs"]],
+        )
+    if disable:
+        logger.info("[auto-correlation] 자동 비활성화: {}", disable)
+    else:
+        logger.info("[auto-correlation] 고상관 쌍 없음. 모든 지표 유지.")
+    return disable
+
+
 def run_param_optimize(args):
-    """전략 파라미터 자동 최적화 (Grid Search 또는 Bayesian). 오버피팅 주의."""
+    """전략 파라미터 자동 최적화 (Grid Search / Bayesian / 가중치 포함).
+
+    --include-weights: 스코어링 전략일 때 가중치도 탐색 (대칭 Grid, OOS 샤프 게이트 포함).
+    --auto-correlation: 최적화 전 상관 분석 자동 실행, 고상관 지표 비활성화 후 최적화.
+    권장 파이프라인: check_correlation → optimize --include-weights → validate --walk-forward.
+    """
     from core.data_collector import DataCollector
-    from backtest.param_optimizer import grid_search, bayesian_optimize
+    from backtest.param_optimizer import grid_search, bayesian_optimize, grid_search_scoring_weights
 
     logger.info("=" * 50)
-    logger.info("🔧 전략 파라미터 최적화 ({}), 전략: {}", getattr(args, "optimizer", "grid"), args.strategy)
+    logger.info("전략 파라미터 최적화 ({}), 전략: {}", getattr(args, "optimizer", "grid"), args.strategy)
     logger.info("=" * 50)
 
+    config = Config.get()
     collector = DataCollector()
     symbol = args.symbol or "005930"
     df = collector.fetch_korean_stock(symbol, args.start, args.end)
@@ -126,7 +184,80 @@ def run_param_optimize(args):
     optimizer = getattr(args, "optimizer", "grid")
     metric = getattr(args, "optimize_metric", "sharpe_ratio")
     train_ratio = getattr(args, "train_ratio", 0.7)
+    include_weights = getattr(args, "include_weights", False)
 
+    # 스코어링 전략 + --include-weights → 가중치 포함 Grid Search
+    if args.strategy == "scoring" and include_weights:
+        disabled = [s.strip() for s in (getattr(args, "disable_weights", "") or "").split(",") if s.strip()]
+
+        auto_corr = getattr(args, "auto_correlation", False)
+        if auto_corr:
+            corr_threshold = getattr(args, "correlation_threshold", 0.7)
+            auto_disabled = _run_auto_correlation(df, config, threshold=corr_threshold)
+            merged = sorted(set(disabled) | set(auto_disabled))
+            if merged != sorted(disabled):
+                logger.info(
+                    "[auto-correlation] 비활성화 병합: {} → {}",
+                    disabled or "(없음)", merged,
+                )
+            disabled = merged
+
+        result = grid_search_scoring_weights(
+            df,
+            metric=metric,
+            train_ratio=train_ratio,
+            strict_lookahead=True,
+            disabled_weights=disabled or None,
+        )
+        if result.get("message"):
+            logger.warning(result["message"])
+            return
+
+        logger.info("=" * 60)
+        logger.info("[가중치 최적화 결과]")
+        logger.info("평가 조합 수: {}", result["total_evaluated"])
+        logger.info("최적 가중치 (대칭): {}", result["best_weight_combo"])
+        logger.info("최적 임계값: buy={}, sell={}", *result["best_threshold"])
+        logger.info("학습 구간 {} ({}): {:.2f}", metric, result["train_period"], result["best_score"])
+        if result.get("disabled_weights"):
+            logger.info("비활성화 지표(0 고정): {}", result["disabled_weights"])
+
+        if result.get("oos_metrics"):
+            oos = result["oos_metrics"]
+            logger.info(
+                "OOS 구간 {} ({}): sharpe={}, return={:.1f}%",
+                metric, result.get("oos_period", ""),
+                oos.get("sharpe_ratio"), oos.get("total_return", 0),
+            )
+            if result["oos_passed"]:
+                logger.info("OOS 샤프 게이트 통과 (≥ {:.1f}). 아래 YAML을 strategies.yaml에 반영 가능.", result["oos_sharpe_gate"])
+            else:
+                logger.warning(
+                    "OOS 샤프 게이트 미달 (< {:.1f}). 이 가중치를 채택하지 마세요. "
+                    "다른 종목/기간으로 재시도하거나 check_correlation로 지표를 줄여 보세요.",
+                    result["oos_sharpe_gate"],
+                )
+
+        logger.info("\n{}", result.get("yaml_snippet", ""))
+        if result.get("all_results"):
+            logger.info("상위 5개 조합:")
+            for r in result["all_results"][:5]:
+                logger.info("  {} | threshold={} | {}={:.2f}", r["weight_combo"], r["threshold"], metric, r["score"])
+
+        logger.info("=" * 60)
+        validate_cmd = (
+            f"python main.py --mode validate --walk-forward --strategy scoring "
+            f"--symbol {symbol} --validation-years 5"
+        )
+        logger.info("다음 단계 (워크포워드 검증):\n  {}", validate_cmd)
+        if result["oos_passed"]:
+            logger.info(
+                "YAML 스니펫을 strategies.yaml에 반영한 뒤 위 명령을 실행하세요.\n"
+                "워크포워드에서도 안정적이면 --mode paper 로 모의투자를 시작합니다."
+            )
+        return
+
+    # 기존: 임계값만 탐색
     if optimizer == "bayesian":
         result = bayesian_optimize(
             df,
@@ -197,7 +328,9 @@ def run_check_indicator_correlation(args):
 
     threshold = args.correlation_threshold
     result = run_indicator_correlation_check(df_scores, threshold=threshold)
-    report_text = render_correlation_report(result)
+    report_text = render_correlation_report(
+        result, symbol=symbol, start=start_date, end=end_date,
+    )
 
     out_dir = Path(getattr(args, "output_dir", "reports"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -208,12 +341,73 @@ def run_check_indicator_correlation(args):
     print(report_text)
     logger.info("지표 독립성 검증 리포트 저장: {}", report_path)
 
+    disable_weights = result.get("disable_weights", [])
+    if disable_weights:
+        logger.info(
+            "고상관 지표 자동 비활성화 대상: {}. "
+            "optimize --include-weights --disable-weights {} 로 전달하거나 "
+            "--auto-correlation 플래그를 사용하세요.",
+            disable_weights, ",".join(disable_weights),
+        )
+
+
+def run_check_ensemble_correlation(args):
+    """앙상블 구성 전략(technical, momentum_factor, volatility_condition) 신호 간 상관계수 검증.
+    BUY=1, SELL=-1, HOLD=0 로 수치화한 일별 시리즈 상관계수. |r| >= 0.6 이면 conservative 모드 또는 전략 재구성 권고."""
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    from core.data_collector import DataCollector
+    from core.ensemble_correlation import run_ensemble_signal_correlation_check, render_ensemble_correlation_report
+
+    symbol = args.symbol or "005930"
+    years = getattr(args, "validation_years", 5)
+    end_date = args.end
+    start_date = args.start
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if not start_date:
+        start_date = (datetime.now() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
+
+    collector = DataCollector()
+    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    if df.empty or len(df) < 60:
+        logger.error("앙상블 신호 상관 검증용 데이터 부족: {} ({}~{}, {}일)", symbol, start_date, end_date, len(df))
+        return
+
+    threshold = getattr(args, "ensemble_correlation_threshold", 0.6)
+    result = run_ensemble_signal_correlation_check(df, threshold=threshold)
+    report_text = render_ensemble_correlation_report(result)
+
+    out_dir = Path(getattr(args, "output_dir", "reports"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = out_dir / f"ensemble_correlation_{symbol}_{timestamp}.txt"
+    report_path.write_text(report_text, encoding="utf-8")
+
+    print(report_text)
+    logger.info("앙상블 신호 독립성 검증 리포트 저장: {}", report_path)
+
 
 def run_strategy_validation(args):
     """전략 검증 모드 실행. --walk-forward 시 슬라이딩 윈도우 워크포워드 검증."""
     from backtest.strategy_validator import StrategyValidator
+    from core.notifier import Notifier
 
-    validator = StrategyValidator(output_dir=args.output_dir)
+    config = Config.get()
+    universe = (config.risk_params or {}).get("backtest_universe") or {}
+    u_mode = (universe.get("mode") or "current").strip().lower()
+    if u_mode == "current":
+        logger.warning(
+            "backtest_universe.mode=current — 벤치마크·유니버스가 현재 종목 기준. "
+            "생존자 편향 위험. mode: historical 또는 kospi200 권장 (§8.2.1)."
+        )
+    else:
+        logger.info("backtest_universe.mode={} — 생존자 편향 완화 적용", u_mode)
+
+    validator = StrategyValidator(config=config, output_dir=args.output_dir)
+    discord = Notifier(config)
+
     if getattr(args, "walk_forward", False):
         result = validator.run_walk_forward(
             symbol=args.symbol or "005930",
@@ -230,6 +424,7 @@ def run_strategy_validation(args):
         )
         print(validator._render_walk_forward_report(result))
         logger.info("워크포워드 검증 리포트 저장 완료: {}", result["report_path"])
+        warnings = result.get("warnings", [])
     else:
         result = validator.run(
             symbol=args.symbol or "005930",
@@ -245,6 +440,54 @@ def run_strategy_validation(args):
         )
         validator.print_report(result)
         logger.info("전략 검증 리포트 저장 완료: {}", result["report_path"])
+        warnings = result.get("validation", {}).get("warnings", [])
+
+    if warnings:
+        warn_text = "\n".join([f"⚠️ {w}" for w in warnings])
+        discord.send_message(
+            f"📊 전략 검증 경고 ({args.strategy} | {args.symbol or '005930'})\n{warn_text}"
+        )
+
+    # 앙상블 전략일 때 독립성 검증 자동 실행
+    if args.strategy == "ensemble":
+        _run_ensemble_independence_check_in_validate(args, config, discord)
+
+
+def _run_ensemble_independence_check_in_validate(args, config, notifier):
+    """validate 모드에서 앙상블 전략의 신호 독립성을 자동 검증한다."""
+    from datetime import datetime, timedelta
+    from core.data_collector import DataCollector
+    from core.ensemble_correlation import (
+        run_ensemble_signal_correlation_check,
+        render_ensemble_correlation_report,
+    )
+
+    symbol = args.symbol or "005930"
+    end_date = args.end or datetime.now().strftime("%Y-%m-%d")
+    start_date = args.start or (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+
+    collector = DataCollector(config)
+    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    if df.empty or len(df) < 60:
+        logger.warning("앙상블 독립성 검증 스킵: 데이터 부족 ({}일)", len(df) if df is not None else 0)
+        return
+
+    threshold = getattr(args, "ensemble_correlation_threshold", 0.6)
+    result = run_ensemble_signal_correlation_check(df, threshold=threshold, config=config)
+    report = render_ensemble_correlation_report(result)
+
+    logger.info("\n{}", report)
+
+    if result.get("should_force_conservative"):
+        warn_msg = (
+            f"앙상블 독립성 검증 경고 ({symbol}): "
+            f"고상관 쌍 {result['n_high']}개 감지 (|r|>={threshold}). "
+            "majority_vote 모드에서 다수결 의미 퇴색 위험. "
+            "conservative 전환 또는 전략 재구성 권장."
+        )
+        notifier.send_message(warn_msg)
+    else:
+        logger.info("앙상블 독립성 검증 통과: 모든 전략 쌍 |r| < {:.1f}", threshold)
 
 
 def run_paper_trading(args):
@@ -253,7 +496,7 @@ def run_paper_trading(args):
     from core.data_collector import DataCollector
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
-    from monitoring.discord_bot import DiscordBot
+    from core.notifier import Notifier
     from database.repositories import get_position, get_all_positions
 
     config = Config.get()
@@ -265,7 +508,7 @@ def run_paper_trading(args):
     collector = DataCollector()
     account_key = args.strategy or ""
     portfolio = PortfolioManager(config, account_key=account_key)
-    discord = DiscordBot(config)
+    discord = Notifier(config)
     executor = OrderExecutor(config, account_key=account_key)
 
     watchlist = WatchlistManager(config).resolve()
@@ -322,17 +565,23 @@ def run_paper_trading(args):
                 discord.send_signal_alert(symbol, signal_info)
 
             if signal_info["signal"] == "BUY" and not get_position(symbol, account_key=account_key):
-                from core.market_regime import allow_new_buys_by_market_regime
-                if not allow_new_buys_by_market_regime(config, collector):
-                    logger.info("하락장(코스피 200일선 이하)으로 신규 매수 중단 — {} 스킵", symbol)
+                from core.market_regime import check_market_regime
+                regime_result = check_market_regime(config, collector)
+                if not regime_result["allow_buys"]:
+                    logger.info("시장 국면 [bearish] — 200일선+단기모멘텀 하락 → {} 매수 스킵", symbol)
                     continue
+                regime_scale = regime_result["position_scale"]
                 capital_summary = portfolio.get_portfolio_summary()
+                adjusted_capital = capital_summary["total_value"] * regime_scale
+                adjusted_cash = capital_summary["cash"] * regime_scale
+                if regime_scale < 1.0:
+                    logger.info("시장 국면 [caution] — {} 포지션 사이징 {:.0f}%로 축소", symbol, regime_scale * 100)
                 avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1]) if "volume" in df.columns and not df["volume"].empty else None
                 order_result = executor.execute_buy(
                     symbol=symbol,
                     price=signal_info["close"],
-                    capital=capital_summary["total_value"],
-                    available_cash=capital_summary["cash"],
+                    capital=adjusted_capital,
+                    available_cash=adjusted_cash,
                     current_invested=capital_summary["current_value"],
                     atr=signal_info.get("atr"),
                     signal_score=signal_info["score"],
@@ -434,9 +683,12 @@ def run_live_trading(args):
 
 
 def run_compare_paper_backtest(args):
-    """모의투자 결과 vs 백테스트 결과 자동 비교. 차이가 크면 구현/데이터 문제 신호로 경고."""
+    """모의투자 결과 vs 백테스트 결과 자동 비교 + 실전 전환 준비 평가."""
     from datetime import datetime, timedelta
-    from backtest.paper_compare import run_compare
+    from backtest.paper_compare import run_compare, check_live_readiness
+    from core.notifier import Notifier
+
+    config = Config.get()
 
     start_s = args.start
     end_s = args.end
@@ -460,11 +712,12 @@ def run_compare_paper_backtest(args):
     logger.info("📊 모의투자 vs 백테스트 비교 ({} ~ {})", start_s, end_s)
     logger.info("=" * 50)
 
+    compare_symbol = getattr(args, "compare_symbol", None)
     result = run_compare(
         start_date=start_date,
         end_date=end_date,
         strategy_name=args.strategy,
-        symbol=getattr(args, "compare_symbol", None),
+        symbol=compare_symbol,
     )
     if result.get("paper_metrics"):
         pm = result["paper_metrics"]
@@ -484,6 +737,46 @@ def run_compare_paper_backtest(args):
             result["return_diff_pct"], result["win_rate_diff_pct"], result["divergence"],
         )
     logger.info("결과: {}", result["message"])
+
+    # 실전 전환 준비 평가
+    logger.info("-" * 50)
+    logger.info("🔄 실전 전환 준비 평가")
+    readiness = check_live_readiness(
+        start_date=start_date,
+        end_date=end_date,
+        strategy_name=args.strategy,
+        symbol=compare_symbol or result.get("symbol"),
+        config=config,
+    )
+    cr = readiness["criteria"]
+    logger.info(
+        "기준: 방향성 ≥{}%, 수익률차 ≤{}%, 거래일 ≥{}일, 매도 ≥{}건",
+        cr["min_direction_agreement_pct"], cr["max_return_diff_pct"],
+        cr["min_trading_days"], cr["min_trades"],
+    )
+    if readiness.get("direction_agreement_pct") is not None:
+        logger.info(
+            "결과: 방향성 {:.1f}% | 수익률차 {:.1f}% | 거래일 {}일 | 매도 {}건",
+            readiness["direction_agreement_pct"], readiness.get("return_diff_pct", 0),
+            readiness["trading_days"], readiness["total_trades"],
+        )
+    status = "✅ 준비 완료" if readiness["ready"] else "⏳ 미달"
+    logger.info("{}: {}", status, readiness["message"])
+
+    discord = Notifier(config)
+    risk = config.risk_params
+    readiness_cfg = risk.get("paper_backtest_compare", {}).get("live_readiness", {})
+    if readiness["ready"] and readiness_cfg.get("notify_on_ready", True):
+        discord.send_embed(
+            "✅ 실전 전환 준비 완료",
+            readiness["message"],
+            color=0x2ECC71,
+            fields=[
+                {"name": "방향성 일치율", "value": f"{readiness['direction_agreement_pct']:.1f}%", "inline": True},
+                {"name": "수익률 차이", "value": f"{readiness.get('return_diff_pct', 0):.1f}%", "inline": True},
+                {"name": "거래일수", "value": f"{readiness['trading_days']}일", "inline": True},
+            ],
+        )
 
 
 def run_emergency_liquidate(args):
@@ -583,7 +876,10 @@ def main():
   python main.py --mode liquidate  # 긴급 전 종목 매도 (실전/모의 모두 DB 기준)
   python main.py --mode compare --start 2025-01-01 --end 2025-03-18 --strategy scoring  # 모의투자 vs 백테스트 비교
   python main.py --update-holidays  # 휴장일 파일(pykrx+fallback) 자동 갱신
-  python main.py --mode optimize --strategy scoring  # 전략 파라미터 Grid Search (오버피팅 주의)
+  python main.py --mode optimize --strategy scoring  # 임계값만 Grid Search (오버피팅 주의)
+  python main.py --mode optimize --strategy scoring --include-weights  # 가중치+임계값 동시 최적화 (OOS 샤프≥1.0 게이트)
+  python main.py --mode optimize --strategy scoring --include-weights --auto-correlation  # 상관분석+비활성화+최적화 원스텝
+  python main.py --mode optimize --strategy scoring --include-weights --disable-weights w_rsi,w_ma  # 수동으로 RSI·MA 제외
   python main.py --mode optimize --strategy scoring --optimizer bayesian  # Bayesian 최적화 (scikit-optimize)
   python main.py --mode dashboard  # 실시간 웹 대시보드 (기본 http://127.0.0.1:8080)
         """,
@@ -606,14 +902,27 @@ def main():
         help="[optimize 모드, bayesian] 목적 함수 호출 횟수",
     )
     parser.add_argument(
+        "--include-weights", action="store_true",
+        help="[optimize 모드, scoring] 스코어링 가중치(weights)도 탐색 (대칭 Grid + OOS 샤프 게이트)",
+    )
+    parser.add_argument(
+        "--disable-weights", type=str, default="",
+        help="[optimize 모드, --include-weights] 탐색에서 0으로 고정할 가중치 키 (쉼표 구분, 예: w_rsi,w_ma)",
+    )
+    parser.add_argument(
+        "--auto-correlation", action="store_true",
+        help="[optimize 모드, --include-weights] 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화 후 최적화. "
+        "check_correlation + optimize를 한 번에 수행.",
+    )
+    parser.add_argument(
         "--update-holidays",
         action="store_true",
         help="config/holidays.yaml을 pykrx(또는 fallback)로 자동 갱신 후 종료",
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation"],
-        help="실행 모드 (기본: backtest). check_correlation: 스코어링 지표 간 상관계수·독립성 검증",
+        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation"],
+        help="실행 모드. check_correlation: 스코어링 지표 상관. check_ensemble_correlation: 앙상블 전략 신호 상관(0.6 이상 시 conservative/재구성 권고)",
     )
     parser.add_argument(
         "--strategy", type=str, default="scoring",
@@ -684,6 +993,10 @@ def main():
         "--correlation-threshold", type=float, default=0.7,
         help="[check_correlation 모드] 고상관 판단 기준 (기본: 0.7). 이 값 이상이면 제거/가중치 축소 권고",
     )
+    parser.add_argument(
+        "--ensemble-correlation-threshold", type=float, default=0.6,
+        help="[check_ensemble_correlation 모드] 앙상블 신호 고상관 기준 (기본: 0.6). 이 값 이상이면 conservative 또는 전략 재구성 권고",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -724,6 +1037,8 @@ def main():
             run_dashboard(args)
         elif args.mode == "check_correlation":
             run_check_indicator_correlation(args)
+        elif args.mode == "check_ensemble_correlation":
+            run_check_ensemble_correlation(args)
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:

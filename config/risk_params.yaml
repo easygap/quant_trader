@@ -2,6 +2,16 @@
 # 리스크 관리 파라미터 설정
 # ============================================================
 
+# --- 백테스트 유니버스 (생존자 편향 완화) ---
+# get_krx_stock_list() 및 전략 검증·워치리스트 자동 선정 시 적용.
+#   current:    현재 상장 종목만 (FDR). 생존자 편향 있음 — 실전 paper/live 용.
+#   historical: 과거 시점(as_of_date) 전체 상장 종목 (pykrx). 상폐 종목 포함 → 생존자 편향 완화. 백테스트 권장.
+#   kospi200:   해당 시점 코스피200 구성종목 (pykrx). 대형주 한정 → 상폐 빈도 낮음.
+# WatchlistManager에 as_of_date가 주어지고 mode가 current이면 자동으로 historical로 전환.
+backtest_universe:
+  mode: "historical"           # "current" | "historical" | "kospi200"
+  exclude_administrative: true  # 관리종목(투자주의·투자위험 등) 제외
+
 # --- 포지션 사이징 ---
 position_sizing:
   max_risk_per_trade: 0.01    # 1% 룰: 1회 거래 최대 손실 = 자본의 1%
@@ -28,12 +38,21 @@ trailing_stop:
   fixed_rate: 0.03            # 고점 대비 하락 비율 (3%)
   atr_multiplier: 3.0         # ATR 기반 트레일링 배수
 
+# --- 유동성 필터 (watchlist 진입 대상 제외) ---
+# 일평균 거래대금이 너무 낮은 종목은 실전에서 슬리피지가 백테스트 가정(0.05%)보다 훨씬 커져
+# 백테스트 수익이 실전에서 손실로 바뀌는 대표 원인. 아예 진입 대상에서 제외하는 것이 안전함.
+liquidity_filter:
+  enabled: true                      # true 시 20일 평균 거래대금 기준으로 필터
+  min_avg_trading_value_20d_krw: 5000000000  # 20일 평균 거래대금(원) 하한. 50억 = 5e9
+  strict: true                       # true면 거래대금 데이터 없는 종목도 제외. false면 데이터 없으면 통과(수동 watchlist용)
+  check_on_entry: true               # true면 OrderExecutor 매수 직전 유동성 재검증 (watchlist 구축 이후 유동성 변화 감지)
+
 # --- 분산 투자 / 자금 관리 ---
 # 1% 룰은 종목당 최대 손실만 제한. 아래 상한이 없으면 다수 종목 동시 신호 시 전 재산이 주식에 투입될 수 있음.
 diversification:
   max_position_ratio: 0.20    # 단일 종목 최대 비중 (총자산 대비 20%)
   max_investment_ratio: 0.70  # 전체 주식 투자 비중 상한 (총 자산의 70% 초과 불가)
-  max_sector_ratio: 0.40      # (미구현) 단일 섹터 최대 비중 — 섹터 정보 연동 후 적용 예정
+  max_sector_ratio: 0.40      # 단일 업종(KRX Sector) 최대 비중 (총자산 대비 40%). FDR 업종 매핑 사용.
   max_positions: 10           # 최대 동시 보유 종목 수 (이 개수 초과 시 신규 매수 불가)
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
 
@@ -62,12 +81,27 @@ paper_backtest_compare:
   win_rate_diff_warn_pct: 20    # 승률 차이 이 값(%) 초과 시 divergence
   notify_on_divergence: true    # divergence 시 디스코드 알림 전송 여부
 
+  # paper → live 전환 준비 자동 평가 기준
+  # 모든 조건 충족 시 "실전 전환 준비 완료" 신호 발생 + 디스코드 알림
+  live_readiness:
+    min_direction_agreement_pct: 70   # 일별 수익률 방향성 일치율 ≥ 70% (paper vs backtest 같은 방향 비율)
+    max_return_diff_pct: 5            # 누적 수익률 차이 ≤ 5%p 이내
+    min_trading_days: 20              # 최소 평가 거래일수 (약 1개월)
+    min_trades: 5                     # 최소 매도 거래 건수 (충분한 샘플)
+    notify_on_ready: true             # 준비 완료 시 디스코드 알림
+    auto_check_in_scheduler: true     # paper 모드 장마감 시 자동 체크 (최근 30일 기준)
+
 # --- 거래 비용 (설정 누락 시 실제 수익과 백테스트 괴리 발생) ---
-# 국내 주식: 증권거래세 매도 시 0.18% 의무. 대주주 해당 시 양도소득세 별도. 배당소득세(15.4% 등)는 배당 수령 시 해당.
-# 왕복(매수+매도) 비용 약 0.23% → 매 거래당 평균 0.23% 이상 초과 수익 필요. 신호가 자주 바뀌는 전략은 과매매로 수수료만 나갈 수 있음(설계서 §8.3).
+# 국내 주식 증권거래세(2026년 기준):
+#   코스피: 거래세 0.05% + 농어촌특별세 0.15% = 총 0.20%
+#   코스닥: 거래세 0.20% (농특세 없음)
+#   → 양 시장 모두 실질 세 부담 0.20%로 동일
+# 대주주 해당 시 양도소득세 별도. 배당소득세(15.4% 등)는 배당 수령 시 해당.
+# 왕복(매수+매도) 비용 약 0.23% (수수료 0.015%×2 + 거래세 0.20%)
+# → 매 거래당 평균 0.23% 이상 초과 수익 필요. 신호가 자주 바뀌는 전략은 과매매로 수수료만 나갈 수 있음(설계서 §8.3).
 transaction_costs:
   commission_rate: 0.00015    # 편도 수수료 (0.015%)
-  tax_rate: 0.0018            # 증권거래세: 매도 금액의 0.18% (국내 상장주 매도 시 의무)
+  tax_rate: 0.0020            # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일)
   slippage: 0.0005            # 슬리피지 기본 비율 (0.05%). 동적 슬리피지 배수 적용 시 이 값 위에 곱해짐
   slippage_ticks: 2           # 호가 단위 기준 슬리피지 틱 수 (실제 적용 = max(비율, tick*N))
   # 양도소득세 (대주주 해당 시에만 적용; 일반 투자자는 해당 없음)
