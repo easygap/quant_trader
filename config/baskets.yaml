@@ -1,0 +1,51 @@
+# =============================================================
+# 바스켓 포트폴리오 & 리밸런싱 설정
+# =============================================================
+# fintics의 Basket/Rebalance 개념을 차용:
+#   - 바스켓 = 종목 + 목표 비중의 묶음
+#   - 리밸런싱 = 실제 비중 vs 목표 비중 드리프트 감지 → 주문 생성
+#
+# 여러 바스켓을 정의할 수 있으며, enabled: true인 바스켓만 실행됩니다.
+# --mode rebalance 또는 스케줄러 장전 단계에서 실행됩니다.
+# =============================================================
+
+baskets:
+
+  # --- 예시 1: 한국 대형주 균등 배분 바스켓 ---
+  kr_blue_chip:
+    name: "한국 대형주 균등배분"
+    enabled: false
+    rebalance:
+      trigger: drift               # drift(비중 이탈) | weekly | monthly
+      drift_threshold: 0.05        # 실제-목표 비중 차이가 5%p 이상이면 리밸런싱
+      min_trade_amount: 100000     # 리밸런싱 1건 최소 거래금액 (너무 작은 주문 방지)
+      max_turnover_ratio: 0.30     # 1회 리밸런싱 시 총자산 대비 최대 매매 비율 (30%)
+    holdings:
+      "005930": 0.25    # 삼성전자  25%
+      "000660": 0.20    # SK하이닉스 20%
+      "035420": 0.15    # NAVER    15%
+      "005380": 0.15    # 현대차    15%
+      "051910": 0.15    # LG화학   15%
+      "006400": 0.10    # 삼성SDI  10%
+      # 합계 = 1.00 (현금 비중 = diversification.min_cash_ratio로 별도 관리)
+
+  # --- 예시 2: 신호 가중 리밸런싱 바스켓 ---
+  # signal_weighted: true 시, 스코어링 전략 점수에 따라 목표 비중을 동적 조정
+  kr_signal_weighted:
+    name: "한국 대형주 신호가중"
+    enabled: false
+    signal_weighted: true          # 전략 신호로 비중 동적 조정
+    signal_strategy: scoring       # 신호 소스 전략
+    signal_weight_range: [0.5, 1.5]  # 기본 비중 × 0.5 ~ 1.5 범위로 조정
+    rebalance:
+      trigger: weekly
+      weekday: 1                   # 월요일 (0=월, 4=금)
+      drift_threshold: 0.03
+      min_trade_amount: 50000
+      max_turnover_ratio: 0.20
+    holdings:
+      "005930": 0.30
+      "000660": 0.25
+      "035420": 0.20
+      "005380": 0.15
+      "051910": 0.10

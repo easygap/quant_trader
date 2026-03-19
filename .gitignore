@@ -30,9 +30,6 @@ reports/backtest_*.html
 reports/backtest_*.txt
 reports/*.md
 
-# --- quant_trader만 올리기 (fintics 제외) ---
-fintics/
-
 # --- IDE / OS ---
 .idea/
 .vscode/

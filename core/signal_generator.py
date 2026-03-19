@@ -57,10 +57,17 @@ class SignalGenerator:
             self.strategy_params.get("scoring", {})
             .get("collinearity_mode", "max_per_direction")
         )
+        scoring = self.strategy_params.get("scoring", {})
+        hyst = scoring.get("hysteresis", {})
+        self._hysteresis_enabled = hyst.get("enabled", False)
+        self._exit_sell_threshold = hyst.get("exit_sell_threshold", None)
+        self._exit_buy_threshold = hyst.get("exit_buy_threshold", None)
+
         self._diagnose_weight_collinearity()
         logger.info(
-            "SignalGenerator 초기화 완료 (collinearity_mode={})",
+            "SignalGenerator 초기화 완료 (collinearity_mode={}, hysteresis={})",
             self._collinearity_mode,
+            self._hysteresis_enabled,
         )
 
     def _diagnose_weight_collinearity(self):
@@ -155,23 +162,66 @@ class SignalGenerator:
 
         # 매수/매도 임계값
         scoring = self.strategy_params.get("scoring", {})
-        buy_threshold = scoring.get("buy_threshold", 3)
-        sell_threshold = scoring.get("sell_threshold", -3)
+        buy_threshold = scoring.get("buy_threshold", 2)
+        sell_threshold = scoring.get("sell_threshold", -2)
 
         # 신호 생성
-        result["signal"] = self.HOLD
-        result.loc[result["total_score"] >= buy_threshold, "signal"] = self.BUY
-        result.loc[result["total_score"] <= sell_threshold, "signal"] = self.SELL
+        if self._hysteresis_enabled:
+            result = self._generate_with_hysteresis(result, buy_threshold, sell_threshold)
+        else:
+            result["signal"] = self.HOLD
+            result.loc[result["total_score"] >= buy_threshold, "signal"] = self.BUY
+            result.loc[result["total_score"] <= sell_threshold, "signal"] = self.SELL
 
         logger.info(
-            "신호 생성 완료 (collinearity={}) — 매수: {}건, 매도: {}건, 홀드: {}건",
-            mode,
+            "신호 생성 완료 (collinearity={}, hysteresis={}) — 매수: {}건, 매도: {}건, 홀드: {}건",
+            mode, self._hysteresis_enabled,
             (result["signal"] == self.BUY).sum(),
             (result["signal"] == self.SELL).sum(),
             (result["signal"] == self.HOLD).sum(),
         )
 
         return result
+
+    def _generate_with_hysteresis(
+        self, df: pd.DataFrame, buy_threshold: float, sell_threshold: float,
+    ) -> pd.DataFrame:
+        """
+        히스터리시스 적용 신호 생성.
+
+        상태 전이는 반드시 BUY ↔ HOLD ↔ SELL 순서를 따릅니다.
+        BUY → SELL 또는 SELL → BUY 직접 전환은 허용하지 않아 과매매를 방지합니다.
+
+        상태 전이 규칙:
+          HOLD → BUY:  score >= buy_threshold
+          HOLD → SELL: score <= sell_threshold
+          BUY  → HOLD: score < exit_buy_threshold (BUY 유지 해제)
+          SELL → HOLD: score > -exit_sell_threshold (SELL 유지 해제)
+        """
+        exit_sell = self._exit_sell_threshold if self._exit_sell_threshold is not None else sell_threshold
+        exit_buy = self._exit_buy_threshold if self._exit_buy_threshold is not None else 0.0
+
+        scores = df["total_score"].values
+        signals = np.full(len(scores), self.HOLD, dtype=object)
+        state = self.HOLD
+
+        for i in range(len(scores)):
+            s = scores[i]
+            if state == self.HOLD:
+                if s >= buy_threshold:
+                    state = self.BUY
+                elif s <= sell_threshold:
+                    state = self.SELL
+            elif state == self.BUY:
+                if s < exit_buy:
+                    state = self.HOLD
+            elif state == self.SELL:
+                if s > (-exit_sell):
+                    state = self.HOLD
+            signals[i] = state
+
+        df["signal"] = signals
+        return df
 
     def _apply_max_per_direction(self, result: pd.DataFrame) -> pd.DataFrame:
         """기본 모드: 가격 그룹에서 방향별 최대 1개만 반영."""
@@ -262,9 +312,12 @@ class SignalGenerator:
 
     def _score_macd(self, df: pd.DataFrame) -> pd.Series:
         """
-        MACD 점수 계산
-        - MACD > Signal 이고 이전에 MACD < Signal (골든크로스) → +2점
-        - MACD < Signal 이고 이전에 MACD > Signal (데드크로스) → -2점
+        MACD 점수 계산 (3단계 점수 체계)
+        - 골든크로스 당일: buy_weight (기본 +2)
+        - MACD > Signal 유지 중: buy_weight × 0.5 (기본 +1) — 상승 추세 지속
+        - 데드크로스 당일: sell_weight (기본 -2)
+        - MACD < Signal 유지 중: sell_weight × 0.5 (기본 -1) — 하락 추세 지속
+        - 히스토그램 방향 전환 보너스: ±0.5 (기존과 동일)
         """
         weights = self._get_weights()
         buy_weight = weights["macd_golden_cross"]
@@ -273,17 +326,20 @@ class SignalGenerator:
         score = pd.Series(0.0, index=df.index)
 
         if "macd" in df.columns and "macd_signal" in df.columns:
-            # 골든크로스: MACD가 시그널선을 상향 돌파
             macd_above = df["macd"] > df["macd_signal"]
-            golden_cross = macd_above & (~macd_above.shift(1).fillna(False))
+            macd_above_prev = macd_above.shift(1, fill_value=False)
+            golden_cross = macd_above & (~macd_above_prev)
+            dead_cross = (~macd_above) & macd_above_prev
 
-            # 데드크로스: MACD가 시그널선을 하향 돌파
-            dead_cross = (~macd_above) & macd_above.shift(1).fillna(False)
+            # 기본: MACD > Signal 유지 중 절반 점수
+            score[macd_above] = buy_weight * 0.5
+            score[~macd_above] = sell_weight * 0.5
 
+            # 크로스 당일은 풀 점수로 덮어쓰기
             score[golden_cross] = buy_weight
             score[dead_cross] = sell_weight
 
-            # 히스토그램 방향 보너스 (약한 신호)
+            # 히스토그램 방향 보너스 (크로스 아닌 날만)
             if "macd_histogram" in df.columns:
                 hist_positive = df["macd_histogram"] > 0
                 hist_turning_up = (
@@ -293,10 +349,9 @@ class SignalGenerator:
                     df["macd_histogram"] < df["macd_histogram"].shift(1)
                 ) & (~hist_positive)
 
-                # 골든/데드크로스 없는 날에만 약한 보너스
-                no_cross = (score == 0)
-                score = score.where(~(no_cross & hist_turning_up), 0.5)
-                score = score.where(~(no_cross & hist_turning_down), -0.5)
+                is_cross_day = golden_cross | dead_cross
+                score = score.where(~(~is_cross_day & hist_turning_up), score + 0.5)
+                score = score.where(~(~is_cross_day & hist_turning_down), score - 0.5)
 
         return score
 
@@ -363,8 +418,9 @@ class SignalGenerator:
 
         if sma_short and sma_mid and sma_short in df.columns and sma_mid in df.columns:
             short_above = df[sma_short] > df[sma_mid]
-            golden_cross = short_above & (~short_above.shift(1).fillna(False))
-            dead_cross = (~short_above) & short_above.shift(1).fillna(False)
+            short_above_prev = short_above.shift(1, fill_value=False)
+            golden_cross = short_above & (~short_above_prev)
+            dead_cross = (~short_above) & short_above_prev
 
             score[golden_cross] = buy_weight
             score[dead_cross] = sell_weight

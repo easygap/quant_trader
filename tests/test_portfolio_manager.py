@@ -15,16 +15,20 @@ class _MockPosition:
 class _MockConfig:
     trading = {"mode": "paper"}
     risk_params = {"position_sizing": {"initial_capital": 1000000}}
+    database = {"sqlite_path": "data/quant_trader.db"}
+
+    def get_account_no(self, key=""):
+        return "00000000-00"
 
 
 def test_portfolio_summary_uses_trade_cash_flow(monkeypatch):
     monkeypatch.setattr(
         "core.portfolio_manager.get_all_positions",
-        lambda: [_MockPosition("005930", 50000, 10)],
+        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
     )
     monkeypatch.setattr(
         "core.portfolio_manager.get_trade_cash_summary",
-        lambda mode=None: {
+        lambda mode=None, account_key=None: {
             "cash_delta": -510000,
             "buy_count": 1,
             "sell_count": 0,
@@ -63,7 +67,7 @@ def test_sync_with_broker_uses_core_notifier(monkeypatch):
     )
     monkeypatch.setattr(
         "core.portfolio_manager.get_all_positions",
-        lambda: [_MockPosition("005930", 50000, 10)],
+        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
     )
     monkeypatch.setattr(core.notifier, "Notifier", _FakeNotifier)
 

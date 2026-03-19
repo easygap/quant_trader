@@ -64,8 +64,8 @@ indicators:
 # ⚠️ 아래 가중치는 *검증되지 않은 직관값*입니다. 이 상태로 실전 투입하면 신호가 노이즈이므로
 #    무작위 또는 손실 결과가 나올 수 있습니다. 반드시 위 파이프라인을 실행하세요.
 scoring:
-  buy_threshold: 3            # 매수 실행 최소 점수 (권장 2~3)
-  sell_threshold: -3          # 매도 실행 최소 점수 (권장 -2~-3, buy와 절댓값 동일 권장)
+  buy_threshold: 2            # 매수 실행 최소 점수 (representative_only 모드 점수 범위 ±4 기준)
+  sell_threshold: -2          # 매도 실행 최소 점수 (buy와 절댓값 동일 권장)
 
   # --- 다중공선성 완화 모드 ---
   # RSI·MACD·MA·볼린저는 대부분 "가격이 최근 올랐냐 내렸냐"의 변형.
@@ -77,6 +77,16 @@ scoring:
   #   사용하고 나머지 점수를 강제 0. 가격=MACD, 변동성=볼린저, 거래량=volume.
   #   → 스코어 = MACD점수 + 볼린저점수 + 거래량점수 (실질적으로 독립 정보 3개만 합산)
   collinearity_mode: "representative_only"   # "max_per_direction" | "representative_only"
+
+  # --- 신호 히스터리시스 (과매매 방지) ---
+  # 진입/청산 임계값을 분리하여 임계값 근처에서 BUY↔SELL 반복(과매매)을 방지합니다.
+  # enabled: true 시 이전 봉의 신호 상태를 유지하며, 상태 전환에 더 강한 조건을 요구합니다.
+  # exit_sell_threshold: 보유(BUY) 상태에서 매도 전환 임계값. buy_threshold보다 낮아야 의미 있음.
+  # exit_buy_threshold: 보유(BUY) 상태에서 HOLD로 전환되는 임계값 (BUY 유지 해제선).
+  hysteresis:
+    enabled: true                 # 과매매 방지: 진입/청산 임계값 분리
+    exit_sell_threshold: -1       # 보유→매도 전환 (sell_threshold -2보다 완화)
+    exit_buy_threshold: 0.5       # BUY 유지 해제선 (buy_threshold 2보다 낮은 값)
 
   # ⚠️ 미검증 직관값 — OOS 검증 없이 사용 금지.
   # RSI·MACD·MA는 모두 가격 기반으로 다중공선성이 높음 (RSI↔스토캐스틱 r≈0.8, MACD↔MA r≈0.7).

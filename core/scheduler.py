@@ -2,10 +2,14 @@
 자동 스케줄러 모듈
 - 장전 준비 → 장중 모니터링 → 장마감 리포트 사이클 자동 실행
 - 무한 루프 기반 (Ctrl+C로 종료)
+- 시스템 헬스체크 자동화 (DB/API/디스크/메모리)
+- 루프 모니터링 지표 (실행 시간, 스킵 횟수)
 """
 
+import os
 import time as time_mod
-from datetime import datetime
+import shutil
+from datetime import datetime, timedelta
 from loguru import logger
 
 from config.config_loader import Config
@@ -23,6 +27,39 @@ from database.repositories import (
 from core.position_lock import PositionLock
 
 
+class LoopMetrics:
+    """10분 루프 모니터링 지표 수집기."""
+
+    def __init__(self):
+        self.total_loops = 0
+        self.total_skips = 0
+        self.consecutive_skips = 0
+        self.last_success_time: datetime | None = None
+        self.last_elapsed_seconds: float = 0.0
+        self.max_elapsed_seconds: float = 0.0
+
+    def record_success(self, elapsed: float):
+        self.total_loops += 1
+        self.consecutive_skips = 0
+        self.last_success_time = datetime.now()
+        self.last_elapsed_seconds = elapsed
+        self.max_elapsed_seconds = max(self.max_elapsed_seconds, elapsed)
+
+    def record_skip(self):
+        self.total_skips += 1
+        self.consecutive_skips += 1
+
+    def summary(self) -> dict:
+        return {
+            "total_loops": self.total_loops,
+            "total_skips": self.total_skips,
+            "consecutive_skips": self.consecutive_skips,
+            "last_success": self.last_success_time.isoformat() if self.last_success_time else None,
+            "last_elapsed_s": round(self.last_elapsed_seconds, 1),
+            "max_elapsed_s": round(self.max_elapsed_seconds, 1),
+        }
+
+
 class Scheduler:
     """
     자동 매매 스케줄러
@@ -35,6 +72,8 @@ class Scheduler:
     거래 빈도·수수료: 10분마다 신호를 보므로 신호가 자주 바뀌는 전략은 과매매(수수료만 나감) 위험.
     왕복 비용 약 0.23%(수수료+거래세 0.20%, 2026년 기준)를 상회하는 기대 수익이 나오도록 전략·임계값 설계 권장. quant_trader_design.md §8.3.
     """
+
+    MAX_CONSECUTIVE_SKIPS = 3  # 연속 스킵 허용 한도 (초과 시 알림)
 
     def __init__(self, strategy_name: str = "scoring", config: Config = None):
         self.config = config or Config.get()
@@ -54,6 +93,8 @@ class Scheduler:
         self._entry_candidates = []
         self._skip_next_monitor_cycle = False
         self._last_sync_broker_time = None  # KIS 잔고 크로스체크 주기용
+        self._last_healthcheck_time: datetime | None = None
+        self._loop_metrics = LoopMetrics()
 
         logger.info(
             "Scheduler 초기화 (전략: {}, 모니터링 간격: {}초, auto_entry: {})",
@@ -77,11 +118,16 @@ class Scheduler:
                     self._last_monitor_time = None
                     self._last_sync_broker_time = None
                     self._entry_candidates = []
+                    self._loop_metrics = LoopMetrics()
                     logger.info("📅 새로운 거래일: {}", today)
+                    self._maybe_update_holidays()
 
                 if not self.trading_hours.is_trading_day():
                     self._sleep_until_next_trading_day()
                     continue
+
+                # 장전 헬스체크 (10분 주기)
+                self._maybe_run_healthcheck()
 
                 if self.trading_hours.is_pre_market() and not self._pre_market_done:
                     self._run_pre_market()
@@ -178,6 +224,8 @@ class Scheduler:
                 logger.warning(msg)
                 self.discord.send_message(msg, critical=True)
 
+            self._run_basket_rebalance_check()
+
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
 
@@ -209,14 +257,27 @@ class Scheduler:
         except Exception as e:
             logger.error("장중 모니터링 실패: {}", e)
         finally:
-            # 타이밍 리스크 안전장치: 루프 실행 시간이 10분을 초과하면 다음 루프 스킵 (API 지연·Rate Limit 시 꼬임 방지)
             elapsed = (datetime.now() - started_at).total_seconds()
+            self._loop_metrics.record_success(elapsed)
+
             if elapsed > self.monitor_interval:
                 self._skip_next_monitor_cycle = True
+                self._loop_metrics.record_skip()
                 logger.warning(
                     "⚠️ 장중 루프가 {}초 소요되어 다음 모니터링 사이클을 1회 스킵합니다. (안전: 10분 초과 시 다음 루프 생략)",
                     int(elapsed),
                 )
+
+            if self._loop_metrics.consecutive_skips >= self.MAX_CONSECUTIVE_SKIPS:
+                msg = (
+                    f"🚨 루프 연속 스킵 {self._loop_metrics.consecutive_skips}회 — "
+                    f"시스템 지연 의심. 최근 루프 {elapsed:.0f}초 소요."
+                )
+                logger.error(msg)
+                self.discord.send_message(msg, critical=True)
+
+            if self._loop_metrics.total_loops % 6 == 0:
+                logger.info("📊 루프 지표: {}", self._loop_metrics.summary())
 
     def _maybe_sync_with_broker(self):
         """live 모드에서 주기적으로 KIS 잔고와 DB 포지션 크로스체크 (불일치 시 로깅·알림)."""
@@ -453,6 +514,16 @@ class Scheduler:
             if self.config.trading.get("mode") == "paper":
                 self._check_live_readiness()
 
+            # 일일 루프 모니터링 지표 기록
+            metrics = self._loop_metrics.summary()
+            logger.info("📊 일일 루프 지표: {}", metrics)
+            if metrics["total_skips"] > 0:
+                self.discord.send_message(
+                    f"📊 오늘 루프 지표: 실행 {metrics['total_loops']}회, "
+                    f"스킵 {metrics['total_skips']}회, "
+                    f"최대 소요 {metrics['max_elapsed_s']}초"
+                )
+
             logger.info("장마감 리포트 저장 및 발송 완료")
 
         except Exception as e:
@@ -500,6 +571,7 @@ class Scheduler:
         """모니터링 주기 확인. 이전 루프가 10분 초과 시 다음 사이클 스킵(타이밍 리스크 방지)."""
         if self._skip_next_monitor_cycle:
             self._skip_next_monitor_cycle = False
+            self._loop_metrics.record_skip()
             logger.warning("이전 장중 루프 지연으로 이번 모니터링 사이클을 스킵합니다. (10분 초과 안전장치)")
             return False
         if self._last_monitor_time is None:
@@ -513,6 +585,156 @@ class Scheduler:
         hours = wait.total_seconds() / 3600
         logger.info("비거래일 — 다음 거래일까지 {:.1f}시간 대기", hours)
         time_mod.sleep(min(wait.total_seconds(), 3600))
+
+    # =============================================================
+    # 시스템 헬스체크
+    # =============================================================
+
+    def _maybe_run_healthcheck(self):
+        """10분 주기로 시스템 헬스체크 실행."""
+        now = datetime.now()
+        if self._last_healthcheck_time is not None:
+            elapsed = (now - self._last_healthcheck_time).total_seconds()
+            if elapsed < 600:
+                return
+        self._last_healthcheck_time = now
+        issues = self._run_healthcheck()
+        if issues:
+            msg = "🏥 헬스체크 이상 항목:\n" + "\n".join(f"  - {i}" for i in issues)
+            logger.warning(msg)
+            self.discord.send_message(msg, critical=True)
+
+    def _run_healthcheck(self) -> list[str]:
+        """
+        시스템 상태 점검. 이상 항목 문자열 리스트를 반환합니다.
+        검사 항목: DB 연결, 디스크 여유, KIS API 인증(live), 메모리 사용량.
+        """
+        issues = []
+
+        # 1) DB 연결 검사
+        try:
+            from database.models import get_session
+            session = get_session()
+            session.execute("SELECT 1")
+            session.remove()
+        except Exception as e:
+            issues.append(f"DB 연결 실패: {e}")
+
+        # 2) 디스크 여유 공간 검사
+        try:
+            db_path = self.config.database.get("sqlite_path", "data/quant_trader.db")
+            disk = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)))
+            free_gb = disk.free / (1024 ** 3)
+            if free_gb < 1.0:
+                issues.append(f"디스크 여유 공간 부족: {free_gb:.1f}GB")
+        except Exception:
+            pass
+
+        # 3) KIS API 인증 상태 (live 모드)
+        if self.config.trading.get("mode") == "live":
+            try:
+                from api.kis_api import KISApi
+                kis = KISApi()
+                if not getattr(kis, "_access_token", None):
+                    issues.append("KIS API 토큰 없음 — 재인증 필요")
+            except Exception as e:
+                issues.append(f"KIS API 초기화 실패: {e}")
+
+        # 4) 메모리 사용량 검사
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            if mem.percent > 90:
+                issues.append(f"메모리 사용률 높음: {mem.percent}%")
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        if not issues:
+            logger.debug("헬스체크 정상")
+        return issues
+
+    # =============================================================
+    # 휴장일 자동 갱신
+    # =============================================================
+
+    def _maybe_update_holidays(self):
+        """
+        새해 또는 holidays.yaml이 오래된 경우 자동 갱신.
+        연초(1/1~1/7) 또는 파일 수정일이 90일 이상 지난 경우 트리거.
+        """
+        from pathlib import Path
+        holidays_path = Path("config/holidays.yaml")
+
+        needs_update = False
+        now = datetime.now()
+
+        if not holidays_path.exists():
+            needs_update = True
+        else:
+            try:
+                mtime = datetime.fromtimestamp(holidays_path.stat().st_mtime)
+                age_days = (now - mtime).days
+                if age_days > 90:
+                    needs_update = True
+                    logger.info("holidays.yaml 마지막 수정 {}일 전 → 갱신 시도", age_days)
+                elif now.month == 1 and now.day <= 7:
+                    if mtime.year < now.year:
+                        needs_update = True
+                        logger.info("새해 — holidays.yaml 갱신 시도")
+            except Exception:
+                needs_update = True
+
+        if needs_update:
+            try:
+                from core.holidays_updater import update_holidays_yaml
+                result_path = update_holidays_yaml()
+                logger.info("휴장일 자동 갱신 완료: {}", result_path)
+                self.trading_hours = TradingHours(self.config)
+            except Exception as e:
+                logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
+
+    def _run_basket_rebalance_check(self):
+        """장전 단계에서 enabled 바스켓의 리밸런싱 필요 여부를 체크하고 실행."""
+        try:
+            from core.basket_rebalancer import BasketRebalancer
+
+            enabled = BasketRebalancer.get_enabled_baskets()
+            if not enabled:
+                return
+
+            logger.info("🔄 바스켓 리밸런싱 체크: {}", enabled)
+            for name in enabled:
+                try:
+                    rebalancer = BasketRebalancer(
+                        basket_name=name, config=self.config,
+                        account_key=self.strategy_name,
+                    )
+                    should, reason = rebalancer.should_rebalance()
+                    if not should:
+                        logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
+                        continue
+
+                    orders = rebalancer.plan_rebalance()
+                    if not orders:
+                        continue
+
+                    result = rebalancer.execute(orders)
+                    summary = (
+                        f"🔄 바스켓 '{name}' 리밸런싱 완료: "
+                        f"실행 {result['executed']}건, 실패 {result['failed']}건"
+                    )
+                    logger.info(summary)
+                    self.discord.send_message(summary)
+
+                except Exception as e:
+                    logger.error("바스켓 '{}' 리밸런싱 오류: {}", name, e)
+
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.error("바스켓 리밸런싱 체크 실패: {}", e)
 
     def _log_rate_limit_preflight(self, est_requests: int, n_symbols: int, phase: str):
         """API 요청 사전 예측: 예상 건수와 소요 시간을 로그하고, 분당 한도 초과 시 경고."""
@@ -551,15 +773,6 @@ class Scheduler:
             pass
 
     def _get_strategy(self):
-        """전략 인스턴스 반환."""
-        if self.strategy_name == "mean_reversion":
-            from strategies.mean_reversion import MeanReversionStrategy
-            return MeanReversionStrategy(self.config)
-        if self.strategy_name == "trend_following":
-            from strategies.trend_following import TrendFollowingStrategy
-            return TrendFollowingStrategy(self.config)
-        if self.strategy_name == "ensemble":
-            from core.strategy_ensemble import StrategyEnsemble
-            return StrategyEnsemble(self.config)
-        from strategies.scoring_strategy import ScoringStrategy
-        return ScoringStrategy(self.config)
+        """전략 레지스트리를 통해 인스턴스 반환."""
+        from strategies import create_strategy
+        return create_strategy(self.strategy_name, self.config)

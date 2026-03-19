@@ -114,25 +114,13 @@ class Backtester:
 
     def _get_strategy(self, name: str):
         """전략 인스턴스 반환. param_overrides가 있으면 해당 전략 파라미터만 덮어쓴 Config로 생성."""
+        from strategies import create_strategy
+
         overrides = getattr(self, "_param_overrides", None) or {}
         config = self.config
         if overrides and name in overrides:
             config = self.config.with_strategy_overrides(name, overrides[name])
-        if name == "scoring":
-            from strategies.scoring_strategy import ScoringStrategy
-            return ScoringStrategy(config)
-        elif name == "mean_reversion":
-            from strategies.mean_reversion import MeanReversionStrategy
-            return MeanReversionStrategy(config)
-        elif name == "trend_following":
-            from strategies.trend_following import TrendFollowingStrategy
-            return TrendFollowingStrategy(config)
-        elif name == "ensemble":
-            from core.strategy_ensemble import StrategyEnsemble
-            return StrategyEnsemble(config)
-        else:
-            from strategies.scoring_strategy import ScoringStrategy
-            return ScoringStrategy(config)
+        return create_strategy(name, config)
 
     def _simulate(self, df: pd.DataFrame, initial_capital: float) -> dict:
         """
@@ -148,6 +136,8 @@ class Backtester:
         avg_price = 0
         partial_exit_done = False  # 1차 부분 익절 수행 여부
         high_water_mark = 0.0     # 트레일링 스탑용: 보유 중 최고가
+        buy_date = None           # 매수일 (보유 기간 추적용)
+        sold_today = False        # 당일 매도 발생 여부 (손절 후 재매수 방지)
         trades = []
         equity_curve = []
 
@@ -156,6 +146,7 @@ class Backtester:
         ts_config = self.risk_params.get("trailing_stop", {})
         pos_config = self.risk_params.get("position_sizing", {})
         div_config = self.risk_params.get("diversification", {})
+        pos_limits = self.risk_params.get("position_limits") or {}
 
         sl_rate = sl_config.get("fixed_rate", 0.03)
         sl_type = sl_config.get("type", "fixed")
@@ -184,23 +175,51 @@ class Backtester:
                 return hwm - float(row_atr) * ts_atr_mult
             return hwm * (1 - ts_fixed_rate)
 
+        min_holding_days = pos_limits.get("min_holding_days", 0)
+        max_holding_days = pos_limits.get("max_holding_days", 0)
+
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
             signal = row.get("signal", "HOLD")
             row_atr = row.get("atr")
-            # 일평균 거래량(20일 롤링)으로 동적 슬리피지. 없으면 당일 거래량 fallback
             avg_daily_vol = row.get("_avg_daily_volume")
             if pd.isna(avg_daily_vol) or avg_daily_vol <= 0:
                 avg_daily_vol = row.get("volume")
             row_volume = avg_daily_vol
+            sold_today = False
 
             if position > 0:
                 high_water_mark = max(high_water_mark, close)
                 stop_loss_price = _stop_loss_price(row_atr)
                 take_profit_price = avg_price * (1 + tp_rate)
+                holding_days = (date - buy_date).days if buy_date is not None else 0
+
+                # 최대 보유 기간 초과 시 강제 청산
+                if max_holding_days > 0 and holding_days >= max_holding_days:
+                    costs = self.risk_manager.calculate_transaction_costs(
+                        close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                    )
+                    sell_price = costs["execution_price"]
+                    sell_amount = sell_price * position
+                    commission = costs["commission"]
+                    tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
+                    pnl = (sell_price - avg_price) * position - commission - tax_amt
+                    cash += sell_amount - commission - tax_amt
+                    trades.append({
+                        "date": date, "action": "MAX_HOLD", "price": sell_price,
+                        "quantity": position, "pnl": pnl,
+                        "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        "commission": commission,
+                    })
+                    position = 0
+                    avg_price = 0
+                    partial_exit_done = False
+                    high_water_mark = 0.0
+                    buy_date = None
+                    sold_today = True
 
                 # 손절
-                if close <= stop_loss_price:
+                elif close <= stop_loss_price:
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
                     )
@@ -220,6 +239,8 @@ class Backtester:
                     avg_price = 0
                     partial_exit_done = False
                     high_water_mark = 0.0
+                    buy_date = None
+                    sold_today = True
 
                 # 부분 익절 (1차 목표 도달)
                 elif partial_exit and not partial_exit_done and close >= avg_price * (1 + partial_target):
@@ -245,6 +266,8 @@ class Backtester:
                         avg_price = 0
                         partial_exit_done = False
                         high_water_mark = 0.0
+                        buy_date = None
+                        sold_today = True
 
                 # 전량 익절
                 elif close >= take_profit_price:
@@ -267,6 +290,8 @@ class Backtester:
                     avg_price = 0
                     partial_exit_done = False
                     high_water_mark = 0.0
+                    buy_date = None
+                    sold_today = True
 
                 # 트레일링 스탑 (고점 대비 하락 시 청산)
                 elif ts_enabled:
@@ -291,8 +316,17 @@ class Backtester:
                         avg_price = 0
                         partial_exit_done = False
                         high_water_mark = 0.0
+                        buy_date = None
+                        sold_today = True
 
-            if signal == "BUY" and position == 0:
+            # 최소 보유 기간 미달 시 신호 매도 차단 (손절/트레일링/익절은 위에서 이미 처리)
+            if position > 0 and min_holding_days > 0 and buy_date is not None:
+                holding_days_now = (date - buy_date).days if buy_date is not None else 0
+                if holding_days_now < min_holding_days and signal == "SELL":
+                    signal = "HOLD"
+
+            # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
+            if signal == "BUY" and position == 0 and not sold_today:
                 costs = self.risk_manager.calculate_transaction_costs(
                     close, 1, "BUY", avg_daily_volume=row_volume
                 )
@@ -332,6 +366,7 @@ class Backtester:
                     avg_price = buy_price
                     partial_exit_done = False
                     high_water_mark = buy_price
+                    buy_date = date
                     trades.append({
                         "date": date, "action": "BUY", "price": buy_price,
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
@@ -358,6 +393,8 @@ class Backtester:
                 position = 0
                 avg_price = 0
                 high_water_mark = 0.0
+                buy_date = None
+                sold_today = True
 
             # 자본금 곡선 기록
             portfolio_value = cash + (position * close)
@@ -411,7 +448,10 @@ class Backtester:
         avg_win = np.mean([t["pnl"] for t in winning]) if winning else 0
         avg_loss = abs(np.mean([t["pnl"] for t in losing])) if losing else 1
 
-        profit_factor = avg_win / avg_loss if avg_loss > 0 else 0
+        # Profit Factor는 "평균 손익비"가 아니라 "총이익 / 총손실"로 계산한다.
+        gross_profit = sum(t["pnl"] for t in winning)
+        gross_loss = abs(sum(t["pnl"] for t in losing))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
         # 칼마 비율
         years = len(equity) / 252 if len(equity) > 0 else 1
