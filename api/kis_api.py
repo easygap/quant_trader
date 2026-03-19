@@ -3,10 +3,12 @@
 - REST API를 통한 시세 조회, 주문 실행, 잔고 조회
 - 토큰 발급 및 자동 갱신
 - 모의투자 / 실전 도메인 전환 지원
+- Rate Limiter: Token Bucket(초당) + 슬라이딩 윈도우(분당) 이중 제어
 """
 
 import time
 import json
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import threading
@@ -60,19 +62,31 @@ class KISApi:
         self.cano = parts[0] if len(parts) >= 1 else ""    # 종합 계좌 번호
         self.acnt_prdt_cd = parts[1] if len(parts) >= 2 else "01"  # 계좌 상품 코드
 
-        # API Rate Limiter (Token Bucket)
-        # 설정된 MAX_CALLS_PER_SEC에 맞춰 토큰 충전 및 소비 (기본: 4)
-        self.max_calls_per_sec = float(kis.get("max_calls_per_sec", 4.0))
+        # --- Rate Limiter (이중 제어) ---
+        # 1) Token Bucket: 초당 한도 (burst 제어)
+        # 2) Sliding Window: 분당 한도 (지속적 버스트 방지)
+        self.max_calls_per_sec = float(kis.get("max_calls_per_sec", 10.0))
+        self.max_calls_per_min = int(kis.get("max_calls_per_min", 300))
         self._tokens = self.max_calls_per_sec
         self._last_refill = time.monotonic()
         self._token_lock = threading.Lock()
-        self._auth_lock = threading.Lock()  # 토큰 갱신 동시 호출 방지
+        self._auth_lock = threading.Lock()
+
+        # 분당 슬라이딩 윈도우: 최근 60초 내 요청 타임스탬프
+        self._minute_window: deque[float] = deque()
+        self._minute_lock = threading.Lock()
+
+        # 모니터링 카운터 (사용량 추적)
+        self._total_requests = 0
+        self._total_429s = 0
+        self._session_start = time.monotonic()
 
         logger.info(
-            "KIS API 초기화 완료 (모드: {}, 계좌: {}, RateLimit: {}/sec)",
+            "KIS API 초기화 완료 (모드: {}, 계좌: {}, RateLimit: {}/sec, {}/min)",
             "모의투자" if self.use_mock else "실전",
             self.account_no,
-            self.max_calls_per_sec
+            self.max_calls_per_sec,
+            self.max_calls_per_min,
         )
 
     def _notify_auth_failure(self, message: str):
@@ -195,13 +209,19 @@ class KISApi:
         }
 
     def _wait_for_token(self):
-        """Token Bucket Rate Limiter 알고리즘: 요청 전 토큰 확보 (동기 컨텍스트용 monotonic)"""
+        """
+        이중 Rate Limiter: Token Bucket(초당) + 슬라이딩 윈도우(분당).
+        두 조건 모두 충족해야 요청 진행.
+        """
+        # 1) 분당 슬라이딩 윈도우 체크
+        self._wait_for_minute_window()
+
+        # 2) 초당 Token Bucket
         with self._token_lock:
             while True:
                 now = time.monotonic()
                 elapsed = now - self._last_refill
 
-                # 시간 경과에 따른 토큰 보충
                 self._tokens = self._tokens + (elapsed * self.max_calls_per_sec)
                 if self._tokens > self.max_calls_per_sec:
                     self._tokens = self.max_calls_per_sec
@@ -209,11 +229,53 @@ class KISApi:
 
                 if self._tokens >= 1.0:
                     self._tokens = self._tokens - 1.0
-                    return
+                    break
                 else:
-                    # 토큰이 부족하면 충전될 때까지 약간 대기
                     sleep_time = (1.0 - self._tokens) / self.max_calls_per_sec
                     time.sleep(max(0.01, sleep_time))
+
+        # 분당 윈도우에 현재 요청 기록
+        with self._minute_lock:
+            self._minute_window.append(time.monotonic())
+        self._total_requests += 1
+
+    def _wait_for_minute_window(self):
+        """분당 한도 초과 시 가장 오래된 요청이 윈도우를 벗어날 때까지 대기."""
+        while True:
+            with self._minute_lock:
+                now = time.monotonic()
+                cutoff = now - 60.0
+                while self._minute_window and self._minute_window[0] < cutoff:
+                    self._minute_window.popleft()
+                if len(self._minute_window) < self.max_calls_per_min:
+                    return
+                oldest = self._minute_window[0]
+                wait = oldest - cutoff + 0.1
+            logger.debug(
+                "분당 한도 도달 ({}/{}), {:.1f}초 대기",
+                len(self._minute_window), self.max_calls_per_min, wait,
+            )
+            time.sleep(wait)
+
+    def get_rate_limit_stats(self) -> dict:
+        """현재 Rate Limiter 사용량 통계 반환."""
+        with self._minute_lock:
+            now = time.monotonic()
+            cutoff = now - 60.0
+            while self._minute_window and self._minute_window[0] < cutoff:
+                self._minute_window.popleft()
+            recent_minute = len(self._minute_window)
+
+        elapsed_sec = max(1, time.monotonic() - self._session_start)
+        return {
+            "total_requests": self._total_requests,
+            "total_429s": self._total_429s,
+            "requests_last_60s": recent_minute,
+            "max_per_sec": self.max_calls_per_sec,
+            "max_per_min": self.max_calls_per_min,
+            "avg_per_sec": round(self._total_requests / elapsed_sec, 2),
+            "minute_utilization_pct": round(recent_minute / self.max_calls_per_min * 100, 1),
+        }
 
     def _request(
         self,
@@ -251,10 +313,11 @@ class KISApi:
 
                 # HTTP 에러 분기 처리
                 if response.status_code == 429:
+                    self._total_429s += 1
                     retry_after = int(response.headers.get("Retry-After", 5))
                     logger.warning(
-                        "[429 Too Many Requests] {}초 대기 후 재시도 ({}/{}) - 경로: {}",
-                        retry_after, attempt, max_retries, path
+                        "[429 Too Many Requests] {}초 대기 후 재시도 ({}/{}) - 경로: {} (누적 429: {}회)",
+                        retry_after, attempt, max_retries, path, self._total_429s,
                     )
                     time.sleep(retry_after)
                     continue

@@ -33,11 +33,57 @@ class SignalGenerator:
         "volume_surge", "ma_golden_cross", "ma_dead_cross",
     )
 
+    # 독립 정보 3그룹. 그룹 내 지표는 같은 정보의 변형이므로 가중치 중복 시 경고.
+    COLLINEARITY_GROUPS = {
+        "가격 모멘텀": {
+            "weights": ["rsi_oversold", "macd_golden_cross", "ma_golden_cross"],
+            "representative": "macd_golden_cross",
+        },
+        "변동성": {
+            "weights": ["bollinger_lower"],
+            "representative": "bollinger_lower",
+        },
+        "거래량": {
+            "weights": ["volume_surge"],
+            "representative": "volume_surge",
+        },
+    }
+
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
         self.strategy_params = self.config.strategies
         self.indicator_params = self.config.indicators
-        logger.info("SignalGenerator 초기화 완료")
+        self._collinearity_mode = (
+            self.strategy_params.get("scoring", {})
+            .get("collinearity_mode", "max_per_direction")
+        )
+        self._diagnose_weight_collinearity()
+        logger.info(
+            "SignalGenerator 초기화 완료 (collinearity_mode={})",
+            self._collinearity_mode,
+        )
+
+    def _diagnose_weight_collinearity(self):
+        """현재 가중치 설정에서 다중공선성 위험을 진단하고 경고 로그 출력."""
+        try:
+            weights = self._get_weights()
+        except KeyError:
+            return
+
+        for group_name, info in self.COLLINEARITY_GROUPS.items():
+            active = [
+                w for w in info["weights"]
+                if abs(weights.get(w, 0)) > 0
+            ]
+            if len(active) > 1:
+                rep = info["representative"]
+                others = [w for w in active if w != rep]
+                logger.warning(
+                    "⚠️ 다중공선성: {} 그룹에서 {}개 지표가 동시 활성 ({}). "
+                    "같은 정보를 중복 측정 중. 대표 지표({})만 남기고 나머지({})를 "
+                    "가중치 0 또는 --mode optimize --auto-correlation 으로 자동 정리 권장.",
+                    group_name, len(active), active, rep, others,
+                )
 
     def _get_weights(self) -> dict:
         """스코어링 가중치 dict 반환. 미설정 또는 필수 키 누락 시 KeyError."""
@@ -55,13 +101,32 @@ class SignalGenerator:
             )
         return weights
 
+    # 그룹 → score 컬럼 매핑 (representative_only 모드용)
+    _SCORE_GROUP_MAP = {
+        "가격 모멘텀": {
+            "columns": ["score_rsi", "score_macd", "score_ma"],
+            "representative": "score_macd",
+        },
+        "변동성": {
+            "columns": ["score_bollinger"],
+            "representative": "score_bollinger",
+        },
+        "거래량": {
+            "columns": ["score_volume"],
+            "representative": "score_volume",
+        },
+    }
+
     def generate(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         멀티 지표 스코어링 방식으로 매매 신호 생성.
 
-        다중공선성 완화: RSI/MACD/볼린저/MA는 모두 "가격 강도"를 다르게 표현하므로
-        합산하지 않고, 매수 방향 점수(양수 중 최대) + 매도 방향 점수(음수 중 최대)만
-        사용해 동일 신호의 중복 가산을 막는다. 거래량은 독립 정보로 그대로 가산.
+        collinearity_mode (strategies.yaml → scoring.collinearity_mode):
+          - "max_per_direction" (기본): 가격 그룹(RSI/MACD/볼린저/MA) 점수를 방향별
+            최대 1개만 반영 (매수=양수 max, 매도=음수 min). 완화 수준: 중간.
+          - "representative_only": 3그룹(가격 모멘텀/변동성/거래량)에서 각 대표 지표
+            1개만 사용하고 나머지 점수를 0으로 강제. 완화 수준: 강력.
+            대표: MACD(가격 모멘텀), 볼린저(변동성), volume(거래량).
 
         Args:
             df: 기술 지표가 계산된 DataFrame
@@ -81,16 +146,12 @@ class SignalGenerator:
         result["score_volume"] = self._score_volume(result)
         result["score_ma"] = self._score_ma(result)
 
-        # 다중공선성 완화: 가격 강도 그룹(RSI/MACD/볼린저/MA)은 같은 정보를 반복하므로
-        # 방향별로 최대 1개만 반영. 매수 쪽은 양수 중 최대, 매도 쪽은 음수 중 최대만 사용.
-        price_columns = ["score_rsi", "score_macd", "score_bollinger", "score_ma"]
-        price_df = result[price_columns]
-        buy_side = price_df.clip(lower=0).max(axis=1)   # 양수만 취해 최대
-        sell_side = price_df.clip(upper=0).min(axis=1)  # 음수만 취해 최소
-        result["score_price_group"] = buy_side + sell_side
+        mode = self._collinearity_mode
 
-        # 총점 = 가격 그룹 점수(중복 제거) + 거래량(독립 정보)
-        result["total_score"] = result["score_price_group"] + result["score_volume"]
+        if mode == "representative_only":
+            result = self._apply_representative_only(result)
+        else:
+            result = self._apply_max_per_direction(result)
 
         # 매수/매도 임계값
         scoring = self.strategy_params.get("scoring", {})
@@ -103,12 +164,37 @@ class SignalGenerator:
         result.loc[result["total_score"] <= sell_threshold, "signal"] = self.SELL
 
         logger.info(
-            "신호 생성 완료 — 매수: {}건, 매도: {}건, 홀드: {}건",
+            "신호 생성 완료 (collinearity={}) — 매수: {}건, 매도: {}건, 홀드: {}건",
+            mode,
             (result["signal"] == self.BUY).sum(),
             (result["signal"] == self.SELL).sum(),
             (result["signal"] == self.HOLD).sum(),
         )
 
+        return result
+
+    def _apply_max_per_direction(self, result: pd.DataFrame) -> pd.DataFrame:
+        """기본 모드: 가격 그룹에서 방향별 최대 1개만 반영."""
+        price_columns = ["score_rsi", "score_macd", "score_bollinger", "score_ma"]
+        price_df = result[price_columns]
+        buy_side = price_df.clip(lower=0).max(axis=1)
+        sell_side = price_df.clip(upper=0).min(axis=1)
+        result["score_price_group"] = buy_side + sell_side
+        result["total_score"] = result["score_price_group"] + result["score_volume"]
+        return result
+
+    def _apply_representative_only(self, result: pd.DataFrame) -> pd.DataFrame:
+        """강력 모드: 3그룹 각 대표 지표 1개만 사용, 나머지 점수 0 강제."""
+        total = pd.Series(0.0, index=result.index)
+        for group_name, info in self._SCORE_GROUP_MAP.items():
+            rep_col = info["representative"]
+            if rep_col in result.columns:
+                total += result[rep_col]
+            for col in info["columns"]:
+                if col != rep_col and col in result.columns:
+                    result[col] = 0.0
+        result["score_price_group"] = total - result.get("score_volume", 0.0)
+        result["total_score"] = total
         return result
 
     def get_latest_signal(self, df: pd.DataFrame) -> dict:
