@@ -186,16 +186,21 @@ class PortfolioManager:
         summary = self.get_portfolio_summary()
         return float(summary["cash"])
 
-    def sync_with_broker(self, auto_correct: bool = False) -> dict:
+    def sync_with_broker(self, auto_correct: bool = None) -> dict:
         """
         KIS 실제 잔고와 DB 포지션을 대조하여 불일치 시 로깅 및 알림.
+        auto_correct=True 시 DB를 증권사 기준으로 자동 보정합니다.
 
         Args:
-            auto_correct: True면 DB를 증권사 기준으로 보정 (미구현 시 무시)
+            auto_correct: True면 DB를 증권사 기준으로 보정.
+                          None이면 settings.yaml의 position_mismatch_auto_correct 참조.
 
         Returns:
-            {"ok": bool, "mismatches": [...], "message": str}
+            {"ok": bool, "mismatches": [...], "corrected": [...], "message": str}
         """
+        if auto_correct is None:
+            auto_correct = self.config.trading.get("position_mismatch_auto_correct", False)
+
         try:
             from api.kis_api import KISApi
             account_no = self.config.get_account_no(self.account_key)
@@ -203,11 +208,11 @@ class PortfolioManager:
             balance = kis.get_balance()
         except Exception as e:
             logger.error("sync_with_broker: KIS 잔고 조회 실패 — {}", e)
-            return {"ok": False, "mismatches": [], "message": f"잔고 조회 실패: {e}"}
+            return {"ok": False, "mismatches": [], "corrected": [], "message": f"잔고 조회 실패: {e}"}
 
         if not balance or "positions" not in balance:
             logger.warning("sync_with_broker: KIS 잔고 응답 없음")
-            return {"ok": False, "mismatches": [], "message": "잔고 응답 없음"}
+            return {"ok": False, "mismatches": [], "corrected": [], "message": "잔고 응답 없음"}
 
         kis_positions = {p["symbol"]: p for p in balance["positions"] if p.get("symbol")}
         db_positions = {p.symbol: p for p in get_all_positions(account_key=self.account_key if self.account_key else None)}
@@ -218,40 +223,113 @@ class PortfolioManager:
             if not db_pos:
                 mismatches.append({
                     "symbol": symbol,
+                    "type": "kis_only",
                     "reason": "KIS에는 있으나 DB에 없음",
                     "kis_qty": kp["quantity"],
+                    "kis_avg_price": kp.get("avg_price", 0),
                     "db_qty": None,
                 })
             elif db_pos.quantity != kp["quantity"]:
                 mismatches.append({
                     "symbol": symbol,
+                    "type": "qty_mismatch",
                     "reason": "수량 불일치",
                     "kis_qty": kp["quantity"],
+                    "kis_avg_price": kp.get("avg_price", db_pos.avg_price),
                     "db_qty": db_pos.quantity,
                 })
         for symbol in db_positions:
             if symbol not in kis_positions:
                 mismatches.append({
                     "symbol": symbol,
+                    "type": "db_only",
                     "reason": "DB에는 있으나 KIS에 없음",
                     "kis_qty": None,
+                    "kis_avg_price": None,
                     "db_qty": db_positions[symbol].quantity,
                 })
 
+        corrected = []
         if mismatches:
             msg = f"포지션 불일치 {len(mismatches)}건: " + "; ".join(
                 f"{m['symbol']}({m['reason']})" for m in mismatches
             )
             logger.warning("sync_with_broker: {}", msg)
+
+            if auto_correct:
+                corrected = self._auto_correct_positions(mismatches)
+                msg += f" → 자동 보정 {len(corrected)}건"
+                logger.info("sync_with_broker: 자동 보정 완료 ({}건)", len(corrected))
+
             try:
                 from core.notifier import Notifier
                 notifier = Notifier()
+                action_msg = "자동 보정 완료" if auto_correct and corrected else "수동 확인 후 DB 보정하세요"
                 notifier.send_message(
-                    f"⚠️ **포지션 동기화 불일치**\n{msg}\n수동 확인 후 DB 보정하세요.",
+                    f"⚠️ **포지션 동기화 불일치**\n{msg}\n{action_msg}",
                     critical=True,
                 )
             except Exception as e:
                 logger.error("sync_with_broker: 알림 발송 실패 — {}", e)
-            return {"ok": False, "mismatches": mismatches, "message": msg}
+            return {"ok": False, "mismatches": mismatches, "corrected": corrected, "message": msg}
         logger.info("sync_with_broker: DB와 KIS 잔고 일치")
-        return {"ok": True, "mismatches": [], "message": "일치"}
+        return {"ok": True, "mismatches": [], "corrected": [], "message": "일치"}
+
+    def _auto_correct_positions(self, mismatches: list) -> list:
+        """
+        불일치 목록을 기반으로 DB 포지션을 KIS 잔고에 맞춰 보정합니다.
+
+        - kis_only: KIS에만 있는 포지션 → DB에 추가
+        - db_only: DB에만 있는 포지션 → DB에서 삭제
+        - qty_mismatch: 수량 불일치 → DB 수량을 KIS 기준으로 수정
+
+        Returns:
+            보정된 항목 리스트
+        """
+        from database.repositories import save_position, delete_position
+
+        corrected = []
+        ak = self.account_key or ""
+
+        for m in mismatches:
+            symbol = m["symbol"]
+            try:
+                if m["type"] == "kis_only":
+                    save_position(
+                        symbol=symbol,
+                        avg_price=float(m.get("kis_avg_price", 0)),
+                        quantity=int(m["kis_qty"]),
+                        account_key=ak,
+                    )
+                    corrected.append({"symbol": symbol, "action": "added", "qty": m["kis_qty"]})
+                    logger.info("자동 보정: {} DB에 추가 ({}주)", symbol, m["kis_qty"])
+
+                elif m["type"] == "db_only":
+                    delete_position(symbol, account_key=ak)
+                    corrected.append({"symbol": symbol, "action": "deleted", "qty": m["db_qty"]})
+                    logger.info("자동 보정: {} DB에서 삭제 (KIS에 없음)", symbol)
+
+                elif m["type"] == "qty_mismatch":
+                    kis_qty = int(m["kis_qty"])
+                    if kis_qty == 0:
+                        delete_position(symbol, account_key=ak)
+                        corrected.append({"symbol": symbol, "action": "deleted", "qty": 0})
+                    else:
+                        save_position(
+                            symbol=symbol,
+                            avg_price=float(m.get("kis_avg_price", 0)),
+                            quantity=kis_qty,
+                            account_key=ak,
+                        )
+                        corrected.append({
+                            "symbol": symbol,
+                            "action": "qty_updated",
+                            "old_qty": m["db_qty"],
+                            "new_qty": kis_qty,
+                        })
+                    logger.info("자동 보정: {} 수량 {}→{}", symbol, m["db_qty"], kis_qty)
+
+            except Exception as e:
+                logger.error("자동 보정 실패 ({}): {}", symbol, e)
+
+        return corrected

@@ -19,6 +19,10 @@
 
     # 긴급 전체 청산 (수동 개입·블랙스완 외 상황에서 즉시 전 종목 매도)
     python main.py --mode liquidate
+
+    # 바스켓 리밸런싱 (목표 비중 대비 드리프트 체크 → 주문)
+    python main.py --mode rebalance --basket kr_blue_chip
+    python main.py --mode rebalance --basket kr_blue_chip --dry-run
 """
 
 import os
@@ -490,6 +494,63 @@ def _run_ensemble_independence_check_in_validate(args, config, notifier):
         logger.info("앙상블 독립성 검증 통과: 모든 전략 쌍 |r| < {:.1f}", threshold)
 
 
+# ──────────────────────────────────────────────────────────────
+# 바스켓 리밸런싱 모드
+# ──────────────────────────────────────────────────────────────
+def run_rebalance(args):
+    """바스켓 포트폴리오 리밸런싱 모드."""
+    from core.basket_rebalancer import BasketRebalancer
+    from core.notifier import Notifier
+
+    config = Config.get()
+    notifier = Notifier(config)
+    basket_name = getattr(args, "basket", None)
+    dry_run = getattr(args, "dry_run", False)
+
+    if basket_name:
+        basket_names = [basket_name]
+    else:
+        basket_names = BasketRebalancer.get_enabled_baskets()
+        if not basket_names:
+            logger.warning("enabled=true인 바스켓이 없습니다. --basket으로 지정하거나 baskets.yaml에서 enabled를 true로 설정하세요.")
+            return
+
+    logger.info("=" * 50)
+    logger.info("🔄 바스켓 리밸런싱 시작 (바스켓: {}, dry_run: {})", basket_names, dry_run)
+    logger.info("=" * 50)
+
+    for name in basket_names:
+        try:
+            rebalancer = BasketRebalancer(basket_name=name, config=config)
+
+            report = rebalancer.get_status_report()
+            logger.info("\n{}", report)
+
+            should, reason = rebalancer.should_rebalance()
+            if not should and not dry_run:
+                logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
+                continue
+
+            orders = rebalancer.plan_rebalance()
+            if not orders:
+                logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
+                continue
+
+            result = rebalancer.execute(orders, dry_run=dry_run)
+
+            summary = (
+                f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
+                f"완료: 실행 {result['executed']}건, 스킵 {result['skipped']}건, "
+                f"실패 {result['failed']}건"
+            )
+            logger.info(summary)
+            notifier.send_message(summary)
+
+        except Exception as e:
+            logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)
+            notifier.send_message(f"바스켓 '{name}' 리밸런싱 오류: {e}")
+
+
 def run_paper_trading(args):
     """페이퍼 트레이딩 모드 실행"""
     from datetime import datetime
@@ -842,21 +903,9 @@ def run_dashboard(args):
 
 
 def _get_strategy(name: str):
-    """전략 인스턴스 반환"""
-    from config.config_loader import Config
-    config = Config.get()
-    if name == "mean_reversion":
-        from strategies.mean_reversion import MeanReversionStrategy
-        return MeanReversionStrategy(config)
-    elif name == "trend_following":
-        from strategies.trend_following import TrendFollowingStrategy
-        return TrendFollowingStrategy(config)
-    elif name == "ensemble":
-        from core.strategy_ensemble import StrategyEnsemble
-        return StrategyEnsemble(config)
-    else:
-        from strategies.scoring_strategy import ScoringStrategy
-        return ScoringStrategy(config)
+    """전략 인스턴스 반환 (레지스트리 기반)"""
+    from strategies import create_strategy
+    return create_strategy(name)
 
 
 def main():
@@ -921,12 +970,13 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation"],
-        help="실행 모드. check_correlation: 스코어링 지표 상관. check_ensemble_correlation: 앙상블 전략 신호 상관(0.6 이상 시 conservative/재구성 권고)",
+        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
+        help="실행 모드. rebalance: 바스켓 리밸런싱. check_correlation: 스코어링 지표 상관. check_ensemble_correlation: 앙상블 전략 신호 상관",
     )
+    from strategies import get_strategy_names
     parser.add_argument(
         "--strategy", type=str, default="scoring",
-        choices=["scoring", "mean_reversion", "trend_following", "ensemble"],
+        choices=get_strategy_names(),
         help="매매 전략 (기본: scoring)",
     )
     parser.add_argument(
@@ -997,6 +1047,14 @@ def main():
         "--ensemble-correlation-threshold", type=float, default=0.6,
         help="[check_ensemble_correlation 모드] 앙상블 신호 고상관 기준 (기본: 0.6). 이 값 이상이면 conservative 또는 전략 재구성 권고",
     )
+    parser.add_argument(
+        "--basket", type=str, default=None,
+        help="[rebalance 모드] 리밸런싱 대상 바스켓 이름 (미지정 시 enabled=true인 모든 바스켓)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="[rebalance 모드] 실제 주문 없이 계획만 출력",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -1039,6 +1097,8 @@ def main():
             run_check_indicator_correlation(args)
         elif args.mode == "check_ensemble_correlation":
             run_check_ensemble_correlation(args)
+        elif args.mode == "rebalance":
+            run_rebalance(args)
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:
