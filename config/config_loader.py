@@ -50,13 +50,23 @@ def _override_with_env(settings: dict) -> dict:
         settings["kis_api"]["max_retry"] = int(os.environ["MAX_RETRY"])
 
     if "discord" in settings:
-        settings["discord"]["webhook_url"] = os.environ.get("DISCORD_WEBHOOK_URL", settings["discord"].get("webhook_url"))
+        settings["discord"]["webhook_url"] = os.environ.get(
+            "DISCORD_WEBHOOK_URL", settings["discord"].get("webhook_url", "")
+        )
 
-    tg = settings.setdefault("telegram", {})
-    if "TELEGRAM_BOT_TOKEN" in os.environ:
-        tg["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
-    if "TELEGRAM_CHAT_ID" in os.environ:
-        tg["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
+    em = settings.setdefault("email", {})
+    if "SMTP_SERVER" in os.environ:
+        em["smtp_server"] = os.environ["SMTP_SERVER"]
+    if "SMTP_PORT" in os.environ:
+        em["smtp_port"] = int(os.environ["SMTP_PORT"])
+    if "SMTP_USER" in os.environ:
+        em["smtp_user"] = os.environ["SMTP_USER"]
+    if "ALERT_EMAIL_TO" in os.environ:
+        em["alert_to"] = os.environ["ALERT_EMAIL_TO"]
+
+    dart = settings.setdefault("dart", {})
+    if "DART_API_KEY" in os.environ:
+        dart["api_key"] = os.environ["DART_API_KEY"].strip()
 
     return settings
 
@@ -65,7 +75,15 @@ def load_settings() -> dict:
     try:
         settings = load_yaml(CONFIG_DIR / "settings.yaml")
     except FileNotFoundError:
-        settings = {"kis_api": {}, "database": {}, "trading": {}, "discord": {}, "telegram": {}, "watchlist": {}}
+        settings = {
+            "kis_api": {},
+            "database": {},
+            "trading": {},
+            "discord": {},
+            "email": {},
+            "watchlist": {},
+            "dart": {},
+        }
     return _override_with_env(settings)
 
 
@@ -152,9 +170,24 @@ class Config:
         return self._settings.get("trading", {})
 
     @property
+    def markets(self) -> dict:
+        """시장(국가)별 브로커·통화 설정 (korea / us)"""
+        return self._settings.get("markets", {})
+
+    @property
+    def dart(self) -> dict:
+        """DART Open API (전자공시) 설정"""
+        return self._settings.get("dart", {})
+
+    @property
     def discord(self) -> dict:
         """디스코드 설정"""
         return self._settings.get("discord", {})
+
+    @property
+    def email(self) -> dict:
+        """이메일(SMTP) 설정"""
+        return self._settings.get("email", {})
 
     @property
     def watchlist(self) -> list:

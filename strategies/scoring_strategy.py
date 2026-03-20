@@ -32,17 +32,18 @@ class ScoringStrategy(BaseStrategy):
         self.signal_generator = SignalGenerator(self.config)
         logger.info("ScoringStrategy 초기화 완료")
 
-    def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
+    def analyze(self, df: pd.DataFrame, symbol: str = None) -> pd.DataFrame:
         """기술 지표 계산 후 신호 생성"""
         # 모든 지표 계산
         df = self.indicator_engine.calculate_all(df)
         # 신호 생성
-        df = self.signal_generator.generate(df)
+        df = self.signal_generator.generate(df, symbol=symbol or "")
         if "total_score" in df.columns:
             df["strategy_score"] = df["total_score"]
         return df
 
-    def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
+    def generate_signal(self, df: pd.DataFrame, symbol: str = None, **kwargs) -> dict:
         """최신 매매 신호 반환"""
-        df = self.analyze(df)
+        sym = symbol or kwargs.get("symbol")
+        df = self.analyze(df, symbol=sym)
         return self.signal_generator.get_latest_signal(df)

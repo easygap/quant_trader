@@ -1,0 +1,19 @@
+[Unit]
+Description=Quant Trader Auto Trading System
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/quant_trader
+Environment=PATH=/home/ubuntu/quant_trader/.venv/bin
+# .env 가 없으면 유닛 시작 실패를 막기 위해 '-' 접두(선택 파일)
+EnvironmentFile=-/home/ubuntu/quant_trader/.env
+ExecStart=/home/ubuntu/quant_trader/.venv/bin/python main.py --mode schedule
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/ubuntu/quant_trader/logs/service.log
+StandardError=append:/home/ubuntu/quant_trader/logs/service_error.log
+
+[Install]
+WantedBy=multi-user.target

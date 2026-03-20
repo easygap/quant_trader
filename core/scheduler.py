@@ -21,6 +21,7 @@ from core.notifier import Notifier
 from database.repositories import (
     get_all_positions,
     get_daily_trade_summary,
+    get_pending_failed_orders,
     get_position,
     save_daily_report,
 )
@@ -37,19 +38,33 @@ class LoopMetrics:
         self.last_success_time: datetime | None = None
         self.last_elapsed_seconds: float = 0.0
         self.max_elapsed_seconds: float = 0.0
+        self._elapsed_sum: float = 0.0
+        self.loops_over_8min: int = 0
+        self.loops_over_10min: int = 0
 
-    def record_success(self, elapsed: float):
+    def record_success(self, elapsed: float, monitor_interval: float = 600.0):
+        """
+        monitor_interval: 장중 모니터링 주기(초). 10분=600일 때 80% 경고=480초.
+        주기가 매우 짧은 단위테스트(예: 1초)에서는 8분 경고 카운트를 올리지 않음(소프트 임계 < 60이면 비활성).
+        """
         self.total_loops += 1
         self.consecutive_skips = 0
         self.last_success_time = datetime.now()
         self.last_elapsed_seconds = elapsed
         self.max_elapsed_seconds = max(self.max_elapsed_seconds, elapsed)
+        self._elapsed_sum += elapsed
+        soft = int(monitor_interval * 0.8)
+        if soft >= 60 and elapsed > soft:
+            self.loops_over_8min += 1
+        if elapsed > monitor_interval:
+            self.loops_over_10min += 1
 
     def record_skip(self):
         self.total_skips += 1
         self.consecutive_skips += 1
 
     def summary(self) -> dict:
+        avg = self._elapsed_sum / self.total_loops if self.total_loops else 0.0
         return {
             "total_loops": self.total_loops,
             "total_skips": self.total_skips,
@@ -57,6 +72,9 @@ class LoopMetrics:
             "last_success": self.last_success_time.isoformat() if self.last_success_time else None,
             "last_elapsed_s": round(self.last_elapsed_seconds, 1),
             "max_elapsed_s": round(self.max_elapsed_seconds, 1),
+            "avg_elapsed_s": round(avg, 1),
+            "loops_over_8min": self.loops_over_8min,
+            "loops_over_10min": self.loops_over_10min,
         }
 
 
@@ -101,44 +119,118 @@ class Scheduler:
             strategy_name, self.monitor_interval, self.auto_entry,
         )
 
+    def startup_recovery(self):
+        """
+        비정상 종료 후 재시작 시: Dead-letter 미처리 건 알림, KIS 미체결 확인, 잔고↔DB 동기화.
+        장중이면 `_last_monitor_time`을 비워 첫 장중 루프에서 곧바로 모니터링이 돌도록 한다.
+        """
+        try:
+            pending_orders = get_pending_failed_orders()
+            if pending_orders:
+                logger.warning("[복구] 미처리 실패 주문 {}건 발견", len(pending_orders))
+                lines = []
+                for o in pending_orders[:15]:
+                    ak = getattr(o, "account_key", "") or ""
+                    lines.append(
+                        f"  #{o.id} [{ak}] {o.symbol} {o.action} {o.quantity}주 @{o.price:,.0f}"
+                    )
+                if len(pending_orders) > 15:
+                    lines.append(f"  … 외 {len(pending_orders) - 15}건")
+                self.discord.send_message(
+                    "⚠️ **[복구] 미처리 Dead-letter 주문**\n"
+                    f"총 {len(pending_orders)}건 (status=pending)\n"
+                    + "\n".join(lines),
+                    critical=True,
+                )
+
+            if self.config.trading.get("mode") == "live":
+                from core.order_executor import OrderExecutor
+
+                executor = OrderExecutor(self.config, account_key=self.strategy_name)
+                open_orders = executor.reconcile_open_orders_after_crash()
+                if open_orders:
+                    logger.warning("[복구] KIS 미체결 주문 {}건: {}", len(open_orders), open_orders)
+                    parts = [
+                        f"{x.get('symbol','?')} {x.get('remaining_qty','?')}주 "
+                        f"({x.get('buy_sell','')}) @{x.get('order_price','')}"
+                        for x in open_orders[:12]
+                    ]
+                    tail = f"\n… 외 {len(open_orders) - 12}건" if len(open_orders) > 12 else ""
+                    self.discord.send_message(
+                        "⚠️ **[복구] KIS 미체결 주문**\n"
+                        f"{len(open_orders)}건 — 잔고 동기화로 체결분 반영 예정\n"
+                        + "\n".join(parts)
+                        + tail,
+                        critical=True,
+                    )
+
+                try:
+                    self.portfolio.sync_with_broker(auto_correct=True)
+                except Exception as e:
+                    logger.warning("[복구] KIS 잔고↔DB 동기화 실패: {}", e)
+            else:
+                logger.info("[복구] paper 모드 — KIS 미체결·잔고 동기화 생략")
+
+            if self.trading_hours.is_market_open():
+                self._last_monitor_time = None
+                logger.info("[복구] 장중 재시작 — 모니터링 주기 타이머 초기화(다음 루프에서 즉시 실행 가능)")
+            else:
+                logger.info("[복구] 비장중 재시작 — 다음 거래일·장 개시까지 기존 스케줄로 대기")
+        except Exception as e:
+            logger.error("[복구] startup_recovery 처리 중 오류: {}", e)
+
     def run(self):
         """메인 루프 — 무한 반복으로 장 시간에 맞춰 자동 실행."""
         logger.info("🚀 자동 스케줄러 시작 (전략: {})", self.strategy_name)
         self.discord.send_message(f"🚀 퀀트 트레이더 스케줄러 시작\n전략: {self.strategy_name}")
+        self.startup_recovery()
 
         try:
             while True:
-                now = datetime.now()
-                today = now.date()
+                try:
+                    now = datetime.now()
+                    today = now.date()
 
-                if self._today != today:
-                    self._today = today
-                    self._pre_market_done = False
-                    self._post_market_done = False
-                    self._last_monitor_time = None
-                    self._last_sync_broker_time = None
-                    self._entry_candidates = []
-                    self._loop_metrics = LoopMetrics()
-                    logger.info("📅 새로운 거래일: {}", today)
-                    self._maybe_update_holidays()
+                    if self._today != today:
+                        self._today = today
+                        self._pre_market_done = False
+                        self._post_market_done = False
+                        self._last_monitor_time = None
+                        self._last_sync_broker_time = None
+                        self._entry_candidates = []
+                        self._loop_metrics = LoopMetrics()
+                        logger.info("📅 새로운 거래일: {}", today)
+                        self._maybe_update_holidays()
 
-                if not self.trading_hours.is_trading_day():
-                    self._sleep_until_next_trading_day()
-                    continue
+                    if not self.trading_hours.is_trading_day():
+                        self._sleep_until_next_trading_day()
+                        continue
 
-                # 장전 헬스체크 (10분 주기)
-                self._maybe_run_healthcheck()
+                    # 장전 헬스체크 (10분 주기)
+                    self._maybe_run_healthcheck()
 
-                if self.trading_hours.is_pre_market() and not self._pre_market_done:
-                    self._run_pre_market()
-                    self._pre_market_done = True
-                elif self.trading_hours.is_market_open():
-                    if self._should_monitor():
-                        self._run_monitoring()
-                        self._last_monitor_time = now
-                elif now.hour == 15 and now.minute >= 35 and not self._post_market_done:
-                    self._run_post_market()
-                    self._post_market_done = True
+                    if self.trading_hours.is_pre_market() and not self._pre_market_done:
+                        self._run_pre_market()
+                        self._pre_market_done = True
+                    elif self.trading_hours.is_market_open():
+                        if self._should_monitor():
+                            self._run_monitoring()
+                            self._last_monitor_time = now
+                    elif now.hour == 15 and now.minute >= 35 and not self._post_market_done:
+                        self._run_post_market()
+                        self._post_market_done = True
+
+                except Exception as loop_exc:
+                    logger.exception(
+                        "[Scheduler] 메인 루프 예외 — 30초 후 계속: {}",
+                        loop_exc,
+                    )
+                    try:
+                        self.discord.send_message(
+                            f"⚠️ **[Scheduler]** 루프 예외(복구 진행): `{type(loop_exc).__name__}`",
+                        )
+                    except Exception:
+                        pass
 
                 time_mod.sleep(30)
 
@@ -173,7 +265,7 @@ class Scheduler:
             signals = []
             for symbol in watchlist:
                 try:
-                    df = collector.fetch_korean_stock(symbol)
+                    df = collector.fetch_stock(symbol)
                     if df.empty or len(df) < 30:
                         continue
 
@@ -229,10 +321,43 @@ class Scheduler:
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
 
+    def _get_kis_max_calls_per_sec(self) -> float:
+        """KIS 설정 초당 호출 한도 (예상 소요 계산용). 실패 시 10."""
+        try:
+            from api.kis_api import KISApi
+            v = float(KISApi().max_calls_per_sec)
+            return v if v > 0 else 10.0
+        except Exception:
+            return 10.0
+
+    def _log_monitoring_watchlist_preflight(self):
+        """장중 루프 진입 전 워치리스트 규모·KIS 한도 대비 예상 API 소요(종목×2/초당한도) 로깅."""
+        try:
+            n = len(WatchlistManager(self.config).resolve())
+        except Exception as e:
+            logger.debug("워치리스트 조회 실패(프리플라이트 스킵): {}", e)
+            return
+        per_sec = self._get_kis_max_calls_per_sec()
+        est_sec = (n * 2) / per_sec if per_sec > 0 else 0.0
+        if n > 50:
+            logger.error(
+                "[Scheduler] 종목 {}개. 10분 루프 내 처리 불가능할 수 있습니다. "
+                "예상 순수 API 소요 약 {:.1f}초 (종목×2요청 / 초당 {:.0f}건)",
+                n, est_sec, per_sec,
+            )
+        elif n > 30:
+            logger.warning(
+                "[Scheduler] 종목 {}개. KIS API 분당 한도 초과 위험. "
+                "예상 순수 API 소요 약 {:.1f}초 (종목×2요청 / 초당 {:.0f}건)",
+                n, est_sec, per_sec,
+            )
+
     def _run_monitoring(self):
         """장중 모니터링: 진입 후보 실행 + 손절/익절 체크."""
         logger.debug("🔍 장중 모니터링 ({})", datetime.now().strftime("%H:%M:%S"))
         started_at = datetime.now()
+
+        self._log_monitoring_watchlist_preflight()
 
         try:
             # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
@@ -258,13 +383,28 @@ class Scheduler:
             logger.error("장중 모니터링 실패: {}", e)
         finally:
             elapsed = (datetime.now() - started_at).total_seconds()
-            self._loop_metrics.record_success(elapsed)
+
+            soft = int(self.monitor_interval * 0.8)
+            if soft >= 60 and elapsed > soft:
+                logger.warning(
+                    "[Scheduler] 루프 실행 시간 {:.1f}초 경고. {}초(모니터 주기의 80%) 초과 — 10분 한도에 근접.",
+                    elapsed,
+                    soft,
+                )
+                self.discord.send_message(
+                    f"⚠️ **[Scheduler]** 장중 루프 **{elapsed:.1f}초** 소요 "
+                    f"({soft}초 = 주기 {self.monitor_interval:.0f}초의 80% 초과). "
+                    "다음 루프가 주기 한도에 가까워질 수 있습니다.",
+                )
+
+            self._loop_metrics.record_success(elapsed, self.monitor_interval)
 
             if elapsed > self.monitor_interval:
                 self._skip_next_monitor_cycle = True
                 self._loop_metrics.record_skip()
                 logger.warning(
-                    "⚠️ 장중 루프가 {}초 소요되어 다음 모니터링 사이클을 1회 스킵합니다. (안전: 10분 초과 시 다음 루프 생략)",
+                    "⚠️ 장중 루프가 {}초 소요되어 다음 모니터링 사이클을 1회 스킵합니다. (안전: 10분 초과 시 다음 루프 생략) "
+                    "[LoopMetrics] 10분 초과(timeout) 1회 기록",
                     int(elapsed),
                 )
 
@@ -305,7 +445,7 @@ class Scheduler:
 
             for symbol in watchlist:
                 try:
-                    df = collector.fetch_korean_stock(symbol)
+                    df = collector.fetch_stock(symbol)
                     if df.empty or len(df) < 30:
                         continue
                     signal_info = strategy.generate_signal(df, symbol=symbol)
@@ -517,11 +657,13 @@ class Scheduler:
             # 일일 루프 모니터링 지표 기록
             metrics = self._loop_metrics.summary()
             logger.info("📊 일일 루프 지표: {}", metrics)
-            if metrics["total_skips"] > 0:
+            if metrics["total_loops"] > 0 or metrics["total_skips"] > 0:
                 self.discord.send_message(
-                    f"📊 오늘 루프 지표: 실행 {metrics['total_loops']}회, "
-                    f"스킵 {metrics['total_skips']}회, "
-                    f"최대 소요 {metrics['max_elapsed_s']}초"
+                    "📊 **오늘 루프 지표**\n"
+                    f"실행 {metrics['total_loops']}회 | 스킵 {metrics['total_skips']}회\n"
+                    f"평균 소요 {metrics['avg_elapsed_s']}초 | 최대 소요 {metrics['max_elapsed_s']}초\n"
+                    f"8분 초과(경고) {metrics['loops_over_8min']}회 | "
+                    f"10분 초과(timeout) {metrics['loops_over_10min']}회"
                 )
 
             logger.info("장마감 리포트 저장 및 발송 완료")

@@ -19,6 +19,7 @@ from loguru import logger
 from backtest.backtester import Backtester
 from config.config_loader import Config
 from core.data_collector import DataCollector
+from core.notifier import Notifier
 
 
 def _get_kospi_top_n_symbols(
@@ -368,9 +369,30 @@ class StrategyValidator:
             })
         n_passed = sum(1 for w in windows if w.get("passed", False))
         n_total = len(windows)
-        all_passed = n_total > 0 and n_passed == n_total
+        n_failed = n_total - n_passed
+        pass_rate = (n_passed / n_total) if n_total > 0 else 0.0
         min_pass_ratio = 0.8
-        ratio_passed = (n_passed >= int(n_total * min_pass_ratio)) if n_total > 0 else False
+        wf_passed = n_total > 0 and pass_rate >= min_pass_ratio - 1e-12
+        all_passed = n_total > 0 and n_passed == n_total
+        ratio_passed = wf_passed
+
+        metrics_list = [w["metrics"] for w in windows if w.get("metrics")]
+        if metrics_list:
+            avg_oos_sharpe = float(np.mean([m.get("sharpe_ratio") or 0 for m in metrics_list]))
+            avg_oos_mdd = float(np.mean([m.get("max_drawdown") or 0 for m in metrics_list]))
+        else:
+            avg_oos_sharpe = 0.0
+            avg_oos_mdd = 0.0
+
+        if wf_passed:
+            print("워크포워드 검증 통과")
+            logger.info("워크포워드 검증 통과")
+        else:
+            print(f"워크포워드 검증 실패: {n_passed}/{n_total}")
+            logger.warning(
+                "워크포워드 검증 실패: {}/{} — 통과율 {:.1f}% < {:.0f}%. 전략 사용을 권장하지 않습니다.",
+                n_passed, n_total, pass_rate * 100, min_pass_ratio * 100,
+            )
 
         # 워크포워드 전체 창의 손익비 경고
         wf_warnings = []
@@ -399,17 +421,41 @@ class StrategyValidator:
             "windows": windows,
             "n_passed": n_passed,
             "n_total": n_total,
+            "n_failed": n_failed,
+            "pass_rate": round(pass_rate, 4),
+            "avg_oos_sharpe": round(avg_oos_sharpe, 2),
+            "avg_oos_mdd": round(avg_oos_mdd, 2),
             "all_passed": all_passed,
             "ratio_passed": ratio_passed,
+            "wf_passed": wf_passed,
             "min_pass_ratio": min_pass_ratio,
             "warnings": wf_warnings,
         }
         result["report_path"] = str(self._save_walk_forward_report(result))
+        self._notify_walk_forward(result)
         return result
 
+    def _notify_walk_forward(self, result: dict) -> None:
+        """워크포워드 요약을 디스코드(Notifier)로 전송."""
+        strat = result["strategy"]
+        npass, ntot = result["n_passed"], result["n_total"]
+        avg_s = result.get("avg_oos_sharpe", 0)
+        avg_m = result.get("avg_oos_mdd", 0)
+        verdict = "통과" if result.get("wf_passed") else "실패"
+        body = (
+            f"[전략 검증] {strat} 전략 워크포워드 결과: {npass}/{ntot} 통과\n"
+            f"OOS 평균 샤프: {avg_s} | OOS 평균 MDD: {avg_m}%\n"
+            f"판정: {verdict}"
+        )
+        try:
+            Notifier(self.config).send(body)
+        except Exception as e:
+            logger.warning("워크포워드 검증 알림 전송 실패: {}", e)
+
     def _save_walk_forward_report(self, result: dict) -> Path:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = self.output_dir / f"validation_walkforward_{result['strategy']}_{result['symbol']}_{timestamp}.txt"
+        date_part = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_strategy = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(result["strategy"]))
+        path = self.output_dir / f"validation_walkforward_{date_part}_{safe_strategy}.txt"
         path.write_text(self._render_walk_forward_report(result), encoding="utf-8")
         logger.info("워크포워드 검증 리포트 저장: {}", path)
         return path
@@ -420,25 +466,41 @@ class StrategyValidator:
             f"워크포워드 검증 리포트 | {result['strategy']} | {result['symbol']}",
             f"기간: {result['period']}",
             f"train_days={result['train_days']} test_days={result['test_days']} step_days={result['step_days']}",
-            f"통과: {result['n_passed']}/{result['n_total']} 창 (전체 통과: {result['all_passed']}, {result['min_pass_ratio']*100:.0f}% 이상: {result['ratio_passed']})",
+            f"기준: 샤프 ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
+            f"창별 통과: {result['n_passed']}/{result['n_total']} | 기준 미달 창: {result.get('n_failed', 0)}",
+            f"통과율: {result.get('pass_rate', 0) * 100:.1f}% | 80% 이상 워크포워드 통과: {result.get('wf_passed', False)}",
+            f"OOS 평균 샤프: {result.get('avg_oos_sharpe', 0)} | OOS 평균 MDD: {result.get('avg_oos_mdd', 0)}%",
+            f"전체 창 통과: {result['all_passed']}",
             "=" * 70,
+            "",
+            f"{'창':>4} | {'테스트 구간':^21} | {'샤프':>7} | {'MDD%':>8} | {'거래건수':>8} | {'손익비':>8} | {'판정':^6}",
+            "-" * 86,
         ]
         for w in result["windows"]:
             status = "PASS" if w.get("passed") else "FAIL"
-            lines.append(f"[창 {w['window']}] {w['test_period']} {status}")
-            if w.get("metrics"):
-                m = w["metrics"]
+            m = w.get("metrics")
+            if m:
+                tp = w.get("test_period", "")[:21]
                 lines.append(
-                    f"  수익률 {m.get('total_return', 0):.2f}% | 샤프 {m.get('sharpe_ratio', 0):.2f} "
-                    f"| MDD {m.get('max_drawdown', 0):.2f}% | 손익비 {m.get('profit_factor', 0):.2f}"
+                    f"{w['window']:>4} | {tp:^21} | {m.get('sharpe_ratio', 0):>7.2f} | "
+                    f"{m.get('max_drawdown', 0):>8.2f} | {m.get('total_trades', 0):>8} | "
+                    f"{m.get('profit_factor', 0):>8.2f} | {status:^6}"
                 )
+            else:
+                err = (w.get("error") or "N/A")[:40]
+                lines.append(
+                    f"{w['window']:>4} | {w.get('test_period', '')[:21]:^21} | {'N/A':>7} | {'N/A':>8} | {'N/A':>8} | "
+                    f"{'N/A':>8} | {status:^6}  # {err}"
+                )
+        lines.append("")
+        for w in result["windows"]:
             if w.get("error"):
-                lines.append(f"  오류: {w['error']}")
+                lines.append(f"[창 {w['window']}] 오류: {w['error']}")
         if result.get("warnings"):
             lines.append("")
             lines.append("⚠️ 경고:")
-            for w in result["warnings"]:
-                lines.append(f"  {w}")
+            for msg in result["warnings"]:
+                lines.append(f"  {msg}")
         return "\n".join(lines) + "\n"
 
     def save_report(self, result: dict) -> Path:

@@ -776,12 +776,12 @@ def save_failed_order(
 
 
 @with_retry
-def get_pending_failed_orders(account_key: str = "") -> list:
-    """미처리(pending) 상태의 실패 주문 목록 반환."""
+def get_pending_failed_orders(account_key: str | None = None) -> list:
+    """미처리(pending) 상태의 실패 주문 목록 반환. account_key가 None 또는 미전달이면 전체 조회."""
     session = get_session()
     try:
         q = session.query(FailedOrder).filter(FailedOrder.status == "pending")
-        if account_key:
+        if account_key is not None and account_key != "":
             q = q.filter(FailedOrder.account_key == account_key)
         return q.order_by(FailedOrder.failed_at).all()
     finally:

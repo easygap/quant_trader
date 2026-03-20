@@ -9,7 +9,7 @@
 #   kospi200:   해당 시점 코스피200 구성종목 (pykrx). 대형주 한정 → 상폐 빈도 낮음.
 # WatchlistManager에 as_of_date가 주어지고 mode가 current이면 자동으로 historical로 전환.
 backtest_universe:
-  mode: "historical"           # "current" | "historical" | "kospi200"
+  mode: historical             # "current" | "historical" | "kospi200"
   exclude_administrative: true  # 관리종목(투자주의·투자위험 등) 제외
 
 # --- 포지션 사이징 ---

@@ -12,7 +12,7 @@ import random
 import ssl
 from collections import deque
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import threading
 
 import requests
@@ -496,6 +496,71 @@ class KISApi:
 
         return data["output"]
 
+    def get_price_history(self, symbol: str, minutes: int = 10) -> Optional[List[Dict[str, Any]]]:
+        """
+        당일 분봉(시간대별) 시세 조회 — 웹소켓 갭 구간 보충용.
+        국내주식 API `inquire-time-itemchartprice` (1분 단위 응답 가정).
+
+        Args:
+            symbol: 종목코드
+            minutes: 갭 길이 가늠용; 응답 행이 더 많으면 최근 minutes개만 사용
+
+        Returns:
+            [{"open","high","low","close","volume"}, ...] 시간순(오래된→최신) 또는 API 순서. 실패 시 None.
+        """
+        self._ensure_token()
+        tr_id = "FHKST03010200"
+        now = datetime.now()
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": symbol,
+            "fid_input_hour_1": now.strftime("%H%M%S"),
+            "fid_pw_data_incu_yn": "N",
+        }
+        data = self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            tr_id,
+            params=params,
+        )
+        if not data or data.get("rt_cd") != "0":
+            return None
+        rows = data.get("output2") or data.get("output1") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list):
+            return None
+        bars: List[Dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                cl = float(row.get("stck_prpr") or row.get("stck_clpr") or 0)
+                hg_f = float(row.get("stck_hgpr") or 0)
+                lw_f = float(row.get("stck_lwpr") or 0)
+                op = float(row.get("stck_oprc") or 0) or cl
+                vol = int(float(row.get("cntg_vol") or row.get("acml_vol") or 0))
+                if cl <= 0 and op > 0:
+                    cl = op
+                if cl <= 0:
+                    continue
+                hi = hg_f if hg_f > 0 else cl
+                lo = lw_f if lw_f > 0 else cl
+                bars.append({
+                    "open": op if op > 0 else cl,
+                    "high": hi,
+                    "low": lo,
+                    "close": cl,
+                    "volume": vol,
+                })
+            except (TypeError, ValueError):
+                continue
+        if not bars:
+            return None
+        if minutes > 0 and len(bars) > minutes:
+            bars = bars[-minutes:]
+        return bars
+
     # =============================================================
     # 주문 실행
     # =============================================================
@@ -643,6 +708,79 @@ class KISApi:
             logger.debug("미체결 조회 실패(OrderGuard만 적용): {} — {}", symbol, e)
             return False
 
+    def get_open_orders(self) -> list:
+        """
+        당일 계좌 전체 미체결 주문 조회 (재시작 복구·운영 점검용).
+        inquire-daily-ccld + CCLD_DVSN=02. PDNO 비우면 전체(증권사 스펙에 따라 전종목 또는 오류 시 []).
+
+        Returns:
+            정규화된 dict 목록(symbol, remaining_qty, order_price, buy_sell, order_no 등). 실패 시 [].
+        """
+        if not self._is_configured() or not self.cano:
+            return []
+        try:
+            self._ensure_token()
+            tr_id = "VTTC8001R" if self.use_mock else "TTTC8001R"
+            today = datetime.now().strftime("%Y%m%d")
+            params = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "INQR_STRT_DT": today,
+                "INQR_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",
+                "CCLD_DVSN": "02",
+                "PDNO": "",
+                "ORD_NO": "",
+                "INQR_DVSN": "00",
+            }
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+                tr_id,
+                params=params,
+            )
+            if not data or data.get("rt_cd") != "0":
+                return []
+            output = data.get("output1") or data.get("output") or []
+            if isinstance(output, dict):
+                output = [output] if output else []
+            if not isinstance(output, list):
+                return []
+            normalized = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                sym = str(
+                    item.get("pdno") or item.get("PDNO") or item.get("shtn_pdno") or ""
+                ).strip()
+                raw_rmn = (
+                    item.get("rmn_qty")
+                    or item.get("RMN_QTY")
+                    or item.get("nccs_qty")
+                    or item.get("NCCS_QTY")
+                    or item.get("ord_qty")
+                    or item.get("ORD_QTY")
+                    or 0
+                )
+                try:
+                    rmn = int(float(raw_rmn))
+                except (TypeError, ValueError):
+                    rmn = 0
+                if rmn <= 0:
+                    continue
+                normalized.append({
+                    "symbol": sym,
+                    "remaining_qty": rmn,
+                    "order_price": item.get("ord_unpr") or item.get("ORD_UNPR") or "",
+                    "buy_sell": item.get("sll_buy_dvsn_cd") or item.get("SLL_BUY_DVSN_CD") or "",
+                    "order_no": item.get("odno") or item.get("ODNO") or item.get("ord_no") or "",
+                    "order_time": item.get("ord_tmd") or item.get("ORD_TMD") or "",
+                })
+            return normalized
+        except Exception as e:
+            logger.warning("미체결 전체 조회 실패: {}", e)
+            return []
+
     # =============================================================
     # 잔고 조회
     # =============================================================
@@ -756,6 +894,245 @@ class KISApi:
         except Exception as e:
             logger.error("KIS approval key 발급 실패: {} (도메인: {})", e, domain)
             return ""
+
+    # =============================================================
+    # 해외주식 (미국) — KIS Developers 해외주식 API (시세/주문/잔고)
+    # 시세 EXCD·주문 OVRS_EXCG_CD 는 스펙이 다름 (예: NAS ↔ NASD).
+    # 참고: koreainvestment/open-trading-api examples_llm/overseas_stock
+    # =============================================================
+
+    @staticmethod
+    def map_us_market_to_kis_codes(market: str) -> tuple[str, str]:
+        """
+        사용자 시장 코드 → (해외시세 quotations EXCD, 주문 OVRS_EXCG_CD).
+
+        Args:
+            market: NAS / NYS / AMS (또는 NASDAQ, NYSE, AMEX)
+
+        Returns:
+            (excd, ovrs_excg_cd)
+        """
+        m = (market or "NAS").strip().upper()
+        if m in ("NAS", "NASDAQ", "NASD"):
+            return "NAS", "NASD"
+        if m in ("NYS", "NYSE", "NY"):
+            return "NYS", "NYSE"
+        if m in ("AMS", "AMEX", "AMX"):
+            return "AMS", "AMEX"
+        logger.warning("미국 시장 코드 '{}' 인식 불가 — NAS/NASD 로 대체", market)
+        return "NAS", "NASD"
+
+    def get_overseas_price(self, symbol: str, market: str = "NAS") -> Optional[Dict[str, Any]]:
+        """
+        해외주식 현재체결가 조회.
+        GET /uapi/overseas-price/v1/quotations/price (tr_id HHDFS00000300, 실전·모의 동일)
+        """
+        excd, _ = self.map_us_market_to_kis_codes(market)
+        symb = str(symbol).strip().upper()
+        tr_id = "HHDFS00000300"
+        params = {
+            "AUTH": "",
+            "EXCD": excd,
+            "SYMB": symb,
+        }
+        data = self._request(
+            "GET",
+            "/uapi/overseas-price/v1/quotations/price",
+            tr_id,
+            params=params,
+        )
+        if not data or data.get("rt_cd") != "0":
+            return None
+        out = data.get("output")
+        if isinstance(out, list) and out:
+            out = out[0]
+        if not isinstance(out, dict):
+            return None
+        # 응답 필드명은 증권사 스펙에 따라 다를 수 있음
+        def _f(*keys, default=0.0):
+            for k in keys:
+                v = out.get(k)
+                if v is not None and str(v).strip() != "":
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        continue
+            return default
+
+        def _i(*keys, default=0):
+            for k in keys:
+                v = out.get(k)
+                if v is not None and str(v).strip() != "":
+                    try:
+                        return int(float(v))
+                    except (TypeError, ValueError):
+                        continue
+            return default
+
+        price = _f("last", "ovrs_prpr", "prpr", "stck_prpr")
+        return {
+            "symbol": symb,
+            "market": market,
+            "excd": excd,
+            "price": price,
+            "open": _f("open", "ovrs_nmix_prpr", "stck_oprc"),
+            "high": _f("high", "stck_hgpr"),
+            "low": _f("low", "stck_lwpr"),
+            "volume": _i("tvol", "acml_vol", "vol"),
+            "change_rate": _f("rate", "prdy_ctrt"),
+            "prev_close": _f("base", "pbase", "stck_sdpr"),
+            "raw": out,
+        }
+
+    def place_overseas_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        market: str = "NAS",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        해외주식 주문 (미국 NASD/NYSE/AMEX).
+        POST /uapi/overseas-stock/v1/trading/order
+
+        Args:
+            symbol: 티커 (예 AAPL)
+            side: buy | sell
+            qty: 주문 수량
+            price: 지정가 (USD). 시장가 대체 시 0 → API 스펙상 \"0\" 문자열 전달
+            market: NAS / NYS / AMS
+        """
+        _, ovrs = self.map_us_market_to_kis_codes(market)
+        symb = str(symbol).strip().upper()
+        sd = str(side).strip().lower()
+        if sd not in ("buy", "sell"):
+            logger.error("place_overseas_order: side는 buy/sell 만 허용: {}", side)
+            return None
+        if ovrs not in ("NASD", "NYSE", "AMEX"):
+            logger.error("place_overseas_order: 미국 거래소만 지원 (NASD/NYSE/AMEX): {}", ovrs)
+            return None
+
+        if sd == "buy":
+            tr_id = "VTTT1002U" if self.use_mock else "TTTT1002U"
+            sll_type = ""
+        else:
+            tr_id = "VTTT1006U" if self.use_mock else "TTTT1006U"
+            sll_type = "00"
+
+        unpr = f"{float(price):.2f}" if price and float(price) > 0 else "0"
+
+        body = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "OVRS_EXCG_CD": ovrs,
+            "PDNO": symb,
+            "ORD_QTY": str(int(qty)),
+            "OVRS_ORD_UNPR": unpr,
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "SLL_TYPE": sll_type,
+            "ORD_SVR_DVSN_CD": "0",
+            "ORD_DVSN": "00",
+        }
+
+        data = self._request(
+            "POST",
+            "/uapi/overseas-stock/v1/trading/order",
+            tr_id,
+            body=body,
+        )
+        if data and data.get("rt_cd") == "0":
+            logger.info("해외주문 성공 {} {} {}주 @ {}", sd, symb, qty, unpr)
+            out = data.get("output")
+            return out if isinstance(out, dict) else {"output": out}
+        msg = data.get("msg1", data.get("msg_cd", "오류")) if data else "API 응답 없음"
+        logger.error("해외주문 실패 {} {} — {}", symb, sd, msg)
+        return None
+
+    def get_overseas_balance(self) -> Optional[Dict[str, Any]]:
+        """
+        해외주식 체결기준 현재잔고.
+        GET /uapi/overseas-stock/v1/trading/inquire-present-balance
+        (실전 CTRP6504R / 모의 VTRP6504R)
+        """
+        tr_id = "VTRP6504R" if self.use_mock else "CTRP6504R"
+        params = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "WCRC_FRCR_DVSN_CD": "02",
+            "NATN_CD": "840",
+            "TR_MKET_CD": "00",
+            "INQR_DVSN_CD": "00",
+        }
+        # 공식 예시(kis_auth)는 params 전달 — GET 쿼리로 시도, 실패 시 POST body로 재시도 가능
+        data = self._request(
+            "GET",
+            "/uapi/overseas-stock/v1/trading/inquire-present-balance",
+            tr_id,
+            params=params,
+        )
+        if not data or str(data.get("rt_cd", "")) != "0":
+            data = self._request(
+                "POST",
+                "/uapi/overseas-stock/v1/trading/inquire-present-balance",
+                tr_id,
+                body=params,
+            )
+        if not data or data.get("rt_cd") != "0":
+            return None
+
+        def _rows(key: str) -> list:
+            r = data.get(key) or []
+            if isinstance(r, dict):
+                return [r] if r else []
+            return r if isinstance(r, list) else []
+
+        rows1 = _rows("output1")
+        rows2 = _rows("output2")
+        rows3 = _rows("output3")
+
+        positions = []
+        pos_rows = rows2 if rows2 else rows1
+        for item in pos_rows:
+            if not isinstance(item, dict):
+                continue
+            try:
+                q = int(float(item.get("ovrs_cblc_qty") or item.get("hldg_qty") or item.get("cblc_qty") or 0))
+            except (TypeError, ValueError):
+                q = 0
+            if q <= 0:
+                continue
+            positions.append({
+                "symbol": str(item.get("ovrs_pdno") or item.get("pdno") or "").strip(),
+                "name": str(item.get("ovrs_item_name") or item.get("prdt_name") or ""),
+                "quantity": q,
+                "avg_price": float(item.get("pchs_avg_pric") or item.get("avg_pur_pric") or 0),
+                "current_price": float(item.get("now_pric2") or item.get("prpr") or 0),
+                "currency": str(item.get("tr_crcy_cd") or item.get("crcy_cd") or "USD"),
+                "exchange": str(item.get("ovrs_excg_cd") or ""),
+                "pnl_rate": float(item.get("evlu_pfls_rt") or 0),
+                "pnl_amount": float(item.get("evlu_pfls_amt") or 0),
+            })
+
+        cash_foreign = 0.0
+        for item in rows1:
+            if isinstance(item, dict):
+                try:
+                    cash_foreign = float(item.get("frcr_dncl_amt_1") or item.get("frcr_use_amt") or 0)
+                except (TypeError, ValueError):
+                    pass
+                break
+
+        summary = rows3[0] if rows3 else {}
+        return {
+            "cash_foreign": cash_foreign,
+            "total_value_foreign": float(summary.get("tot_asst_amt") or summary.get("frcr_evlu_tota") or 0),
+            "positions": positions,
+            "raw_output1": rows1,
+            "raw_output2": rows2,
+            "raw_output3": rows3,
+        }
 
     def verify_connection(self) -> bool:
         """

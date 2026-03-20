@@ -54,6 +54,20 @@ class RiskManager:
 
         logger.info("RiskManager 초기화 완료")
 
+    @staticmethod
+    def _value_in_krw_for_symbol(symbol: str, value: float) -> float:
+        """미국 티커면 USD 가치를 DataCollector 환율로 원화 환산 (비중·업종 합산용)."""
+        try:
+            from core.data_collector import DataCollector
+
+            if DataCollector.is_us_ticker(symbol or ""):
+                r = DataCollector.get_usd_krw_rate()
+                if r and r > 0:
+                    return float(value) * r
+        except Exception as e:
+            logger.debug("원화 환산 생략 ({}): {}", symbol, e)
+        return float(value)
+
     # =============================================================
     # 포지션 사이징
     # =============================================================
@@ -325,6 +339,9 @@ class RiskManager:
         max_investment_ratio = div_config.get("max_investment_ratio", 0.70)
         min_cash = div_config.get("min_cash_ratio", 0.20)
 
+        position_value = self._value_in_krw_for_symbol(symbol, float(position_value or 0))
+        current_invested = float(current_invested or 0)
+
         if current_positions >= max_positions:
             return {"can_buy": False, "reason": f"최대 보유 종목({max_positions}개) 초과"}
 
@@ -361,7 +378,10 @@ class RiskManager:
             target_sector = sector_map.get(symbol, "")
             if target_sector:
                 sector_invested = sum(
-                    float(getattr(p, "total_invested", 0) or 0)
+                    self._value_in_krw_for_symbol(
+                        getattr(p, "symbol", ""),
+                        float(getattr(p, "total_invested", 0) or 0),
+                    )
                     for p in positions
                     if sector_map.get(getattr(p, "symbol", ""), "") == target_sector
                 )
