@@ -5,10 +5,11 @@
 - 거래시간 체크 / 블랙스완 감지 연동
 - 주문 실패 시 재시도 (최대 3회, 지수 백오프)
 - 결과를 DB에 기록
+- 재시작 복구: `reconcile_open_orders_after_crash()`로 KIS 미체결 목록 확인·로깅 (잔고 정합은 `PortfolioManager.sync_with_broker`)
 """
 
 import time as time_mod
-from datetime import datetime
+from datetime import datetime, timedelta
 from loguru import logger
 
 from config.config_loader import Config
@@ -116,6 +117,14 @@ class OrderExecutor:
         avg_daily_volume: float = None,
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
+        if self._should_block_new_buy_volatility_window():
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(
+                "[OrderExecutor] 장 초반/마감 변동성 구간 신규 매수 차단: {} {}",
+                symbol, now_str,
+            )
+            return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
+
         # 손절가 계산
         stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
 
@@ -470,6 +479,36 @@ class OrderExecutor:
             .get("min_holding_days", 0)
         )
 
+    def _should_block_new_buy_volatility_window(self) -> bool:
+        """
+        장 시작 직후·종료 직전 구간 신규 매수 차단 (settings.trading).
+        거래일이 아니면 적용하지 않음. 매도(손절·익절·트레일링 등)는 이 경로를 쓰지 않음.
+        """
+        tcfg = self.config.trading or {}
+        block_open = bool(tcfg.get("block_open_30min", True))
+        block_close = bool(tcfg.get("block_close_30min", True))
+        if not block_open and not block_close:
+            return False
+        if not self.trading_hours.is_trading_day():
+            return False
+
+        now = datetime.now()
+        ct = now.time()
+        mo = self.trading_hours.market_open
+        mc = self.trading_hours.market_close
+
+        if block_open:
+            open_end = (datetime.combine(now.date(), mo) + timedelta(minutes=30)).time()
+            if mo <= ct < open_end:
+                return True
+
+        if block_close:
+            close_start = (datetime.combine(now.date(), mc) - timedelta(minutes=30)).time()
+            if close_start <= ct <= mc:
+                return True
+
+        return False
+
     # =============================================================
     # 안전 체크 및 재시도
     # =============================================================
@@ -548,3 +587,33 @@ class OrderExecutor:
             )
 
         return None
+
+    def reconcile_open_orders_after_crash(self) -> list[dict]:
+        """
+        프로세스 재시작 직후: KIS 당일 미체결 주문을 조회해 건별 로깅한다.
+        체결 완료분은 증권사 잔고에 반영되므로, 이후 `PortfolioManager.sync_with_broker(auto_correct=True)`로
+        DB 포지션을 잔고에 맞추면 정합성이 맞춰진다(미체결 행 자체는 trades 테이블에 자동 삽입하지 않음).
+        """
+        if self.mode != "live":
+            return []
+        try:
+            if self.kis_api and not getattr(self.kis_api, "_access_token", None):
+                self.kis_api.authenticate()
+        except Exception as e:
+            logger.warning("[복구] KIS 인증 실패 — 미체결 조회 생략: {}", e)
+            return []
+        try:
+            open_orders = self.kis_api.get_open_orders()
+        except Exception as e:
+            logger.warning("[복구] get_open_orders 실패: {}", e)
+            return []
+        for o in open_orders:
+            logger.info(
+                "[복구] 미체결 유지: {} {}주 매매구분={} 주문가={} 주문번호={}",
+                o.get("symbol"),
+                o.get("remaining_qty"),
+                o.get("buy_sell"),
+                o.get("order_price"),
+                o.get("order_no"),
+            )
+        return open_orders

@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytest.importorskip("websockets")
+pytest.importorskip("pytest_asyncio")
 
 # ---------------------------------------------------------------------------
 # KIS API 모의 E2E

@@ -8,8 +8,11 @@
     # 백테스트 리포트 저장 경로 지정
     python main.py --mode backtest --strategy scoring --symbol 005930 --output-dir reports
 
-    # 페이퍼 트레이딩 (모의 매매)
+    # 페이퍼 트레이딩 (모의 매매, 워치리스트 1회 순회 후 종료)
     python main.py --mode paper --strategy scoring
+
+    # 모의 24시간 스케줄 루프 (systemd 상시 구동용, config trading.mode=paper 권장)
+    python main.py --mode schedule --strategy scoring
 
     # 실전 (ENABLE_LIVE_TRADING=true + --confirm-live 필요)
     python main.py --mode live --strategy scoring --confirm-live
@@ -76,7 +79,7 @@ def run_backtest(args):
     symbol = args.symbol or "005930"
 
     logger.info("종목 {} 데이터 수집 중...", symbol)
-    df = collector.fetch_korean_stock(symbol, args.start, args.end)
+    df = collector.fetch_stock(symbol, args.start, args.end)
 
     if df.empty:
         logger.error(
@@ -113,6 +116,7 @@ def run_backtest(args):
         df,
         strategy_name=args.strategy,
         strict_lookahead=args.strict_lookahead,
+        notify_overtrading=True,
     )
 
     if not result:
@@ -134,21 +138,17 @@ def run_backtest(args):
 
 def _run_auto_correlation(df, config, threshold=0.7):
     """상관 분석 실행 후 자동 비활성화 대상 가중치 키 반환."""
-    from core.indicator_engine import IndicatorEngine
-    from core.signal_generator import SignalGenerator
     from core.indicator_correlation import (
         run_indicator_correlation_check,
         suggest_disable_weights,
     )
 
-    engine = IndicatorEngine(config)
-    generator = SignalGenerator(config)
-    df_ind = engine.calculate_all(df.copy())
-    df_scores = generator.generate(df_ind)
-    if df_scores.empty:
-        logger.warning("상관 분석 실패: 스코어 생성 불가")
-        return []
-    result = run_indicator_correlation_check(df_scores, threshold=threshold)
+    result = run_indicator_correlation_check(
+        df,
+        threshold=threshold,
+        config=config,
+        save_report=False,
+    )
     disable = suggest_disable_weights(result.get("high_correlation_pairs", []))
     if result.get("high_correlation_pairs"):
         logger.info(
@@ -180,7 +180,7 @@ def run_param_optimize(args):
     config = Config.get()
     collector = DataCollector()
     symbol = args.symbol or "005930"
-    df = collector.fetch_korean_stock(symbol, args.start, args.end)
+    df = collector.fetch_stock(symbol, args.start, args.end)
     if df.empty or len(df) < 252:
         logger.error("데이터가 없거나 1년 미만입니다. --start, --end 및 데이터 소스를 확인하세요.")
         return
@@ -213,6 +213,8 @@ def run_param_optimize(args):
             strict_lookahead=True,
             disabled_weights=disabled or None,
         )
+        if result is None:
+            return
         if result.get("message"):
             logger.warning(result["message"])
             return
@@ -233,16 +235,10 @@ def run_param_optimize(args):
                 metric, result.get("oos_period", ""),
                 oos.get("sharpe_ratio"), oos.get("total_return", 0),
             )
-            if result["oos_passed"]:
-                logger.info("OOS 샤프 게이트 통과 (≥ {:.1f}). 아래 YAML을 strategies.yaml에 반영 가능.", result["oos_sharpe_gate"])
-            else:
-                logger.warning(
-                    "OOS 샤프 게이트 미달 (< {:.1f}). 이 가중치를 채택하지 마세요. "
-                    "다른 종목/기간으로 재시도하거나 check_correlation로 지표를 줄여 보세요.",
-                    result["oos_sharpe_gate"],
-                )
-
-        logger.info("\n{}", result.get("yaml_snippet", ""))
+            logger.info(
+                "OOS 샤프 게이트 통과 (≥ {:.1f}). 채택 스니펫은 위 stdout에 출력되었습니다.",
+                result["oos_sharpe_gate"],
+            )
         if result.get("all_results"):
             logger.info("상위 5개 조합:")
             for r in result["all_results"][:5]:
@@ -299,11 +295,8 @@ def run_param_optimize(args):
 def run_check_indicator_correlation(args):
     """스코어링 지표 독립성 검증: 지표 간 상관계수 계산, 0.7 이상 쌍에 대해 제거/가중치 축소 권고."""
     from datetime import datetime, timedelta
-    from pathlib import Path
 
     from core.data_collector import DataCollector
-    from core.indicator_engine import IndicatorEngine
-    from core.signal_generator import SignalGenerator
     from core.indicator_correlation import run_indicator_correlation_check, render_correlation_report
 
     symbol = args.symbol or "005930"
@@ -316,34 +309,25 @@ def run_check_indicator_correlation(args):
         start_date = (datetime.now() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
 
     collector = DataCollector()
-    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    df = collector.fetch_stock(symbol, start_date, end_date)
     if df.empty or len(df) < 120:
         logger.error("지표 상관 검증용 데이터 부족: {} ({}~{}, {}일)", symbol, start_date, end_date, len(df))
         return
 
-    config = Config.get()
-    engine = IndicatorEngine(config)
-    generator = SignalGenerator(config)
-    df_ind = engine.calculate_all(df.copy())
-    df_scores = generator.generate(df_ind)
-    if df_scores.empty:
-        logger.error("스코어 생성 실패")
-        return
-
     threshold = args.correlation_threshold
-    result = run_indicator_correlation_check(df_scores, threshold=threshold)
-    report_text = render_correlation_report(
-        result, symbol=symbol, start=start_date, end=end_date,
+    result = run_indicator_correlation_check(
+        df,
+        threshold=threshold,
+        symbol=symbol,
+        config=Config.get(),
+        output_dir=getattr(args, "output_dir", "reports"),
+        save_report=True,
+        start=start_date,
+        end=end_date,
     )
-
-    out_dir = Path(getattr(args, "output_dir", "reports"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = out_dir / f"indicator_correlation_{symbol}_{timestamp}.txt"
-    report_path.write_text(report_text, encoding="utf-8")
-
+    report_text = render_correlation_report(result, symbol=symbol, start=start_date, end=end_date)
     print(report_text)
-    logger.info("지표 독립성 검증 리포트 저장: {}", report_path)
+    logger.info("지표 독립성 검증 리포트 저장: {}", result.get("report_path"))
 
     disable_weights = result.get("disable_weights", [])
     if disable_weights:
@@ -374,7 +358,7 @@ def run_check_ensemble_correlation(args):
         start_date = (datetime.now() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
 
     collector = DataCollector()
-    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    df = collector.fetch_stock(symbol, start_date, end_date)
     if df.empty or len(df) < 60:
         logger.error("앙상블 신호 상관 검증용 데이터 부족: {} ({}~{}, {}일)", symbol, start_date, end_date, len(df))
         return
@@ -471,7 +455,7 @@ def _run_ensemble_independence_check_in_validate(args, config, notifier):
     start_date = args.start or (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
 
     collector = DataCollector(config)
-    df = collector.fetch_korean_stock(symbol, start_date, end_date)
+    df = collector.fetch_stock(symbol, start_date, end_date)
     if df.empty or len(df) < 60:
         logger.warning("앙상블 독립성 검증 스킵: 데이터 부족 ({}일)", len(df) if df is not None else 0)
         return
@@ -588,7 +572,7 @@ def run_paper_trading(args):
             holding_days = (today - bought_date).days
             if holding_days >= max_holding_days:
                 try:
-                    df = collector.fetch_korean_stock(pos.symbol)
+                    df = collector.fetch_stock(pos.symbol)
                     price = float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns else pos.avg_price
                     result = executor.execute_sell(
                         pos.symbol, price,
@@ -608,7 +592,7 @@ def run_paper_trading(args):
 
         try:
             # 최근 데이터 수집
-            df = collector.fetch_korean_stock(symbol)
+            df = collector.fetch_stock(symbol)
 
             if df.empty or len(df) < 30:
                 logger.warning("종목 {} 데이터 부족 — 스킵", symbol)
@@ -741,6 +725,40 @@ def run_live_trading(args):
     finally:
         config._settings["trading"]["mode"] = old_mode
         logger.info("실전 모드 설정 복원됨")
+
+
+def run_scheduler_loop(args):
+    """
+    모의 매매용 무한 스케줄러 (장전/장중/장마감 루프).
+    systemd 상시 구동 시 `--mode paper` 한 사이클 종료와 달리 프로세스를 유지한다.
+    config.trading.mode 가 live 이면 거부 (--mode live --confirm-live 사용).
+    """
+    config = Config.get()
+    if str(config.trading.get("mode", "paper")).lower() == "live":
+        logger.error(
+            "config.trading.mode 가 live 입니다. 실전 루프는 "
+            "ENABLE_LIVE_TRADING=true 및 --mode live --confirm-live 를 사용하세요. "
+            "schedule 모드는 모의(paper) 전용입니다."
+        )
+        sys.exit(1)
+
+    from core.runtime_lock import scheduler_lock
+    from core.scheduler import Scheduler
+
+    root = Path(__file__).resolve().parent
+    lock_file = root / "data" / ".scheduler.lock"
+
+    with scheduler_lock(lock_file) as acquired:
+        if not acquired:
+            sys.exit(1)
+        logger.info("=" * 50)
+        logger.info(
+            "🗓️ 스케줄러 모드 시작 (무한 루프, trading.mode={})",
+            config.trading.get("mode", "paper"),
+        )
+        logger.info("=" * 50)
+        scheduler = Scheduler(strategy_name=args.strategy, config=config)
+        scheduler.run()
 
 
 def run_compare_paper_backtest(args):
@@ -921,6 +939,7 @@ def main():
   python main.py --mode backtest --strategy scoring --symbol 005930 --allow-lookahead  # 위험: 미래 데이터 혼입 허용
   python main.py --mode validate --strategy scoring --symbol 005930 --validation-years 5
   python main.py --mode paper --strategy scoring
+  python main.py --mode schedule --strategy scoring  # 모의 스케줄 무한 루프 (서버 상시 구동)
   python main.py --mode live --strategy scoring --confirm-live  # 실전 (ENABLE_LIVE_TRADING=true 필요)
   python main.py --mode liquidate  # 긴급 전 종목 매도 (실전/모의 모두 DB 기준)
   python main.py --mode compare --start 2025-01-01 --end 2025-03-18 --strategy scoring  # 모의투자 vs 백테스트 비교
@@ -970,8 +989,8 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
-        help="실행 모드. rebalance: 바스켓 리밸런싱. check_correlation: 스코어링 지표 상관. check_ensemble_correlation: 앙상블 전략 신호 상관",
+        choices=["backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
+        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1083,6 +1102,8 @@ def main():
             run_strategy_validation(args)
         elif args.mode == "paper":
             run_paper_trading(args)
+        elif args.mode == "schedule":
+            run_scheduler_loop(args)
         elif args.mode == "live":
             run_live_trading(args)
         elif args.mode == "liquidate":

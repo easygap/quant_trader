@@ -56,6 +56,8 @@ trading:
   market_open: "09:00"
   market_close: "15:30"
   pre_market_prep: "08:50"
+  block_open_30min: true
+  block_close_30min: true
   mode: "paper"
   auto_entry: false
   pending_order_ttl_seconds: 600
@@ -76,22 +78,22 @@ trading:
   market_regime_ma_short: 20                  # 신호 C: 단기 이동평균 일수
   market_regime_ma_mid: 60                    # 신호 C: 중기 이동평균 일수
 
-# 1차 알림: 디스코드 웹훅
+# DART Open API (실적 필터 yfinance 폴백). 키는 DART_API_KEY 환경변수 권장.
+dart:
+  api_key: ""
+  enabled: true
+
+# 알림: 디스코드 → 이메일 폴백 (critical 시 디스코드+이메일 동시)
 discord:
-  enabled: false
+  enabled: true
   webhook_url: ""
-  username: "퀀트 트레이더"
-  avatar_url: ""
 
-# 2차 Fallback: 텔레그램 Bot API (디스코드 장애 시 자동 전환)
-# 환경변수: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-telegram:
-  enabled: false
-  bot_token: ""
-  chat_id: ""
-
-# 3차 Fallback: 이메일(SMTP)
-# 환경변수: SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL_TO
+email:
+  enabled: true
+  smtp_server: ""
+  smtp_port: 587
+  smtp_user: ""
+  alert_to: ""
 
 # 웹 대시보드 (python main.py --mode dashboard)
 dashboard:

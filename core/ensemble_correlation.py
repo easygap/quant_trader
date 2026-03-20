@@ -1,7 +1,8 @@
 """
 앙상블 구성 전략 신호 간 독립성 검증.
-- technical / momentum_factor / volatility_condition 세 전략의 최종 신호(BUY=1, SELL=-1, HOLD=0) 시리즈에 대해
+- technical / momentum_factor / volatility_condition / fundamental_factor(선택) 의 최종 신호(BUY=1, SELL=-1, HOLD=0) 시리즈에 대해
   상관계수를 계산하고, |r| >= threshold 인 쌍이 있으면 다수결 의미 퇴색 → conservative 모드 또는 전략 재구성 권고.
+- technical–fundamental_factor 상관이 |r|<=0.4 이면 "독립성 확인됨" 로그·리포트에 반영.
 - BUY/SELL 동시 발생률: Pearson 상관계수는 직관적이지 않으므로 "두 전략이 같은 날 BUY한 비율" 등을 추가 제공.
 """
 
@@ -15,11 +16,17 @@ from loguru import logger
 from config.config_loader import Config
 
 SIGNAL_TO_NUM = {"BUY": 1, "HOLD": 0, "SELL": -1}
-ENSEMBLE_SIGNAL_COLS = ["signal_technical", "signal_momentum_factor", "signal_volatility_condition"]
+ENSEMBLE_SIGNAL_COLS = [
+    "signal_technical",
+    "signal_momentum_factor",
+    "signal_volatility_condition",
+    "signal_fundamental_factor",
+]
 ENSEMBLE_LABELS = {
     "signal_technical": "technical(스코어링)",
     "signal_momentum_factor": "momentum_factor(N일 수익률)",
     "signal_volatility_condition": "volatility_condition(실현변동성)",
+    "signal_fundamental_factor": "fundamental_factor(펀더멘털)",
 }
 
 STRATEGY_ALTERNATIVES = {
@@ -37,7 +44,20 @@ STRATEGY_ALTERNATIVES = {
         "momentum_factor와 volatility_condition의 고상관은 드물지만, 모멘텀 상승 구간이 "
         "저변동성 구간과 겹칠 수 있습니다. 두 전략의 look-back 기간을 분리하면 개선 가능합니다."
     ),
+    ("signal_fundamental_factor", "signal_technical"): (
+        "fundamental_factor는 재무 지표, technical은 가격·거래량 기반입니다. "
+        "일반적으로 상관이 낮으면 정보 소스가 잘 분리된 것입니다."
+    ),
+    ("signal_fundamental_factor", "signal_momentum_factor"): (
+        "펀더멘털은 느리게 변하고 모멘텀은 단기 가격입니다. 고상관이면 동일 국면(성장주 랠리 등)에 둘 다 민감할 수 있습니다."
+    ),
+    ("signal_fundamental_factor", "signal_volatility_condition"): (
+        "펀더멘털과 변동성 조건의 고상관은 상대적으로 드뭅니다. 발생 시 기간·유니버스를 점검하세요."
+    ),
 }
+
+# technical vs fundamental: 이 임계 이하이면 정보원이 가격 대비 분리된 것으로 간주
+TECH_FUND_INDEPENDENCE_ABS_MAX = 0.4
 
 
 def _compute_agreement_rates(numeric: pd.DataFrame, cols: list[str]) -> list[dict]:
@@ -100,6 +120,8 @@ def run_ensemble_signal_correlation_check(
         "recommendation_summary": "",
         "agreement_rates": [],
         "should_force_conservative": False,
+        "technical_fundamental_correlation": None,
+        "technical_fundamental_independence_note": "",
     }
 
     ensemble = StrategyEnsemble(config, skip_independence_check=True)
@@ -119,6 +141,18 @@ def run_ensemble_signal_correlation_check(
 
     corr_matrix = numeric[cols].corr()
     agreement_rates = _compute_agreement_rates(numeric, cols)
+
+    tech_fund_note = ""
+    tech_fund_r = None
+    c_tech, c_fun = "signal_technical", "signal_fundamental_factor"
+    if c_tech in corr_matrix.columns and c_fun in corr_matrix.columns:
+        tech_fund_r = corr_matrix.loc[c_tech, c_fun]
+        if pd.notna(tech_fund_r) and abs(float(tech_fund_r)) <= TECH_FUND_INDEPENDENCE_ABS_MAX:
+            tech_fund_note = (
+                f"fundamental_factor–technical 신호 상관계수 {float(tech_fund_r):.2f} — "
+                f"독립성 확인됨 (|r|≤{TECH_FUND_INDEPENDENCE_ABS_MAX})"
+            )
+            logger.info(tech_fund_note)
 
     high_pairs: List[Tuple[str, str, float]] = []
     seen = set()
@@ -174,6 +208,8 @@ def run_ensemble_signal_correlation_check(
         "recommendation_summary": summary,
         "agreement_rates": agreement_rates,
         "should_force_conservative": force_conservative,
+        "technical_fundamental_correlation": None if tech_fund_r is None or pd.isna(tech_fund_r) else float(tech_fund_r),
+        "technical_fundamental_independence_note": tech_fund_note,
     }
 
 
@@ -213,6 +249,11 @@ def render_ensemble_correlation_report(result: dict) -> str:
     lines.append(result["corr_matrix"].to_string())
     lines.append("")
     lines.append(f"고상관 쌍 수: {result['n_high']}")
+
+    tf_note = result.get("technical_fundamental_independence_note") or ""
+    if tf_note:
+        lines.append("")
+        lines.append(f"[technical ↔ fundamental] {tf_note}")
 
     # BUY/SELL 동시 발생률
     rates = result.get("agreement_rates", [])

@@ -7,6 +7,8 @@
 
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
 from loguru import logger
 
 from config.config_loader import Config
@@ -86,6 +88,28 @@ def _load_holidays() -> set:
     return KR_HOLIDAYS_FALLBACK.copy()
 
 
+def _load_us_holidays() -> set:
+    """config/us_holidays.yaml 의 holidays 리스트 (YYYY-MM-DD) 로드."""
+    import yaml
+
+    path = _PROJECT_ROOT / "config" / "us_holidays.yaml"
+    if not path.exists():
+        logger.debug("us_holidays.yaml 없음 — 미국 휴장일은 주말만 제외")
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        lst = data.get("holidays", data.get("dates", []))
+        if not isinstance(lst, list):
+            return set()
+        out = {str(x).strip() for x in lst if x}
+        logger.info("미국 휴장일 로드: us_holidays.yaml ({}일)", len(out))
+        return out
+    except Exception as e:
+        logger.warning("us_holidays.yaml 로드 실패: {}", e)
+        return set()
+
+
 class TradingHours:
     """
     거래 시간 관리
@@ -111,6 +135,8 @@ class TradingHours:
 
         # 공휴일 세트 (동적 로드)
         self.holidays = _load_holidays()
+        self._us_holidays = _load_us_holidays()
+        self._ny_tz = ZoneInfo("America/New_York")
 
         logger.info(
             "TradingHours 초기화 (장: {} ~ {}, 준비: {})",
@@ -213,3 +239,44 @@ class TradingHours:
             return today_close - now
 
         return timedelta(0)
+
+    # --- 미국 (NYSE/NASDAQ) 동부시간 09:30~16:00, 서머타임은 ZoneInfo 로 자동 ---
+
+    def to_us_eastern(self, dt: datetime = None) -> datetime:
+        """주어진 시각을 미국 동부(뉴욕) 타임존으로 변환."""
+        d = dt or datetime.now()
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+        return d.astimezone(self._ny_tz)
+
+    def is_us_trading_day(self, dt: datetime = None) -> bool:
+        """미국 현지 기준 거래일(주말·us_holidays.yaml 제외)."""
+        et = self.to_us_eastern(dt)
+        if et.weekday() >= 5:
+            return False
+        if et.date().isoformat() in self._us_holidays:
+            return False
+        return True
+
+    def is_us_market_open(self, dt: datetime = None) -> bool:
+        """미국 주식 정규장(동부 09:30~16:00) 개장 여부."""
+        et = self.to_us_eastern(dt)
+        if not self.is_us_trading_day(dt):
+            return False
+        t = et.time()
+        us_open = time(9, 30)
+        us_close = time(16, 0)
+        return us_open <= t <= us_close
+
+    def us_market_session_kst_window(self, dt: datetime = None) -> dict:
+        """해당 미국 거래일의 정규장 시작·종료를 한국 시각으로 표시 (디버그·로그용)."""
+        et = self.to_us_eastern(dt)
+        d = et.date()
+        open_et = datetime.combine(d, time(9, 30), tzinfo=self._ny_tz)
+        close_et = datetime.combine(d, time(16, 0), tzinfo=self._ny_tz)
+        kst = ZoneInfo("Asia/Seoul")
+        return {
+            "date_us": d.isoformat(),
+            "open_kst": open_et.astimezone(kst).strftime("%Y-%m-%d %H:%M %Z"),
+            "close_kst": close_et.astimezone(kst).strftime("%Y-%m-%d %H:%M %Z"),
+        }

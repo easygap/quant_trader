@@ -3,14 +3,15 @@
 
 - 오버피팅 주의: train_ratio로 in-sample 구간에서만 최적화하고,
   best params에 대해 out-of-sample 구간 성과를 함께 보고해 과적합 여부를 확인할 수 있음.
-- 스코어링 가중치(weights): --include-weights 사용 시 탐색. 대칭(매수 가중치 = -매도 가중치)으로
-  탐색해 차원을 줄이고, OOS 샤프 ≥ 1.0 게이트를 반드시 통과해야 채택. 미통과 시 채택 불가 경고.
+- 스코어링 가중치(weights): grid_search_scoring_weights()는 기본으로 MACD·볼린저·거래량 그리드와
+  buy_threshold [2,3,4](sell=-buy)만 탐색. Train 70% / OOS 30% 분할. OOS 샤프 < 1.0(또는 OOS 30일 미만)이면
+  None 반환 및 채택 불가 메시지. 통과 시 strategies.yaml용 스니펫을 stdout에 출력.
 - 권장 파이프라인: check_correlation → optimize --include-weights → validate --walk-forward (설계서 §4.1 참고).
 """
 
 from copy import deepcopy
 from itertools import product
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from loguru import logger
@@ -20,20 +21,22 @@ from backtest.backtester import Backtester
 
 
 # 전략별 기본 검색 공간 (Grid Search용: 파라미터명 -> 값 목록)
+# mean_reversion / trend_following: 한국 시장(ADX 낮게 형성되는 경향 등) 반영.
 DEFAULT_SEARCH_SPACES = {
     "scoring": {
         "buy_threshold": [2, 3, 4, 5],
-        "sell_threshold": [-2, -3, -4, -5],
+        # sell_threshold는 grid_search에서 -buy로 자동 설정
     },
     "mean_reversion": {
-        "z_score_buy": [-2.5, -2.0, -1.5],
+        "lookback_period": [10, 15, 20, 30, 40, 60],
+        "z_score_buy": [-1.5, -2.0, -2.5],
         "z_score_sell": [1.5, 2.0, 2.5],
-        "lookback_period": [15, 20, 25, 40, 60],
+        "adx_filter": [15, 20, 25, 30],
     },
     "trend_following": {
-        "adx_threshold": [20, 25, 30],
-        "trend_ma_period": [120, 200],
-        "atr_stop_multiplier": [1.5, 2.0, 2.5],
+        "adx_threshold": [15, 20, 25, 30],
+        "trend_ma_period": [60, 120, 200],
+        "atr_stop_multiplier": [1.5, 2.0, 2.5, 3.0],
     },
 }
 
@@ -46,6 +49,15 @@ SCORING_WEIGHT_SEARCH_SPACE = {
     "w_volume": [0, 1, 2],
     "w_ma": [0, 1, 2],
 }
+
+# grid_search_scoring_weights() 기본 탐색 공간 (MACD·볼린저·거래량 + buy_threshold; RSI/MA는 그리드에 없음 = 0)
+DEFAULT_GRID_SEARCH_SCORING_WEIGHTS_SPACE: Dict[str, List[Any]] = {
+    "w_macd": [1, 2, 3],
+    "w_bollinger": [0.5, 1, 1.5],
+    "w_volume": [0.5, 1, 1.5],
+}
+
+DEFAULT_SCORING_BUY_THRESHOLDS = [2, 3, 4, 5]
 
 OOS_SHARPE_GATE = 1.0
 
@@ -60,21 +72,58 @@ def _grid_candidates(search_space: Dict[str, List[Any]]) -> List[Dict[str, Any]]
     return candidates
 
 
+def _format_grid_search_space_report(
+    strategy_name: str,
+    search_space: Dict[str, List[Any]],
+    *,
+    symmetric_scoring_sell: bool = False,
+    title: str = "Grid Search",
+) -> str:
+    """optimize 실행 시 로그/리포트 상단에 붙일 탐색 공간 설명."""
+    lines = [f"[최적화 탐색 공간] ({title})", f"전략: {strategy_name}"]
+    if symmetric_scoring_sell and "buy_threshold" in search_space:
+        lines.append(f"  buy_threshold: {search_space['buy_threshold']}")
+        lines.append("  sell_threshold: buy와 대칭 (-buy 자동)")
+        for k in sorted(search_space.keys()):
+            if k != "buy_threshold":
+                lines.append(f"  {k}: {search_space[k]}")
+    else:
+        for k in sorted(search_space.keys()):
+            lines.append(f"  {k}: {search_space[k]}")
+    return "\n".join(lines)
+
+
+def _format_bayesian_bounds_report(strategy_name: str, bounds: Dict[str, Tuple[float, float]]) -> str:
+    lines = ["[최적화 탐색 공간] (Bayesian Optimization)", f"전략: {strategy_name}"]
+    for k in sorted(bounds.keys()):
+        lo, hi = bounds[k]
+        lines.append(f"  {k}: ({lo}, {hi})")
+    if strategy_name == "scoring" and "sell_threshold" not in bounds:
+        lines.append("  sell_threshold: -buy_threshold (대칭 자동)")
+    return "\n".join(lines)
+
+
 def _expand_symmetric_weights(combo: dict) -> dict:
     """
     w_rsi=2 → rsi_oversold=2, rsi_overbought=-2 등 대칭 전개.
     volume_surge는 단방향(양수만).
+    그리드에 없는 w_* 키는 0으로 간주.
     """
+    w_rsi = combo.get("w_rsi", 0) or 0
+    w_macd = combo.get("w_macd", 0) or 0
+    w_bollinger = combo.get("w_bollinger", 0) or 0
+    w_volume = combo.get("w_volume", 0) or 0
+    w_ma = combo.get("w_ma", 0) or 0
     return {
-        "rsi_oversold": combo["w_rsi"],
-        "rsi_overbought": -combo["w_rsi"],
-        "macd_golden_cross": combo["w_macd"],
-        "macd_dead_cross": -combo["w_macd"],
-        "bollinger_lower": combo["w_bollinger"],
-        "bollinger_upper": -combo["w_bollinger"],
-        "volume_surge": combo["w_volume"],
-        "ma_golden_cross": combo["w_ma"],
-        "ma_dead_cross": -combo["w_ma"],
+        "rsi_oversold": w_rsi,
+        "rsi_overbought": -w_rsi,
+        "macd_golden_cross": w_macd,
+        "macd_dead_cross": -w_macd,
+        "bollinger_lower": w_bollinger,
+        "bollinger_upper": -w_bollinger,
+        "volume_surge": w_volume,
+        "ma_golden_cross": w_ma,
+        "ma_dead_cross": -w_ma,
     }
 
 
@@ -141,7 +190,11 @@ def grid_search(
     config = config or Config.get()
     risk = config.risk_params
     initial_capital = initial_capital or risk.get("position_sizing", {}).get("initial_capital", 10_000_000)
-    search_space = search_space or DEFAULT_SEARCH_SPACES.get(strategy_name, {})
+    search_space = (
+        deepcopy(search_space)
+        if search_space is not None
+        else deepcopy(DEFAULT_SEARCH_SPACES.get(strategy_name, {}))
+    )
     if not search_space:
         return {
             "best_params": {},
@@ -150,6 +203,16 @@ def grid_search(
             "oos_metrics": None,
             "message": "검색 공간이 비어 있거나 해당 전략에 정의되지 않았습니다.",
         }
+
+    symmetric_scoring_sell = (
+        strategy_name == "scoring"
+        and "buy_threshold" in search_space
+        and "sell_threshold" not in search_space
+    )
+    search_space_report = _format_grid_search_space_report(
+        strategy_name, search_space, symmetric_scoring_sell=symmetric_scoring_sell
+    )
+    logger.info("{}", search_space_report)
 
     # train / OOS 분할
     n = len(df)
@@ -161,8 +224,13 @@ def grid_search(
     df_train = df.iloc[:train_end]
     df_oos = df.iloc[train_end:] if train_end < n else None
 
-    # scoring 전략: 임계값 대칭만 탐색 (buy_threshold와 sell_threshold를 동일 인덱스로 짝지음)
-    if strategy_name == "scoring" and "buy_threshold" in search_space and "sell_threshold" in search_space:
+    # scoring: sell_threshold 미지정 시 -buy 자동. 지정 시 동일 길이면 zip, 아니면 전체 그리드.
+    if symmetric_scoring_sell:
+        candidates = [
+            {"buy_threshold": b, "sell_threshold": -b}
+            for b in search_space["buy_threshold"]
+        ]
+    elif strategy_name == "scoring" and "buy_threshold" in search_space and "sell_threshold" in search_space:
         buy_vals = search_space["buy_threshold"]
         sell_vals = search_space["sell_threshold"]
         if len(buy_vals) == len(sell_vals):
@@ -201,6 +269,7 @@ def grid_search(
             "all_results": [],
             "oos_metrics": None,
             "message": "유효한 백테스트 결과가 없습니다.",
+            "search_space_report": search_space_report,
         }
 
     # max: sharpe, total_return, calmar / min: max_drawdown(보통 음수이므로 절대값 기준으로 최소화)
@@ -237,7 +306,30 @@ def grid_search(
         "train_period": f"{df_train.index[0]} ~ {df_train.index[-1]}",
         "oos_period": f"{df_oos.index[0]} ~ {df_oos.index[-1]}" if df_oos is not None and len(df_oos) > 0 else None,
         "metric": metric,
+        "search_space_report": search_space_report,
     }
+
+
+def _render_adoptable_scoring_yaml_snippet(
+    weights: dict,
+    buy_threshold: int,
+    oos_sharpe: float,
+) -> str:
+    """OOS 통과 시 strategies.yaml에 붙여넣기용 스니펫 (지정 포맷)."""
+    mg = weights.get("macd_golden_cross", 0)
+    bl = weights.get("bollinger_lower", 0)
+    vs = weights.get("volume_surge", 0)
+    lines = [
+        f"=== 채택 가능한 가중치 (OOS 샤프: {oos_sharpe:.2f}) ===",
+        "scoring:",
+        "  weights:",
+        f"    macd_golden_cross: {mg}",
+        f"    bollinger_lower: {bl}",
+        f"    volume_surge: {vs}",
+        f"  buy_threshold: {buy_threshold}",
+        f"  sell_threshold: -{buy_threshold}",
+    ]
+    return "\n".join(lines)
 
 
 def grid_search_scoring_weights(
@@ -251,37 +343,53 @@ def grid_search_scoring_weights(
     initial_capital: float = None,
     oos_sharpe_gate: float = OOS_SHARPE_GATE,
     disabled_weights: List[str] = None,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """
-    스코어링 가중치 + 임계값 동시 Grid Search. 대칭 탐색으로 차원 축소.
+    스코어링 가중치 + 임계값 동시 Grid Search. 대칭 탐색(매수=+w, 매도=-w), sell_threshold=-buy_threshold.
+
+    기본 탐색 공간: w_macd [1,2,3], w_bollinger [0.5,1,1.5], w_volume [0.5,1,1.5], buy_threshold [2,3,4,5].
+    전체 데이터를 train_ratio(기본 0.7) / 나머지 OOS로 분리해 학습 구간에서만 그리드 탐색 후
+    최적 조합을 OOS에서 검증. OOS 샤프 < oos_sharpe_gate 이거나 OOS 일수 부족 시 None 반환.
 
     권장 파이프라인:
     1. --mode check_correlation → 고상관 지표 확인
-    2. disabled_weights에 제거 대상 전달 (또는 strategies.yaml에서 0으로 설정)
-    3. 이 함수로 최적화 → OOS 샤프 ≥ oos_sharpe_gate 게이트 통과 확인
+    2. disabled_weights에 제거 대상 전달 또는 --auto-correlation 으로 suggest_disable_weights 연동
+    3. OOS 샤프 ≥ oos_sharpe_gate 일 때만 채택 스니펫 출력
     4. --mode validate --walk-forward 로 최종 안정성 검증
 
     Args:
-        disabled_weights: ['w_rsi', 'w_ma'] 등 탐색에서 0으로 고정할 가중치 키 목록 (상관 분석 후 제거 대상).
-        oos_sharpe_gate: OOS 구간 샤프 최소치. 미달 시 채택 불가 경고.
+        disabled_weights: ['w_rsi', 'w_ma'] 등 탐색에서 [0]으로 고정할 w_* 키.
+        weight_search_space: None이면 DEFAULT_GRID_SEARCH_SCORING_WEIGHTS_SPACE.
+        threshold_pairs: None이면 buy_threshold마다 (b, -b) (기본 buy ∈ [2,3,4,5]).
 
     Returns:
-        best_params, best_weights, oos_passed, oos_metrics 등.
+        게이트 통과 시 요약 dict + yaml_snippet. 미통과·OOS 불가 시 None.
     """
     config = config or Config.get()
     risk = config.risk_params
     initial_capital = initial_capital or risk.get("position_sizing", {}).get("initial_capital", 10_000_000)
-    weight_search_space = weight_search_space or dict(SCORING_WEIGHT_SEARCH_SPACE)
+    weight_search_space = deepcopy(weight_search_space or DEFAULT_GRID_SEARCH_SCORING_WEIGHTS_SPACE)
     disabled = set(disabled_weights or [])
     for dk in disabled:
         if dk in weight_search_space:
             weight_search_space[dk] = [0]
 
     if threshold_pairs is None:
-        threshold_pairs = [(2, -2), (3, -3), (4, -4), (5, -5)]
+        threshold_pairs = [(b, -b) for b in DEFAULT_SCORING_BUY_THRESHOLDS]
+
+    buy_list = sorted({b for b, _ in threshold_pairs})
+    weight_search_report_lines = [
+        "[최적화 탐색 공간] (Grid Search · scoring 가중치+임계값)",
+        "전략: scoring",
+    ]
+    for k in sorted(weight_search_space.keys()):
+        weight_search_report_lines.append(f"  {k}: {weight_search_space[k]}")
+    weight_search_report_lines.append(f"  buy_threshold: {buy_list}")
+    weight_search_report_lines.append("  sell_threshold: buy와 대칭 (-buy 자동)")
+    weight_search_report = "\n".join(weight_search_report_lines)
+    logger.info("{}", weight_search_report)
 
     weight_combos = _grid_candidates(weight_search_space)
-    # 모든 가중치가 0인 조합은 무의미 → 제외
     weight_combos = [c for c in weight_combos if sum(c.values()) > 0]
     total = len(weight_combos) * len(threshold_pairs)
     logger.info(
@@ -292,8 +400,12 @@ def grid_search_scoring_weights(
     n = len(df)
     if n < 252:
         logger.warning("데이터 1년 미만. 최적화 결과 신뢰도 낮음.")
-    train_end = max(100, int(n * train_ratio))
-    train_end = min(train_end, n)
+
+    train_end = int(n * train_ratio)
+    if n >= 2:
+        train_end = max(1, min(train_end, n - 1))
+    else:
+        train_end = n
     df_train = df.iloc[:train_end]
     df_oos = df.iloc[train_end:] if train_end < n else None
 
@@ -331,36 +443,49 @@ def grid_search_scoring_weights(
             "oos_passed": False,
             "all_results": [],
             "message": "유효한 백테스트 결과가 없습니다.",
+            "search_space_report": weight_search_report,
         }
 
     results.sort(key=lambda x: x["score"], reverse=True)
     best = results[0]
 
-    oos_metrics = None
-    oos_passed = False
-    if df_oos is not None and len(df_oos) >= 30:
-        oos_metrics = _run_single(
-            df_oos, "scoring", best["params"], config, strict_lookahead, initial_capital,
-        )
-        if oos_metrics:
-            oos_sharpe = oos_metrics.get("sharpe_ratio", 0) or 0
-            oos_passed = oos_sharpe >= oos_sharpe_gate
-            if oos_passed:
-                logger.info(
-                    "OOS 샤프 {:.2f} ≥ {:.1f} → 게이트 통과. 가중치 채택 가능.",
-                    oos_sharpe, oos_sharpe_gate,
-                )
-            else:
-                logger.warning(
-                    "OOS 샤프 {:.2f} < {:.1f} → 게이트 미달. 이 가중치를 채택하지 마세요. "
-                    "과적합 가능성이 높습니다.",
-                    oos_sharpe, oos_sharpe_gate,
-                )
+    if df_oos is None or len(df_oos) < 30:
+        print("OOS 게이트 실패: 이 가중치는 채택 불가")
+        logger.warning("OOS 구간이 30거래일 미만입니다. 채택 검증을 수행할 수 없습니다.")
+        return None
+
+    oos_metrics = _run_single(
+        df_oos, "scoring", best["params"], config, strict_lookahead, initial_capital,
+    )
+    oos_sharpe = None
+    if oos_metrics:
+        oos_sharpe = oos_metrics.get("sharpe_ratio")
+        if oos_sharpe is None:
+            oos_sharpe = 0.0
+        else:
+            oos_sharpe = float(oos_sharpe)
     else:
-        logger.warning("OOS 구간 부족. 가중치 채택 여부를 판단할 수 없습니다.")
+        oos_sharpe = 0.0
+
+    if oos_sharpe < oos_sharpe_gate:
+        print("OOS 게이트 실패: 이 가중치는 채택 불가")
+        logger.warning(
+            "OOS 샤프 {:.2f} < {:.1f} → 채택 불가.",
+            oos_sharpe, oos_sharpe_gate,
+        )
+        return None
+
+    logger.info(
+        "OOS 샤프 {:.2f} ≥ {:.1f} → 게이트 통과. 가중치 채택 가능.",
+        oos_sharpe, oos_sharpe_gate,
+    )
+
+    bt, _st = best["threshold"]
+    yaml_snippet = _render_adoptable_scoring_yaml_snippet(best["weights"], int(bt), oos_sharpe)
+    print(yaml_snippet)
 
     top20 = results[:20]
-    yaml_snippet = _render_weights_yaml_snippet(best["weights"], best["threshold"])
+    full_yaml_reference = _render_weights_yaml_snippet(best["weights"], best["threshold"])
 
     return {
         "best_params": best["params"],
@@ -370,18 +495,20 @@ def grid_search_scoring_weights(
         "best_score": best["score"],
         "train_metrics": best["metrics"],
         "oos_metrics": oos_metrics,
-        "oos_passed": oos_passed,
+        "oos_passed": True,
         "oos_sharpe_gate": oos_sharpe_gate,
         "all_results": [
             {"weight_combo": r["weight_combo"], "threshold": r["threshold"], "score": r["score"]}
             for r in top20
         ],
         "train_period": f"{df_train.index[0]} ~ {df_train.index[-1]}",
-        "oos_period": f"{df_oos.index[0]} ~ {df_oos.index[-1]}" if df_oos is not None and len(df_oos) > 0 else None,
+        "oos_period": f"{df_oos.index[0]} ~ {df_oos.index[-1]}" if len(df_oos) > 0 else None,
         "metric": metric,
         "yaml_snippet": yaml_snippet,
-        "disabled_weights": list(disabled),
+        "full_weights_yaml_reference": full_yaml_reference,
+        "disabled_weights": sorted(disabled),
         "total_evaluated": total,
+        "search_space_report": weight_search_report,
     }
 
 
@@ -448,15 +575,26 @@ def bayesian_optimize(
     risk = config.risk_params
     initial_capital = initial_capital or risk.get("position_sizing", {}).get("initial_capital", 10_000_000)
 
-    # scoring: 대칭 권장. 아래는 구간만 정의하며, 실전에서는 sell_threshold = -buy_threshold 로 맞추는 것을 권장.
+    # scoring: buy만 탐색하고 sell은 -buy로 고정 (Grid Search 기본과 동일).
     default_bounds = {
-        "scoring": {"buy_threshold": (2, 6), "sell_threshold": (-6, -2)},
-        "mean_reversion": {"z_score_buy": (-3.0, -1.0), "z_score_sell": (1.0, 3.0), "lookback_period": (10, 60)},
-        "trend_following": {"adx_threshold": (15, 35), "trend_ma_period": (100, 250), "atr_stop_multiplier": (1.0, 3.0)},
+        "scoring": {"buy_threshold": (2, 5)},
+        "mean_reversion": {
+            "z_score_buy": (-2.5, -1.5),
+            "z_score_sell": (1.5, 2.5),
+            "lookback_period": (10, 60),
+            "adx_filter": (15, 30),
+        },
+        "trend_following": {
+            "adx_threshold": (15, 30),
+            "trend_ma_period": (60, 200),
+            "atr_stop_multiplier": (1.5, 3.0),
+        },
     }
     bounds = param_bounds or default_bounds.get(strategy_name, {})
     if not bounds:
         return grid_search(df, strategy_name, None, metric, train_ratio, strict_lookahead, config, initial_capital)
+    bounds_report = _format_bayesian_bounds_report(strategy_name, bounds)
+    logger.info("{}", bounds_report)
 
     n = len(df)
     train_end = int(n * train_ratio)
@@ -478,7 +616,9 @@ def bayesian_optimize(
         params = {}
         for i, k in enumerate(param_names):
             v = x[i]
-            params[k] = int(round(v)) if isinstance(dims[i], Integer) else v
+            params[k] = int(round(v)) if isinstance(dims[i], Integer) else float(v)
+        if strategy_name == "scoring" and "sell_threshold" not in params:
+            params["sell_threshold"] = -int(round(params["buy_threshold"]))
         metrics = _run_single(
             df_train, strategy_name, params, config,
             strict_lookahead, initial_capital,
@@ -492,7 +632,14 @@ def bayesian_optimize(
 
     res = gp_minimize(objective, dims, n_calls=n_calls, random_state=42, verbose=False)
     best_x = res.x
-    best_params = dict(zip(param_names, [int(round(v)) if isinstance(dims[i], Integer) else v for i, v in enumerate(best_x)]))
+    best_params = dict(
+        zip(
+            param_names,
+            [int(round(v)) if isinstance(dims[i], Integer) else float(v) for i, v in enumerate(best_x)],
+        )
+    )
+    if strategy_name == "scoring" and "sell_threshold" not in best_params:
+        best_params["sell_threshold"] = -int(round(best_params["buy_threshold"]))
     best_score = -res.fun if metric != "max_drawdown" else res.fun
 
     oos_metrics = None
@@ -511,4 +658,5 @@ def bayesian_optimize(
         "oos_period": f"{df_oos.index[0]} ~ {df_oos.index[-1]}" if df_oos is not None and len(df_oos) > 0 else None,
         "metric": metric,
         "n_calls": n_calls,
+        "search_space_report": bounds_report,
     }

@@ -1,15 +1,17 @@
 """
 실적 발표일(어닝) 필터.
 - 실적 발표일 전후 N일 동안 해당 종목의 신규 매수를 금지한다.
-- 데이터 소스: yfinance earningsDate (Yahoo Finance 기반, 한국 종목은 누락 가능).
-  yfinance 미설치·조회 실패·날짜 미제공 시 필터를 통과(매수 허용)시킨다.
-  향후 pykrx / KRX OPEN API(공시) 연동으로 정확도 향상 가능.
+- 데이터 소스: 1) yfinance earningsDate 2) 실패·None 시 DART Open API(정기공시 접수일 기반 추정).
+  둘 다 없으면 필터 통과(매수 허용). DART는 settings.dart.enabled 및 API 키 필요.
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from config.config_loader import Config
 
 try:
     import yfinance as yf
@@ -27,12 +29,8 @@ def _korean_ticker(symbol: str) -> str:
     return f"{s}.KS"
 
 
-def get_next_earnings_date(symbol: str) -> Optional[datetime]:
-    """
-    종목의 다음 실적 발표 예정일을 조회한다.
-    yfinance의 earningsDate(리스트)에서 현재 이후 가장 가까운 날짜를 반환.
-    조회 실패·미제공 시 None.
-    """
+def _get_next_earnings_date_yfinance(symbol: str) -> Optional[datetime]:
+    """yfinance 캘린더에서 가장 가까운 실적일(최근 30일 이내 과거 포함)."""
     if not HAS_YF:
         return None
     ticker_str = _korean_ticker(symbol)
@@ -43,7 +41,6 @@ def get_next_earnings_date(symbol: str) -> Optional[datetime]:
         cal = t.calendar
         if cal is None:
             return None
-        # yfinance >= 0.2: calendar는 dict. earningsDate는 list[Timestamp] 또는 단일 Timestamp
         dates = None
         if isinstance(cal, dict):
             dates = cal.get("Earnings Date") or cal.get("earningsDate")
@@ -70,14 +67,58 @@ def get_next_earnings_date(symbol: str) -> Optional[datetime]:
             return None
         return min(future)
     except Exception as e:
-        logger.debug("실적 발표일 조회 실패 {}: {}", symbol, e)
+        logger.debug("yfinance 실적일 조회 실패 {}: {}", symbol, e)
         return None
+
+
+def _get_next_earnings_date_dart(symbol: str, config: Optional["Config"] = None) -> Optional[datetime]:
+    """DART 정기공시 접수 이력으로 차기 분기 공시 시점 추정."""
+    try:
+        if config is None:
+            from config.config_loader import Config
+            config = Config.get()
+    except Exception:
+        return None
+
+    dart_cfg = config.dart or {}
+    if not dart_cfg.get("enabled", False):
+        return None
+    api_key = (dart_cfg.get("api_key") or "").strip()
+    if not api_key:
+        return None
+
+    try:
+        from core.dart_loader import DartEarningsLoader
+        loader = DartEarningsLoader(api_key)
+        corp = loader.get_corp_code(symbol)
+        if not corp:
+            logger.debug("DART 고유번호 없음: {}", symbol)
+            return None
+        return loader.get_next_earnings_date(corp)
+    except Exception as e:
+        logger.debug("DART 실적일 추정 실패 {}: {}", symbol, e)
+        return None
+
+
+def get_next_earnings_date(
+    symbol: str,
+    config: Optional["Config"] = None,
+) -> Optional[datetime]:
+    """
+    종목의 다음 실적(공시) 기준일 조회.
+    yfinance 우선, 실패·None이면 DART 추정.
+    """
+    dt = _get_next_earnings_date_yfinance(symbol)
+    if dt is not None:
+        return dt
+    return _get_next_earnings_date_dart(symbol, config=config)
 
 
 def is_near_earnings(
     symbol: str,
     skip_days: int = 3,
     reference_date: Optional[datetime] = None,
+    config: Optional["Config"] = None,
 ) -> tuple[bool, str]:
     """
     실적 발표일 전후 skip_days 이내인지 판별.
@@ -89,7 +130,7 @@ def is_near_earnings(
     if skip_days <= 0:
         return False, ""
 
-    earnings_dt = get_next_earnings_date(symbol)
+    earnings_dt = get_next_earnings_date(symbol, config=config)
     if earnings_dt is None:
         return False, ""
 
