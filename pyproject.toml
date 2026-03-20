@@ -16,6 +16,6 @@ include = ["api*", "backtest*", "config*", "core*", "database*", "monitoring*", 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
-    "ignore::pandas.errors.Pandas4Warning",
+    "ignore:.*pandas.*:FutureWarning",
     "ignore:Bitwise inversion.*bool.*deprecated:DeprecationWarning",
 ]

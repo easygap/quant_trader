@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.  
-> **문서 버전**: v2.4  
-> **최종 수정**: 2026-03-19  
+> **문서 버전**: v2.5  
+> **최종 수정**: 2026-03-20  
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -27,21 +27,24 @@
 ### 1.1 전체 흐름 요약
 
 1. **시작**  
-   `main.py` 실행 → 로거·DB 초기화 → `--mode`에 따라 **backtest / validate / paper / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance** 중 하나로 분기.
+   `main.py` 실행 → 로거·DB 초기화 → `--mode`에 따라 **backtest / validate / paper / schedule / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance** 중 하나로 분기.
 
 2. **백테스트 (backtest)**  
    `DataCollector`로 과거 주가 수집 → `Backtester`가 전략으로 시뮬레이션(수수료·세금·슬리피지·손절/익절/트레일링 스탑 반영, **strict-lookahead 기본**) → `ReportGenerator`가 txt/html 리포트 생성.
 
 3. **모의투자 (paper)**  
-   `WatchlistManager`로 관심 종목 확정 → 종목마다 `DataCollector` 수집 → 전략 `generate_signal(df, symbol=symbol)` → BUY 시 **시장 국면 필터**(코스피 200일선 이하면 신규 매수 중단) 적용 후 `OrderExecutor`가 **DB에만 기록** + 디스코드 알림. 실제 주문 없음.
+   워치리스트 **1회 순회** 후 프로세스 종료. `WatchlistManager`로 관심 종목 확정 → 종목마다 `DataCollector.fetch_stock` 수집 → 전략 `generate_signal(df, symbol=symbol)` → BUY 시 **시장 국면 필터** 적용 후 `OrderExecutor`가 **DB에만 기록** + 알림. 실제 주문 없음.
 
-4. **실전 (live)**  
+4. **스케줄 루프 (schedule)**  
+   **모의 전용 무한 루프**. `config.trading.mode`가 `live`이면 거부(실전은 `--mode live --confirm-live`). `core/runtime_lock.py`로 `data/.scheduler.lock` 파일 락을 잡은 뒤 `Scheduler.run()` — 장전/장중/장마감 루프가 paper와 동일하게 동작하며 프로세스를 유지(systemd 상시 구동용).
+
+5. **실전 (live)**  
    `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. KIS API 인증 → `PortfolioManager.sync_with_broker()` → `Scheduler` 무한 루프.  
    - **장전(08:50)** 데이터 수집·전략 분석·**시장 국면 필터** 확인 후 매수 후보 선정(`auto_entry: true` 시 장중 매수).  
    - **장중(09:00~15:30)** 10분 간격으로 최대 보유 기간 초과 정리·신호·손절/익절 확인 → **시장 국면 필터** 통과 시에만 진입 후보 실행 → `OrderExecutor`가 KIS API로 실제 주문. 주문 전 OrderGuard·KIS 미체결 조회로 중복 방지.  
    - **장마감(15:35)** 일일 리포트·스냅샷·KIS 크로스체크·DB 백업(설정 시)·디스코드.
 
-5. **공통**  
+6. **공통**  
    설정: `config/` YAML + `.env`. 데이터·포지션·거래 기록: SQLite(또는 설정 DB).
 
 ### 1.2 모드별 진입점
@@ -50,7 +53,8 @@
 |------|-------------------|-----------|
 | **backtest** | `run_backtest(args)` | DataCollector → Backtester → ReportGenerator |
 | **validate** | `run_strategy_validation(args)` | backtest.strategy_validator (3~5년, 샤프·MDD·벤치마크 KS11·코스피 상위 50 동일비중, in/out-of-sample, **손익비 자동 경고+디스코드**). `--no-benchmark-top50` 으로 Top50 비활성화 |
-| **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), DiscordBot |
+| **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
+| **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용) |
 | **live** | `run_live_trading(args)` | KISApi, PortfolioManager(sync), Scheduler |
 | **liquidate** | `run_emergency_liquidate(args)` | DB 포지션 조회 → 종목별 매도(KIS 현재가 주문) |
 | **compare** | `run_compare_paper_backtest(args)` | backtest.paper_compare (run_compare + **check_live_readiness**), divergence 경고 + **실전 전환 준비 자동 평가·디스코드 알림** |
@@ -66,7 +70,7 @@
 
 ```
 quant_trader/
-├── main.py                      # CLI 진입점, --mode 분기 (11개 모드)
+├── main.py                      # CLI 진입점, --mode 분기 (12개 모드)
 ├── test_integration.py          # 통합 검증 스크립트 (단일 실행, pytest 아님)
 ├── pyproject.toml               # 프로젝트 메타데이터 (Python >=3.11,<3.13, 패키지, pytest 설정)
 ├── requirements.txt             # pip 의존성 목록
@@ -79,14 +83,15 @@ quant_trader/
 │   ├── config_loader.py         # YAML 통합 로더, .env 덮어쓰기, Config.get() 싱글톤
 │   ├── settings.yaml.example    # 설정 예시 (settings.yaml은 .gitignore)
 │   ├── settings.yaml            # KIS API, database, data_source, trading, discord, telegram, dashboard, watchlist
-│   ├── strategies.yaml          # indicators, scoring, mean_reversion(fundamental_filter), trend_following, momentum_factor, volatility_condition, ensemble
+│   ├── strategies.yaml          # indicators, scoring, mean_reversion, trend_following, fundamental_factor, momentum_factor, volatility_condition, ensemble(components)
 │   ├── risk_params.yaml         # backtest_universe, liquidity_filter, 포지션/손절/익절/트레일링/분산/MDD/성과열화/거래비용
 │   ├── baskets.yaml             # 바스켓 포트폴리오 & 리밸런싱 설정 (종목별 목표 비중, drift/weekly/monthly 트리거, 신호 가중)
-│   ├── holidays.yaml.example    # 휴장일 예시
-│   └── holidays.yaml            # --update-holidays 로 자동 갱신
+│   ├── holidays.yaml.example    # 한국 휴장일 예시
+│   ├── holidays.yaml            # --update-holidays 로 자동 갱신
+│   └── us_holidays.yaml         # 미국 휴장일(선택, NYSE 판별 보조)
 ├── core/
 │   ├── __init__.py
-│   ├── data_collector.py        # 주가 수집 (FDR→yfinance→KIS 폴백, 소스 추적·수정주가 검증), get_krx_stock_list(), get_sector_map()
+│   ├── data_collector.py        # fetch_stock(통합): 미국 티커 yfinance, 한국 FDR→yfinance→KIS 폴백. 소스 추적·is_us_ticker(), get_krx_stock_list(), get_sector_map()
 │   ├── watchlist_manager.py     # 관심 종목: manual/top_market_cap/kospi200/momentum_top/low_vol_top/momentum_lowvol + 유동성 필터 + 리밸런싱 캐시 + as_of_date
 │   ├── indicator_engine.py      # pandas-ta: RSI, MACD, 볼린저, MA(SMA/EMA), 스토캐스틱, ADX, ATR, OBV, volume_ratio
 │   ├── signal_generator.py      # 멀티 지표 스코어링 → BUY/SELL/HOLD, collinearity_mode(representative_only 권장)
@@ -94,16 +99,18 @@ quant_trader/
 │   ├── order_executor.py        # 매수/매도 (paper: DB만, live: KIS), PositionLock, OrderGuard, 유동성·어닝 필터, 매수 직전 재검증, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
 │   ├── portfolio_manager.py     # 포지션·잔고·수익률, sync_with_broker(KIS↔DB 크로스체크), save_daily_snapshot()
 │   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
-│   ├── scheduler.py             # 실전 무한 루프: 장전/장중(10분)/장마감, 시장 국면 필터, 블랙스완 recovery, 바스켓 리밸런싱 체크, paper 실전전환 자동 평가
-│   ├── trading_hours.py         # 장 시간·휴장일 판별 (holidays.yaml → pykrx → fallback)
+│   ├── scheduler.py             # 무한 루프: 장전/장중(10분)/장마감, 시장 국면 필터, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전전환 자동 평가
+│   ├── runtime_lock.py          # schedule 모드 단일 인스턴스 락 (`data/.scheduler.lock`)
+│   ├── trading_hours.py         # 한국 장·휴장일 + 미국(NYSE 정규장, us_holidays.yaml)
 │   ├── holidays_updater.py      # 휴장일 YAML 자동 갱신 (pykrx 또는 fallback)
 │   ├── blackswan_detector.py    # 급락 감지 → 전량 매도·쿨다운·recovery(점진적 재진입, recovery_scale)
 │   ├── market_regime.py         # 시장 국면 필터: 3중 신호(200일선 + 단기모멘텀 + MA크로스) → bearish/caution/bullish
 │   ├── fundamental_loader.py    # 펀더멘털(PER·부채비율) — pykrx(우선) → yfinance(폴백)
-│   ├── earnings_filter.py       # 실적 발표일 필터 (전후 N일 신규 매수 금지, yfinance earningsDate)
+│   ├── dart_loader.py           # DART Open API (corp_code, 정기공시 기반 실적 시점 추정)
+│   ├── earnings_filter.py       # 실적일 필터: yfinance → (선택) DART. `trading.skip_earnings_days`
 │   ├── indicator_correlation.py # 스코어링 지표 상관계수 분석·고상관 쌍 제거 권고
 │   ├── ensemble_correlation.py  # 앙상블 전략 신호 상관계수 + BUY 동시 발생률 + 대안 전략 권고 + auto_downgrade
-│   ├── strategy_ensemble.py     # 앙상블: technical + momentum_factor + volatility_condition (정보 소스 분리, auto_downgrade)
+│   ├── strategy_ensemble.py     # 앙상블: ensemble.components (technical·momentum_factor·volatility_condition·fundamental_factor 선택), auto_downgrade
 │   ├── data_validator.py        # OHLCV 정합성 검사 (Null, NaN, 음수 주가, 타임스탬프 역전)
 │   ├── notifier.py              # 통합 알림 이중화 (1차 디스코드 → 2차 텔레그램 → 3차 이메일, critical 전채널 동시)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
@@ -114,8 +121,9 @@ quant_trader/
 │   ├── scoring_strategy.py      # IndicatorEngine + SignalGenerator, 멀티 지표 스코어링
 │   ├── mean_reversion.py        # Z-Score·ADX·52주 이중 필터·코스피200 제한·펀더멘털 필터
 │   ├── trend_following.py       # ADX·200일선·MACD·ATR 추세 추종
-│   ├── momentum_factor.py       # 모멘텀 팩터 (N일 수익률만, 앙상블용)
-│   └── volatility_condition.py  # 변동성 조건 (N일 실현변동성만, 앙상블용)
+│   ├── fundamental_factor.py    # 펀더멘털 팩터 (--strategy fundamental_factor, 앙상블 구성 가능)
+│   ├── momentum_factor.py       # 모멘텀 (N일 수익률, 앙상블 내부 전용 — CLI 레지스트리 미등록)
+│   └── volatility_condition.py  # 변동성 조건 (앙상블 내부 전용)
 ├── api/
 │   ├── __init__.py
 │   ├── kis_api.py               # KIS REST API: 토큰·시세·주문·잔고·일봉. 이중 Rate Limiter(초당+분당) + 지수 백오프+지터 + SSL/커넥션 에러 핸들러 + 토큰 쿨다운 + 사용량 모니터링 + Circuit Breaker
@@ -156,7 +164,9 @@ quant_trader/
 │   ├── test_strategy_validator.py       # 전략 검증(validate) 로직 검증
 │   ├── test_trading_hours.py            # 장 시간·휴장일 검증
 │   ├── test_watchlist_manager.py        # watchlist 모드별 resolve 검증
-│   └── test_basket_rebalancer.py       # 바스켓 리밸런서 (설정·비중·드리프트·트리거·주문·실행)
+│   ├── test_basket_rebalancer.py       # 바스켓 리밸런서 (설정·비중·드리프트·트리거·주문·실행)
+│   └── test_us_market_support.py      # 미국 티커·TradingHours NYSE 등
+├── deploy/                      # (선택) Oracle Cloud 등 — setup.sh, systemd, logrotate
 ├── docs/
 │   └── PROJECT_GUIDE.md         # 본 문서
 └── reports/                     # 백테스트 txt/html 출력 (.gitignore)
@@ -170,7 +180,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **main.py** | CLI 진입점. `--mode`: backtest / validate / paper / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance. **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper/live 시 시장 국면 필터 적용. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
+| **main.py** | CLI 진입점. `--mode`: backtest / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (12종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
 | **test_integration.py** | 설정·DB·지표·신호·리스크·백테스트·리포트·디스코드 등 전체 파이프라인 일괄 검증(14단계). 단일 실행 스크립트 (pytest 아님). |
 | **pyproject.toml** | 프로젝트 메타데이터: name=`quant_trader`, version=`0.1.0`, Python `>=3.11,<3.13`, 패키지 구성, pytest 설정 (`tests/` 대상, pandas 경고 필터). |
 | **requirements.txt** | pip 의존성 목록. pandas, numpy, scipy, pandas-ta, pykrx, finance-datareader, yfinance, requests, aiohttp, websockets, sqlalchemy, pyyaml, loguru, click, pytest 등. |
@@ -183,19 +193,20 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **config_loader.py** | `load_settings()`, `load_strategies()`, `load_risk_params()`, `load_all_config()`. `.env`로 KIS 키·계좌·디스코드 웹훅 덮어씀. 다중 계좌: `kis_api.accounts`, `Config.get_account_no(strategy)`. `Config.get()` 싱글톤. `ConfigOverlay`로 YAML 설정과 .env 병합. |
+| **config_loader.py** | `load_settings()`, `load_strategies()`, `load_risk_params()`, `load_all_config()`. `.env`로 KIS 키·계좌·디스코드·**DART_API_KEY** 등 덮어씀. 다중 계좌: `kis_api.accounts`, `Config.get_account_no(strategy)`. `Config.dart` 속성. `Config.get()` 싱글톤. `ConfigOverlay`로 YAML 설정과 .env 병합. |
 | **settings.yaml.example** | 설정 예시. 복사해 `settings.yaml`로 사용. (`settings.yaml`은 .gitignore에 포함) |
-| **strategies.yaml** | `active_strategy`, `indicators`(RSI·MACD·볼린저·MA·스토캐스틱·ADX·ATR·거래량), `scoring`(weights, collinearity_mode), `mean_reversion`(z_score, adx, fundamental_filter), `trend_following`, `momentum_factor`, `volatility_condition`, `ensemble`(mode, auto_downgrade, independence_threshold). |
+| **strategies.yaml** | `active_strategy`, `indicators`, `scoring`, `mean_reversion`, `trend_following`, **`fundamental_factor`**, `momentum_factor`, `volatility_condition`, **`ensemble`**(`components`로 technical·momentum_factor·volatility_condition·fundamental_factor on/off·가중치, `mode`, `auto_downgrade`, `independence_threshold`). |
 | **risk_params.yaml** | **backtest_universe**(mode: current/historical/kospi200, exclude_administrative), **liquidity_filter**(20일 평균 거래대금 하한, strict, check_on_entry), position_sizing(1% 룰, initial_capital), stop_loss, take_profit(부분 익절), trailing_stop, diversification(max_sector_ratio 포함), position_limits, drawdown, performance_degradation, paper_backtest_compare(live_readiness), transaction_costs(commission, tax, slippage, dynamic_slippage). |
 | **baskets.yaml** | 바스켓 포트폴리오 & 리밸런싱 설정. 바스켓별 종목·목표 비중·리밸런싱 트리거(drift/weekly/monthly)·신호 가중 모드 정의. `--mode rebalance`에서 사용. |
-| **holidays.yaml** | 휴장일 목록. `python main.py --update-holidays`로 pykrx+fallback 자동 갱신. |
-| **holidays.yaml.example** | 휴장일 예시 파일. |
+| **holidays.yaml** | 한국 휴장일. `python main.py --update-holidays`로 pykrx+fallback 자동 갱신. |
+| **holidays.yaml.example** | 한국 휴장일 예시. |
+| **us_holidays.yaml** | 미국 휴장일(선택). 없으면 미국 거래일 판별 시 주말만 제외. |
 
 ### 3.3 core/
 
 | 파일 | 역할 |
 |------|------|
-| **data_collector.py** | 한국: FDR(수정주가, 우선) → yfinance(수정주가) → KIS(비수정 가능, 폴백). **소스 추적**: `_last_source`, `_source_history`, `check_source_consistency()`로 불일치 감지. `data_source.allow_kis_fallback: false`로 비수정주가 폴백 차단 가능. `get_krx_stock_list(universe_mode)`: current/historical/kospi200. **`get_sector_map()`** 종목→업종 매핑. |
+| **data_collector.py** | **`fetch_stock`**: 미국 티커(`is_us_ticker`)는 yfinance(수정주가). 한국: FDR → yfinance → KIS 폴백. **소스 추적**: `_last_source`, `_source_history`, `check_source_consistency()`. `allow_kis_fallback: false`로 KIS 일봉 폴백 차단 가능. `fetch_korean_stock`은 한국 전용 내부/레거시 호출에 사용. `get_krx_stock_list`, **`get_sector_map()`**. |
 | **watchlist_manager.py** | manual / top_market_cap / kospi200 / momentum_top / low_vol_top / momentum_lowvol. **유동성 필터**(20일 거래대금 하한, strict 모드: 데이터 없는 종목도 제외). **리밸런싱 캐시**: 팩터 모드는 `rebalance_interval_days`(기본 20)마다 재계산, 사이에는 `data/watchlist_cache.json` 사용. **as_of_date** 지원: 백테스트 시 과거 시점 유니버스 사용 가능. |
 | **indicator_engine.py** | pandas-ta로 RSI, MACD, 볼린저, MA, 스토캐스틱, ADX, ATR, OBV, volume_ratio. `calculate_all(df)`로 지표 컬럼 추가. |
 | **signal_generator.py** | `strategies.yaml` 스코어링 가중치로 점수 합산 → BUY/SELL/HOLD. `generate(df)`, `get_latest_signal(df)`. **`collinearity_mode`**: `max_per_direction`(방향별 최대 1개) 또는 `representative_only`(3그룹 대표 1개씩=MACD+볼린저+거래량만 사용, 권장). 초기화 시 가격 모멘텀 그룹 다중공선성 경고 자동 출력. |
@@ -204,17 +215,19 @@ quant_trader/
 | **portfolio_manager.py** | 보유 포지션·잔고·수익률. `sync_with_broker()`로 KIS 잔고↔DB 크로스체크. `get_portfolio_summary()`. |
 | **basket_rebalancer.py** | 바스켓 리밸런싱 엔진. `baskets.yaml`에서 바스켓 로드. `get_target_weights()`(신호 가중 지원), `get_current_weights()`, `calculate_drift()`, `should_rebalance()`(drift/weekly/monthly 트리거), `plan_rebalance()`(SELL→BUY 순서, max_turnover 제한), `execute()`(dry_run 지원). `get_status_report()`로 현황 리포트 생성. |
 | **scheduler.py** | 실전 무한 루프. 장전/장중/장마감. **시장 국면 필터**(단계적: bearish→매수 중단, caution→사이징 축소). 장중 10분 간격. 루프 10분 초과 시 다음 사이클 스킵. 장전 단계에서 **바스켓 리밸런싱 자동 체크** (`_run_basket_rebalance_check`). **전략 레지스트리** 기반 `_get_strategy()`. |
-| **trading_hours.py** | 장 시간·휴장일. holidays.yaml → pykrx → fallback. 주문 가능 시간 검사. |
+| **runtime_lock.py** | `scheduler_lock(lock_file)` 컨텍스트: 스케줄 프로세스 중복 실행 방지. |
+| **trading_hours.py** | 한국 장·휴장일(holidays.yaml → pykrx → fallback). **미국**: `us_holidays.yaml`, 동부 09:30~16:00 (`is_us_trading_day`, `is_us_market_open` 등). 주문 가능 시간 검사. |
 | **holidays_updater.py** | pykrx(또는 fallback)로 휴장일 조회 → `config/holidays.yaml` 저장. `update_holidays_yaml()`. |
 | **blackswan_detector.py** | 급락 감지 시 전량 매도·디스코드 경고·쿨다운. **쿨다운 해제 시** 즉시 재스캔 트리거 + recovery 기간(기본 120분) 중 사이징 50% 축소. `blackswan_recovery_minutes`, `blackswan_recovery_scale`. |
 | **market_regime.py** | `check_market_regime()` → 3중 신호 단계적 국면 판별. **신호 A**: 200일선 이탈, **신호 B**: 20일 수익률 ≤ -5%, **신호 C**: MA(20)<MA(60) 데드크로스(선택적). 2개↑ 충족 → bearish(매수 중단), 1개 → caution(사이징 50%), 0 → bullish. 신호 C는 200일선 이탈보다 2~3주 빠르게 추세 전환 포착. `market_regime_ma_cross_enabled: false`면 기존 2-신호 로직과 동일. |
 | **fundamental_loader.py** | `get_fundamentals(symbol)`, `check_fundamental_filter()`. **pykrx(우선) → yfinance(폴백)** 순서로 PER·부채비율 조회. pykrx는 한국 종목 PER 정확도 높음. yfinance는 부채비율 등 보충. |
-| **earnings_filter.py** | `is_near_earnings(symbol, skip_days)`. 실적 발표일 전후 N일 이내 시 신규 매수 금지. yfinance earningsDate 기반(한국 종목 누락 가능). `trading.skip_earnings_days`(기본 3). |
+| **dart_loader.py** | `DartEarningsLoader`: DART API로 corp_code 매핑·정기공시 기반 차기 실적 시점 추정. `data/dart_corpCode.zip` 캐시. |
+| **earnings_filter.py** | `is_near_earnings(symbol, skip_days, config=...)`. **1순위** yfinance `earningsDate`, **2순위** DART(`settings.dart.enabled`·API 키). 둘 다 없으면 통과. `trading.skip_earnings_days`(기본 3). |
 | **indicator_correlation.py** | 스코어링 지표 점수 시리즈 상관계수·고상관 쌍 권고. `--mode check_correlation` 시 사용. 다중공선성 안내: 3그룹 각 대표 1개만 권장. `suggest_disable_weights()`: 고상관 쌍에서 자동 비활성화 키 추출. 리포트 하단에 다음 단계 CLI 명령어 자동 출력. |
 | **ensemble_correlation.py** | 앙상블 전략 **신호** 시리즈 상관계수 + **BUY/SELL 동시 발생률** + 구체적 **대안 전략 권고**. `quick_independence_check()`: 런타임 경량 검사. `should_force_conservative()`: 고상관 시 conservative 전환 판단. |
 | **position_lock.py** | 포지션/주문 공유 자원용 `threading.RLock`. |
 | **order_guard.py** | 동일 종목에 대해 최근 주문 접수 후 TTL(기본 600초) 동안 추가 주문 차단. |
-| **strategy_ensemble.py** | **technical** + **momentum_factor** + **volatility_condition** 신호 통합. majority_vote / weighted_sum / conservative. **auto_downgrade**(기본 true): 첫 analyze()에서 고상관 감지 시 → conservative 자동 전환. 정보 소스 분리(설계서 §4.4). |
+| **strategy_ensemble.py** | `strategies.yaml` → `ensemble.components`에 정의된 구성(기본: technical·momentum_factor·volatility_condition·**fundamental_factor** 등) 신호 통합. majority_vote / weighted_sum / conservative. **auto_downgrade**. 설계서 §4.4. |
 | **data_validator.py** | OHLCV Null·NaN·음수 주가·거래량·타임스탬프 역전 등 검사. |
 | **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 텔레그램 Bot API → 3차 이메일(SMTP). `critical=True` 시 모든 채널 동시 발송. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
 
@@ -222,13 +235,14 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **\_\_init\_\_.py** | 전략 레지스트리(플러그인형). `_STRATEGY_REGISTRY`에 전략명→(모듈경로, 클래스명) 매핑. `create_strategy(name, config)`: lazy import로 인스턴스 생성. `get_strategy_names()`: argparse choices 등에 활용. `register_strategy()`: 런타임 외부 플러그인 등록. |
+| **\_\_init\_\_.py** | 전략 레지스트리. 등록명: **`scoring`**, **`mean_reversion`**, **`trend_following`**, **`fundamental_factor`**, **`ensemble`**. `momentum_factor`·`volatility_condition`은 레지스트리에 없음(앙상블 내부 전용). `create_strategy`, `get_strategy_names`, `register_strategy`. |
 | **base_strategy.py** | `analyze(df)` → 지표·신호 붙은 DataFrame, `generate_signal(df, **kwargs)` → 최신 BUY/SELL/HOLD·점수·상세. |
 | **scoring_strategy.py** | IndicatorEngine + SignalGenerator. 총점 ≥ buy_threshold 매수, ≤ sell_threshold 매도. |
-| **mean_reversion.py** | Z-Score·ADX 필터. **52주 이중 필터**: 고점 대비 -30% 하락 또는 저점 대비 +5% 이내 → 매수 제외. **`restrict_to_kospi200: true`**: 코스피200만 매수 허용. **펀더멘털 필터**(pykrx→yfinance). 한국 시장 한계·실전 권장: 설계서 §4.2. |
-| **trend_following.py** | ADX·200일선·MACD·ATR 기반 추세 추종. 진입 늦음·손익비 ≥ 2.0 검증 필수. 한국 시장 추세 지속성 약함(§4.3). |
-| **momentum_factor.py** | N일 수익률만 사용(기술지표 없음). 앙상블용. lookback_days, buy_threshold_pct, sell_threshold_pct. |
-| **volatility_condition.py** | N일 실현변동성(연율화)만 사용. 저변동성=매수, 고변동성=매도. 앙상블용. |
+| **mean_reversion.py** | Z-Score·ADX 필터. **52주 이중 필터**, **`restrict_to_kospi200`**, **펀더멘털 필터**(pykrx→yfinance). 설계서 §4.2. |
+| **trend_following.py** | ADX·200일선·MACD·ATR 추세 추종. 손익비 ≥ 2.0 검증 필수(§4.3). |
+| **fundamental_factor.py** | 재무(PER 상대·ROE·부채·영업이익 성장 등)만으로 신호. pykrx→yfinance. 백테스트 시 `df.attrs['symbol']` 권장. |
+| **momentum_factor.py** | N일 수익률만. **`StrategyEnsemble` 구성용** — `--strategy momentum_factor` 불가. |
+| **volatility_condition.py** | N일 실현변동성만. **앙상블 구성용** — 단독 CLI 전략 아님. |
 
 ### 3.5 api/
 
@@ -285,6 +299,7 @@ quant_trader/
 | **test_trading_hours.py** | 장 시간·휴장일. |
 | **test_watchlist_manager.py** | watchlist 모드별 resolve. |
 | **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행). |
+| **test_us_market_support.py** | `fetch_stock` 미국 라우팅, 미국 장/휴장일 관련 `TradingHours` 동작. |
 
 실행: `pytest tests/ -q`
 
@@ -301,6 +316,7 @@ quant_trader/
 | **logging** | level(INFO), log_dir(logs), rotation(10MB), retention(30 days) | loguru 로그 설정 |
 | **data_source** | preferred(auto), allow_kis_fallback(true), warn_on_source_mismatch(true) | 데이터 소스·수정주가 일치 제어 |
 | **trading** | market_open(09:00), market_close(15:30), mode(paper), auto_entry(false), skip_earnings_days(3), market_regime_filter(true), market_regime_index(KS11), blackswan_recovery_minutes(120), sync_broker_interval_minutes 등 | 매매 모드·시장 국면 필터·블랙스완 |
+| **dart** | enabled, api_key(또는 `DART_API_KEY` 환경변수) | 전자공시 기반 실적 시점 추정 → `earnings_filter` 폴백 |
 | **discord** | enabled(false), webhook_url, username | 디스코드 알림 |
 | **telegram** | enabled(false), bot_token, chat_id | 텔레그램 알림 (이중화) |
 | **dashboard** | host(0.0.0.0), port(8080) | 웹 대시보드 |
@@ -317,7 +333,8 @@ quant_trader/
 | **trend_following** | adx_threshold, trend_ma_period, atr_stop_multiplier, trailing_atr_multiplier | 추세 추종 |
 | **momentum_factor** | lookback_days(20), buy_threshold_pct, sell_threshold_pct | 모멘텀 팩터 (앙상블용) |
 | **volatility_condition** | lookback_days(60), low_vol_max_pct, high_vol_min_pct | 변동성 조건 (앙상블용) |
-| **ensemble** | mode(majority_vote), auto_downgrade(true), independence_threshold(0.6), confidence_weight | 앙상블 통합 |
+| **fundamental_factor** | per_sector_relative, roe_min, debt_ratio_max, earnings_growth_min, data_cache_hours 등 | 펀더멘털 단독 전략·앙상블 구성 공통 설정 |
+| **ensemble** | `components`(name, enabled, weight), mode(majority_vote), auto_downgrade(true), independence_threshold(0.6), confidence_weight(레거시 폴백) | 앙상블 통합 |
 
 ### config/risk_params.yaml
 
@@ -357,7 +374,7 @@ quant_trader/
 
 ```
 main.py (--mode backtest)
-  → DataCollector.fetch_korean_stock(symbol, start, end)
+  → DataCollector.fetch_stock(symbol, start, end)   # 미국 티커는 yfinance 분기
   → Backtester.run(df, strategy_name)  # strict_lookahead 기본, 전략.analyze → _simulate
   → Backtester.print_report(result)
   → ReportGenerator.generate_all(result)  # txt, html
@@ -368,9 +385,18 @@ main.py (--mode backtest)
 ```
 main.py (--mode paper)
   → WatchlistManager.resolve()
-  → 종목마다: DataCollector.fetch_korean_stock(symbol) → strategy.generate_signal(df)
-  → BUY/SELL 시 DiscordBot.send_signal_alert, OrderExecutor.execute_buy/execute_sell (DB만)
+  → 종목마다: DataCollector.fetch_stock(symbol) → strategy.generate_signal(df)
+  → BUY/SELL 시 Notifier, OrderExecutor.execute_buy/execute_sell (DB만)
   → PortfolioManager.get_portfolio_summary()
+```
+
+### 스케줄 루프(schedule)
+
+```
+main.py (--mode schedule --strategy scoring)
+  → trading.mode == live 이면 거부
+  → runtime_lock(data/.scheduler.lock) 획득 실패 시 종료
+  → Scheduler.run()  # 장전/장중/장마감 무한 루프 (paper 설정 하에 동일 비즈니스 로직)
 ```
 
 ### 실전(live)
@@ -410,14 +436,14 @@ main.py (--mode live --confirm-live)
 
 ```
 main.py (--mode check_correlation)
-  → DataCollector.fetch_korean_stock(symbol)
+  → DataCollector.fetch_stock(symbol, ...)
   → IndicatorEngine.calculate_all(df)
   → SignalGenerator.generate(df)  # 각 지표별 스코어 시리즈 추출
   → indicator_correlation.run_indicator_correlation_check()  # Pearson 상관계수
   → 리포트 저장 (reports/indicator_correlation_*.txt)
 
 main.py (--mode check_ensemble_correlation)
-  → DataCollector.fetch_korean_stock(symbol)
+  → DataCollector.fetch_stock(symbol, ...)
   → StrategyEnsemble.analyze(df)  # 3개 전략 신호 시리즈
   → ensemble_correlation.run_ensemble_signal_correlation_check()  # 상관 + BUY 동시 발생률
   → 리포트 저장 + 대안 전략 권고
@@ -442,7 +468,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 - **지표**: `core/indicator_engine.py`에서 pandas-ta로 RSI, MACD, 볼린저, MA, 스토캐스틱, ADX, ATR, OBV, volume_ratio 계산. 설정은 `config/strategies.yaml` → `indicators`.
 - **스코어링**: `core/signal_generator.py`가 가중치(weights)로 점수 합산 → buy_threshold/sell_threshold로 BUY/SELL 판단. **⚠️ 가중치는 미검증 직관값이며, 이 상태로 실전 투입하면 노이즈를 실행하는 것**. `collinearity_mode: representative_only`(권장)로 설정하면 MACD+볼린저+거래량 3개만 합산하여 다중공선성을 근본적으로 차단. 반드시 `check_correlation → optimize --include-weights --auto-correlation → validate --walk-forward` 파이프라인으로 최적화 후 사용. **스코어링 전략 단독으로 안정적 수익을 낼 가능성은 낮음** — 설계서 §4.5.1 참고.
-- **전략**: scoring(멀티 지표), mean_reversion(Z-Score·ADX·52주 이중 필터·코스피200 제한·펀더멘털(pykrx→yfinance)), trend_following(ADX·200일선·MACD·ATR), **momentum_factor**(N일 수익률만), **volatility_condition**(N일 실현변동성만), **ensemble**(technical + momentum_factor + volatility_condition). 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
+- **전략 (CLI 등록)**: scoring, mean_reversion, trend_following, **fundamental_factor**, **ensemble**. **momentum_factor**·**volatility_condition**은 앙상블 내부 구성용. 앙상블은 `ensemble.components`로 구성·가중치 설정(기본 예시에 fundamental_factor 포함). 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
 
 공식·파라미터·신호 조건 등 **상세는 루트의 `quant_trader_design.md` §3(지표), §4(전략), §5(리스크)** 참고.
 
@@ -512,13 +538,16 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ 주문 실패 Dead-letter 큐 | FailedOrder 테이블에 영구 저장, 재처리 API 지원 |
 | ✅ 전략 레지스트리(플러그인형) | `create_strategy(name)`으로 동적 로딩 |
 | ✅ 바스켓 리밸런싱 | 목표 비중 관리, 드리프트/주기 트리거, 신호 가중, CLI+스케줄러 통합 |
+| ✅ schedule 모드 + 런타임 락 | 모의 무한 루프, `data/.scheduler.lock` 중복 방지 |
+| ✅ 미국 티커·휴장일 | `fetch_stock`, `us_holidays.yaml`, NYSE 장세션 헬퍼 |
+| ✅ DART(선택) | `DART_API_KEY` / `settings.dart` 시 실적일 폴백 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
 | 항목 | 설명 | 우선순위 |
 |------|------|----------|
-| DART OpenAPI 연동 | 실적 발표일·공시 필터 정확도 개선 | 중기 (3~6개월) |
-| 펀더멘털 독립 신호 | 앙상블에 PER·ROE 기반 전략 추가 | 중기 |
+| DART·어닝 필터 고도화 | 기본 연동 완료(`dart_loader`+`earnings_filter`). 공시 키워드·커버리지·폴백 정책 확대 | 중기 (3~6개월) |
+| 펀더멘털 신호 고도화 | `fundamental_factor`·앙상블 구성 반영됨. 지표·해외 종목·공시 연계 강화 | 중기 |
 | 웹 대시보드 강화 | 전략별 신호, 주문 목록, API 사용량 표시 | 중기 |
 | WebSocket 갭 처리 | 재연결 시 REST API 보충 조회, 갭 중 급변 감지 | 중기 |
 
@@ -575,6 +604,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | `KIS_APP_KEY` | ✅ | KIS API 앱 키 |
 | `KIS_APP_SECRET` | ✅ | KIS API 앱 시크릿 |
 | `KIS_ACCOUNT_NO` | ✅ | KIS 계좌번호 |
+| `DART_API_KEY` | 선택 | 전자공시 API — 실적일 DART 폴백 (`settings.dart.enabled`와 함께) |
 | `DISCORD_WEBHOOK_URL` | 권장 | 디스코드 알림 웹훅 URL |
 | `ENABLE_LIVE_TRADING` | live 시 | `true` 설정 + `--confirm-live` 필수 |
 | `MAX_CALLS_PER_SEC` | 선택 | KIS API 초당 호출 제한 (기본 10) |
@@ -597,7 +627,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **Python 소스** | `main.py`, `test_integration.py`, `core/*.py`, `strategies/*.py`, `api/*.py`, `backtest/*.py`, `database/*.py`, `monitoring/*.py`, `tests/*.py`, `config/config_loader.py` |
 | **설정 예시** | `config/settings.yaml.example`, `config/holidays.yaml.example`, `.env.example` |
 | **메타데이터** | `pyproject.toml`, `requirements.txt` |
-| **문서** | `README.md`, `quant_trader_design.md`, `docs/PROJECT_GUIDE.md` |
+| **문서** | `README.md`, `quant_trader_design.md`, `docs/PROJECT_GUIDE.md`, `deploy/README.md`(선택) |
 | **설정 (공개 가능)** | `config/strategies.yaml`, `config/risk_params.yaml` |
 | **기타** | `.gitignore` |
 
@@ -617,5 +647,5 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 ---
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`  
-> **문서 버전**: v2.4  
-> **최종 수정**: 2026-03-19 (KIS 호출 제어 강화, Dead-letter 큐, 전략 레지스트리, 바스켓 리밸런싱, FailedOrder 모델, rebalance CLI 모드 반영. 운영 안정성 항목 구현 완료 상태 갱신)
+> **문서 버전**: v2.5  
+> **최종 수정**: 2026-03-20 (`schedule` 모드·`runtime_lock`, `fundamental_factor`·앙상블 `components`, DART+`dart_loader`, 미국 시장·`us_holidays.yaml`, `deploy/`·테스트 목록 반영)

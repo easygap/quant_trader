@@ -6,9 +6,12 @@
   (1) 가격 모멘텀 (MA 또는 MACD 중 하나), (2) 변동성 (볼린저/ATR), (3) 거래량 — 3그룹 각 1개만 권장.
 """
 
+from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 import pandas as pd
+from loguru import logger
 
 # 스코어링에서 사용하는 개별 점수 컬럼 (상관 분석 대상)
 SCORE_COLUMNS = ["score_rsi", "score_macd", "score_bollinger", "score_volume", "score_ma"]
@@ -83,6 +86,7 @@ def recommend_reduction(
     for col1, col2, r in high_pairs:
         label1 = SCORE_LABELS.get(col1, col1)
         label2 = SCORE_LABELS.get(col2, col2)
+        action = "제거 권고" if abs(r) >= 0.85 else "가중치 축소 권고"
         group_note = (
             "가격 모멘텀 그룹(RSI/MACD/MA) 내 고상관: 그룹당 대표 1개만 두고 나머지는 가중치 0 권장. "
             "실질적 독립 정보는 (1) 가격모멘텀 (2) 변동성 (3) 거래량 3그룹 각 1개만 두세요."
@@ -93,9 +97,10 @@ def recommend_reduction(
             "label1": label1,
             "label2": label2,
             "correlation": r,
+            "action": action,
             "suggestion": (
                 f"{label1}–{label2} 상관계수 {r:.2f}. "
-                "둘 중 하나 가중치 0(제거) 또는 축소 권장. "
+                f"{action}. "
                 f"{group_note}"
             ),
         })
@@ -103,11 +108,22 @@ def recommend_reduction(
 
 
 def run_indicator_correlation_check(
-    df_scores: pd.DataFrame,
+    df_or_scores: pd.DataFrame,
     threshold: float = 0.7,
+    symbol: str = "005930",
+    config=None,
+    output_dir: str = "reports",
+    save_report: bool = False,
+    start: str = None,
+    end: str = None,
 ) -> dict:
     """
-    스코어 DataFrame에 대해 상관계수 계산 및 고상관 쌍·권고 반환.
+    지표 독립성 검증 실행.
+    - 입력이 원시 OHLCV면 IndicatorEngine + SignalGenerator로 score 시리즈 생성
+    - 입력이 score DataFrame이면 그대로 사용
+    - Pearson 상관계수(df.corr) 계산
+    - |r|>=threshold 고상관 쌍 추출 및 권고 생성
+    - save_report=True면 reports/indicator_correlation_{날짜}.txt 저장
 
     Returns:
         {
@@ -117,16 +133,62 @@ def run_indicator_correlation_check(
             "n_high": int,
         }
     """
+    if df_or_scores is None or df_or_scores.empty:
+        return {
+            "corr_matrix": pd.DataFrame(),
+            "high_correlation_pairs": [],
+            "recommendations": [],
+            "n_high": 0,
+            "threshold": threshold,
+            "symbol": symbol,
+            "report_path": None,
+        }
+
+    has_score_cols = any(c in df_or_scores.columns for c in SCORE_COLUMNS)
+    if has_score_cols:
+        df_scores = df_or_scores.copy()
+    else:
+        from config.config_loader import Config
+        from core.indicator_engine import IndicatorEngine
+        from core.signal_generator import SignalGenerator
+
+        cfg = config or Config.get()
+        engine = IndicatorEngine(cfg)
+        generator = SignalGenerator(cfg)
+        df_ind = engine.calculate_all(df_or_scores.copy())
+        # representative_only 등으로 generate() 후에는 RSI·MA 점수가 0 고정 → 상관 NaN.
+        # 실매매 total_score와 무관하게, collinearity 적용 전 개별 점수로 Pearson 상관만 계산.
+        df_scores = generator.compute_score_columns_for_correlation(df_ind)
+
     corr_matrix = compute_score_correlation_matrix(df_scores)
     high_pairs = get_high_correlation_pairs(corr_matrix, threshold=threshold)
     recommendations = recommend_reduction(high_pairs)
-    return {
+    for col1, col2, r in high_pairs:
+        logger.info(
+            "[indicator_correlation] 고상관 쌍 발견: {}-{} (r={:.3f})",
+            SCORE_LABELS.get(col1, col1),
+            SCORE_LABELS.get(col2, col2),
+            r,
+        )
+
+    result = {
         "corr_matrix": corr_matrix,
         "high_correlation_pairs": high_pairs,
         "recommendations": recommendations,
         "n_high": len(high_pairs),
         "threshold": threshold,
+        "symbol": symbol,
+        "report_path": None,
     }
+    if save_report:
+        report_text = render_correlation_report(result, symbol=symbol, start=start, end=end)
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = out_dir / f"indicator_correlation_{timestamp}.txt"
+        report_path.write_text(report_text, encoding="utf-8")
+        result["report_path"] = str(report_path)
+    return result
 
 
 SCORE_COL_TO_WEIGHT_KEY = {
@@ -217,6 +279,9 @@ def render_correlation_report(
         f"기준: |상관계수| >= {result['threshold']} 인 쌍을 고상관으로 판단",
         "=" * 70,
         "",
+        "[참고] 상관계수는 실매매 total_score에 쓰이는 collinearity(representative_only 등) "
+        "적용 **전** 개별 점수 시리즈(score_rsi, score_macd, …) 기준입니다.",
+        "",
         "[다중공선성 안내] 대부분의 지표는 가격·이동평균 변형입니다. 스코어가 실질적으로",
         "1~2개 지표에 지배당하지 않으려면, 실질적 독립 정보 3그룹 각 대표 1개만 두는 것을 권장:",
         "  (1) 가격 모멘텀: MA 골든/데드크로스 또는 MACD (택 1)",
@@ -237,6 +302,7 @@ def render_correlation_report(
         lines.append("\n[권고] |r| >= 0.7 쌍 — 하나 제거(가중치 0) 또는 가중치 축소 권장")
         for rec in result["recommendations"]:
             lines.append(f"  - {rec['label1']}–{rec['label2']}: r={rec['correlation']:.2f}")
+            lines.append(f"    → {rec.get('action', '권고')}")
             lines.append(f"    → {rec['suggestion']}")
     else:
         lines.append("\n고상관 쌍 없음. 현재 지표 조합은 독립성 기준을 만족합니다.")
@@ -264,6 +330,11 @@ def render_correlation_report(
     lines.append("")
     lines.append("  [원스텝] 상관 분석 + 최적화를 한 번에 실행:")
     lines.append(f"     {cmds['step_auto']}")
+    lines.append("")
+    lines.append("=== 다음 단계 명령어 ===")
+    lines.append(
+        f"python main.py --mode optimize --strategy scoring --include-weights --auto-correlation --symbol {symbol}"
+    )
     lines.append("=" * 70)
 
     return "\n".join(lines) + "\n"

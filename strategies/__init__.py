@@ -13,6 +13,7 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
     "scoring":         ("strategies.scoring_strategy",  "ScoringStrategy"),
     "mean_reversion":  ("strategies.mean_reversion",    "MeanReversionStrategy"),
     "trend_following": ("strategies.trend_following",    "TrendFollowingStrategy"),
+    "fundamental_factor": ("strategies.fundamental_factor", "FundamentalFactorStrategy"),
     "ensemble":        ("core.strategy_ensemble",       "StrategyEnsemble"),
 }
 

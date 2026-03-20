@@ -43,6 +43,9 @@ def test_scheduler_pre_market_runs_without_network(monkeypatch):
         def fetch_korean_stock(self, symbol, start=None, end=None):
             return sample.copy()
 
+        def fetch_stock(self, symbol, start=None, end=None):
+            return self.fetch_korean_stock(symbol, start, end)
+
     monkeypatch.setattr("core.data_collector.DataCollector", FakeCollector)
     scheduler = Scheduler(strategy_name="scoring")
     if not scheduler.config.watchlist:
@@ -78,6 +81,16 @@ def test_scheduler_post_market_runs():
 
     scheduler = Scheduler(strategy_name="scoring")
     scheduler._run_post_market()
+    assert True
+
+
+def test_scheduler_startup_recovery_paper_mode_no_crash(monkeypatch):
+    """재시작 복구: paper 모드에서 KIS 없이 startup_recovery가 예외 없이 끝난다."""
+    from core.scheduler import Scheduler
+
+    monkeypatch.setattr("core.scheduler.get_pending_failed_orders", lambda: [])
+    scheduler = Scheduler(strategy_name="scoring")
+    scheduler.startup_recovery()
     assert True
 
 

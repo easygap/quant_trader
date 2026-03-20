@@ -6,8 +6,9 @@
 - 모멘텀 팩터: 12개월 수익률 상위 종목 (momentum_top)
 - 저변동성 팩터: 60일 실현변동성 하위 = 저변동성 상위 (low_vol_top)
 - 모멘텀+저변동성 복합: 12개월 수익률 상위이면서 저변동성 필터 (momentum_lowvol)
+- 미국: S&P 500 구성 중 시총 상위 N (us_sp500_top20), NASDAQ-100 구성 중 시총 상위 N (us_nasdaq_top20)
 - 유동성 필터: 20일 평균 거래대금(원) 하한으로 저유동 종목 진입 대상에서 제외 (risk_params.liquidity_filter)
-- 리밸런싱 주기: 팩터 모드(momentum_top/low_vol_top/momentum_lowvol)는 rebalance_interval_days(기본 20)마다
+- 리밸런싱 주기: 팩터·미국 지수 모드는 rebalance_interval_days(기본 20)마다
   재계산하고 그 사이에는 캐시를 사용. 매일 재계산 시 종목 교체가 잦아 거래비용이 불필요하게 증가하고,
   너무 드물면 팩터 효과가 희석됨(Jegadeesh & Titman 1993 기준 월 1회 리밸런싱이 일반적).
 """
@@ -17,12 +18,19 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 from config.config_loader import Config
 from core.data_collector import DataCollector
 
-_FACTOR_MODES = {"momentum_top", "low_vol_top", "momentum_lowvol"}
+_FACTOR_MODES = {
+    "momentum_top",
+    "low_vol_top",
+    "momentum_lowvol",
+    "us_sp500_top20",
+    "us_nasdaq_top20",
+}
 _CACHE_FILENAME = "watchlist_cache.json"
 
 
@@ -143,6 +151,8 @@ class WatchlistManager:
                 "momentum_top": self._build_momentum_top_watchlist,
                 "low_vol_top": self._build_low_vol_top_watchlist,
                 "momentum_lowvol": self._build_momentum_lowvol_watchlist,
+                "us_sp500_top20": self._build_us_sp500_top20,
+                "us_nasdaq_top20": self._build_us_nasdaq_top20,
             }
             auto_symbols = self._resolve_factor_mode(mode, settings, builder_map[mode])
             if auto_symbols:
@@ -157,7 +167,8 @@ class WatchlistManager:
 
     def _get_universe_mode(self) -> str:
         """backtest_universe.mode 설정 반환. as_of_date가 있고 mode가 current면 historical로 자동 전환."""
-        universe = (self.config.risk_params or {}).get("backtest_universe") or {}
+        risk_params = getattr(self.config, "risk_params", {}) or {}
+        universe = risk_params.get("backtest_universe") or {}
         mode = (universe.get("mode") or "current").strip().lower()
         if self.as_of_date and mode == "current":
             return "historical"
@@ -166,11 +177,13 @@ class WatchlistManager:
     def _build_top_market_cap_watchlist(self, settings: dict) -> list[str]:
         market = str(settings.get("market", "KOSPI")).upper()
         top_n = max(1, int(settings.get("top_n", 20)))
-        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        risk_params = getattr(self.config, "risk_params", {}) or {}
+        liq = risk_params.get("liquidity_filter") or {}
         use_liq = liq.get("enabled", False)
         candidate_n = (min(100, top_n * 2) if use_liq else top_n)
 
-        universe = (self.config.risk_params or {}).get("backtest_universe") or {}
+        risk_params = getattr(self.config, "risk_params", {}) or {}
+        universe = risk_params.get("backtest_universe") or {}
         exclude_admin = universe.get("exclude_administrative", True)
         u_mode = self._get_universe_mode()
         try:
@@ -231,7 +244,8 @@ class WatchlistManager:
           데이터 없는 종목을 통과시키면 거래대금 1억 미만 종목이 진입 대상에 포함될 위험.
         strict=false: 데이터 없는 종목은 통과(기존 동작). 수동 watchlist에서 직접 지정한 종목 유지용.
         """
-        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        risk_params = getattr(self.config, "risk_params", {}) or {}
+        liq = risk_params.get("liquidity_filter") or {}
         if not liq.get("enabled", False):
             return list(symbols) if symbols else []
         min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5_000_000_000))
@@ -290,6 +304,101 @@ class WatchlistManager:
         except Exception as e:
             logger.debug("20일 평균 거래대금 계산 실패 {}: {}", symbol, e)
             return None
+
+    def _build_us_sp500_top20(self, settings: dict) -> list[str]:
+        """위키백과 S&P500 목록 + yfinance 시가총액 기준 상위 N (표본 최대 120종)."""
+        top_n = max(1, int(settings.get("top_n", 20)))
+        try:
+            tables = pd.read_html(
+                "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+                storage_options={"User-Agent": "quant-trader/1.0"},
+            )
+        except Exception as e:
+            logger.warning("S&P500 테이블 로드 실패: {}", e)
+            return []
+        if not tables:
+            return []
+        df = tables[0]
+        col = "Symbol" if "Symbol" in df.columns else None
+        if col is None:
+            return []
+        raw = (
+            df[col]
+            .astype(str)
+            .str.strip()
+            .str.replace(".", "-", regex=False)
+            .tolist()
+        )
+        symbols = [s for s in raw if s and s.lower() != "nan"]
+        if not symbols:
+            return []
+        ranked = self._rank_us_symbols_by_market_cap(symbols, top_n, max_lookups=min(120, len(symbols)))
+        logger.info("watchlist 자동 생성: mode=us_sp500_top20 → {}개", len(ranked))
+        return ranked
+
+    def _build_us_nasdaq_top20(self, settings: dict) -> list[str]:
+        """위키백과 NASDAQ-100 구성 + yfinance 시가총액 기준 상위 N."""
+        top_n = max(1, int(settings.get("top_n", 20)))
+        try:
+            tables = pd.read_html(
+                "https://en.wikipedia.org/wiki/NASDAQ-100",
+                storage_options={"User-Agent": "quant-trader/1.0"},
+            )
+        except Exception as e:
+            logger.warning("NASDAQ-100 테이블 로드 실패: {}", e)
+            return []
+        symbols = []
+        for tbl in tables:
+            col = None
+            if "Ticker" in tbl.columns:
+                col = "Ticker"
+            elif "Symbol" in tbl.columns:
+                col = "Symbol"
+            if col:
+                symbols = (
+                    tbl[col]
+                    .astype(str)
+                    .str.strip()
+                    .str.replace(".", "-", regex=False)
+                    .tolist()
+                )
+                symbols = [s for s in symbols if s and s.lower() != "nan" and len(s) <= 8]
+                break
+        if not symbols:
+            return []
+        ranked = self._rank_us_symbols_by_market_cap(symbols, top_n, max_lookups=len(symbols))
+        logger.info("watchlist 자동 생성: mode=us_nasdaq_top20 → {}개", len(ranked))
+        return ranked
+
+    def _rank_us_symbols_by_market_cap(
+        self, symbols: list[str], top_n: int, max_lookups: int,
+    ) -> list[str]:
+        """yfinance .info marketCap 기준 정렬. 조회 실패 종목은 뒤로."""
+        try:
+            import yfinance as yf
+        except ImportError:
+            return self._normalize_symbols(symbols[:top_n])
+
+        caps: list[tuple[str, int]] = []
+        for s in symbols[:max_lookups]:
+            sym = str(s).strip().upper().replace(".", "-")
+            mc = 0
+            try:
+                info = yf.Ticker(sym).info
+                mc = int(info.get("marketCap") or info.get("enterpriseValue") or 0)
+            except Exception:
+                pass
+            caps.append((sym, mc))
+        caps.sort(key=lambda x: -x[1])
+        out = [s for s, m in caps[:top_n] if s]
+        if len(out) < top_n:
+            for s in symbols:
+                sym = str(s).strip().upper().replace(".", "-")
+                if sym not in out:
+                    out.append(sym)
+                if len(out) >= top_n:
+                    break
+        return self._normalize_symbols(out[:top_n])
 
     def _build_momentum_top_watchlist(self, settings: dict) -> list[str]:
         """모멘텀 팩터: 12개월 수익률 상위 종목. 후보 풀에서 1년 수익률 계산 후 상위 top_n 반환."""

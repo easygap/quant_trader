@@ -4,12 +4,13 @@
 - asyncio 기반 비동기 처리
 - connect() 시 KISApi.get_approval_key()로 웹소켓 전용 승인키 발급 후 구독 메시지에 사용.
   KIS 공식 문서(웹소켓 인증) 변경 시 해당 로직 재검증 필요.
+- 재연결 시 끊긴 구간이 1분 초과면 KISApi.get_price_history()로 분봉 보충 후 급변(3%+) 시 BlackSwanDetector 보고.
 """
 
 import json
 import asyncio
-from datetime import datetime
-from typing import Callable, Optional, Dict, Any
+from datetime import datetime, timedelta
+from typing import Callable, Optional, Dict, Any, List
 import time
 
 from loguru import logger
@@ -61,6 +62,9 @@ class WebSocketHandler:
         self._last_pong_time: float = 0.0
         self._first_data_logged: bool = False
 
+        # 재연결 갭 보충용 (연결 끊김 시각 → 재연결 성공 시 REST 보충)
+        self._disconnect_time: Optional[datetime] = None
+
         logger.info(
             "WebSocketHandler 초기화 (모드: {})",
             "모의투자" if self.use_mock else "실전",
@@ -87,6 +91,60 @@ class WebSocketHandler:
         """
         self._on_orderbook_callbacks.append(callback)
         logger.info("호가 콜백 등록 (총 {}개)", len(self._on_orderbook_callbacks))
+
+    @staticmethod
+    def _gap_range_swing_pct(bars: List[Dict[str, Any]]) -> Optional[float]:
+        """분봉 구간 내 (고가 최대 - 저가 최소) / 저가 * 100."""
+        if not bars:
+            return None
+        lows = [float(b["low"]) for b in bars if b.get("low") is not None and float(b["low"]) > 0]
+        highs = [float(b["high"]) for b in bars if b.get("high") is not None and float(b["high"]) > 0]
+        if not lows or not highs:
+            return None
+        lo, hi = min(lows), max(highs)
+        if lo <= 0:
+            return None
+        return (hi - lo) / lo * 100.0
+
+    async def _process_reconnect_gap(self, symbols: list[str], gap: timedelta) -> int:
+        """
+        갭이 1분 초과 시 REST로 분봉 보충 후 변동률 검사.
+        Returns:
+            보충 조회를 수행한 종목 수(갭이 짧으면 0).
+        """
+        gap_sec = gap.total_seconds()
+        if gap_sec <= 60:
+            return 0
+        gap_min = max(1, int(gap_sec / 60))
+        minutes_fetch = gap_min + 5
+
+        from api.kis_api import KISApi
+        from core.blackswan_detector import BlackSwanDetector
+
+        api = KISApi()
+        try:
+            await asyncio.to_thread(api.authenticate)
+        except Exception as e:
+            logger.warning("[WebSocket] 갭 보충용 KIS 인증 실패: {}", e)
+            return 0
+
+        detector = BlackSwanDetector(self.config)
+        n_queried = 0
+        for symbol in symbols:
+            n_queried += 1
+            try:
+                bars = await asyncio.to_thread(api.get_price_history, symbol, minutes_fetch)
+                if not bars:
+                    continue
+                swing = self._gap_range_swing_pct(bars)
+                if swing is None:
+                    continue
+                if swing >= 3.0:
+                    logger.warning("[WebSocket] {} 갭 중 {:.1f}% 급변 감지", symbol, swing)
+                    detector.report_websocket_gap_volatility(symbol, swing)
+            except Exception as e:
+                logger.debug("[WebSocket] 갭 보충 조회 실패 {}: {}", symbol, e)
+        return n_queried
 
     async def connect(self, symbols: list[str]):
         """
@@ -117,6 +175,21 @@ class WebSocketHandler:
             try:
                 # ping_interval=None (수동 Ping-Pong 처리를 위해)
                 async with websockets.connect(self.ws_url, ping_interval=None) as ws:
+                    reconnect_time = datetime.now()
+                    if self._disconnect_time is not None:
+                        gap_td = reconnect_time - self._disconnect_time
+                    else:
+                        gap_td = timedelta(0)
+
+                    n_backfill = await self._process_reconnect_gap(symbols, gap_td)
+                    logger.info(
+                        "[WebSocket] 재연결 완료. 갭: {:.0f}초. 보충 조회 종목: {}개",
+                        gap_td.total_seconds(),
+                        n_backfill,
+                    )
+
+                    self._disconnect_time = None
+
                     self._ws = ws
                     self._is_connected = True
                     retry_count = 0  # 성공 시 재시도 카운트 리셋
@@ -155,12 +228,14 @@ class WebSocketHandler:
                     e, self.ws_url, type(e).__name__,
                 )
 
+            was_live = self._is_connected
             self._is_connected = False
             self._ws = None
 
             if self._should_reconnect:
+                if was_live:
+                    self._disconnect_time = datetime.now()
                 retry_count += 1
-                # 재시도 지수 백오프 (최대 60초)
                 wait_time = min(60, 2 ** min(retry_count, 6))
                 logger.warning("웹소켓 끊김 — {}초 후 재연결 시도", wait_time)
                 await asyncio.sleep(wait_time)

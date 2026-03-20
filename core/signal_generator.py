@@ -63,12 +63,40 @@ class SignalGenerator:
         self._exit_sell_threshold = hyst.get("exit_sell_threshold", None)
         self._exit_buy_threshold = hyst.get("exit_buy_threshold", None)
 
+        self._dynamic_threshold_enabled = bool(scoring.get("dynamic_threshold", False))
+        self._dynamic_atr_high = float(scoring.get("dynamic_threshold_atr_high", 1.5))
+        self._dynamic_atr_low = float(scoring.get("dynamic_threshold_atr_low", 0.7))
+
+        self._warn_price_momentum_collinearity()
         self._diagnose_weight_collinearity()
         logger.info(
-            "SignalGenerator 초기화 완료 (collinearity_mode={}, hysteresis={})",
+            "SignalGenerator 초기화 완료 (collinearity_mode={}, hysteresis={}, dynamic_threshold={})",
             self._collinearity_mode,
             self._hysteresis_enabled,
+            self._dynamic_threshold_enabled,
         )
+
+    def _warn_price_momentum_collinearity(self):
+        """가격 모멘텀 그룹(RSI, MACD, MA) 다중 활성화 시 권장 모드 경고."""
+        try:
+            weights = self._get_weights()
+        except KeyError:
+            return
+
+        active_indicators = []
+        if abs(weights.get("rsi_oversold", 0)) > 0 or abs(weights.get("rsi_overbought", 0)) > 0:
+            active_indicators.append("RSI")
+        if abs(weights.get("macd_golden_cross", 0)) > 0 or abs(weights.get("macd_dead_cross", 0)) > 0:
+            active_indicators.append("MACD")
+        if abs(weights.get("ma_golden_cross", 0)) > 0 or abs(weights.get("ma_dead_cross", 0)) > 0:
+            active_indicators.append("MA")
+
+        if len(active_indicators) >= 2:
+            logger.warning(
+                "[SignalGenerator] 다중공선성 경고: 가격 모멘텀 그룹에서 {}이 모두 활성화되어 있습니다. "
+                "collinearity_mode: representative_only 설정을 권장합니다.",
+                ", ".join(active_indicators),
+            )
 
     def _diagnose_weight_collinearity(self):
         """현재 가중치 설정에서 다중공선성 위험을 진단하고 경고 로그 출력."""
@@ -124,7 +152,28 @@ class SignalGenerator:
         },
     }
 
-    def generate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def compute_score_columns_for_correlation(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        collinearity_mode 적용 **전** 일별 개별 점수(score_rsi 등)만 계산.
+
+        `representative_only`에서는 generate() 이후 RSI·MA 점수가 0으로 고정되어
+        상관행렬이 NaN이 되므로, 지표 독립성 검증(check_correlation)은 이 메서드 결과를 사용한다.
+        """
+        if df.empty:
+            return pd.DataFrame(
+                columns=["score_rsi", "score_macd", "score_bollinger", "score_volume", "score_ma"],
+            )
+
+        work = df.copy()
+        out = pd.DataFrame(index=work.index)
+        out["score_rsi"] = self._score_rsi(work)
+        out["score_macd"] = self._score_macd(work)
+        out["score_bollinger"] = self._score_bollinger(work)
+        out["score_volume"] = self._score_volume(work)
+        out["score_ma"] = self._score_ma(work)
+        return out
+
+    def generate(self, df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
         """
         멀티 지표 스코어링 방식으로 매매 신호 생성.
 
@@ -137,6 +186,7 @@ class SignalGenerator:
 
         Args:
             df: 기술 지표가 계산된 DataFrame
+            symbol: 동적 임계값 조정 시 debug 로그용 종목코드 (미지정 시 "-")
 
         Returns:
             신호 컬럼(signal, score, score_price_group, score_volume 등)이 추가된 DataFrame
@@ -160,10 +210,17 @@ class SignalGenerator:
         else:
             result = self._apply_max_per_direction(result)
 
-        # 매수/매도 임계값
+        # 매수/매도 임계값 (ATR 비율 기반 동적 매수 임계값 선택적 적용)
         scoring = self.strategy_params.get("scoring", {})
-        buy_threshold = scoring.get("buy_threshold", 2)
-        sell_threshold = scoring.get("sell_threshold", -2)
+        base_buy_threshold = float(scoring.get("buy_threshold", 2))
+        sell_threshold = float(scoring.get("sell_threshold", -2))
+
+        buy_threshold, atr_ratio_series = self._resolve_buy_threshold_series(
+            result, base_buy_threshold
+        )
+        self._log_dynamic_threshold_adjustments(
+            symbol or "-", base_buy_threshold, buy_threshold, atr_ratio_series,
+        )
 
         # 신호 생성
         if self._hysteresis_enabled:
@@ -183,8 +240,59 @@ class SignalGenerator:
 
         return result
 
+    def _resolve_buy_threshold_series(
+        self, df: pd.DataFrame, base_buy: float,
+    ) -> tuple[pd.Series, pd.Series | None]:
+        """
+        기본 buy_threshold를 시리즈로 두고, 동적 모드이고 atr 컬럼이 있으면 행별 조정.
+        atr_ratio = ATR / 최근 20일 ATR 평균 (rolling, min_periods=20).
+        """
+        n = len(df)
+        idx = df.index
+        buy_series = pd.Series(base_buy, index=idx, dtype=float)
+        if not self._dynamic_threshold_enabled or n == 0:
+            return buy_series, None
+        if "atr" not in df.columns:
+            return buy_series, None
+
+        atr = pd.to_numeric(df["atr"], errors="coerce").astype(float)
+        mean20 = atr.rolling(window=20, min_periods=20).mean()
+        ratio = atr / mean20.replace(0, np.nan)
+
+        adj = buy_series.copy()
+        valid = ratio.notna()
+        high_m = valid & (ratio >= self._dynamic_atr_high)
+        low_m = valid & (ratio <= self._dynamic_atr_low)
+        adj = adj.where(~high_m, base_buy + 1.0)
+        adj = adj.where(~low_m, base_buy - 0.5)
+        return adj, ratio
+
+    def _log_dynamic_threshold_adjustments(
+        self,
+        symbol: str,
+        base_buy: float,
+        buy_threshold: pd.Series,
+        atr_ratio: pd.Series | None,
+    ) -> None:
+        if atr_ratio is None or buy_threshold is None:
+            return
+        diff = (buy_threshold != base_buy) & atr_ratio.notna()
+        if not diff.any():
+            return
+        for idx in buy_threshold.loc[diff].index:
+            logger.debug(
+                "[SignalGenerator] {} 동적 임계값 조정: ATR 비율={:.2f}, buy_threshold {} → {}",
+                symbol,
+                float(atr_ratio.loc[idx]),
+                base_buy,
+                float(buy_threshold.loc[idx]),
+            )
+
     def _generate_with_hysteresis(
-        self, df: pd.DataFrame, buy_threshold: float, sell_threshold: float,
+        self,
+        df: pd.DataFrame,
+        buy_threshold: float | pd.Series,
+        sell_threshold: float,
     ) -> pd.DataFrame:
         """
         히스터리시스 적용 신호 생성.
@@ -202,13 +310,19 @@ class SignalGenerator:
         exit_buy = self._exit_buy_threshold if self._exit_buy_threshold is not None else 0.0
 
         scores = df["total_score"].values
+        if isinstance(buy_threshold, pd.Series):
+            buy_thr_arr = buy_threshold.reindex(df.index).astype(float).values
+        else:
+            buy_thr_arr = np.full(len(scores), float(buy_threshold), dtype=float)
+
         signals = np.full(len(scores), self.HOLD, dtype=object)
         state = self.HOLD
 
         for i in range(len(scores)):
             s = scores[i]
+            bt = buy_thr_arr[i]
             if state == self.HOLD:
-                if s >= buy_threshold:
+                if s >= bt:
                     state = self.BUY
                 elif s <= sell_threshold:
                     state = self.SELL
