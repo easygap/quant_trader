@@ -7,6 +7,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _sample_ohlcv(days: int = 500):
@@ -95,6 +96,16 @@ class TestBacktestAndReport:
             assert result.get("metrics")
             assert "total_return" in result["metrics"]
             assert "sharpe_ratio" in result["metrics"]
+            m = result["metrics"]
+            for key in (
+                "avg_holding_days",
+                "total_commission",
+                "commission_to_profit_ratio",
+                "monthly_roundtrips_per_symbol",
+                "annual_roundtrips_total",
+            ):
+                assert key in m
+            assert "overtrading_warnings" in result
 
     def test_report_generator(self):
         from backtest.backtester import Backtester
@@ -119,6 +130,7 @@ class TestMonitoringAndApi:
         assert api is not None
 
     def test_websocket_handler_init(self):
+        pytest.importorskip("websockets")
         from api.websocket_handler import WebSocketHandler
         ws = WebSocketHandler()
         assert ws is not None

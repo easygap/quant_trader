@@ -36,3 +36,6 @@ pytest-asyncio>=0.24.0
 
 # CLI
 click>=8.1.0
+
+# 리포트 차트 (HTML base64 인라인)
+matplotlib>=3.8.0

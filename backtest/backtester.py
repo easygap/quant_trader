@@ -12,6 +12,66 @@ from loguru import logger
 from config.config_loader import Config
 from core.risk_manager import RiskManager
 
+_FULL_EXIT_SELL_ACTIONS = frozenset(
+    ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD")
+)
+_PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
+
+
+def _count_roundtrips(trades: list) -> int:
+    """완전 청산 1회당 왕복 1회 (부분 익절 후 잔량 청산까지 한 사이클로 묶음)."""
+    pos = 0
+    rt = 0
+    for t in trades:
+        a = t.get("action")
+        q = int(t.get("quantity") or 0)
+        if a == "BUY":
+            pos = q
+        elif a == _PARTIAL_EXIT_ACTION:
+            pos -= q
+            if pos <= 0:
+                if pos < 0:
+                    pos = 0
+                rt += 1
+        elif a in _FULL_EXIT_SELL_ACTIONS:
+            if pos > 0:
+                rt += 1
+            pos = 0
+    return rt
+
+
+def _overtrading_warnings_from_metrics(metrics: dict) -> list:
+    """과매매 기준 경고 문구 리스트 (로그·디스코드·리포트 공통)."""
+    out = []
+    avg_hold = metrics.get("avg_holding_days")
+    if metrics.get("total_trades", 0) > 0 and avg_hold is not None and avg_hold < 3:
+        out.append(f"⚠️ 평균 보유 기간 {avg_hold:.1f}일 — 최소 보유 기간 설정 확인")
+
+    cpr = metrics.get("commission_to_profit_ratio")
+    if cpr is not None and cpr > 0.5:
+        pct = cpr * 100
+        out.append("🚨 수수료가 총 이익의 50% 초과 — 전략 수익 절반 이상 소멸")
+        out.append(f"⚠️ 수수료가 총 이익의 {pct:.1f}% — 과매매 의심")
+    elif cpr is not None and cpr > 0.3:
+        out.append(f"⚠️ 수수료가 총 이익의 {cpr * 100:.1f}% — 과매매 의심")
+
+    mrps = metrics.get("monthly_roundtrips_per_symbol")
+    if mrps is not None and mrps > 5:
+        out.append(f"⚠️ 종목당 월 {mrps:.1f}회 왕복 — 과매매 경고")
+    return out
+
+
+def _notify_overtrading_discord(warnings: list, config: Config) -> None:
+    if not warnings:
+        return
+    try:
+        from core.notifier import Notifier
+
+        body = "[백테스트 과매매 경고]\n" + "\n".join(warnings)
+        Notifier(config).send_message(body)
+    except Exception as e:
+        logger.debug("과매매 디스코드 알림 스킵: {}", e)
+
 
 class Backtester:
     """
@@ -36,6 +96,7 @@ class Backtester:
         initial_capital: float = None,
         strict_lookahead: bool = True,
         param_overrides: dict = None,
+        notify_overtrading: bool = False,
     ) -> dict:
         """
         백테스팅 실행
@@ -46,6 +107,7 @@ class Backtester:
             initial_capital: 초기 투자금 (None이면 설정값 사용)
             strict_lookahead: True면 매 시점 T에서 df[:T+1]만으로 지표/신호 계산 (Look-Ahead Bias 완전 방어, 느림)
             param_overrides: 전략 파라미터 덮어쓰기 (최적화 시 사용). 예: {"scoring": {"buy_threshold": 3, "sell_threshold": -3}}
+            notify_overtrading: True면 과매매 경고 1건 이상일 때 Notifier(디스코드 등) 전송. 대량 백테스트는 False 권장.
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -102,6 +164,12 @@ class Backtester:
             metrics["win_rate"],
         )
 
+        warn_list = _overtrading_warnings_from_metrics(metrics)
+        for w in warn_list:
+            logger.warning(w)
+        if warn_list and notify_overtrading:
+            _notify_overtrading_discord(warn_list, self.config)
+
         return {
             "metrics": metrics,
             "trades": result["trades"],
@@ -110,6 +178,7 @@ class Backtester:
             "period": f"{df.index[0]} ~ {df.index[-1]}",
             "initial_capital": initial_capital,
             "look_ahead_bias_verified": result.get("look_ahead_bias_verified", "PASS"),
+            "overtrading_warnings": warn_list,
         }
 
     def _get_strategy(self, name: str):
@@ -473,7 +542,24 @@ class Backtester:
                     pass
                 if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP"):
                     position_open_date = None
-        avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0
+        avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0.0
+
+        roundtrips = _count_roundtrips(trades)
+        eq_dates = pd.to_datetime(equity["date"])
+        n_months = int(eq_dates.dt.to_period("M").nunique())
+        if n_months < 1:
+            n_months = 1
+        years_bt = len(equity) / 252 if len(equity) > 0 else 1.0
+        if years_bt <= 0:
+            years_bt = 1.0
+        n_symbols = 1
+        monthly_roundtrips_per_symbol = round(roundtrips / n_months / n_symbols, 4)
+        annual_roundtrips_total = round(roundtrips / years_bt, 4)
+
+        if gross_profit > 0:
+            commission_to_profit_ratio = round(total_commission / gross_profit, 6)
+        else:
+            commission_to_profit_ratio = None
 
         return {
             "total_return": round(total_return, 2),
@@ -492,6 +578,9 @@ class Backtester:
             "initial_capital": initial_capital,
             "total_commission": round(total_commission, 0),
             "avg_holding_days": avg_holding_days,
+            "commission_to_profit_ratio": commission_to_profit_ratio,
+            "monthly_roundtrips_per_symbol": monthly_roundtrips_per_symbol,
+            "annual_roundtrips_total": annual_roundtrips_total,
         }
 
     @staticmethod
@@ -502,7 +591,10 @@ class Backtester:
             "calmar_ratio": 0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "avg_win": 0, "avg_loss": 0,
             "final_value": 0, "initial_capital": 0,
-            "total_commission": 0, "avg_holding_days": 0,
+            "total_commission": 0, "avg_holding_days": 0.0,
+            "commission_to_profit_ratio": None,
+            "monthly_roundtrips_per_symbol": 0.0,
+            "annual_roundtrips_total": 0.0,
         }
 
     def print_report(self, result: dict):
@@ -538,4 +630,13 @@ class Backtester:
         n_trades = m.get("total_trades", 0)
         total_comm = m.get("total_commission", 0)
         print(f"  총 수수료     : {total_comm:>14,.0f}원 (총 거래 {n_trades}회)")
+        cpr = m.get("commission_to_profit_ratio")
+        cpr_s = f"{cpr * 100:.2f}%" if cpr is not None else "N/A"
+        print(f"  수수료/총이익 : {cpr_s:>13}")
+        print(
+            f"  왕복(월·종목) : {m.get('monthly_roundtrips_per_symbol', 0):>11.2f}회 | "
+            f"연간 왕복 {m.get('annual_roundtrips_total', 0):.2f}회"
+        )
+        for w in result.get("overtrading_warnings") or []:
+            print(f"  {w}")
         print("=" * 60 + "\n")

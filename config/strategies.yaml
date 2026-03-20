@@ -67,6 +67,11 @@ scoring:
   buy_threshold: 2            # 매수 실행 최소 점수 (representative_only 모드 점수 범위 ±4 기준)
   sell_threshold: -2          # 매도 실행 최소 점수 (buy와 절댓값 동일 권장)
 
+  # ATR 기반 동적 매수 임계값 (atr 컬럼 필요). 비율 = 현재 ATR / 최근 20일 ATR 평균
+  dynamic_threshold: true
+  dynamic_threshold_atr_high: 1.5   # 이상이면 buy_threshold +1 (진입 엄격)
+  dynamic_threshold_atr_low: 0.7    # 이하이면 buy_threshold -0.5 (진입 완화)
+
   # --- 다중공선성 완화 모드 ---
   # RSI·MACD·MA·볼린저는 대부분 "가격이 최근 올랐냐 내렸냐"의 변형.
   # 지표 5개가 합산되면 실질적으로 1~2개 정보가 스코어를 지배합니다.
@@ -76,7 +81,7 @@ scoring:
   # representative_only (권장): 3그룹(가격 모멘텀/변동성/거래량)에서 대표 지표 1개씩만
   #   사용하고 나머지 점수를 강제 0. 가격=MACD, 변동성=볼린저, 거래량=volume.
   #   → 스코어 = MACD점수 + 볼린저점수 + 거래량점수 (실질적으로 독립 정보 3개만 합산)
-  collinearity_mode: "representative_only"   # "max_per_direction" | "representative_only"
+  collinearity_mode: representative_only     # "max_per_direction" | "representative_only"
 
   # --- 신호 히스터리시스 (과매매 방지) ---
   # 진입/청산 임계값을 분리하여 임계값 근처에서 BUY↔SELL 반복(과매매)을 방지합니다.
@@ -137,6 +142,15 @@ trend_following:
   atr_stop_multiplier: 2.0    # ATR 기반 손절 배수
   trailing_atr_multiplier: 3.0  # ATR 기반 트레일링 스탑 배수
 
+# --- 펀더멘털 팩터 전략 (가격 OHLC와 독립, pykrx 우선 → yfinance 폴백) ---
+fundamental_factor:
+  per_sector_relative: true    # 섹터(업종) 평균 PER 기준 저PER 가점 (실패 시 동일 시장 PER 중앙값)
+  per_max_absolute: 30         # PER 30 초과 종목은 상대비교 가점 대상에서 제외
+  roe_min: 10                  # ROE 10% 이상 가점
+  debt_ratio_max: 200          # 부채비율 200% 이하 가점
+  earnings_growth_min: 5       # 영업이익 YoY 5% 이상 가점
+  data_cache_hours: 24         # 펀더멘털 데이터 캐시 유지 시간 (시간)
+
 # --- 모멘텀 팩터 전략 (앙상블용, 정보 소스: 가격 수익률만) ---
 momentum_factor:
   lookback_days: 20           # N일 수익률
@@ -149,13 +163,26 @@ volatility_condition:
   low_vol_max_pct: 25.0       # 연율화 변동성(%) 이하 → 매수 (저변동성)
   high_vol_min_pct: 45.0      # 연율화 변동성(%) 이상 → 매도 (고변동성)
 
-# --- 전략 앙상블 (정보 소스 분리: 기술 + 모멘텀 + 변동성) ---
-# technical = 스코어링(RSI/MACD/볼린저/MA/거래량), momentum_factor = N일 수익률, volatility_condition = N일 실현변동성
+# --- 전략 앙상블 (정보 소스 분리: 기술 + 모멘텀 + 변동성 [+ 펀더멘털]) ---
+# technical = 스코어링, momentum_factor = N일 수익률, volatility_condition = 실현변동성, fundamental_factor = 재무(가격 독립)
 ensemble:
   mode: "majority_vote"       # majority_vote | weighted_sum | conservative
   auto_downgrade: true        # true면 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
   independence_threshold: 0.6 # 전략 신호 상관계수 |r| >= 이 값이면 고상관 판단 → 다수결 의미 퇴색 경고
-  confidence_weight:          # weighted_sum 모드 시 전략별 가중치
+  components:                 # enabled/weight 로 구성 전략 켜고 끄기 (weighted_sum 시 weight 사용)
+    - name: technical
+      enabled: true
+      weight: 1.0
+    - name: momentum_factor
+      enabled: true
+      weight: 1.0
+    - name: volatility_condition
+      enabled: true
+      weight: 1.0
+    - name: fundamental_factor
+      enabled: true
+      weight: 1.5             # 가격 독립 신호라 가중치를 높게 둘 수 있음
+  confidence_weight:          # 레거시: components 미사용 시 기본 3전략 가중치 폴백
     technical: 1.0
     momentum_factor: 1.0
     volatility_condition: 1.0

@@ -222,6 +222,19 @@ class BlackSwanDetector:
         logger.warning("🚨 긴급 매도 대상: {}개 종목", len(sell_list))
         return sell_list
 
+    def report_websocket_gap_volatility(self, symbol: str, swing_pct: float) -> None:
+        """
+        웹소켓 끊김 갭 구간에서 REST 보충 데이터로 관측된 가격 변동(%)을 보수적으로 보고.
+        전일 대비 -5% 급락과 별개로, 갭 중 레인지 변동만으로 리스크를 표시한다.
+        """
+        logger.warning(
+            "[BlackSwan/갭] {} 웹소켓 갭 구간 관측 변동 {:.1f}% — 스케줄러·포지션 점검 권장",
+            symbol,
+            swing_pct,
+        )
+        if swing_pct >= 5.0:
+            self._activate_cooldown()
+
     def reset(self):
         """감지기 초기화 (수동)"""
         self._cooldown_until = None

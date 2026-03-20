@@ -11,6 +11,8 @@
   백테스트와 실전에서 동일 소스를 쓰도록 FDR 설치·우선 사용을 권장하고, KIS fallback 시 로그로 경고.
 """
 
+import re
+import time as time_module
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -41,6 +43,14 @@ except ImportError:
 from database.repositories import save_stock_prices, get_stock_prices
 
 
+class DataCollectionError(RuntimeError):
+    """주가 데이터 수집 실패 예외."""
+
+
+_USD_KRW_CACHE: tuple[float, float] = (0.0, 0.0)
+_USD_KRW_TTL_SEC = 300.0
+
+
 class DataCollector:
     """
     주가 데이터 수집기
@@ -55,7 +65,7 @@ class DataCollector:
     SOURCE_ADJUSTED_MAP = {
         "FinanceDataReader": True,
         "yfinance": True,       # auto_adjust=True
-        "KIS_API": False,       # 비수정(원시) 반환 가능
+        "KIS": False,           # 비수정(원시) 반환 가능
     }
 
     def __init__(self, config=None):
@@ -82,6 +92,16 @@ class DataCollector:
         self._last_adjusted = self.SOURCE_ADJUSTED_MAP.get(source, None)
         self._source_history[symbol] = source
 
+    def _log_source_usage(self, symbol: str, source: str):
+        """종목 수집 시 사용 소스/수정주가 여부를 표준 포맷으로 로그 출력."""
+        adjusted = bool(self.SOURCE_ADJUSTED_MAP.get(source, False))
+        logger.info(
+            "[DataCollector] {} 소스={}, 수정주가={}",
+            symbol,
+            source,
+            adjusted,
+        )
+
     def get_last_source_info(self) -> dict:
         """마지막 수집 시 사용된 소스 정보."""
         return {
@@ -90,12 +110,71 @@ class DataCollector:
             "history": dict(self._source_history),
         }
 
+    @staticmethod
+    def is_us_ticker(symbol: str) -> bool:
+        """
+        미국 주식 티커 휴리스틱: '.' 없이 알파벳만 (예: AAPL, MSFT).
+        BRK.B 등은 제외되며 한국 6자리 숫자 코드와 구분됩니다.
+        """
+        s = str(symbol).strip()
+        if not s or "." in s:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z]+", s))
+
+    @classmethod
+    def get_usd_krw_rate(cls) -> float:
+        """
+        USD→KRW 환율 (1 USD당 원화). yfinance 티커 KRW=X.
+        짧은 TTL 캐시로 호출 부담을 줄입니다.
+        """
+        global _USD_KRW_CACHE  # noqa: PLW0603
+        now = time_module.monotonic()
+        rate, ts = _USD_KRW_CACHE
+        if rate > 0 and (now - ts) < _USD_KRW_TTL_SEC:
+            return rate
+        if not HAS_YF:
+            logger.warning("yfinance 미설치 — USD/KRW 환율 0 반환")
+            return 0.0
+        try:
+            t = yf.Ticker("KRW=X")
+            last = t.fast_info.get("last_price") or t.fast_info.get("regular_market_price")
+            if last is None or float(last) <= 0:
+                hist = t.history(period="5d", auto_adjust=True)
+                if hist is not None and not hist.empty and "Close" in hist.columns:
+                    last = float(hist["Close"].iloc[-1])
+            fx = float(last)
+            if fx <= 0:
+                return 0.0
+            _USD_KRW_CACHE = (fx, now)
+            logger.debug("USD/KRW 환율 갱신: {:.2f}", fx)
+            return fx
+        except Exception as e:
+            logger.warning("USD/KRW 환율 조회 실패: {}", e)
+            return rate if rate > 0 else 0.0
+
+    def fetch_stock(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None,
+    ) -> pd.DataFrame:
+        """티커 규칙에 따라 미국(yfinance) 또는 한국(FDR→yfinance→KIS) 경로로 수집."""
+        if self.is_us_ticker(symbol):
+            return self.fetch_us_stock(symbol, start_date, end_date)
+        return self.fetch_korean_stock(symbol, start_date, end_date)
+
     def check_source_consistency(self, reference_source: str = "FinanceDataReader") -> list[str]:
         """수집 이력에서 reference_source와 다른 소스를 사용한 종목 반환."""
         mismatched = []
         for symbol, src in self._source_history.items():
             if src != reference_source:
                 mismatched.append(f"{symbol}({src})")
+        if mismatched and self._warn_on_source_mismatch:
+            logger.warning(
+                "데이터 소스 불일치 감지(reference={}): {}",
+                reference_source,
+                mismatched,
+            )
         return mismatched
 
     def fetch_korean_stock(
@@ -123,13 +202,13 @@ class DataCollector:
             start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
-        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
         # 1) FDR
         if HAS_FDR and self._preferred_source in ("auto", "fdr"):
             df = self._try_fdr(symbol, start_date, end_date)
             if df is not None and not df.empty:
                 self._record_source(symbol, "FinanceDataReader")
+                self._log_source_usage(symbol, "FinanceDataReader")
                 return df
 
         # 2) yfinance
@@ -137,17 +216,14 @@ class DataCollector:
             df = self._fetch_korean_stock_via_yfinance(symbol, start_date, end_date)
             if not df.empty:
                 self._record_source(symbol, "yfinance")
+                self._log_source_usage(symbol, "yfinance")
                 return df
 
         # 3) KIS API (비수정주가 가능)
         if not self._allow_kis_fallback:
-            logger.error(
-                "종목 {} 데이터 수집 실패. FDR/yfinance 모두 불가하고 "
-                "data_source.allow_kis_fallback=false로 KIS 폴백이 차단됨. "
-                "pip install FinanceDataReader 또는 allow_kis_fallback: true 설정.",
-                symbol,
+            raise DataCollectionError(
+                f"KIS fallback 비활성화 상태. FDR/yfinance 실패로 수집 중단: {symbol}"
             )
-            return empty
 
         logger.warning(
             "⚠️ [데이터 소스 불일치] {} → KIS API 폴백. "
@@ -158,7 +234,8 @@ class DataCollector:
         )
         df = self.fetch_korean_stock_via_kis(symbol)
         if not df.empty:
-            self._record_source(symbol, "KIS_API")
+            self._record_source(symbol, "KIS")
+            self._log_source_usage(symbol, "KIS")
         return df
 
     def _try_fdr(
@@ -205,12 +282,21 @@ class DataCollector:
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
 
-        logger.info("미국 주식 데이터 수집: {} ({} ~ {})", symbol, start_date, end_date)
+        logger.info("미국 주식 데이터 수집 (yfinance, auto_adjust=True): {} ({} ~ {})", symbol, start_date, end_date)
 
         try:
-            ticker = yf.Ticker(symbol)
-            df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-            df = self._normalize_dataframe(df, is_us=True)
+            df = yf.download(
+                symbol,
+                start=start_date,
+                end=end_date,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.copy()
+                df.columns = [str(c[0]).lower() if isinstance(c, tuple) else str(c).lower() for c in df.columns]
+            df = self._normalize_dataframe(df)
             
             # 수신 데이터 정합성 검증 추가
             from core.data_validator import DataValidator
@@ -276,7 +362,8 @@ class DataCollector:
 
         if df.empty:
             logger.info("종목 {} 캐시 없음 — 새로 수집합니다", symbol)
-            df = self.fetch_and_save(symbol, "KR", start_date, end_date)
+            mkt = "US" if self.is_us_ticker(symbol) else "KR"
+            df = self.fetch_and_save(symbol, mkt, start_date, end_date)
 
         return df
 

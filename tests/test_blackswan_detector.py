@@ -9,6 +9,7 @@ from core.blackswan_detector import BlackSwanDetector
 class _MockConfig:
     risk_params = {}
     settings = {}
+    trading = {}
 
 
 @pytest.fixture
