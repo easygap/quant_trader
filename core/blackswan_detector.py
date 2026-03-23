@@ -35,25 +35,22 @@ class BlackSwanDetector:
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
 
-        # 블랙스완 감지 임계값
-        self.single_stock_threshold = -0.05    # 개별 종목 -5%
-        self.portfolio_threshold = -0.03       # 포트폴리오 -3%
-        self.consecutive_days = 3              # 연속 하락 일수
-        self.consecutive_threshold = -0.02     # 연속 하락 기준 -2%
+        bs_cfg = (self.config.risk_params or {}).get("blackswan", {})
 
-        # 쿨다운 관리
-        self.cooldown_minutes = 60             # 기본 1시간 매매 중단
-        self._cooldown_until = None            # 매매 재개 시각
-        self._triggered_count = 0              # 발동 횟수
+        self.single_stock_threshold = float(bs_cfg.get("single_stock_threshold", -0.05))
+        self.portfolio_threshold = float(bs_cfg.get("portfolio_threshold", -0.03))
+        self.consecutive_days = int(bs_cfg.get("consecutive_days", 3))
+        self.consecutive_threshold = float(bs_cfg.get("consecutive_threshold", -0.02))
 
-        # 쿨다운 해제 후 recovery 관리
-        trading = self.config.trading if hasattr(self.config, "trading") else self.config.get("trading", {})
-        self.recovery_minutes = int(trading.get("blackswan_recovery_minutes", 120))
-        self.recovery_scale = float(trading.get("blackswan_recovery_scale", 0.5))
+        self.cooldown_minutes = int(bs_cfg.get("cooldown_minutes", 60))
+        self._cooldown_until = None
+        self._triggered_count = 0
+
+        self.recovery_minutes = int(bs_cfg.get("recovery_minutes", 120))
+        self.recovery_scale = float(bs_cfg.get("recovery_scale", 0.5))
         self._recovery_until = None
         self._cooldown_just_ended = False
 
-        # 연속 하락 추적
         self._daily_returns: list[float] = []
 
         logger.info("BlackSwanDetector 초기화 완료")

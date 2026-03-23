@@ -502,13 +502,57 @@ class Backtester:
         else:
             sharpe = 0
 
+        # 소르티노 비율 (하방 변동성만 사용 — 수익은 불이익이 아니므로 제외)
+        downside_returns = daily_returns[daily_returns < 0]
+        if len(downside_returns) > 0 and downside_returns.std() > 0:
+            downside_std = downside_returns.std() * np.sqrt(252)
+            sortino = (daily_returns.mean() * 252 - 0.03) / downside_std
+        else:
+            sortino = sharpe
+
+        # 매매 기준 성과
+        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
+
+        # 꼬리 리스크: VaR 95%, CVaR 95% (일일 기준)
+        if len(daily_returns) >= 20:
+            var_95 = float(np.percentile(daily_returns, 5))
+            cvar_95 = float(daily_returns[daily_returns <= var_95].mean()) if (daily_returns <= var_95).any() else var_95
+        else:
+            var_95 = 0
+            cvar_95 = 0
+
+        # 최대 연속 손실 거래 수
+        max_consec_loss = 0
+        cur_consec = 0
+        for t in sell_trades:
+            if t["pnl"] <= 0:
+                cur_consec += 1
+                max_consec_loss = max(max_consec_loss, cur_consec)
+            else:
+                cur_consec = 0
+
         # MDD (최대 낙폭)
         equity["peak"] = equity["value"].cummax()
         equity["drawdown"] = (equity["value"] - equity["peak"]) / equity["peak"]
         max_drawdown = equity["drawdown"].min() * 100
 
-        # 매매 기준 성과
-        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
+        # MDD 회복 기간 (일)
+        mdd_recovery_days = 0
+        if max_drawdown < 0:
+            dd_series = equity["drawdown"]
+            in_dd = False
+            cur_dd_start = 0
+            for idx_i in range(len(dd_series)):
+                if dd_series.iloc[idx_i] < 0:
+                    if not in_dd:
+                        in_dd = True
+                        cur_dd_start = idx_i
+                else:
+                    if in_dd:
+                        mdd_recovery_days = max(mdd_recovery_days, idx_i - cur_dd_start)
+                        in_dd = False
+            if in_dd:
+                mdd_recovery_days = max(mdd_recovery_days, len(dd_series) - cur_dd_start)
         winning = [t for t in sell_trades if t["pnl"] > 0]
         losing = [t for t in sell_trades if t["pnl"] <= 0]
 
@@ -565,7 +609,12 @@ class Backtester:
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
             "sharpe_ratio": round(sharpe, 2),
+            "sortino_ratio": round(sortino, 2),
             "max_drawdown": round(max_drawdown, 2),
+            "mdd_recovery_days": mdd_recovery_days,
+            "var_95_daily": round(var_95 * 100, 3),
+            "cvar_95_daily": round(cvar_95 * 100, 3),
+            "max_consecutive_losses": max_consec_loss,
             "win_rate": round(win_rate, 1),
             "profit_factor": round(profit_factor, 2),
             "calmar_ratio": round(calmar, 2),
@@ -587,7 +636,9 @@ class Backtester:
     def _empty_metrics():
         return {
             "total_return": 0, "annual_return": 0, "sharpe_ratio": 0,
-            "max_drawdown": 0, "win_rate": 0, "profit_factor": 0,
+            "sortino_ratio": 0, "max_drawdown": 0, "mdd_recovery_days": 0,
+            "var_95_daily": 0, "cvar_95_daily": 0, "max_consecutive_losses": 0,
+            "win_rate": 0, "profit_factor": 0,
             "calmar_ratio": 0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "avg_win": 0, "avg_loss": 0,
             "final_value": 0, "initial_capital": 0,
@@ -615,8 +666,13 @@ class Backtester:
         print(f"  연간 수익률   : {m['annual_return']:>13.2f}%")
         print("-" * 60)
         print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}")
+        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}")
         print(f"  최대 낙폭     : {m['max_drawdown']:>13.2f}%")
+        print(f"  MDD 회복 기간 : {m.get('mdd_recovery_days', 0):>13d}일")
         print(f"  칼마 비율     : {m['calmar_ratio']:>13.2f}")
+        print(f"  VaR 95%(일)   : {m.get('var_95_daily', 0):>13.3f}%")
+        print(f"  CVaR 95%(일)  : {m.get('cvar_95_daily', 0):>13.3f}%")
+        print(f"  최대 연속 손실: {m.get('max_consecutive_losses', 0):>13d}회")
         print("-" * 60)
         print(f"  총 매매 횟수  : {m['total_trades']:>13d}회")
         print(f"  승률          : {m['win_rate']:>13.1f}%")
