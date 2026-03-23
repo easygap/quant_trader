@@ -472,6 +472,26 @@ def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float
         session.close()
 
 
+def update_stop_loss_price(symbol: str, new_stop_loss: float, account_key: str = ""):
+    """손절가를 새 값으로 업데이트 (래칫: 기존보다 높은 값만)."""
+    session = get_session()
+    try:
+        ak = account_key or ""
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
+        if position:
+            old_sl = position.stop_loss_price or 0
+            if new_stop_loss > old_sl:
+                position.stop_loss_price = new_stop_loss
+                session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error("손절가 업데이트 실패: {}", e)
+    finally:
+        session.close()
+
+
 # =============================================================
 # 포트폴리오 스냅샷 관련
 # =============================================================
