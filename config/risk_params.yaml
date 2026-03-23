@@ -16,6 +16,12 @@ backtest_universe:
 position_sizing:
   max_risk_per_trade: 0.01    # 1% 룰: 1회 거래 최대 손실 = 자본의 1%
   initial_capital: 10000000   # 초기 투자 자본 (원) - 1천만원
+  # 신호 강도 기반 포지션 스케일링: 강한 신호일수록 더 큰 포지션
+  signal_scaling:
+    enabled: true
+    min_scale: 0.5            # 최소 스케일 (약한 신호: 기본 수량의 50%)
+    max_scale: 1.5            # 최대 스케일 (강한 신호: 기본 수량의 150%)
+    score_range: [2, 5]       # [최소점수, 최대점수] — 이 범위에서 선형 보간. 범위 밖은 클램핑
 
 # --- 손절매 (Stop Loss) ---
 stop_loss:
@@ -59,6 +65,12 @@ diversification:
   max_sector_ratio: 0.40      # 단일 업종(KRX Sector) 최대 비중 (총자산 대비 40%). FDR 업종 매핑 사용.
   max_positions: 10           # 최대 동시 보유 종목 수 (이 개수 초과 시 신규 매수 불가)
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
+  # 상관관계 기반 리스크 관리: 기존 보유 종목과 높은 상관관계를 보이는 종목의 비중 축소
+  correlation_risk:
+    enabled: true
+    lookback_days: 60         # 상관계수 계산에 사용할 과거 일수
+    high_corr_threshold: 0.7  # 이 값 이상이면 고상관 종목으로 판단
+    high_corr_scale: 0.5      # 고상관 종목 포지션 축소 배수 (50%)
 
 # --- 보유 기간 제한 ---
 # max_holding_days: 신호가 없어도 N일 초과 보유 시 강제 정리 (물리는 상황 방지)
@@ -72,6 +84,26 @@ drawdown:
   max_portfolio_mdd: 0.15     # 전체 포트폴리오 MDD 한도 (15%)
   max_daily_loss: 0.03        # 일일 최대 손실 한도 (3%)
   recovery_scale: 0.5         # MDD 회복 후 복귀 시 축소 비율 (50%)
+
+# --- 블랙스완(급락) 감지 ---
+# 개별 종목·포트폴리오·연속 하락 세 가지 경로로 급락을 감지.
+# 발동 시 전 종목 긴급 매도 + 쿨다운(매매 중단) + recovery(점진 복구).
+blackswan:
+  single_stock_threshold: -0.05   # 개별 종목 전일 대비 -5% 이상 급락 시 발동
+  portfolio_threshold: -0.03      # 포트폴리오 전일 대비 -3% 이상 급락 시 발동
+  consecutive_days: 3             # N일 연속 하락 감지 기간
+  consecutive_threshold: -0.02    # 연속 하락 개별 기준 (-2%/일)
+  cooldown_minutes: 60            # 발동 후 매매 중단 시간 (분). 반복 발동 시 최대 4시간까지 증가
+  recovery_minutes: 120           # 쿨다운 해제 후 recovery 기간 (분)
+  recovery_scale: 0.5             # recovery 중 포지션 사이징 축소 배수 (50%)
+
+# --- 갭 리스크 방어 (오버나이트/주말) ---
+# 전일 종가 대비 시가가 크게 갭다운으로 출발하면 지정가 손절이 실패하고 큰 손실이 발생.
+# gap_down_threshold 이상 갭다운 시 보유 종목을 시가에 즉시 매도(장 초반 30분 이내).
+gap_risk:
+  enabled: true
+  gap_down_threshold: -0.03       # 전일 종가 대비 시가 -3% 이상 갭다운이면 즉시 청산
+  gap_up_entry_block: 0.05        # 전일 대비 +5% 이상 갭업 종목은 당일 신규 매수 차단 (추격매수 방지)
 
 # --- 전략 성과 자동 열화 감지 ---
 # 시장 국면이 바뀌면 기존 전략이 손실을 낼 수 있음 → 최근 N거래 승률이 임계값 아래로 떨어지면 신규 매수 자동 중단

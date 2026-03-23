@@ -77,19 +77,20 @@ class RiskManager:
         capital: float,
         entry_price: float,
         stop_loss_price: float,
+        signal_score: float = 0,
     ) -> int:
         """
-        1% 룰 기반 포지션 크기 계산
+        1% 룰 기반 포지션 크기 계산 (+ 신호 강도 스케일링)
 
         Args:
             capital: 현재 총 자본
             entry_price: 매수 예정 가격
             stop_loss_price: 손절 가격
+            signal_score: 매매 신호 점수 (강할수록 포지션 확대)
 
         Returns:
             매수 가능 수량
         """
-        # 진입가 유효성 검사 (분모 0 방지)
         if entry_price <= 0:
             logger.warning("진입가가 0 이하 — 포지션 계산 불가 (entry_price={})", entry_price)
             return 0
@@ -99,14 +100,13 @@ class RiskManager:
             return 0
 
         max_risk = self.risk_params.get("position_sizing", {}).get("max_risk_per_trade", 0.01)
-        risk_amount = capital * max_risk  # 최대 손실 가능 금액
+        risk_amount = capital * max_risk
 
         risk_per_share = abs(entry_price - stop_loss_price)
         if risk_per_share <= 0:
             logger.warning("손절 폭이 0 이하 — 포지션 계산 불가")
             return 0
 
-        # ATR≈0 등 극단적으로 작은 손절 폭 방어 (진입가 대비 최소 0.1% 이상)
         min_risk_per_share = entry_price * 0.001
         if risk_per_share < min_risk_per_share:
             logger.warning(
@@ -117,7 +117,12 @@ class RiskManager:
 
         quantity = int(risk_amount / risk_per_share)
 
-        # 분산 투자 제한 확인 (entry_price > 0 검증 완료됨)
+        # 신호 강도 기반 스케일링
+        scale = self._signal_scale(signal_score)
+        if scale != 1.0:
+            quantity = int(quantity * scale)
+            logger.debug("신호 강도 스케일링: score={} → scale={:.2f}", signal_score, scale)
+
         max_ratio = self.risk_params.get("diversification", {}).get("max_position_ratio", 0.20)
         max_invest = capital * max_ratio
         max_by_ratio = int(max_invest / entry_price)
@@ -127,12 +132,95 @@ class RiskManager:
 
         logger.info(
             "포지션 계산: 자본={:,.0f} | 진입가={:,.0f} | 손절가={:,.0f} | "
-            "1% 룰={}주 | 비중제한={}주 | 최종={}주",
+            "1% 룰={}주 | 비중제한={}주 | 신호스케일={:.2f} | 최종={}주",
             capital, entry_price, stop_loss_price,
-            quantity, max_by_ratio, final_qty,
+            quantity, max_by_ratio, scale, final_qty,
         )
 
         return final_qty
+
+    def _signal_scale(self, signal_score: float) -> float:
+        """신호 점수에 따른 포지션 스케일 (선형 보간)."""
+        ss_cfg = self.risk_params.get("position_sizing", {}).get("signal_scaling", {})
+        if not ss_cfg.get("enabled", False) or signal_score == 0:
+            return 1.0
+
+        min_scale = float(ss_cfg.get("min_scale", 0.5))
+        max_scale = float(ss_cfg.get("max_scale", 1.5))
+        score_range = ss_cfg.get("score_range", [2, 5])
+        lo, hi = float(score_range[0]), float(score_range[1])
+
+        if hi <= lo:
+            return 1.0
+
+        abs_score = abs(signal_score)
+        t = max(0.0, min(1.0, (abs_score - lo) / (hi - lo)))
+        return min_scale + t * (max_scale - min_scale)
+
+    # =============================================================
+    # 상관관계 기반 포지션 축소
+    # =============================================================
+
+    def check_correlation_risk(
+        self,
+        symbol: str,
+        existing_symbols: list[str],
+        lookback_days: int = None,
+    ) -> dict:
+        """
+        신규 매수 대상과 기존 보유 종목 간 상관관계를 검사.
+        고상관 종목이 이미 보유 중이면 포지션 축소 배수를 반환.
+
+        Returns:
+            {"scale": float, "high_corr_symbols": list, "reason": str}
+        """
+        corr_cfg = self.risk_params.get("diversification", {}).get("correlation_risk", {})
+        if not corr_cfg.get("enabled", False) or not existing_symbols:
+            return {"scale": 1.0, "high_corr_symbols": [], "reason": ""}
+
+        threshold = float(corr_cfg.get("high_corr_threshold", 0.7))
+        scale_factor = float(corr_cfg.get("high_corr_scale", 0.5))
+        lb = lookback_days or int(corr_cfg.get("lookback_days", 60))
+
+        try:
+            from core.data_collector import DataCollector
+            collector = DataCollector()
+            target_df = collector.fetch_stock(symbol)
+            if target_df is None or target_df.empty or len(target_df) < lb:
+                return {"scale": 1.0, "high_corr_symbols": [], "reason": "데이터 부족"}
+
+            target_returns = target_df["close"].pct_change().dropna().tail(lb)
+            high_corr = []
+
+            for ex_sym in existing_symbols:
+                try:
+                    ex_df = collector.fetch_stock(ex_sym)
+                    if ex_df is None or ex_df.empty or len(ex_df) < lb:
+                        continue
+                    ex_returns = ex_df["close"].pct_change().dropna().tail(lb)
+                    common = target_returns.index.intersection(ex_returns.index)
+                    if len(common) < 30:
+                        continue
+                    corr = target_returns.loc[common].corr(ex_returns.loc[common])
+                    if abs(corr) >= threshold:
+                        high_corr.append((ex_sym, round(corr, 3)))
+                except Exception:
+                    continue
+
+            if high_corr:
+                reason = "고상관 보유종목: " + ", ".join(
+                    f"{s}(r={c})" for s, c in high_corr
+                )
+                logger.warning(
+                    "종목 {} 상관관계 리스크: {} → 포지션 {:.0f}% 축소",
+                    symbol, reason, scale_factor * 100,
+                )
+                return {"scale": scale_factor, "high_corr_symbols": high_corr, "reason": reason}
+
+        except Exception as e:
+            logger.debug("상관관계 체크 실패 (정상 진행): {}", e)
+
+        return {"scale": 1.0, "high_corr_symbols": [], "reason": ""}
 
     # =============================================================
     # 손절/익절 가격 계산
@@ -142,13 +230,15 @@ class RiskManager:
         self,
         entry_price: float,
         atr: float = None,
+        regime_multiplier: float = 1.0,
     ) -> float:
         """
-        손절 가격 계산
+        손절 가격 계산 (시장 국면 배수 적용 가능)
 
         Args:
             entry_price: 매수가
             atr: ATR 값 (변동성 기반 손절 시 필요)
+            regime_multiplier: 시장 국면 배수 (< 1.0이면 더 타이트한 손절)
 
         Returns:
             손절 가격
@@ -158,20 +248,28 @@ class RiskManager:
 
         if sl_type == "atr" and atr is not None:
             multiplier = sl_config.get("atr_multiplier", 2.0)
-            stop_price = entry_price - (atr * multiplier)
+            stop_price = entry_price - (atr * multiplier * regime_multiplier)
         else:
-            fixed_rate = sl_config.get("fixed_rate", 0.03)
+            fixed_rate = sl_config.get("fixed_rate", 0.03) * regime_multiplier
             stop_price = entry_price * (1 - fixed_rate)
 
-        logger.debug("손절가 계산: 매수가={:,.0f} → 손절가={:,.0f}", entry_price, stop_price)
+        logger.debug(
+            "손절가 계산: 매수가={:,.0f} → 손절가={:,.0f} (국면배수={:.2f})",
+            entry_price, stop_price, regime_multiplier,
+        )
         return round(stop_price, 0)
 
-    def calculate_take_profit(self, entry_price: float) -> dict:
+    def calculate_take_profit(
+        self,
+        entry_price: float,
+        regime_multiplier: float = 1.0,
+    ) -> dict:
         """
-        익절 가격 계산
+        익절 가격 계산 (시장 국면 배수 적용 가능)
 
         Args:
             entry_price: 매수가
+            regime_multiplier: 시장 국면 배수 (< 1.0이면 더 빠른 익절)
 
         Returns:
             {
@@ -181,10 +279,10 @@ class RiskManager:
             }
         """
         tp_config = self.risk_params.get("take_profit", {})
-        fixed_rate = tp_config.get("fixed_rate", 0.10)
+        fixed_rate = tp_config.get("fixed_rate", 0.10) * regime_multiplier
         partial_exit = tp_config.get("partial_exit", True)
         partial_ratio = tp_config.get("partial_ratio", 0.5)
-        partial_target = tp_config.get("partial_target", 0.06)
+        partial_target = tp_config.get("partial_target", 0.06) * regime_multiplier
 
         target_final = entry_price * (1 + fixed_rate)
 
