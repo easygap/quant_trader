@@ -77,7 +77,7 @@ diversification:
 # min_holding_days: 매수 후 최소 N일은 보유 강제 (손절/블랙스완은 예외). 과매매 방지용.
 position_limits:
   max_holding_days: 30        # 0이면 비활성. 이 일수 초과 보유 포지션은 자동 매도
-  min_holding_days: 3         # 0이면 비활성. 매수 후 이 일수 미만이면 매도 차단 (손절·블랙스완 예외)
+  min_holding_days: 5         # 0이면 비활성. 매수 후 이 일수 미만이면 매도 차단 (손절·블랙스완 예외). 과매매 방지를 위해 3→5일로 강화.
 
 # --- 최대 낙폭 (MDD) 제한 ---
 drawdown:

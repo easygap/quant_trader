@@ -35,19 +35,22 @@ class BlackSwanDetector:
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
 
-        bs_cfg = (self.config.risk_params or {}).get("blackswan", {})
+        # 블랙스완 감지 임계값
+        self.single_stock_threshold = -0.05    # 개별 종목 -5%
+        self.portfolio_threshold = -0.03       # 포트폴리오 -3%
+        self.consecutive_days = 3              # 연속 하락 일수
+        self.consecutive_threshold = -0.02     # 연속 하락 기준 -2%
 
-        self.single_stock_threshold = float(bs_cfg.get("single_stock_threshold", -0.05))
-        self.portfolio_threshold = float(bs_cfg.get("portfolio_threshold", -0.03))
-        self.consecutive_days = int(bs_cfg.get("consecutive_days", 3))
-        self.consecutive_threshold = float(bs_cfg.get("consecutive_threshold", -0.02))
+        # 쿨다운 관리
+        self.cooldown_minutes = 60             # 기본 1시간 매매 중단
+        self._cooldown_until = None            # 매매 재개 시각
+        self._triggered_count = 0              # 발동 횟수
+        self._triggered_date = None            # 발동 일자 (일 단위 리셋용)
 
-        self.cooldown_minutes = int(bs_cfg.get("cooldown_minutes", 60))
-        self._cooldown_until = None
-        self._triggered_count = 0
-
-        self.recovery_minutes = int(bs_cfg.get("recovery_minutes", 120))
-        self.recovery_scale = float(bs_cfg.get("recovery_scale", 0.5))
+        # 쿨다운 해제 후 recovery 관리
+        trading = self.config.trading if hasattr(self.config, "trading") else self.config.get("trading", {})
+        self.recovery_minutes = int(trading.get("blackswan_recovery_minutes", 120))
+        self.recovery_scale = float(trading.get("blackswan_recovery_scale", 0.5))
         self._recovery_until = None
         self._cooldown_just_ended = False
 
@@ -189,13 +192,17 @@ class BlackSwanDetector:
         return {"allowed": True, "reason": ""}
 
     def _activate_cooldown(self):
-        """쿨다운 활성화"""
+        """쿨다운 활성화. 일자가 바뀌면 발동 횟수를 리셋."""
+        today = datetime.now().date()
+        if self._triggered_date != today:
+            self._triggered_count = 0
+            self._triggered_date = today
         self._triggered_count += 1
         # 반복 발동 시 쿨다운 시간 증가 (최대 4시간)
         cooldown = min(self.cooldown_minutes * self._triggered_count, 240)
         self._cooldown_until = datetime.now() + timedelta(minutes=cooldown)
         logger.warning(
-            "⏸️ 매매 중단 — {}분 쿨다운 (발동 횟수: {})",
+            "⏸️ 매매 중단 — {}분 쿨다운 (금일 발동 횟수: {})",
             cooldown, self._triggered_count,
         )
 

@@ -102,7 +102,7 @@ class Scheduler:
         self.discord = Notifier(self.config)
         self.auto_entry = self.config.trading.get("auto_entry", False)
 
-        self.monitor_interval = 600  # 10분
+        self.monitor_interval = 600  # 기본 10분 (적응형 주기로 동적 변경됨)
 
         self._pre_market_done = False
         self._post_market_done = False
@@ -112,6 +112,8 @@ class Scheduler:
         self._skip_next_monitor_cycle = False
         self._last_sync_broker_time = None  # KIS 잔고 크로스체크 주기용
         self._last_healthcheck_time: datetime | None = None
+        self._last_regime_check_time: datetime | None = None  # 장중 시장 국면 재확인 주기
+        self._market_regime_scale: float = 1.0
         self._loop_metrics = LoopMetrics()
 
         logger.info(
@@ -293,6 +295,7 @@ class Scheduler:
                             "reason": "live pre-market candidate",
                             "avg_daily_volume": avg_vol,
                             "market_regime_scale": self._market_regime_scale,
+                            "timestamp": datetime.now(),
                         })
 
                 except Exception as e:
@@ -360,6 +363,9 @@ class Scheduler:
         self._log_monitoring_watchlist_preflight()
 
         try:
+            # 장중 시장 국면 재확인 (2시간마다)
+            self._maybe_recheck_market_regime()
+
             # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
             if self.blackswan.consume_cooldown_ended_flag():
                 logger.info("블랙스완 쿨다운 해제 — 즉시 신호 재평가 트리거")
@@ -426,6 +432,35 @@ class Scheduler:
             if self._loop_metrics.total_loops % 6 == 0:
                 logger.info("📊 루프 지표: {}", self._loop_metrics.summary())
 
+    def _maybe_recheck_market_regime(self):
+        """장중 2시간마다 시장 국면을 재확인하여 기존 포지션 규모 조정 권고."""
+        interval_sec = 7200  # 2시간
+        now = datetime.now()
+        if self._last_regime_check_time is not None:
+            elapsed = (now - self._last_regime_check_time).total_seconds()
+            if elapsed < interval_sec:
+                return
+        self._last_regime_check_time = now
+        try:
+            from core.data_collector import DataCollector
+            from core.market_regime import check_market_regime
+
+            regime_result = check_market_regime(self.config, DataCollector())
+            new_scale = regime_result["position_scale"]
+            if new_scale < self._market_regime_scale:
+                logger.warning(
+                    "장중 시장 국면 악화 감지: 포지션 스케일 {:.0f}% → {:.0f}%",
+                    self._market_regime_scale * 100, new_scale * 100,
+                )
+                self.discord.send_message(
+                    f"⚠️ **장중 시장 국면 악화** 감지\n"
+                    f"포지션 스케일: {self._market_regime_scale*100:.0f}% → {new_scale*100:.0f}%\n"
+                    f"신규 매수 축소 적용. 기존 포지션 검토 권장.",
+                )
+            self._market_regime_scale = new_scale
+        except Exception as e:
+            logger.debug("장중 국면 재확인 실패: {}", e)
+
     def _maybe_sync_with_broker(self):
         """live 모드에서 주기적으로 KIS 잔고와 DB 포지션 크로스체크 (불일치 시 로깅·알림)."""
         interval_min = int(self.config.trading.get("sync_broker_interval_minutes", 30))
@@ -480,7 +515,10 @@ class Scheduler:
             logger.error("쿨다운 해제 재스캔 실패: {}", e)
 
     def _execute_entry_candidates(self):
-        """장전 분석에서 쌓인 BUY 후보를 장중 첫 사이클에 실행."""
+        """
+        장전 분석에서 쌓인 BUY 후보를 장중 첫 사이클에 실행.
+        30분 이상 경과한 후보는 폐기하고, 현재 시그널을 재검증한다.
+        """
         if not self._entry_candidates:
             return
 
@@ -488,7 +526,8 @@ class Scheduler:
         from core.data_collector import DataCollector
         from core.market_regime import check_market_regime
 
-        regime_result = check_market_regime(self.config, DataCollector())
+        collector = DataCollector()
+        regime_result = check_market_regime(self.config, collector)
         if not regime_result["allow_buys"]:
             logger.info(
                 "시장 국면 [bearish] — 200일선 이탈 + 단기 모멘텀 하락 → 신규 매수 전면 중단, 진입 후보 실행 생략"
@@ -498,12 +537,41 @@ class Scheduler:
         regime_scale = regime_result["position_scale"]
 
         executor = OrderExecutor(self.config, account_key=self.strategy_name)
+        strategy = self._get_strategy()
         remaining = []
+        now = datetime.now()
+        stale_minutes = 30  # 30분 이상 경과한 후보는 폐기
 
         for candidate in self._entry_candidates:
             symbol = candidate["symbol"]
             if get_position(symbol, account_key=self.strategy_name):
                 continue
+
+            # 오래된 후보 폐기
+            candidate_time = candidate.get("timestamp", now)
+            if (now - candidate_time).total_seconds() > stale_minutes * 60:
+                logger.info("종목 {} 진입 후보 폐기 ({}분 초과)", symbol, stale_minutes)
+                continue
+
+            # 시그널 재검증: 현재 데이터로 BUY 시그널 유효한지 재확인
+            try:
+                df = collector.fetch_stock(symbol)
+                if df.empty or len(df) < 30:
+                    logger.info("종목 {} 진입 후보 폐기 (데이터 부족)", symbol)
+                    continue
+                signal_info = strategy.generate_signal(df, symbol=symbol)
+                if signal_info.get("signal") != "BUY":
+                    logger.info(
+                        "종목 {} 진입 후보 폐기 (시그널 재검증 실패: {} → {})",
+                        symbol, "BUY", signal_info.get("signal", "HOLD"),
+                    )
+                    continue
+                # 재검증 통과 — 현재 가격으로 업데이트
+                candidate["price"] = signal_info.get("close", candidate["price"])
+                candidate["atr"] = signal_info.get("atr", candidate.get("atr"))
+                candidate["score"] = signal_info.get("score", candidate.get("score", 0))
+            except Exception as e:
+                logger.warning("종목 {} 시그널 재검증 실패 — 후보 유지: {}", symbol, e)
 
             summary = self.portfolio.get_portfolio_summary()
             scale = candidate.get("market_regime_scale", regime_scale)
@@ -613,8 +681,10 @@ class Scheduler:
 
                 check = executor.check_stop_loss_take_profit(pos.symbol, current_price)
                 if check["action"]:
+                    sell_qty = check.get("partial_qty")  # 부분 익절 시에만 존재
                     result = executor.execute_sell(
                         pos.symbol, current_price,
+                        quantity=sell_qty,
                         reason=check["action"],
                         strategy=self.strategy_name,
                     )
@@ -741,8 +811,23 @@ class Scheduler:
         except Exception as e:
             logger.warning("실전 전환 준비 평가 실패: {}", e)
 
+    def _get_adaptive_interval(self) -> float:
+        """
+        적응형 모니터링 주기 (과매매 방지).
+        - 장 시작/종료 부근 (09:00~10:30, 14:30~15:30): 10분 (빠른 반응)
+        - 장중 안정 시간대 (10:30~14:30): 20분 (과매매 방지)
+        """
+        now = datetime.now()
+        ct = now.time()
+        from datetime import time
+        # 장 초반·마감 부근: 10분
+        if ct < time(10, 30) or ct >= time(14, 30):
+            return 600.0
+        # 장중 안정 구간: 20분
+        return 1200.0
+
     def _should_monitor(self) -> bool:
-        """모니터링 주기 확인. 이전 루프가 10분 초과 시 다음 사이클 스킵(타이밍 리스크 방지)."""
+        """모니터링 주기 확인. 적응형 주기 사용. 이전 루프 10분 초과 시 다음 사이클 스킵."""
         if self._skip_next_monitor_cycle:
             self._skip_next_monitor_cycle = False
             self._loop_metrics.record_skip()
@@ -750,6 +835,7 @@ class Scheduler:
             return False
         if self._last_monitor_time is None:
             return True
+        self.monitor_interval = self._get_adaptive_interval()
         elapsed = (datetime.now() - self._last_monitor_time).total_seconds()
         return elapsed >= self.monitor_interval
 
