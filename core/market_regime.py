@@ -165,3 +165,38 @@ def check_market_regime(config, collector=None) -> dict:
 def allow_new_buys_by_market_regime(config, collector=None) -> bool:
     """하위 호환: 기존 bool 반환 인터페이스."""
     return check_market_regime(config, collector)["allow_buys"]
+
+
+def get_regime_adjusted_params(config, collector=None) -> dict:
+    """
+    시장 국면에 따라 전략 파라미터 조정값을 반환.
+
+    Returns:
+        {
+            "regime": "bullish" | "caution" | "bearish",
+            "buy_threshold_offset": int,
+            "stop_loss_multiplier": float,
+            "take_profit_multiplier": float,
+        }
+    """
+    regime_result = check_market_regime(config, collector)
+    regime = regime_result["regime"]
+
+    strategies_cfg = config.strategies if hasattr(config, "strategies") else {}
+    ra_cfg = strategies_cfg.get("regime_adaptive", {})
+
+    if not ra_cfg.get("enabled", False):
+        return {
+            "regime": regime,
+            "buy_threshold_offset": 0,
+            "stop_loss_multiplier": 1.0,
+            "take_profit_multiplier": 1.0,
+        }
+
+    regime_params = ra_cfg.get(regime, {})
+    return {
+        "regime": regime,
+        "buy_threshold_offset": int(regime_params.get("buy_threshold_offset", 0)),
+        "stop_loss_multiplier": float(regime_params.get("stop_loss_multiplier", 1.0)),
+        "take_profit_multiplier": float(regime_params.get("take_profit_multiplier", 1.0)),
+    }

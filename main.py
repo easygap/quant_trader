@@ -43,6 +43,44 @@ from loguru import logger
 from core.watchlist_manager import WatchlistManager
 
 
+def run_portfolio_backtest(args):
+    """멀티종목 포트폴리오 백테스팅 모드 실행"""
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    logger.info("=" * 50)
+    logger.info("포트폴리오 백테스팅 모드 시작")
+    logger.info("=" * 50)
+
+    symbols_str = getattr(args, "symbols", "") or ""
+    if not symbols_str:
+        logger.error(
+            "--symbols 옵션으로 종목 코드를 지정하세요. "
+            "예: --symbols 005930,000660,035720,051910,006400"
+        )
+        return
+
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if len(symbols) < 2:
+        logger.error("포트폴리오 백테스트는 최소 2개 종목이 필요합니다.")
+        return
+
+    logger.info("종목: {} ({}개)", symbols, len(symbols))
+
+    pbt = PortfolioBacktester()
+    result = pbt.run(
+        symbols=symbols,
+        strategy_name=args.strategy,
+        start_date=args.start,
+        end_date=args.end,
+    )
+
+    if not result:
+        logger.error("포트폴리오 백테스트 결과가 비어 있습니다.")
+        return
+
+    pbt.print_report(result)
+
+
 def run_backtest(args):
     """백테스팅 모드 실행"""
     from core.data_collector import DataCollector
@@ -661,10 +699,51 @@ def run_paper_trading(args):
     logger.info("  보유 종목: {}개", summary["position_count"])
 
 
+def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
+    """
+    라이브 전 필수 검증 게이트.
+    실패 항목 리스트를 반환 (빈 리스트 = 통과).
+    """
+    issues = []
+
+    # 1. 데이터 소스 일관성: KIS 폴백 허용 여부
+    ds = config.get("data_source", {})
+    if ds.get("allow_kis_fallback", True):
+        issues.append(
+            "data_source.allow_kis_fallback=true — KIS 비수정주가 폴백 가능. "
+            "false로 설정하여 백테스트/실전 소스 일치 필요."
+        )
+
+    # 2. 페이퍼 트레이딩 최소 거래 기록 확인
+    try:
+        from database.repositories import get_recent_sell_trades
+        recent_sells = get_recent_sell_trades(limit=50, mode="paper", account_key=strategy_name)
+        if len(recent_sells) < 20:
+            issues.append(
+                f"페이퍼 트레이딩 매도 기록 {len(recent_sells)}건 (최소 20건 필요). "
+                "충분한 페이퍼 트레이딩 후 진행하세요."
+            )
+    except Exception:
+        issues.append("페이퍼 트레이딩 기록 조회 실패 — DB 확인 필요.")
+
+    # 3. 스코어링 가중치 최적화 여부 (strategies.yaml 직관값 경고 확인)
+    scoring_cfg = config.get("scoring", {})
+    weights = scoring_cfg.get("weights", {})
+    # 기본 직관값 그대로인지 확인 (rsi_oversold=2, macd_golden_cross=2)
+    if weights.get("rsi_oversold") == 2 and weights.get("macd_golden_cross") == 2:
+        issues.append(
+            "스코어링 가중치가 기본 직관값 상태입니다. "
+            "python main.py --mode optimize --include-weights 실행 후 진행 권장."
+        )
+
+    return issues
+
+
 def run_live_trading(args):
     """
     실전 매매 모드 실행.
     이중 확인: ENABLE_LIVE_TRADING=true 환경변수 + --confirm-live 플래그 필수.
+    삼중 확인: 라이브 검증 게이트 (--force-live로 강제 가능).
     """
     if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
         logger.error(
@@ -685,6 +764,21 @@ def run_live_trading(args):
     logger.info("=" * 50)
 
     config = Config.get()
+
+    # ── 라이브 전 필수 검증 게이트 ──
+    force_live = getattr(args, "force_live", False)
+    if not force_live:
+        gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
+        if gate_issues:
+            logger.error("=" * 50)
+            logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
+            for issue in gate_issues:
+                logger.error("  - {}", issue)
+            logger.error("강제 진행: --force-live 플래그 추가")
+            logger.error("=" * 50)
+            sys.exit(1)
+        logger.info("✅ 라이브 전 검증 게이트 통과")
+
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
 
@@ -989,8 +1083,8 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
-        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
+        choices=["backtest", "portfolio_backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
+        help="실행 모드. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1017,6 +1111,10 @@ def main():
     parser.add_argument(
         "--confirm-live", action="store_true",
         help="실전 모드 진입 시 필수. 미지정 시 live 모드 진입 거부.",
+    )
+    parser.add_argument(
+        "--force-live", action="store_true",
+        help="라이브 검증 게이트 강제 통과. 검증 미완료 상태에서 실전 진입 시 사용.",
     )
     parser.add_argument(
         "--output-dir", type=str, default="reports",
@@ -1074,6 +1172,10 @@ def main():
         "--dry-run", action="store_true",
         help="[rebalance 모드] 실제 주문 없이 계획만 출력",
     )
+    parser.add_argument(
+        "--symbols", type=str, default="",
+        help="[portfolio_backtest 모드] 종목 코드 쉼표 구분 (예: 005930,000660,035720,051910,006400)",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -1098,6 +1200,8 @@ def main():
     try:
         if args.mode == "backtest":
             run_backtest(args)
+        elif args.mode == "portfolio_backtest":
+            run_portfolio_backtest(args)
         elif args.mode == "validate":
             run_strategy_validation(args)
         elif args.mode == "paper":

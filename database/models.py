@@ -213,6 +213,23 @@ class FailedOrder(Base):
         return f"<FailedOrder({self.symbol} {self.action} {self.quantity}주 @{self.price}, status={self.status})>"
 
 
+class PendingOrderGuard(Base):
+    """
+    중복 주문 방지 DB 테이블.
+    프로세스 재시작 시에도 중복 주문 방지를 유지하기 위한 영속 가드.
+    TTL 기반으로 expires_at 이후 자동 무효화.
+    """
+    __tablename__ = "pending_order_guards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    def __repr__(self):
+        return f"<PendingOrderGuard({self.symbol}, expires={self.expires_at})>"
+
+
 # =============================================================
 # 데이터베이스 엔진 & 세션 관리
 # =============================================================
