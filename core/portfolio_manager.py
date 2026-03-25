@@ -11,6 +11,7 @@ from database.repositories import (
     get_all_positions,
     get_trade_cash_summary,
     save_portfolio_snapshot,
+    get_portfolio_peak_value,
 )
 
 
@@ -26,11 +27,14 @@ class PortfolioManager:
         self.initial_capital = self.config.risk_params.get(
             "position_sizing", {}
         ).get("initial_capital", 10000000)
-        self._peak_value = self.initial_capital
+        # MDD 피크: DB에서 역대 최고 평가금을 복원 (재시작 시 리셋 방지)
+        db_peak = get_portfolio_peak_value(account_key=self.account_key)
+        self._peak_value = max(self.initial_capital, db_peak)
         self._is_live = self.config.trading.get("mode", "paper") == "live"
         logger.info(
-            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, 모드: {}, 계좌: {})",
+            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, MDD 피크: {:,.0f}원, 모드: {}, 계좌: {})",
             self.initial_capital,
+            self._peak_value,
             "live" if self._is_live else "paper",
             self.account_key or "default",
         )

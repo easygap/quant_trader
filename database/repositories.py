@@ -15,7 +15,8 @@ from loguru import logger
 
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
-    Position, PortfolioSnapshot, DailyReport, FailedOrder
+    Position, PortfolioSnapshot, DailyReport, FailedOrder,
+    PendingOrderGuard,
 )
 
 
@@ -472,22 +473,58 @@ def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float
         session.close()
 
 
-def update_stop_loss_price(symbol: str, new_stop_loss: float, account_key: str = ""):
-    """손절가를 새 값으로 업데이트 (래칫: 기존보다 높은 값만)."""
+@with_retry
+def update_position_targets(
+    symbol: str,
+    stop_loss_price: float = None,
+    take_profit_price: float = None,
+    trailing_stop_price: float = None,
+    account_key: str = "",
+):
+    """
+    포지션의 손절/익절/트레일링 가격을 업데이트 (부분 매도 후 재조정 등).
+    None인 필드는 변경하지 않음.
+    """
     session = get_session()
     try:
         ak = account_key or ""
         position = session.query(Position).filter(
             Position.account_key == ak, Position.symbol == symbol
         ).first()
-        if position:
-            old_sl = position.stop_loss_price or 0
-            if new_stop_loss > old_sl:
-                position.stop_loss_price = new_stop_loss
-                session.commit()
+        if not position:
+            return
+        if stop_loss_price is not None:
+            position.stop_loss_price = stop_loss_price
+        if take_profit_price is not None:
+            position.take_profit_price = take_profit_price
+        if trailing_stop_price is not None:
+            position.trailing_stop_price = trailing_stop_price
+        session.commit()
     except Exception as e:
         session.rollback()
-        logger.error("손절가 업데이트 실패: {}", e)
+        logger.error("포지션 타겟 업데이트 실패: {}", e)
+    finally:
+        session.close()
+
+
+@with_retry
+def get_portfolio_peak_value(account_key: str = "") -> float:
+    """
+    PortfolioSnapshot 테이블에서 해당 계좌의 역대 최고 total_value를 반환.
+    MDD 피크를 재시작 후에도 유지하기 위한 용도.
+    스냅샷이 없으면 0.0 반환.
+    """
+    from sqlalchemy import func
+    session = get_session()
+    try:
+        ak = account_key or ""
+        result = session.query(func.max(PortfolioSnapshot.total_value)).filter(
+            PortfolioSnapshot.account_key == ak,
+        ).scalar()
+        return float(result) if result else 0.0
+    except Exception as e:
+        logger.error("포트폴리오 피크 조회 실패: {}", e)
+        return 0.0
     finally:
         session.close()
 
@@ -822,5 +859,62 @@ def resolve_failed_order(order_id: int, status: str = "retried"):
     except Exception as e:
         session.rollback()
         logger.error("Dead-letter 상태 변경 실패: {}", e)
+    finally:
+        session.close()
+
+
+# =============================================================
+# 중복 주문 방지 (DB 영속 가드)
+# =============================================================
+
+@with_retry
+def save_order_guard(symbol: str, expires_at: datetime):
+    """중복 주문 방지 레코드 저장 (upsert)."""
+    session = get_session()
+    try:
+        existing = session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol
+        ).first()
+        if existing:
+            existing.expires_at = expires_at
+        else:
+            session.add(PendingOrderGuard(symbol=symbol, expires_at=expires_at))
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.debug("OrderGuard DB 저장 실패: {}", e)
+    finally:
+        session.close()
+
+
+@with_retry
+def has_pending_order_guard(symbol: str) -> bool:
+    """DB에 유효한(미만료) 중복 주문 방지 레코드가 있는지 확인."""
+    session = get_session()
+    try:
+        now = datetime.now()
+        record = session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol,
+            PendingOrderGuard.expires_at > now,
+        ).first()
+        return record is not None
+    except Exception:
+        return False
+    finally:
+        session.close()
+
+
+@with_retry
+def clear_order_guard(symbol: str):
+    """중복 주문 방지 레코드 제거."""
+    session = get_session()
+    try:
+        session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol
+        ).delete()
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.debug("OrderGuard DB 제거 실패: {}", e)
     finally:
         session.close()
