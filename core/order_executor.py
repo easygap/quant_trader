@@ -190,8 +190,17 @@ class OrderExecutor:
         # 거래 비용 계산 (avg_daily_volume 있으면 거래량 기반 동적 슬리피지 적용)
         costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY", avg_daily_volume=avg_daily_volume)
         available_cash = capital if available_cash is None else available_cash
+
+        # 음수 캐시 방지: 가용 현금이 0 이하이면 즉시 거부
+        if available_cash <= 0:
+            logger.warning(
+                "종목 {} 매수 불가: 가용 현금 {:,.0f}원 (0 이하)",
+                symbol, available_cash,
+            )
+            return {"success": False, "reason": "가용 현금 부족 (0 이하)"}
+
         total_required = (price * quantity) + costs["total_cost"]
-        if available_cash > 0 and total_required > available_cash:
+        if total_required > available_cash:
             logger.warning(
                 "종목 {} 매수 불가: 필요 현금 {:,.0f}원 > 사용 가능 현금 {:,.0f}원",
                 symbol, total_required, available_cash,
@@ -393,11 +402,21 @@ class OrderExecutor:
             account_key=self.account_key,
         )
 
-        # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position
+        # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position + 손절/익절 재조정
         if sell_qty >= position.quantity:
             delete_position(symbol, account_key=self.account_key)
         else:
-            reduce_position(symbol, sell_qty, account_key=self.account_key)
+            remaining_pos = reduce_position(symbol, sell_qty, account_key=self.account_key)
+            # 부분 익절 후 잔여 포지션의 익절가를 최종 목표가로 승격
+            if remaining_pos and reason == "TAKE_PROFIT_PARTIAL":
+                from database.repositories import update_position_targets
+                tp_config = self.risk_manager.risk_params.get("take_profit", {})
+                final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
+                update_position_targets(
+                    symbol,
+                    take_profit_price=round(final_target, 0),
+                    account_key=self.account_key,
+                )
 
         # 매매 로그
         log_trade("SELL", symbol, price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")
@@ -427,12 +446,16 @@ class OrderExecutor:
         """
         보유 종목의 손절/익절/트레일링 스탑 체크
 
+        체크 순서: 익절(TP) → 부분 익절(TP1) → 트레일링 스탑(TS) → 손절(SL)
+        이익 실현을 우선하여 수익 보호를 극대화한다.
+
         Args:
             symbol: 종목 코드
             current_price: 현재가
 
         Returns:
-            {"action": "STOP_LOSS" / "TAKE_PROFIT" / "TRAILING_STOP" / None}
+            {"action": "STOP_LOSS" / "TAKE_PROFIT" / "TAKE_PROFIT_PARTIAL" / "TRAILING_STOP" / None,
+             "price": 현재가, "partial_ratio": 부분 매도 비율 (부분 익절 시)}
         """
         position = get_position(symbol, account_key=self.account_key)
         if not position:
@@ -446,29 +469,54 @@ class OrderExecutor:
         from database.repositories import update_trailing_stop
         update_trailing_stop(symbol, current_price, trailing_rate, account_key=self.account_key)
 
-        # 손절 체크
-        if position.stop_loss_price and current_price <= position.stop_loss_price:
-            logger.warning(
-                "🚨 손절 발동: {} 현재가={:,.0f} ≤ 손절가={:,.0f}",
-                symbol, current_price, position.stop_loss_price,
-            )
-            return {"action": "STOP_LOSS", "price": current_price}
-
-        # 트레일링 스탑 체크
-        if position.trailing_stop_price and current_price <= position.trailing_stop_price:
-            logger.warning(
-                "📉 트레일링 스탑 발동: {} 현재가={:,.0f} ≤ 스탑가={:,.0f}",
-                symbol, current_price, position.trailing_stop_price,
-            )
-            return {"action": "TRAILING_STOP", "price": current_price}
-
-        # 익절 체크
+        # 1. 익절 체크 (최종 목표가 도달 → 전량 매도)
         if position.take_profit_price and current_price >= position.take_profit_price:
             logger.info(
                 "🎯 익절 도달: {} 현재가={:,.0f} ≥ 익절가={:,.0f}",
                 symbol, current_price, position.take_profit_price,
             )
             return {"action": "TAKE_PROFIT", "price": current_price}
+
+        # 2. 부분 익절 체크 (1차 목표 도달 → partial_ratio만큼 매도)
+        tp_config = self.risk_manager.risk_params.get("take_profit", {})
+        if tp_config.get("partial_exit", False):
+            partial_target_rate = tp_config.get("partial_target", 0.04)
+            partial_ratio = tp_config.get("partial_ratio", 0.5)
+            partial_target_price = position.avg_price * (1 + partial_target_rate)
+            if (
+                current_price >= partial_target_price
+                and position.quantity >= 2  # 1주면 부분 매도 불가
+                and not getattr(position, "_partial_tp_done", False)
+            ):
+                partial_qty = max(1, int(position.quantity * partial_ratio))
+                if partial_qty < position.quantity:
+                    logger.info(
+                        "🎯 부분 익절 도달: {} 현재가={:,.0f} ≥ 1차목표={:,.0f} ({}주 중 {}주 매도)",
+                        symbol, current_price, partial_target_price, position.quantity, partial_qty,
+                    )
+                    return {
+                        "action": "TAKE_PROFIT_PARTIAL",
+                        "price": current_price,
+                        "partial_qty": partial_qty,
+                    }
+
+        # 3. 트레일링 스탑 체크 (이익 보호)
+        # position 재조회 (trailing_stop_price가 업데이트되었을 수 있음)
+        position = get_position(symbol, account_key=self.account_key)
+        if position and position.trailing_stop_price and current_price <= position.trailing_stop_price:
+            logger.warning(
+                "📉 트레일링 스탑 발동: {} 현재가={:,.0f} ≤ 스탑가={:,.0f}",
+                symbol, current_price, position.trailing_stop_price,
+            )
+            return {"action": "TRAILING_STOP", "price": current_price}
+
+        # 4. 손절 체크 (최후의 손실 제한)
+        if position and position.stop_loss_price and current_price <= position.stop_loss_price:
+            logger.warning(
+                "🚨 손절 발동: {} 현재가={:,.0f} ≤ 손절가={:,.0f}",
+                symbol, current_price, position.stop_loss_price,
+            )
+            return {"action": "STOP_LOSS", "price": current_price}
 
         return {"action": None}
 
