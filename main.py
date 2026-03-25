@@ -43,6 +43,44 @@ from loguru import logger
 from core.watchlist_manager import WatchlistManager
 
 
+def run_portfolio_backtest(args):
+    """멀티종목 포트폴리오 백테스팅 모드 실행"""
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    logger.info("=" * 50)
+    logger.info("포트폴리오 백테스팅 모드 시작")
+    logger.info("=" * 50)
+
+    symbols_str = getattr(args, "symbols", "") or ""
+    if not symbols_str:
+        logger.error(
+            "--symbols 옵션으로 종목 코드를 지정하세요. "
+            "예: --symbols 005930,000660,035720,051910,006400"
+        )
+        return
+
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if len(symbols) < 2:
+        logger.error("포트폴리오 백테스트는 최소 2개 종목이 필요합니다.")
+        return
+
+    logger.info("종목: {} ({}개)", symbols, len(symbols))
+
+    pbt = PortfolioBacktester()
+    result = pbt.run(
+        symbols=symbols,
+        strategy_name=args.strategy,
+        start_date=args.start,
+        end_date=args.end,
+    )
+
+    if not result:
+        logger.error("포트폴리오 백테스트 결과가 비어 있습니다.")
+        return
+
+    pbt.print_report(result)
+
+
 def run_backtest(args):
     """백테스팅 모드 실행"""
     from core.data_collector import DataCollector
@@ -1045,8 +1083,8 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
-        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
+        choices=["backtest", "portfolio_backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
+        help="실행 모드. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1134,6 +1172,10 @@ def main():
         "--dry-run", action="store_true",
         help="[rebalance 모드] 실제 주문 없이 계획만 출력",
     )
+    parser.add_argument(
+        "--symbols", type=str, default="",
+        help="[portfolio_backtest 모드] 종목 코드 쉼표 구분 (예: 005930,000660,035720,051910,006400)",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -1158,6 +1200,8 @@ def main():
     try:
         if args.mode == "backtest":
             run_backtest(args)
+        elif args.mode == "portfolio_backtest":
+            run_portfolio_backtest(args)
         elif args.mode == "validate":
             run_strategy_validation(args)
         elif args.mode == "paper":

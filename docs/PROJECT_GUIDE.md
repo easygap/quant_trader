@@ -646,6 +646,58 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 ---
 
+---
+
+## 11. v3.0 업데이트 — 리스크 감소·수익률 향상 동시 개선 (2026-03-23)
+
+### 11.1 리스크 감소 개선
+
+| 항목 | 변경 내용 | 관련 파일 |
+|------|-----------|-----------|
+| **BlackSwanDetector 설정화** | 하드코딩된 급락 임계값(-5%/-3% 등)을 `risk_params.yaml`의 `blackswan` 섹션으로 이동. 설정 변경만으로 민감도 조절 가능. | `core/blackswan_detector.py`, `config/risk_params.yaml` |
+| **갭 리스크 방어** | 오버나이트 갭다운(-3% 이하) 발생 시 장 초반 즉시 청산. 갭업(+5% 이상) 종목 당일 매수 차단(추격매수 방지). | `core/scheduler.py`, `core/order_executor.py`, `config/risk_params.yaml` |
+| **상관관계 기반 분산** | 기존 보유 종목과 상관계수 ≥ 0.7인 신규 종목의 포지션을 자동 축소. 동일 방향 리스크 집중 방지. | `core/risk_manager.py`, `core/order_executor.py`, `config/risk_params.yaml` |
+| **시장 국면별 손절/익절 조정** | bullish/caution/bearish 국면에 따라 손절을 타이트하게, 익절을 빠르게 설정. 하락장 손실 축소. | `core/market_regime.py`, `core/risk_manager.py`, `config/strategies.yaml` |
+| **동적 손절가 업데이트** | 장중 10분마다 ATR 변화를 반영하여 보유 종목 손절가를 래칫 방식(유리한 방향만)으로 갱신. | `core/scheduler.py`, `database/repositories.py` |
+| **꼬리 리스크 메트릭** | VaR 95%, CVaR 95%, 최대 연속 손실 횟수, MDD 회복 기간 등 극단 시나리오 분석 지표 추가. | `backtest/backtester.py` |
+
+### 11.2 수익률 향상 개선
+
+| 항목 | 변경 내용 | 관련 파일 |
+|------|-----------|-----------|
+| **신호 강도 기반 포지션 스케일링** | 매매 신호 점수가 높을수록 포지션을 최대 150%까지 확대. 약한 신호는 50%로 축소. 확신 높은 거래에 자본 집중. | `core/risk_manager.py`, `core/order_executor.py`, `config/risk_params.yaml` |
+| **장중 신호 재평가** | 장전 분석 이후에도 10분마다 워치리스트를 재스캔하여 새로운 매수 기회를 탐지. | `core/scheduler.py` |
+| **소르티노 비율** | 하방 변동성만 고려하는 Sortino ratio 추가. 샤프 대비 상방 변동성에 불이익을 주지 않아 실질 성과 평가에 유리. | `backtest/backtester.py` |
+
+### 11.3 프로젝트 완성도 향상
+
+| 항목 | 변경 내용 | 관련 파일 |
+|------|-----------|-----------|
+| **멀티종목 포트폴리오 백테스트** | `--mode portfolio_backtest --symbols 005930,000660,...` 으로 실전과 동일한 포트폴리오 수준 시뮬레이션. 분산 투자 제한·최대 포지션 수·업종 비중 등 실전 리스크 규칙 적용. 종목별 성과 분석 포함. | `backtest/portfolio_backtester.py`, `main.py` |
+| **시장 국면 적응형 파라미터** | `regime_adaptive` 설정으로 국면별 매수 임계값·손절·익절 배수를 자동 조절. 코드 수정 없이 설정만으로 전략 행동 변경. | `config/strategies.yaml`, `core/market_regime.py` |
+
+### 11.4 새로운 CLI 명령
+
+```bash
+# 멀티종목 포트폴리오 백테스트
+python main.py --mode portfolio_backtest --strategy scoring \
+  --symbols 005930,000660,035720,051910,006400 \
+  --start 2023-01-01 --end 2025-12-31
+```
+
+### 11.5 새로운 설정 파라미터
+
+**`config/risk_params.yaml`** 추가:
+- `blackswan.*` — 급락 감지 임계값·쿨다운·recovery 설정
+- `gap_risk.*` — 갭다운 즉시 청산·갭업 매수 차단
+- `position_sizing.signal_scaling.*` — 신호 강도 포지션 스케일링
+- `diversification.correlation_risk.*` — 상관관계 기반 분산
+
+**`config/strategies.yaml`** 추가:
+- `regime_adaptive.*` — 시장 국면별 전략 파라미터 조정
+
+---
+
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`  
-> **문서 버전**: v2.5  
-> **최종 수정**: 2026-03-20 (`schedule` 모드·`runtime_lock`, `fundamental_factor`·앙상블 `components`, DART+`dart_loader`, 미국 시장·`us_holidays.yaml`, `deploy/`·테스트 목록 반영)
+> **문서 버전**: v3.0  
+> **최종 수정**: 2026-03-23 (리스크 감소·수익률 향상 동시 개선, 멀티종목 포트폴리오 백테스트, 시장 국면 적응형 파라미터, 갭 리스크 방어, 상관관계 분산, 신호 강도 스케일링)
