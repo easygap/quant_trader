@@ -101,7 +101,7 @@ pytest tests/ -q
 * `monitoring/` — 로깅, 알림, 대시보드, 청산 트리거
 * `tests/` — 테스트
 * `docs/` — 문서
-* `deploy/` — (선택) 서버 상시 구동 예시
+* `deploy/` — (선택) Oracle Cloud ARM 서버 상시 구동(systemd, logrotate)
 
 ## 더 읽을 곳
 
@@ -109,6 +109,8 @@ pytest tests/ -q
 |------|------|
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
+| [`docs/BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 손익 개선 포인트(손익비·상승장·손절/익절·가중치 파이프라인) |
+| [`deploy/README.md`](deploy/README.md) | Oracle Cloud Free Tier ARM 배포·systemd 상시 구동 가이드 |
 
 ## 주의
 
