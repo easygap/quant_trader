@@ -54,7 +54,6 @@ class BlackSwanDetector:
         self._recovery_until = None
         self._cooldown_just_ended = False
 
-        # 연속 하락 추적
         self._daily_returns: list[float] = []
 
         logger.info("BlackSwanDetector 초기화 완료")
