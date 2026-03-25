@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
-> **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.  
-> **문서 버전**: v2.5  
-> **최종 수정**: 2026-03-20  
+> **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
+> **문서 버전**: v2.7
+> **최종 수정**: 2026-03-25
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -27,7 +27,7 @@
 ### 1.1 전체 흐름 요약
 
 1. **시작**  
-   `main.py` 실행 → 로거·DB 초기화 → `--mode`에 따라 **backtest / validate / paper / schedule / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance** 중 하나로 분기.
+   `main.py` 실행 → 로거·DB 초기화 → `--mode`에 따라 **backtest / backtest_momentum_top / validate / paper / schedule / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance** 중 하나로 분기.
 
 2. **백테스트 (backtest)**  
    `DataCollector`로 과거 주가 수집 → `Backtester`가 전략으로 시뮬레이션(수수료·세금·슬리피지·손절/익절/트레일링 스탑 반영, **strict-lookahead 기본**) → `ReportGenerator`가 txt/html 리포트 생성.
@@ -52,6 +52,7 @@
 | 모드 | main.py 호출 함수 | 핵심 모듈 |
 |------|-------------------|-----------|
 | **backtest** | `run_backtest(args)` | DataCollector → Backtester → ReportGenerator |
+| **backtest_momentum_top** | `run_backtest_momentum_top(args)` | momentum_top_portfolio.run_momentum_top_portfolio_backtest() — 다종목 동일비중 모멘텀 포트폴리오, 리밸런싱·시장 국면·포트폴리오 스탑 |
 | **validate** | `run_strategy_validation(args)` | backtest.strategy_validator (3~5년, 샤프·MDD·벤치마크 KS11·코스피 상위 50 동일비중, in/out-of-sample, **손익비 자동 경고+디스코드**). `--no-benchmark-top50` 으로 Top50 비활성화 |
 | **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
 | **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용) |
@@ -70,7 +71,7 @@
 
 ```
 quant_trader/
-├── main.py                      # CLI 진입점, --mode 분기 (12개 모드)
+├── main.py                      # CLI 진입점, --mode 분기 (13개 모드)
 ├── test_integration.py          # 통합 검증 스크립트 (단일 실행, pytest 아님)
 ├── pyproject.toml               # 프로젝트 메타데이터 (Python >=3.11,<3.13, 패키지, pytest 설정)
 ├── requirements.txt             # pip 의존성 목록
@@ -113,6 +114,7 @@ quant_trader/
 │   ├── strategy_ensemble.py     # 앙상블: ensemble.components (technical·momentum_factor·volatility_condition·fundamental_factor 선택), auto_downgrade
 │   ├── data_validator.py        # OHLCV 정합성 검사 (Null, NaN, 음수 주가, 타임스탬프 역전)
 │   ├── notifier.py              # 통합 알림 이중화 (1차 디스코드 → 2차 텔레그램 → 3차 이메일, critical 전채널 동시)
+│   ├── strategy_diagnostics.py  # 전략 진단 보조: DiagnosticLine — 전략별 신호·점수 진단 라인 생성
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
 │   └── order_guard.py           # 동일 종목 TTL(기본 600초) 동안 중복 주문 차단
 ├── strategies/
@@ -122,7 +124,7 @@ quant_trader/
 │   ├── mean_reversion.py        # Z-Score·ADX·52주 이중 필터·코스피200 제한·펀더멘털 필터
 │   ├── trend_following.py       # ADX·200일선·MACD·ATR 추세 추종
 │   ├── fundamental_factor.py    # 펀더멘털 팩터 (--strategy fundamental_factor, 앙상블 구성 가능)
-│   ├── momentum_factor.py       # 모멘텀 (N일 수익률, 앙상블 내부 전용 — CLI 레지스트리 미등록)
+│   ├── momentum_factor.py       # 모멘텀 (N일 수익률, CLI `--strategy momentum_factor` 등록 + 앙상블 구성용)
 │   └── volatility_condition.py  # 변동성 조건 (앙상블 내부 전용)
 ├── api/
 │   ├── __init__.py
@@ -134,6 +136,7 @@ quant_trader/
 │   ├── backtester.py            # 시뮬레이션: strict_lookahead 기본, 수수료·세금·동적 슬리피지·손절/익절/트레일링, 과매매 분석
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: KS11·코스피 상위 50 동일비중 벤치마크, 손익비 자동 경고+디스코드
+│   ├── momentum_top_portfolio.py # 다종목 동일비중 모멘텀 포트폴리오 백테스트 (리밸런싱·시장 국면·포트폴리오 스탑)
 │   ├── paper_compare.py         # 모의투자 vs 백테스트 비교, 실전 전환 준비 자동 평가(check_live_readiness)
 │   └── param_optimizer.py       # Grid / Bayesian(scikit-optimize) 최적화, 가중치 대칭 Grid Search + OOS 게이트
 ├── database/
@@ -147,6 +150,7 @@ quant_trader/
 │   ├── discord_bot.py           # 디스코드 웹훅 전송 (Notifier를 통해 호출 권장)
 │   ├── liquidate_trigger.py     # HTTP POST /liquidate 긴급 청산 (X-Token 인증)
 │   ├── dashboard.py             # 콘솔 대시보드 (선택, show_summary_line)
+│   ├── dashboard_runtime_state.py # 대시보드 런타임 상태 관리 (스케줄러·전략 실행 현황 실시간 상태 전달)
 │   └── web_dashboard.py         # aiohttp 웹 대시보드 (포트폴리오·스냅샷 JSON/HTML, 10초 폴링)
 ├── tests/                       # pytest tests/ -q
 │   ├── __init__.py
@@ -166,9 +170,15 @@ quant_trader/
 │   ├── test_watchlist_manager.py        # watchlist 모드별 resolve 검증
 │   ├── test_basket_rebalancer.py       # 바스켓 리밸런서 (설정·비중·드리프트·트리거·주문·실행)
 │   └── test_us_market_support.py      # 미국 티커·TradingHours NYSE 등
-├── deploy/                      # (선택) Oracle Cloud 등 — setup.sh, systemd, logrotate
+├── deploy/                      # (선택) Oracle Cloud ARM 서버 상시 구동
+│   ├── README.md               # Oracle Cloud Free Tier ARM 배포 가이드
+│   ├── setup.sh                # 시스템 셋업 (Python 3.11, venv, pip install)
+│   ├── install_service.sh      # systemd 서비스 등록 스크립트
+│   ├── quant_trader.service    # systemd 유닛 파일 (schedule 모드, auto-restart)
+│   └── logrotate.conf          # 로그 로테이션 정책 (copytruncate)
 ├── docs/
-│   └── PROJECT_GUIDE.md         # 본 문서
+│   ├── PROJECT_GUIDE.md         # 본 문서
+│   └── BACKTEST_IMPROVEMENT.md  # 백테스트 손익 개선 포인트
 └── reports/                     # 백테스트 txt/html 출력 (.gitignore)
 ```
 
@@ -180,7 +190,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **main.py** | CLI 진입점. `--mode`: backtest / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (12종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
+| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (13종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
 | **test_integration.py** | 설정·DB·지표·신호·리스크·백테스트·리포트·디스코드 등 전체 파이프라인 일괄 검증(14단계). 단일 실행 스크립트 (pytest 아님). |
 | **pyproject.toml** | 프로젝트 메타데이터: name=`quant_trader`, version=`0.1.0`, Python `>=3.11,<3.13`, 패키지 구성, pytest 설정 (`tests/` 대상, pandas 경고 필터). |
 | **requirements.txt** | pip 의존성 목록. pandas, numpy, scipy, pandas-ta, pykrx, finance-datareader, yfinance, requests, aiohttp, websockets, sqlalchemy, pyyaml, loguru, click, pytest 등. |
@@ -230,18 +240,19 @@ quant_trader/
 | **strategy_ensemble.py** | `strategies.yaml` → `ensemble.components`에 정의된 구성(기본: technical·momentum_factor·volatility_condition·**fundamental_factor** 등) 신호 통합. majority_vote / weighted_sum / conservative. **auto_downgrade**. 설계서 §4.4. |
 | **data_validator.py** | OHLCV Null·NaN·음수 주가·거래량·타임스탬프 역전 등 검사. |
 | **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 텔레그램 Bot API → 3차 이메일(SMTP). `critical=True` 시 모든 채널 동시 발송. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
+| **strategy_diagnostics.py** | `DiagnosticLine` — 전략별 신호·점수 진단 라인 생성. 스케줄러·대시보드에서 전략 실행 현황 요약 시 사용. |
 
 ### 3.4 strategies/
 
 | 파일 | 역할 |
 |------|------|
-| **\_\_init\_\_.py** | 전략 레지스트리. 등록명: **`scoring`**, **`mean_reversion`**, **`trend_following`**, **`fundamental_factor`**, **`ensemble`**. `momentum_factor`·`volatility_condition`은 레지스트리에 없음(앙상블 내부 전용). `create_strategy`, `get_strategy_names`, `register_strategy`. |
+| **\_\_init\_\_.py** | 전략 레지스트리. 등록명: **`scoring`**, **`mean_reversion`**, **`trend_following`**, **`fundamental_factor`**, **`momentum_factor`**, **`ensemble`**. `volatility_condition`은 레지스트리에 없음(앙상블 내부 전용). `create_strategy`, `get_strategy_names`, `register_strategy`. |
 | **base_strategy.py** | `analyze(df)` → 지표·신호 붙은 DataFrame, `generate_signal(df, **kwargs)` → 최신 BUY/SELL/HOLD·점수·상세. |
 | **scoring_strategy.py** | IndicatorEngine + SignalGenerator. 총점 ≥ buy_threshold 매수, ≤ sell_threshold 매도. |
 | **mean_reversion.py** | Z-Score·ADX 필터. **52주 이중 필터**, **`restrict_to_kospi200`**, **펀더멘털 필터**(pykrx→yfinance). 설계서 §4.2. |
 | **trend_following.py** | ADX·200일선·MACD·ATR 추세 추종. 손익비 ≥ 2.0 검증 필수(§4.3). |
 | **fundamental_factor.py** | 재무(PER 상대·ROE·부채·영업이익 성장 등)만으로 신호. pykrx→yfinance. 백테스트 시 `df.attrs['symbol']` 권장. |
-| **momentum_factor.py** | N일 수익률만. **`StrategyEnsemble` 구성용** — `--strategy momentum_factor` 불가. |
+| **momentum_factor.py** | N일 수익률만. **CLI 등록 완료** — `--strategy momentum_factor`로 단독 사용 가능 + 앙상블 구성용. |
 | **volatility_condition.py** | N일 실현변동성만. **앙상블 구성용** — 단독 CLI 전략 아님. |
 
 ### 3.5 api/
@@ -260,6 +271,7 @@ quant_trader/
 | **strategy_validator.py** | 최소 3~5년, 샤프·MDD·벤치마크(KS11 + **코스피 상위 50 동일비중**). in/out-of-sample. `run()`, `run_walk_forward()`. `--no-benchmark-top50` 으로 Top50 비활성화. **손익비 자동 경고**: 추세 추종 < 2.0, 기타 < 1.0 시 WARN + 디스코드 알림. |
 | **report_generator.py** | txt·html 리포트. 거래 내역, 성과 지표, 자본 곡선, **과매매 분석**(평균 보유 기간, 총 수수료). `--output-dir`. |
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
+| **momentum_top_portfolio.py** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. `run_momentum_top_portfolio_backtest()`: WatchlistManager(momentum_top) → 종목별 데이터 수집 → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성 → 시장 국면 필터·포트폴리오 스탑 적용. `print_momentum_top_portfolio_report()`. `--mode backtest_momentum_top`에서 사용. |
 | **param_optimizer.py** | Grid Search / Bayesian(scikit-optimize). train_ratio·OOS 보고. `--include-weights` 시 **스코어링 가중치 대칭 Grid Search + OOS 샤프≥1.0 게이트**. `--auto-correlation`: 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화. `--disable-weights w_rsi,w_ma` 등으로 수동 지정도 가능. `Backtester.run(..., param_overrides=)`. |
 
 ### 3.7 database/
@@ -278,6 +290,7 @@ quant_trader/
 | **discord_bot.py** | 디스코드 웹훅 전송 전용. 직접 사용보다는 `Notifier`를 통해 호출 권장 (이중화 보장). |
 | **liquidate_trigger.py** | `LIQUIDATE_TRIGGER_TOKEN`·`LIQUIDATE_TRIGGER_PORT` 설정 시 POST /liquidate (X-Token 또는 ?token=)으로 긴급 청산. |
 | **dashboard.py** | 콘솔 대시보드(선택). |
+| **dashboard_runtime_state.py** | 대시보드 런타임 상태 관리. 스케줄러·전략 실행 현황 등 실시간 상태를 웹 대시보드에 전달하는 중간 계층. |
 | **web_dashboard.py** | aiohttp. 포트폴리오 요약·포지션·최근 30일 스냅샷. 10초 폴링. `--mode dashboard` 또는 `python -m monitoring.web_dashboard [--port 8080]`. |
 
 ### 3.9 tests/
@@ -370,7 +383,7 @@ quant_trader/
 
 ## 5. 실행 모드별 데이터 흐름
 
-### 백테스트
+### 백테스트 (단일 종목)
 
 ```
 main.py (--mode backtest)
@@ -378,6 +391,18 @@ main.py (--mode backtest)
   → Backtester.run(df, strategy_name)  # strict_lookahead 기본, 전략.analyze → _simulate
   → Backtester.print_report(result)
   → ReportGenerator.generate_all(result)  # txt, html
+```
+
+### 백테스트 (다종목 모멘텀 포트폴리오)
+
+```
+main.py (--mode backtest_momentum_top --top-n 20 --rebalance-days 20)
+  → momentum_top_portfolio.run_momentum_top_portfolio_backtest()
+      → WatchlistManager(momentum_top) → 모멘텀 상위 N종목 선정
+      → 종목별 DataCollector.fetch_stock()
+      → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성
+      → 시장 국면 필터·포트폴리오 스탑 적용 (옵션)
+  → print_momentum_top_portfolio_report()
 ```
 
 ### 모의투자(paper)
@@ -468,7 +493,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 - **지표**: `core/indicator_engine.py`에서 pandas-ta로 RSI, MACD, 볼린저, MA, 스토캐스틱, ADX, ATR, OBV, volume_ratio 계산. 설정은 `config/strategies.yaml` → `indicators`.
 - **스코어링**: `core/signal_generator.py`가 가중치(weights)로 점수 합산 → buy_threshold/sell_threshold로 BUY/SELL 판단. **⚠️ 가중치는 미검증 직관값이며, 이 상태로 실전 투입하면 노이즈를 실행하는 것**. `collinearity_mode: representative_only`(권장)로 설정하면 MACD+볼린저+거래량 3개만 합산하여 다중공선성을 근본적으로 차단. 반드시 `check_correlation → optimize --include-weights --auto-correlation → validate --walk-forward` 파이프라인으로 최적화 후 사용. **스코어링 전략 단독으로 안정적 수익을 낼 가능성은 낮음** — 설계서 §4.5.1 참고.
-- **전략 (CLI 등록)**: scoring, mean_reversion, trend_following, **fundamental_factor**, **ensemble**. **momentum_factor**·**volatility_condition**은 앙상블 내부 구성용. 앙상블은 `ensemble.components`로 구성·가중치 설정(기본 예시에 fundamental_factor 포함). 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
+- **전략 (CLI 등록)**: scoring, mean_reversion, trend_following, **fundamental_factor**, **momentum_factor**, **ensemble**. **volatility_condition**은 앙상블 내부 구성용. 앙상블은 `ensemble.components`로 구성·가중치 설정(기본 예시에 fundamental_factor 포함). 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
 
 공식·파라미터·신호 조건 등 **상세는 루트의 `quant_trader_design.md` §3(지표), §4(전략), §5(리스크)** 참고.
 
@@ -541,6 +566,10 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ schedule 모드 + 런타임 락 | 모의 무한 루프, `data/.scheduler.lock` 중복 방지 |
 | ✅ 미국 티커·휴장일 | `fetch_stock`, `us_holidays.yaml`, NYSE 장세션 헬퍼 |
 | ✅ DART(선택) | `DART_API_KEY` / `settings.dart` 시 실적일 폴백 |
+| ✅ momentum_factor CLI 등록 | `--strategy momentum_factor`로 단독 사용 가능 (앙상블 구성도 유지) |
+| ✅ 다종목 모멘텀 포트폴리오 백테스트 | `--mode backtest_momentum_top` — 리밸런싱·시장 국면·포트폴리오 스탑 |
+| ✅ 전략 진단 보조 | `strategy_diagnostics.py` DiagnosticLine — 전략별 신호·점수 진단 |
+| ✅ 대시보드 런타임 상태 | `dashboard_runtime_state.py` — 스케줄러·전략 실행 현황 실시간 전달 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
@@ -646,6 +675,6 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 ---
 
-> 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`  
-> **문서 버전**: v2.5  
-> **최종 수정**: 2026-03-20 (`schedule` 모드·`runtime_lock`, `fundamental_factor`·앙상블 `components`, DART+`dart_loader`, 미국 시장·`us_holidays.yaml`, `deploy/`·테스트 목록 반영)
+> 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
+> **문서 버전**: v2.7
+> **최종 수정**: 2026-03-25 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)
