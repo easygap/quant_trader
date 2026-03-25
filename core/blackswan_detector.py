@@ -45,6 +45,7 @@ class BlackSwanDetector:
         self.cooldown_minutes = 60             # 기본 1시간 매매 중단
         self._cooldown_until = None            # 매매 재개 시각
         self._triggered_count = 0              # 발동 횟수
+        self._triggered_date = None            # 발동 일자 (일 단위 리셋용)
 
         # 쿨다운 해제 후 recovery 관리
         trading = self.config.trading if hasattr(self.config, "trading") else self.config.get("trading", {})
@@ -192,13 +193,17 @@ class BlackSwanDetector:
         return {"allowed": True, "reason": ""}
 
     def _activate_cooldown(self):
-        """쿨다운 활성화"""
+        """쿨다운 활성화. 일자가 바뀌면 발동 횟수를 리셋."""
+        today = datetime.now().date()
+        if self._triggered_date != today:
+            self._triggered_count = 0
+            self._triggered_date = today
         self._triggered_count += 1
         # 반복 발동 시 쿨다운 시간 증가 (최대 4시간)
         cooldown = min(self.cooldown_minutes * self._triggered_count, 240)
         self._cooldown_until = datetime.now() + timedelta(minutes=cooldown)
         logger.warning(
-            "⏸️ 매매 중단 — {}분 쿨다운 (발동 횟수: {})",
+            "⏸️ 매매 중단 — {}분 쿨다운 (금일 발동 횟수: {})",
             cooldown, self._triggered_count,
         )
 

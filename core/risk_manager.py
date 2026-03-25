@@ -284,14 +284,21 @@ class RiskManager:
         일일 손실 한도 확인
 
         Args:
-            daily_pnl: 당일 손익
+            daily_pnl: 당일 손익 (음수=손실, 양수=수익)
             capital: 총 자본
 
         Returns:
             True이면 매매 계속, False이면 중단
         """
+        if capital <= 0:
+            return False
         max_daily = self.risk_params.get("drawdown", {}).get("max_daily_loss", 0.03)
-        daily_loss_rate = abs(daily_pnl) / capital if capital > 0 and daily_pnl < 0 else 0
+
+        # 손실이 발생한 경우에만 한도 체크 (양수 PnL이면 항상 통과)
+        if daily_pnl >= 0:
+            return True
+
+        daily_loss_rate = abs(daily_pnl) / capital
 
         if daily_loss_rate >= max_daily:
             logger.warning(
