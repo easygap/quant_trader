@@ -699,10 +699,51 @@ def run_paper_trading(args):
     logger.info("  보유 종목: {}개", summary["position_count"])
 
 
+def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
+    """
+    라이브 전 필수 검증 게이트.
+    실패 항목 리스트를 반환 (빈 리스트 = 통과).
+    """
+    issues = []
+
+    # 1. 데이터 소스 일관성: KIS 폴백 허용 여부
+    ds = config.get("data_source", {})
+    if ds.get("allow_kis_fallback", True):
+        issues.append(
+            "data_source.allow_kis_fallback=true — KIS 비수정주가 폴백 가능. "
+            "false로 설정하여 백테스트/실전 소스 일치 필요."
+        )
+
+    # 2. 페이퍼 트레이딩 최소 거래 기록 확인
+    try:
+        from database.repositories import get_recent_sell_trades
+        recent_sells = get_recent_sell_trades(limit=50, mode="paper", account_key=strategy_name)
+        if len(recent_sells) < 20:
+            issues.append(
+                f"페이퍼 트레이딩 매도 기록 {len(recent_sells)}건 (최소 20건 필요). "
+                "충분한 페이퍼 트레이딩 후 진행하세요."
+            )
+    except Exception:
+        issues.append("페이퍼 트레이딩 기록 조회 실패 — DB 확인 필요.")
+
+    # 3. 스코어링 가중치 최적화 여부 (strategies.yaml 직관값 경고 확인)
+    scoring_cfg = config.get("scoring", {})
+    weights = scoring_cfg.get("weights", {})
+    # 기본 직관값 그대로인지 확인 (rsi_oversold=2, macd_golden_cross=2)
+    if weights.get("rsi_oversold") == 2 and weights.get("macd_golden_cross") == 2:
+        issues.append(
+            "스코어링 가중치가 기본 직관값 상태입니다. "
+            "python main.py --mode optimize --include-weights 실행 후 진행 권장."
+        )
+
+    return issues
+
+
 def run_live_trading(args):
     """
     실전 매매 모드 실행.
     이중 확인: ENABLE_LIVE_TRADING=true 환경변수 + --confirm-live 플래그 필수.
+    삼중 확인: 라이브 검증 게이트 (--force-live로 강제 가능).
     """
     if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
         logger.error(
@@ -723,6 +764,21 @@ def run_live_trading(args):
     logger.info("=" * 50)
 
     config = Config.get()
+
+    # ── 라이브 전 필수 검증 게이트 ──
+    force_live = getattr(args, "force_live", False)
+    if not force_live:
+        gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
+        if gate_issues:
+            logger.error("=" * 50)
+            logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
+            for issue in gate_issues:
+                logger.error("  - {}", issue)
+            logger.error("강제 진행: --force-live 플래그 추가")
+            logger.error("=" * 50)
+            sys.exit(1)
+        logger.info("✅ 라이브 전 검증 게이트 통과")
+
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
 
@@ -1055,6 +1111,10 @@ def main():
     parser.add_argument(
         "--confirm-live", action="store_true",
         help="실전 모드 진입 시 필수. 미지정 시 live 모드 진입 거부.",
+    )
+    parser.add_argument(
+        "--force-live", action="store_true",
+        help="라이브 검증 게이트 강제 통과. 검증 미완료 상태에서 실전 진입 시 사용.",
     )
     parser.add_argument(
         "--output-dir", type=str, default="reports",
