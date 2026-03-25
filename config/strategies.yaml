@@ -5,6 +5,24 @@
 # --- 활성 전략 ---
 active_strategy: "scoring"    # scoring, mean_reversion, trend_following
 
+# --- 시장 국면별 전략 파라미터 자동 조정 ---
+# bullish/caution/bearish 국면에 따라 매수 임계값, 손절 배수, 익절 목표를 동적으로 변경.
+# 하락장에서는 진입 조건을 엄격하게, 손절을 타이트하게, 익절을 빨리 가져가서 리스크를 줄인다.
+regime_adaptive:
+  enabled: true
+  bullish:
+    buy_threshold_offset: 0       # 기본 buy_threshold에 더할 값 (0 = 변경 없음)
+    stop_loss_multiplier: 1.0     # 기본 손절 비율에 곱할 배수 (1.0 = 변경 없음)
+    take_profit_multiplier: 1.0
+  caution:
+    buy_threshold_offset: 1       # 매수 조건을 +1 엄격하게
+    stop_loss_multiplier: 0.7     # 손절을 30% 타이트하게
+    take_profit_multiplier: 0.8   # 익절 목표를 20% 낮춰 빨리 실현
+  bearish:
+    buy_threshold_offset: 2       # 매수 조건을 +2 매우 엄격하게 (사실상 진입 차단 수준)
+    stop_loss_multiplier: 0.5     # 손절을 50% 타이트하게
+    take_profit_multiplier: 0.6   # 익절 목표를 40% 낮춰 빠른 실현
+
 # --- 기술 지표 파라미터 ---
 indicators:
   rsi:

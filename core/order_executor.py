@@ -125,15 +125,63 @@ class OrderExecutor:
             )
             return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
 
-        # 손절가 계산
-        stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
+        # 시장 국면에 따른 손절/익절 배수 조정
+        regime_sl_mult = 1.0
+        regime_tp_mult = 1.0
+        try:
+            from core.market_regime import get_regime_adjusted_params
+            regime_adj = get_regime_adjusted_params(self.config)
+            regime_sl_mult = regime_adj.get("stop_loss_multiplier", 1.0)
+            regime_tp_mult = regime_adj.get("take_profit_multiplier", 1.0)
+            if regime_sl_mult != 1.0 or regime_tp_mult != 1.0:
+                logger.info(
+                    "시장 국면 [{}]: 손절×{:.2f}, 익절×{:.2f}",
+                    regime_adj["regime"], regime_sl_mult, regime_tp_mult,
+                )
+        except Exception:
+            pass
 
-        # 포지션 크기 계산 (1% 룰)
-        quantity = self.risk_manager.calculate_position_size(capital, price, stop_loss)
+        # 손절가 계산 (국면 배수 적용)
+        stop_loss = self.risk_manager.calculate_stop_loss(price, atr, regime_multiplier=regime_sl_mult)
+
+        # 포지션 크기 계산 (1% 룰 + 신호 강도 스케일링)
+        quantity = self.risk_manager.calculate_position_size(
+            capital, price, stop_loss, signal_score=signal_score,
+        )
 
         if quantity <= 0:
             logger.warning("종목 {} 매수 수량 0 — 주문 스킵", symbol)
             return {"success": False, "reason": "계산된 수량이 0"}
+
+        # 상관관계 기반 포지션 축소
+        positions = get_all_positions(account_key=self.account_key if self.account_key else None)
+        existing_symbols = [p.symbol for p in positions]
+        corr_result = self.risk_manager.check_correlation_risk(symbol, existing_symbols)
+        if corr_result["scale"] < 1.0:
+            scaled_qty = max(1, int(quantity * corr_result["scale"]))
+            logger.info(
+                "종목 {} 상관관계 축소: {}주 → {}주 ({})",
+                symbol, quantity, scaled_qty, corr_result["reason"],
+            )
+            quantity = scaled_qty
+
+        # 갭 리스크 체크: 당일 시가가 전일 종가 대비 큰 폭 갭업이면 매수 차단
+        gap_cfg = (self.config.risk_params or {}).get("gap_risk", {})
+        if gap_cfg.get("enabled", False) and gap_cfg.get("gap_up_entry_block", 0) > 0:
+            try:
+                from core.data_collector import DataCollector
+                df_recent = DataCollector().fetch_stock(symbol)
+                if df_recent is not None and len(df_recent) >= 2:
+                    prev_close = float(df_recent["close"].iloc[-2])
+                    today_open = float(df_recent["open"].iloc[-1]) if "open" in df_recent.columns else price
+                    if prev_close > 0:
+                        gap_pct = (today_open - prev_close) / prev_close
+                        if gap_pct >= gap_cfg["gap_up_entry_block"]:
+                            msg = f"갭업 +{gap_pct*100:.1f}% (기준 +{gap_cfg['gap_up_entry_block']*100:.0f}%) — 추격매수 차단"
+                            logger.warning("종목 {} 매수 스킵: {}", symbol, msg)
+                            return {"success": False, "reason": msg}
+            except Exception as e:
+                logger.debug("갭 리스크 체크 스킵: {}", e)
 
         # 실적 발표일 필터: 전후 N일 이내이면 신규 매수 금지
         skip_earnings_days = int(self.config.trading.get("skip_earnings_days", 0))
@@ -158,8 +206,7 @@ class OrderExecutor:
                     logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, msg)
                     return {"success": False, "reason": msg}
 
-        # 분산 투자 체크 (업종 비중 포함)
-        positions = get_all_positions()
+        # 분산 투자 체크 (업종 비중 포함, 상관 체크에서 이미 조회한 positions 재활용)
         sector_map = self._get_sector_map_cached()
         div_check = self.risk_manager.check_diversification(
             len(positions),
@@ -207,8 +254,8 @@ class OrderExecutor:
             )
             return {"success": False, "reason": "사용 가능 현금 부족"}
 
-        # 익절가 계산
-        tp_info = self.risk_manager.calculate_take_profit(price)
+        # 익절가 계산 (국면 배수 적용)
+        tp_info = self.risk_manager.calculate_take_profit(price, regime_multiplier=regime_tp_mult)
 
         # 트레일링 스탑 계산
         trailing_stop = self.risk_manager.calculate_trailing_stop(price, atr)
