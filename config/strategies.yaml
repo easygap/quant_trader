@@ -3,11 +3,14 @@
 # ============================================================
 
 # --- 활성 전략 ---
-# scoring: 기술적 지표 단독 (높은 turnover, 비용에 취약)
-# fundamental_first: 펀더멘털 선별 → 기술 타이밍 (권장: 낮은 turnover, 비용 효율적)
-# mean_reversion: Z-Score 평균 회귀 (한국 시장 비권장 — 하락 종목 회귀 불발 위험)
-# ensemble: 다수결 앙상블 (가격 기반 전략 간 중복투표 위험)
-active_strategy: "fundamental_first"
+# 전략 선택. 검증 미통과 전략은 default off.
+# scoring: experimental (WF 실패 — 005930 OOS Sharpe -2.91)
+# mean_reversion: off (OOS Sharpe -3.20, 중단 권고 발동)
+# fundamental_factor: 보류 (pykrx PER 미수신, yfinance PER None — 데이터 한계)
+# fundamental_first: 보류 (상동)
+# ensemble: off (가격 기반 중복투표 구조)
+# *** 검증 통과 전까지 scoring을 기본값으로 사용. paper 모드에서만 운영. ***
+active_strategy: "scoring"
 
 # --- 시장 국면별 전략 파라미터 자동 조정 ---
 # bullish/caution/bearish 국면에 따라 매수 임계값, 손절 배수, 익절 목표를 동적으로 변경.
