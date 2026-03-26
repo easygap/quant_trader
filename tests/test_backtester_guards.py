@@ -90,34 +90,41 @@ class TestMonthlyTradeLimit:
     """월간 왕복 거래 횟수 상한 초과 시 신규 매수 차단."""
 
     def test_monthly_cap_blocks_excess_buys(self):
-        """max_monthly_roundtrips 초과 시 매수가 차단되어야 함."""
+        """max_monthly_roundtrips 초과 시 같은 달 내 매수가 차단되어야 함."""
         from config.config_loader import Config
 
         config = Config.get()
         pos_limits = config.risk_params.setdefault("position_limits", {})
         pos_limits["max_monthly_roundtrips"] = 2  # 월 2회 제한
+        # min_holding_days를 0으로 → 짧은 사이클 허용
+        pos_limits["min_holding_days"] = 0
 
         from backtest.backtester import Backtester
 
         bt = Backtester(config)
 
-        # 같은 달에 BUY/SELL 3회 반복
-        n = 60
-        df = _make_df(n=n, volume=500_000)
+        # 같은 달(1월) 안에 BUY/SELL 3회 반복 — 간격 3일씩
+        # bdate_range("2024-01-01", periods=22) → 22영업일 = 1월 내
+        dates = pd.bdate_range("2024-01-01", periods=22)
+        n = len(dates)
+        close = np.full(n, 10000.0)
+        df = pd.DataFrame(
+            {"open": close, "high": close, "low": close, "close": close, "volume": [500_000] * n},
+            index=dates,
+        )
         df["signal"] = "HOLD"
-        # 3번의 매수/매도 사이클 (같은 달 내)
-        for i, buy_day in enumerate([5, 15, 25]):
-            sell_day = buy_day + 5
-            if sell_day < n:
-                df.iloc[buy_day, df.columns.get_loc("signal")] = "BUY"
-                df.iloc[sell_day, df.columns.get_loc("signal")] = "SELL"
+        # 3번의 매수/매도 사이클: day 1/4, 7/10, 13/16
+        for buy_day, sell_day in [(1, 4), (7, 10), (13, 16)]:
+            df.iloc[buy_day, df.columns.get_loc("signal")] = "BUY"
+            df.iloc[sell_day, df.columns.get_loc("signal")] = "SELL"
 
         result = bt._simulate(df, initial_capital=100_000_000)
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
 
         # 월 2회 제한이므로 3번째 매수는 차단되어야 함
         assert len(buy_trades) <= 2, (
-            f"월간 거래 제한 미작동: {len(buy_trades)}회 매수 (최대 2회)"
+            f"월간 거래 제한 미작동: {len(buy_trades)}회 매수 (최대 2회). "
+            f"매수 날짜: {[str(t['date'].date()) for t in buy_trades]}"
         )
 
 
