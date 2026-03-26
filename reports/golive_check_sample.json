@@ -1,0 +1,57 @@
+{
+  "go_live": false,
+  "verdict": "NO-GO — 조건 미충족",
+  "checklist": {
+    "paper_days": {
+      "value": 0,
+      "required": ">= 60",
+      "pass": false
+    },
+    "total_trades": {
+      "value": 0,
+      "required": ">= 20",
+      "pass": false
+    },
+    "win_rate": {
+      "value": 0,
+      "required": ">= 40%",
+      "pass": false
+    },
+    "max_mdd": {
+      "value": 0,
+      "required": ">= -20%",
+      "pass": true
+    },
+    "sharpe_approx": {
+      "value": 0,
+      "required": ">= 0.3",
+      "pass": false
+    },
+    "api_failure_rate": {
+      "value": 0,
+      "required": "<= 5%",
+      "pass": true
+    },
+    "positive_months": {
+      "value": 0,
+      "required": ">= 2",
+      "pass": false
+    },
+    "cost_drag": {
+      "value": 0,
+      "required": "<= 3%",
+      "pass": true
+    }
+  },
+  "blockers": [
+    "Paper 운영 0일 — 최소 60영업일 필요"
+  ],
+  "summary": {
+    "paper_days": 0,
+    "cumulative_return": 0,
+    "max_mdd": 0,
+    "sharpe": 0,
+    "total_trades": 0,
+    "blackswan_events": 0
+  }
+}
