@@ -68,6 +68,13 @@ def _override_with_env(settings: dict) -> dict:
     if "DART_API_KEY" in os.environ:
         dart["api_key"] = os.environ["DART_API_KEY"].strip()
 
+    # Paper 전용 프로필: QUANT_AUTO_ENTRY=true 환경변수로만 auto_entry 활성화.
+    # 기본 config(settings.yaml)는 auto_entry 미설정 = False 유지.
+    # live 모드에서는 auto_entry와 무관하게 hard gate가 차단.
+    trading = settings.setdefault("trading", {})
+    if os.environ.get("QUANT_AUTO_ENTRY", "").lower() == "true":
+        trading["auto_entry"] = True
+
     return settings
 
 def load_settings() -> dict:
