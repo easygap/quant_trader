@@ -402,18 +402,17 @@ class Backtester:
                 if holding_days_now < min_holding_days and signal == "SELL":
                     signal = "HOLD"
 
+            # 월간 거래 횟수 제한: 상한 도달 시 BUY 신호를 HOLD로 차단
+            if signal == "BUY" and max_monthly_trades > 0:
+                try:
+                    _mk = date.strftime("%Y-%m")
+                except Exception:
+                    _mk = str(date)[:7]
+                if monthly_trade_counts.get(_mk, 0) >= max_monthly_trades:
+                    signal = "HOLD"
+
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
-                # 월간 거래 횟수 제한 체크
-                if max_monthly_trades > 0:
-                    month_key = str(date)[:7] if hasattr(date, 'strftime') else str(date)[:7]
-                    try:
-                        month_key = date.strftime("%Y-%m")
-                    except Exception:
-                        pass
-                    if monthly_trade_counts.get(month_key, 0) >= max_monthly_trades:
-                        signal = "HOLD"  # 이번 달 거래 상한 도달 → 매수 차단
-
                 costs = self.risk_manager.calculate_transaction_costs(
                     close, 1, "BUY", avg_daily_volume=row_volume
                 )
