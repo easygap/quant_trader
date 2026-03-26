@@ -70,8 +70,11 @@ class MeanReversionStrategy(BaseStrategy):
 
         analyzed["z_mean"] = analyzed["close"].rolling(window=lookback).mean()
         analyzed["z_std"] = analyzed["close"].rolling(window=lookback).std()
-        analyzed["z_score"] = (analyzed["close"] - analyzed["z_mean"]) / analyzed["z_std"]
-        analyzed["strategy_score"] = analyzed["z_score"].fillna(0.0)
+        # 안전: z_std == 0(횡보 구간) → NaN → fillna(0) → HOLD 유도 (Inf/NaN 전파 방지)
+        safe_std = analyzed["z_std"].replace(0, np.nan)
+        analyzed["z_score"] = (analyzed["close"] - analyzed["z_mean"]) / safe_std
+        analyzed["z_score"] = analyzed["z_score"].fillna(0.0)
+        analyzed["strategy_score"] = analyzed["z_score"]
 
         adx_ok = analyzed.get("adx", pd.Series(np.nan, index=analyzed.index)) < adx_filter
         rsi_buy = analyzed.get("rsi", pd.Series(np.nan, index=analyzed.index)) < 40

@@ -11,7 +11,7 @@ from database.repositories import (
     get_all_positions,
     get_trade_cash_summary,
     save_portfolio_snapshot,
-    get_portfolio_peak_value,
+    get_latest_peak_value,
 )
 
 
@@ -27,12 +27,22 @@ class PortfolioManager:
         self.initial_capital = self.config.risk_params.get(
             "position_sizing", {}
         ).get("initial_capital", 10000000)
-        # MDD 피크: DB에서 역대 최고 평가금을 복원 (재시작 시 리셋 방지)
-        db_peak = get_portfolio_peak_value(account_key=self.account_key)
-        self._peak_value = max(self.initial_capital, db_peak)
         self._is_live = self.config.trading.get("mode", "paper") == "live"
+
+        # Peak value 복구: DB 스냅샷에서 이전 세션의 peak을 가져와 MDD 연속성 유지
+        restored_peak = get_latest_peak_value(account_key=self.account_key)
+        if restored_peak is not None and restored_peak > self.initial_capital:
+            self._peak_value = restored_peak
+            logger.info("Peak value DB에서 복구: {:,.0f}원", restored_peak)
+        else:
+            self._peak_value = self.initial_capital
+
         logger.info(
+<<<<<<< HEAD
             "PortfolioManager 초기화 (초기 자본: {:,.0f}원, MDD 피크: {:,.0f}원, 모드: {}, 계좌: {})",
+=======
+            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, peak: {:,.0f}원, 모드: {}, 계좌: {})",
+>>>>>>> 9349351 (fix: 리스크 통제 강화 — 10건 안정성·안전성 패치)
             self.initial_capital,
             self._peak_value,
             "live" if self._is_live else "paper",
@@ -169,6 +179,7 @@ class PortfolioManager:
             mdd=summary["mdd"],
             position_count=summary["position_count"],
             account_key=self.account_key,
+            peak_value=self._peak_value,
         )
 
         logger.info(
