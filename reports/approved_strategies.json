@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-03-26T15:03:50.709195",
+  "strategies": [
+    {
+      "name": "scoring",
+      "status": "experimental",
+      "reason": "WF 0/2 실패, 10종목 평균 Sharpe -1.22"
+    },
+    {
+      "name": "mean_reversion",
+      "status": "off",
+      "reason": "10종목 평균 Sharpe -2.50, 중단 권고 발동"
+    },
+    {
+      "name": "fundamental_factor",
+      "status": "pending_validation",
+      "reason": "PER forwardPE 수신 복구, WF 미실행"
+    },
+    {
+      "name": "fundamental_first",
+      "status": "pending_validation",
+      "reason": "fundamental_factor 종속, WF 미실행"
+    },
+    {
+      "name": "ensemble",
+      "status": "off",
+      "reason": "구성 전략 모두 미승인"
+    }
+  ],
+  "approved_count": 0,
+  "note": "승인된 전략 없음. WF 통과 + 벤치마크 초과수익 양수 달성 시 승격 가능."
+}

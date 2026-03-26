@@ -273,13 +273,17 @@ def _yf_operating_income_yoy(t: "yf.Ticker") -> Optional[float]:
 
 
 def _yf_per(symbol: str) -> Optional[float]:
+    """yfinance PER: trailingPE 우선, 없으면 forwardPE 폴백."""
     if not HAS_YF:
         return None
     try:
         t = _yf_first_ticker(symbol)
         if t is None:
             return None
-        per = (t.info or {}).get("trailingPE")
+        info = t.info or {}
+        per = info.get("trailingPE")
+        if per is None:
+            per = info.get("forwardPE")
         return _clean_per(per)
     except Exception:
         return None
