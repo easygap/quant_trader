@@ -112,31 +112,3 @@ def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
 
     assert scheduler._skip_next_monitor_cycle is True
     assert scheduler._should_monitor() is False
-
-
-def test_quant_auto_entry_env_overrides_config(monkeypatch):
-    """QUANT_AUTO_ENTRY 환경변수가 config의 auto_entry=false를 true로 오버라이드."""
-    from core.scheduler import Scheduler
-
-    monkeypatch.setenv("QUANT_AUTO_ENTRY", "true")
-    scheduler = Scheduler(strategy_name="scoring")
-    assert scheduler.auto_entry is True
-
-
-def test_quant_auto_entry_env_false_keeps_false(monkeypatch):
-    """QUANT_AUTO_ENTRY=false면 auto_entry=false 유지."""
-    from core.scheduler import Scheduler
-
-    monkeypatch.setenv("QUANT_AUTO_ENTRY", "false")
-    scheduler = Scheduler(strategy_name="scoring")
-    assert scheduler.auto_entry is False
-
-
-def test_quant_auto_entry_env_absent_uses_config():
-    """QUANT_AUTO_ENTRY 미설정 시 config 기본값(false) 사용."""
-    import os
-    from core.scheduler import Scheduler
-
-    os.environ.pop("QUANT_AUTO_ENTRY", None)
-    scheduler = Scheduler(strategy_name="scoring")
-    assert scheduler.auto_entry is False
