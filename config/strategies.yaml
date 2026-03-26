@@ -155,7 +155,7 @@ mean_reversion:
     enabled: true                       # pykrx(우선) → yfinance(폴백) 순서로 조회
     per_min: 0                          # PER 하한 (0 = 적자 종목 제외). null 이면 검사 생략
     per_max: 50                         # PER 상한. null 이면 검사 생략
-    debt_ratio_max: 200                 # 부채비율(%) 상한. null 이면 검사 생략
+    debt_ratio_max: 600                 # 부채비율(%) 상한. yfinance debtToEquity 기준(차입금/자본). 한국 회계 부채비율과 다름. DART 사용 시 200으로 복원.
 
 # --- 추세 추종 전략 ---
 # 진입이 늦는 구조: ADX·200일선·MACD 세 조건 동시 충족 = 이미 상승한 뒤. 손실 거래 잦고 승률 40% 이하 가능.

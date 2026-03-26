@@ -581,11 +581,17 @@ def run_paper_trading(args):
     from core.portfolio_manager import PortfolioManager
     from core.notifier import Notifier
     from database.repositories import get_position, get_all_positions
+    from strategies import is_strategy_allowed
 
     config = Config.get()
+    strategy_name = getattr(args, "strategy", None) or config.active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "paper")
+    if not allowed:
+        logger.error("🚫 전략 실행 차단: {}", reason)
+        sys.exit(1)
 
     logger.info("=" * 50)
-    logger.info("📄 페이퍼 트레이딩 모드 시작")
+    logger.info("📄 페이퍼 트레이딩 모드 시작 (전략: {}, 상태: experimental 이상)", strategy_name)
     logger.info("=" * 50)
 
     collector = DataCollector()
@@ -803,9 +809,16 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
 def run_live_trading(args):
     """
     실전 매매 모드 실행.
-    이중 확인: ENABLE_LIVE_TRADING=true 환경변수 + --confirm-live 플래그 필수.
-    삼중 확인: 라이브 검증 게이트 (--force-live로 강제 가능).
+    4중 확인: 전략 상태 → 환경변수 → --confirm-live → 5개 조건 hard gate.
     """
+    from strategies import is_strategy_allowed
+    strategy_name = getattr(args, "strategy", None) or Config.get().active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "live")
+    if not allowed:
+        logger.error("🚫 Live 전략 실행 차단: {}", reason)
+        logger.error("전략 상태를 live_candidate로 승격하려면 승인 기준을 충족하세요.")
+        sys.exit(1)
+
     if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
         logger.error(
             "실전 모드 진입 거부: 환경변수 ENABLE_LIVE_TRADING=true 가 필요합니다. "
@@ -888,7 +901,13 @@ def run_scheduler_loop(args):
     systemd 상시 구동 시 `--mode paper` 한 사이클 종료와 달리 프로세스를 유지한다.
     config.trading.mode 가 live 이면 거부 (--mode live --confirm-live 사용).
     """
+    from strategies import is_strategy_allowed
     config = Config.get()
+    strategy_name = getattr(args, "strategy", None) or config.active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "schedule")
+    if not allowed:
+        logger.error("🚫 스케줄러 전략 실행 차단: {}", reason)
+        sys.exit(1)
     if str(config.trading.get("mode", "paper")).lower() == "live":
         logger.error(
             "config.trading.mode 가 live 입니다. 실전 루프는 "
