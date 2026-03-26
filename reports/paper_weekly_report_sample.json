@@ -1,0 +1,25 @@
+{
+  "period": "2026-03-20 ~ 2026-03-26",
+  "portfolio": {
+    "start_value": 10000000,
+    "end_value": 10000000,
+    "weekly_return_pct": 0.0,
+    "week_mdd_pct": 0.0
+  },
+  "trades": {
+    "total": 0,
+    "buys": 0,
+    "sells": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "total_pnl": 0,
+    "total_cost": 0,
+    "avg_price_gap": 0
+  },
+  "by_strategy": {},
+  "daily_pnl": {},
+  "events": {},
+  "critical_events": [],
+  "note": "Paper 운영 0일차 — 거래 이력 없음. 최소 60영업일 운영 후 GoLive 판정 가능."
+}

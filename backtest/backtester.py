@@ -217,6 +217,14 @@ class Backtester:
         div_config = self.risk_params.get("diversification", {})
         pos_limits = self.risk_params.get("position_limits") or {}
 
+        # 유동성 제한: 주문량이 일평균 거래량의 N%를 초과하면 매수 차단
+        liq_config = self.risk_params.get("liquidity_filter") or {}
+        bt_max_participation = float(liq_config.get("backtest_max_participation_rate", 0.01))  # 기본 1%
+
+        # 월간 거래 횟수 제한 (과매매 억제)
+        max_monthly_trades = int(pos_limits.get("max_monthly_roundtrips", 0))  # 0이면 무제한
+        monthly_trade_counts: dict[str, int] = {}  # "YYYY-MM" -> count
+
         sl_rate = sl_config.get("fixed_rate", 0.03)
         sl_type = sl_config.get("type", "fixed")
         atr_mult = sl_config.get("atr_multiplier", 2.0)
@@ -394,6 +402,15 @@ class Backtester:
                 if holding_days_now < min_holding_days and signal == "SELL":
                     signal = "HOLD"
 
+            # 월간 거래 횟수 제한: 상한 도달 시 BUY 신호를 HOLD로 차단
+            if signal == "BUY" and max_monthly_trades > 0:
+                try:
+                    _mk = date.strftime("%Y-%m")
+                except Exception:
+                    _mk = str(date)[:7]
+                if monthly_trade_counts.get(_mk, 0) >= max_monthly_trades:
+                    signal = "HOLD"
+
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -418,6 +435,14 @@ class Backtester:
                     max(0, qty_by_total_cap),
                 )
 
+                # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
+                if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
+                    max_qty_by_volume = int(row_volume * bt_max_participation)
+                    if max_qty_by_volume <= 0:
+                        quantity = 0  # 유동성 부족 → 매수 불가
+                    elif quantity > max_qty_by_volume:
+                        quantity = max_qty_by_volume  # 유동성 한도까지만 매수
+
                 if quantity > 0:
                     buy_costs = self.risk_manager.calculate_transaction_costs(
                         close, quantity, "BUY", avg_daily_volume=row_volume
@@ -441,6 +466,13 @@ class Backtester:
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
                         "commission": commission,
                     })
+                    # 월간 거래 횟수 카운트
+                    if max_monthly_trades > 0:
+                        try:
+                            mk = date.strftime("%Y-%m")
+                        except Exception:
+                            mk = str(date)[:7]
+                        monthly_trade_counts[mk] = monthly_trade_counts.get(mk, 0) + 1
 
             elif signal == "SELL" and position > 0:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -605,9 +637,46 @@ class Backtester:
         else:
             commission_to_profit_ratio = None
 
+        # ── 누락 메트릭 보강 ──────────────────────────────────
+
+        # 1) CAGR: 복리 연환산 수익률
+        cagr = 0.0
+        if initial_capital > 0 and final_value > 0 and years_bt > 0:
+            cagr = ((final_value / initial_capital) ** (1 / years_bt) - 1) * 100
+
+        # 2) Turnover: 연간 총 거래대금 / 평균 자산 (100% = 전 자산 1회 회전)
+        total_buy_amount = sum(t["price"] * t["quantity"] for t in trades if t["action"] == "BUY")
+        avg_equity = equity["value"].mean() if not equity.empty else initial_capital
+        annual_turnover = (total_buy_amount / avg_equity / years_bt * 100) if avg_equity > 0 and years_bt > 0 else 0
+
+        # 3) 거래당 기대값 (Expected Value per Trade)
+        all_pnl = [t["pnl"] for t in sell_trades]
+        ev_per_trade = float(np.mean(all_pnl)) if all_pnl else 0.0
+
+        # 4) 월별 성과 분해
+        monthly_returns = {}
+        if not equity.empty:
+            eq_copy = equity[["date", "value"]].copy()
+            eq_copy["date"] = pd.to_datetime(eq_copy["date"])
+            eq_copy = eq_copy.set_index("date").resample("ME").last()
+            if len(eq_copy) > 1:
+                m_ret = eq_copy["value"].pct_change().dropna()
+                for idx, val in m_ret.items():
+                    monthly_returns[idx.strftime("%Y-%m")] = round(val * 100, 2)
+
+        # 5) 비용 반영 전 수익률 (gross return) — 비용 차감 전 성과로 비용 영향 정량화
+        total_costs = total_commission + sum(
+            t.get("commission", 0) for t in sell_trades
+        )
+        # sell_trades의 tax는 pnl에 이미 차감됨, commission은 별도 기록
+        gross_pnl = sum(t["pnl"] for t in sell_trades) + total_costs
+        gross_return = (gross_pnl / initial_capital * 100) if initial_capital > 0 else 0
+        cost_drag = round(gross_return - total_return, 2)
+
         return {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
+            "cagr": round(cagr, 2),
             "sharpe_ratio": round(sharpe, 2),
             "sortino_ratio": round(sortino, 2),
             "max_drawdown": round(max_drawdown, 2),
@@ -630,12 +699,18 @@ class Backtester:
             "commission_to_profit_ratio": commission_to_profit_ratio,
             "monthly_roundtrips_per_symbol": monthly_roundtrips_per_symbol,
             "annual_roundtrips_total": annual_roundtrips_total,
+            "annual_turnover_pct": round(annual_turnover, 1),
+            "ev_per_trade": round(ev_per_trade, 0),
+            "monthly_returns": monthly_returns,
+            "gross_return": round(gross_return, 2),
+            "cost_drag_pct": cost_drag,
         }
 
     @staticmethod
     def _empty_metrics():
         return {
-            "total_return": 0, "annual_return": 0, "sharpe_ratio": 0,
+            "total_return": 0, "annual_return": 0, "cagr": 0,
+            "sharpe_ratio": 0,
             "sortino_ratio": 0, "max_drawdown": 0, "mdd_recovery_days": 0,
             "var_95_daily": 0, "cvar_95_daily": 0, "max_consecutive_losses": 0,
             "win_rate": 0, "profit_factor": 0,
@@ -646,6 +721,11 @@ class Backtester:
             "commission_to_profit_ratio": None,
             "monthly_roundtrips_per_symbol": 0.0,
             "annual_roundtrips_total": 0.0,
+            "annual_turnover_pct": 0.0,
+            "ev_per_trade": 0,
+            "monthly_returns": {},
+            "gross_return": 0,
+            "cost_drag_pct": 0,
         }
 
     def print_report(self, result: dict):

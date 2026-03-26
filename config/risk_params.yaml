@@ -56,6 +56,7 @@ liquidity_filter:
   min_avg_trading_value_20d_krw: 5000000000  # 20일 평균 거래대금(원) 하한. 50억 = 5e9
   strict: true                       # true면 거래대금 데이터 없는 종목도 제외. false면 데이터 없으면 통과(수동 watchlist용)
   check_on_entry: true               # true면 OrderExecutor 매수 직전 유동성 재검증 (watchlist 구축 이후 유동성 변화 감지)
+  backtest_max_participation_rate: 0.01  # 백테스트 시 주문량 상한: 일평균 거래량의 1%. 초과분은 축소·차단
 
 # --- 분산 투자 / 자금 관리 ---
 # 1% 룰은 종목당 최대 손실만 제한. 아래 상한이 없으면 다수 종목 동시 신호 시 전 재산이 주식에 투입될 수 있음.
@@ -78,6 +79,7 @@ diversification:
 position_limits:
   max_holding_days: 30        # 0이면 비활성. 이 일수 초과 보유 포지션은 자동 매도
   min_holding_days: 5         # 0이면 비활성. 매수 후 이 일수 미만이면 매도 차단 (손절·블랙스완 예외). 과매매 방지를 위해 3→5일로 강화.
+  max_monthly_roundtrips: 8   # 0이면 무제한. 백테스트 시 월간 왕복 거래 횟수 상한. 초과 시 신규 매수 차단 (과매매 억제)
 
 # --- 최대 낙폭 (MDD) 제한 ---
 drawdown:
