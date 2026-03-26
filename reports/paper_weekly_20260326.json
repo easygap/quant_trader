@@ -1,0 +1,26 @@
+{
+  "period": "2026-03-19 ~ 2026-03-26",
+  "portfolio": {
+    "start_value": 9996107.0,
+    "end_value": 9996107.0,
+    "weekly_return_pct": 0.0,
+    "week_mdd_pct": 0.0
+  },
+  "trades": {
+    "total": 1,
+    "buys": 1,
+    "sells": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0,
+    "total_pnl": 0,
+    "total_cost": 3893.0,
+    "avg_price_gap": 0.0
+  },
+  "by_strategy": {},
+  "daily_pnl": {},
+  "events": {
+    "SIGNAL": 4
+  },
+  "critical_events": []
+}
