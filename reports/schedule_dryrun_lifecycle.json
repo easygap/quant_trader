@@ -1,20 +1,3 @@
-[
-  {
-    "id": 1,
-    "action": "BUY",
-    "symbol": "005930",
-    "quantity": 36,
-    "price": 54200.0,
-    "signal_at": "2026-03-26 17:11:17.977608",
-    "order_at": "2026-03-26 17:11:18.805762",
-    "executed_at": "2026-03-26 17:11:18.806761",
-    "expected_price": 54200.0,
-    "price_gap": 0.0,
-    "commission": 293.0,
-    "tax": 0.0,
-    "slippage": 3600.0,
-    "strategy": "scoring",
-    "reason": "shakedown BUY test",
-    "mode": "paper"
-  }
-]
+{
+  "note": "TradeHistory 0건 — 현재 3종목 모두 SELL 신호라 BUY 미발생. auto_entry=True이지만 매수 신호 없음."
+}
