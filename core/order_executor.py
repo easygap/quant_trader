@@ -408,8 +408,8 @@ class OrderExecutor:
         pnl = (price - position.avg_price) * sell_qty - costs["commission"] - total_tax
         pnl_rate = ((price / position.avg_price) - 1) * 100
 
-        # 주문 전 안전 체크
-        pre_check = self._pre_order_check()
+        # 주문 전 안전 체크 (매도: 쿨다운 중에도 허용)
+        pre_check = self._pre_order_check(action="SELL")
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
@@ -491,7 +491,8 @@ class OrderExecutor:
 
     def check_stop_loss_take_profit(self, symbol: str, current_price: float) -> dict:
         """
-        보유 종목의 손절/익절/트레일링 스탑 체크
+        보유 종목의 손절/익절/트레일링 스탑 체크.
+        PositionLock 내부에서 실행하여 execute_sell과의 이중 매도 경합을 방지합니다.
 
         체크 순서: 익절(TP) → 부분 익절(TP1) → 트레일링 스탑(TS) → 손절(SL)
         이익 실현을 우선하여 수익 보호를 극대화한다.
@@ -504,6 +505,11 @@ class OrderExecutor:
             {"action": "STOP_LOSS" / "TAKE_PROFIT" / "TAKE_PROFIT_PARTIAL" / "TRAILING_STOP" / None,
              "price": 현재가, "partial_ratio": 부분 매도 비율 (부분 익절 시)}
         """
+        with PositionLock():
+            return self._check_stop_loss_take_profit_impl(symbol, current_price)
+
+    def _check_stop_loss_take_profit_impl(self, symbol: str, current_price: float) -> dict:
+        """SL/TP 실제 로직 (Lock 내부에서 호출)."""
         position = get_position(symbol, account_key=self.account_key)
         if not position:
             return {"action": None}
@@ -608,9 +614,12 @@ class OrderExecutor:
     # 안전 체크 및 재시도
     # =============================================================
 
-    def _pre_order_check(self) -> dict:
+    def _pre_order_check(self, action: str = "BUY") -> dict:
         """
         주문 전 안전 체크 (거래 시간 + 블랙스완)
+
+        Args:
+            action: "BUY" 또는 "SELL". 쿨다운 중에도 매도는 허용.
 
         Returns:
             {"allowed": True/False, "reason": 사유}
@@ -625,8 +634,8 @@ class OrderExecutor:
             logger.warning("⏰ 주문 차단: {}", time_check["reason"])
             return time_check
 
-        # 블랙스완 쿨다운 체크
-        bs_check = self.blackswan.can_trade()
+        # 블랙스완 쿨다운 체크 (매도는 쿨다운 중에도 허용)
+        bs_check = self.blackswan.can_trade(action=action)
         if not bs_check["allowed"]:
             logger.warning("🚨 주문 차단: {}", bs_check["reason"])
             return bs_check
