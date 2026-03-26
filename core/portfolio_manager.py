@@ -39,11 +39,7 @@ class PortfolioManager:
             self._peak_value = self.initial_capital
 
         logger.info(
-<<<<<<< HEAD
-            "PortfolioManager 초기화 (초기 자본: {:,.0f}원, MDD 피크: {:,.0f}원, 모드: {}, 계좌: {})",
-=======
             "PortfolioManager 초기화 (초기 자본: {:,.0f}원, peak: {:,.0f}원, 모드: {}, 계좌: {})",
->>>>>>> 9349351 (fix: 리스크 통제 강화 — 10건 안정성·안전성 패치)
             self.initial_capital,
             self._peak_value,
             "live" if self._is_live else "paper",
