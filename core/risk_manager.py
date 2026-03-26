@@ -365,11 +365,17 @@ class RiskManager:
                 )
                 self._is_halted = True
         else:
-            recovery_scale = self.risk_params.get("drawdown", {}).get("recovery_scale", 0.5)
-            if self._is_halted and mdd < max_mdd * (1 - recovery_scale):
-                # MDD가 한도 대비 회복되면 재개 (recovery_scale: 복귀 시 축소 비율)
-                logger.info("MDD 회복 — 매매 재개 (축소 규모)")
-                self._is_halted = False
+            if self._is_halted:
+                # 재개 조건: MDD가 halt 기준의 절반 이하로 회복될 때만 허용.
+                # 기존 recovery_scale 로직은 scale이 작을 때 halt 기준 초과 상태에서
+                # 재개될 수 있는 결함이 있었음. 이제 max_mdd / 2를 고정 기준으로 사용.
+                recovery_threshold = max_mdd / 2
+                if mdd < recovery_threshold:
+                    logger.info(
+                        "MDD 회복 — 매매 재개 (MDD={:.2f}% < 재개 기준={:.2f}%)",
+                        mdd * 100, recovery_threshold * 100,
+                    )
+                    self._is_halted = False
 
         return {
             "mdd": round(mdd * 100, 2),

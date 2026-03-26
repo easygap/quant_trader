@@ -37,6 +37,15 @@ def _get_kospi_top_n_symbols(
     universe = (cfg.risk_params or {}).get("backtest_universe") or {}
     mode = (universe.get("mode") or "current").strip().lower()
     exclude_admin = universe.get("exclude_administrative", True)
+
+    # 생존자 편향 경고: current 모드는 현재 시점 종목을 과거에 적용하므로 벤치마크가 과대평가됨
+    if mode == "current":
+        logger.warning(
+            "⚠️ 벤치마크 생존자 편향 경고: universe_mode='current'는 현재 시점 상위 종목을 "
+            "과거 구간에 적용합니다. 상장폐지·시총 하락 종목이 제외되어 벤치마크가 과대평가됩니다. "
+            "완화하려면 risk_params.backtest_universe.mode를 'kospi200'으로 설정하세요."
+        )
+
     try:
         stocks = DataCollector.get_krx_stock_list(
             as_of_date=as_of_date,
