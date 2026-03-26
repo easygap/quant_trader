@@ -106,7 +106,9 @@ class Scheduler:
         self.blackswan = BlackSwanDetector(self.config)
         self.portfolio = PortfolioManager(self.config, account_key=self.strategy_name)
         self.discord = Notifier(self.config)
-        self.auto_entry = self.config.trading.get("auto_entry", False)
+        self.auto_entry = os.environ.get(
+            "QUANT_AUTO_ENTRY", str(self.config.trading.get("auto_entry", False))
+        ).lower() in ("true", "1", "yes")
 
         self.monitor_interval = 600  # 기본 10분 (적응형 주기로 동적 변경됨)
 
