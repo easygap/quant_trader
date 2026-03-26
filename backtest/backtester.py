@@ -638,9 +638,46 @@ class Backtester:
         else:
             commission_to_profit_ratio = None
 
+        # ── 누락 메트릭 보강 ──────────────────────────────────
+
+        # 1) CAGR: 복리 연환산 수익률
+        cagr = 0.0
+        if initial_capital > 0 and final_value > 0 and years_bt > 0:
+            cagr = ((final_value / initial_capital) ** (1 / years_bt) - 1) * 100
+
+        # 2) Turnover: 연간 총 거래대금 / 평균 자산 (100% = 전 자산 1회 회전)
+        total_buy_amount = sum(t["price"] * t["quantity"] for t in trades if t["action"] == "BUY")
+        avg_equity = equity["value"].mean() if not equity.empty else initial_capital
+        annual_turnover = (total_buy_amount / avg_equity / years_bt * 100) if avg_equity > 0 and years_bt > 0 else 0
+
+        # 3) 거래당 기대값 (Expected Value per Trade)
+        all_pnl = [t["pnl"] for t in sell_trades]
+        ev_per_trade = float(np.mean(all_pnl)) if all_pnl else 0.0
+
+        # 4) 월별 성과 분해
+        monthly_returns = {}
+        if not equity.empty:
+            eq_copy = equity[["date", "value"]].copy()
+            eq_copy["date"] = pd.to_datetime(eq_copy["date"])
+            eq_copy = eq_copy.set_index("date").resample("ME").last()
+            if len(eq_copy) > 1:
+                m_ret = eq_copy["value"].pct_change().dropna()
+                for idx, val in m_ret.items():
+                    monthly_returns[idx.strftime("%Y-%m")] = round(val * 100, 2)
+
+        # 5) 비용 반영 전 수익률 (gross return) — 비용 차감 전 성과로 비용 영향 정량화
+        total_costs = total_commission + sum(
+            t.get("commission", 0) for t in sell_trades
+        )
+        # sell_trades의 tax는 pnl에 이미 차감됨, commission은 별도 기록
+        gross_pnl = sum(t["pnl"] for t in sell_trades) + total_costs
+        gross_return = (gross_pnl / initial_capital * 100) if initial_capital > 0 else 0
+        cost_drag = round(gross_return - total_return, 2)
+
         return {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
+            "cagr": round(cagr, 2),
             "sharpe_ratio": round(sharpe, 2),
             "sortino_ratio": round(sortino, 2),
             "max_drawdown": round(max_drawdown, 2),
@@ -663,12 +700,18 @@ class Backtester:
             "commission_to_profit_ratio": commission_to_profit_ratio,
             "monthly_roundtrips_per_symbol": monthly_roundtrips_per_symbol,
             "annual_roundtrips_total": annual_roundtrips_total,
+            "annual_turnover_pct": round(annual_turnover, 1),
+            "ev_per_trade": round(ev_per_trade, 0),
+            "monthly_returns": monthly_returns,
+            "gross_return": round(gross_return, 2),
+            "cost_drag_pct": cost_drag,
         }
 
     @staticmethod
     def _empty_metrics():
         return {
-            "total_return": 0, "annual_return": 0, "sharpe_ratio": 0,
+            "total_return": 0, "annual_return": 0, "cagr": 0,
+            "sharpe_ratio": 0,
             "sortino_ratio": 0, "max_drawdown": 0, "mdd_recovery_days": 0,
             "var_95_daily": 0, "cvar_95_daily": 0, "max_consecutive_losses": 0,
             "win_rate": 0, "profit_factor": 0,
@@ -679,6 +722,11 @@ class Backtester:
             "commission_to_profit_ratio": None,
             "monthly_roundtrips_per_symbol": 0.0,
             "annual_roundtrips_total": 0.0,
+            "annual_turnover_pct": 0.0,
+            "ev_per_trade": 0,
+            "monthly_returns": {},
+            "gross_return": 0,
+            "cost_drag_pct": 0,
         }
 
     def print_report(self, result: dict):
