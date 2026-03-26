@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-03-26T15:24:44.098532",
+  "go_live": false,
+  "verdict": "NO-GO research-only",
+  "hard_blockers": [
+    {
+      "desc": "승인전략 0개"
+    },
+    {
+      "desc": "Paper 0일"
+    },
+    {
+      "desc": "벤치마크 초과수익 음수"
+    }
+  ],
+  "soft_blockers": [
+    {
+      "desc": "pykrx 전면불가"
+    },
+    {
+      "desc": "yfinance debtToEquity 불일치 (600%완화)"
+    }
+  ],
+  "default_strategy": "scoring (experimental, paper only)"
+}

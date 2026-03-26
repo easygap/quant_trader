@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-03-26T15:03:50.708194",
+  "pykrx": {
+    "status": "FAIL",
+    "reason": "get_market_fundamental 빈 결과 반환 — API 변경 또는 네트워크 차단"
+  },
+  "yfinance": {
+    "status": "OK",
+    "per_available": true,
+    "per_field": "forwardPE (trailingPE fallback)",
+    "roe_available": true,
+    "debt_available": true,
+    "note": "debtToEquity가 한국 회계기준과 다름 — 부채비율 과대 가능"
+  },
+  "fdr": {
+    "status": "OK",
+    "price_data": true,
+    "adjusted": true
+  },
+  "summary": "yfinance로 PER/ROE/영업이익 수신 가능. pykrx 불가. 부채비율은 yfinance 기준 주의."
+}
