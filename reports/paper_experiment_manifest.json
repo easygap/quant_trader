@@ -1,14 +1,13 @@
 {
   "strategy_name": "scoring",
-  "start_date": "2026-03-27",
-  "end_date": "2026-06-19 (60영업일)",
+  "mode": "schedule (paper)",
   "watchlist": [
     "005930",
     "000660",
     "035420"
   ],
   "benchmark": "KOSPI (KS11)",
-  "git_commit": "f6ed8ea",
+  "git_commit": "9c88254",
   "config_hash": "5611a6d9c5d4823c",
   "fee_settings": {
     "commission_rate": 0.00015,
@@ -16,7 +15,11 @@
     "slippage": 0.0005,
     "dynamic_slippage": true
   },
-  "run_mode": "paper (schedule)",
-  "run_command": "python main.py --mode schedule --strategy scoring",
-  "operator_notes": "scoring experimental 상태. 모든 전략 검증 미통과. live 전환 불가. 60영업일 관측 후 GoLive 체크."
+  "scheduled_run_time": "장전 08:50, 장중 10분 간격, 장마감 15:40",
+  "market_hours_policy": "한국 장: 09:00~15:30. 장전 08:50에 신호 분석. 비장중 시간에는 대기. 장 시작 30분/종료 30분 매수 차단.",
+  "start_date": "2026-03-27",
+  "end_date_target": "2026-06-19 (60영업일)",
+  "operator_notes": "scoring experimental. live 불가. 60영업일 paper 관측 후 GoLive 판정.",
+  "dryrun_timestamp": "2026-03-26T17:20:27.225098",
+  "dryrun_result": "PASS — schedule 시작, 장전분석, 장마감리포트, OperationEvent/TradeHistory/PortfolioSnapshot/DailyReport 모두 확인"
 }
