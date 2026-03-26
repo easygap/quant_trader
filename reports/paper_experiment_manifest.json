@@ -1,0 +1,22 @@
+{
+  "strategy_name": "scoring",
+  "start_date": "2026-03-27",
+  "end_date": "2026-06-19 (60영업일)",
+  "watchlist": [
+    "005930",
+    "000660",
+    "035420"
+  ],
+  "benchmark": "KOSPI (KS11)",
+  "git_commit": "f6ed8ea",
+  "config_hash": "5611a6d9c5d4823c",
+  "fee_settings": {
+    "commission_rate": 0.00015,
+    "tax_rate": 0.002,
+    "slippage": 0.0005,
+    "dynamic_slippage": true
+  },
+  "run_mode": "paper (schedule)",
+  "run_command": "python main.py --mode schedule --strategy scoring",
+  "operator_notes": "scoring experimental 상태. 모든 전략 검증 미통과. live 전환 불가. 60영업일 관측 후 GoLive 체크."
+}
