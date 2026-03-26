@@ -650,15 +650,24 @@ def run_paper_trading(args):
                 continue
 
             # 신호 생성 (평균회귀 시 symbol 전달 → 펀더멘털 필터 사용)
+            _sig_time = datetime.now()
             signal_info = strategy.generate_signal(df, symbol=symbol)
+            signal_info["_signal_at"] = _sig_time
 
             logger.info(
                 "종목 {} | 신호: {} | 점수: {} | 상세: {}",
                 symbol, signal_info["signal"], signal_info["score"], signal_info["details"],
             )
 
+            # 모든 비-HOLD 신호를 OperationEvent에 기록
             if signal_info["signal"] != "HOLD":
                 discord.send_signal_alert(symbol, signal_info)
+                try:
+                    from monitoring.paper_monitor import log_event
+                    log_event("SIGNAL", f"{signal_info['signal']} {symbol} score={signal_info.get('score', 0)}",
+                              symbol=symbol, strategy=strategy_name, mode="paper")
+                except Exception:
+                    pass
 
             if signal_info["signal"] == "BUY" and not get_position(symbol, account_key=account_key):
                 from core.market_regime import check_market_regime
@@ -684,6 +693,7 @@ def run_paper_trading(args):
                     reason="paper auto-entry",
                     strategy=args.strategy,
                     avg_daily_volume=avg_vol,
+                    signal_at=signal_info.get("_signal_at"),
                 )
                 if order_result.get("success"):
                     discord.send_trade_alert(order_result)
