@@ -600,6 +600,13 @@ def run_paper_trading(args):
     discord = Notifier(config)
     executor = OrderExecutor(config, account_key=account_key)
 
+    raw_watchlist = config.watchlist  # settings.yaml의 watchlist.symbols (설정 원본)
+    if not raw_watchlist:
+        logger.error(
+            "🚫 watchlist가 비어 있습니다. config/settings.yaml의 watchlist.symbols를 설정하세요. "
+            "기본 종목(005930) 폴백을 사용하지 않습니다."
+        )
+        sys.exit(1)
     watchlist = WatchlistManager(config).resolve()
 
     logger.info("관심 종목: {} (계좌/전략: {})", watchlist, account_key or "default")
@@ -705,6 +712,19 @@ def run_paper_trading(args):
     logger.info("  보유 종목: {}개", summary["position_count"])
 
 
+def _compute_config_hash() -> str:
+    """strategies.yaml + risk_params.yaml의 SHA256 해시. 설정 변경 감지용."""
+    import hashlib
+    from pathlib import Path
+    config_dir = Path(__file__).parent / "config"
+    h = hashlib.sha256()
+    for fname in sorted(["strategies.yaml", "risk_params.yaml"]):
+        fpath = config_dir / fname
+        if fpath.exists():
+            h.update(fpath.read_bytes())
+    return h.hexdigest()
+
+
 def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
     """
     라이브 전 필수 검증 게이트 (Hard Gate).
@@ -723,19 +743,37 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
     issues = []
     reports_dir = Path("reports")
 
-    # ── 조건 1: 승인된 전략 존재 ──
+    # ── 조건 1: 승인된 전략 존재 (자동 생성 파일 + 해시 검증) ──
+    import hashlib
     approved_path = reports_dir / "approved_strategies.json"
     approved_strategies = []
     if approved_path.exists():
         try:
             approved_data = json.loads(approved_path.read_text(encoding="utf-8"))
-            approved_strategies = [s["name"] for s in approved_data.get("strategies", []) if s.get("status") == "approved"]
+            # 해시 검증: 승인 시점의 config 해시와 현재가 일치해야 함
+            saved_config_hash = approved_data.get("config_hash", "")
+            current_config_hash = _compute_config_hash()
+            if saved_config_hash and saved_config_hash != current_config_hash:
+                issues.append(
+                    f"승인 파일의 config_hash({saved_config_hash[:12]}...)가 현재({current_config_hash[:12]}...)와 불일치. "
+                    "설정 변경 후 재검증이 필요합니다. python main.py --mode validate --walk-forward 실행."
+                )
+            # 자동 생성 여부 확인 (수동 편집 방지)
+            if not approved_data.get("auto_generated"):
+                issues.append(
+                    "승인 파일이 검증 파이프라인이 아닌 수동으로 생성됨. "
+                    "python main.py --mode validate --walk-forward 로 자동 생성하세요."
+                )
+            approved_strategies = [
+                s["name"] for s in approved_data.get("strategies", [])
+                if s.get("status") == "approved"
+            ]
         except Exception:
             pass
     if not approved_strategies:
         issues.append(
-            "승인된 전략 없음. reports/approved_strategies.json에 status=approved 전략이 필요합니다. "
-            "python main.py --mode validate --walk-forward 실행 후 통과한 전략을 등록하세요."
+            "승인된 전략 없음. python main.py --mode validate --walk-forward 실행 후 "
+            "WF 통과 전략이 자동으로 approved_strategies.json에 기록됩니다."
         )
     elif strategy_name not in approved_strategies:
         issues.append(

@@ -383,54 +383,81 @@ class FundamentalFactorStrategy(BaseStrategy):
         _CACHE[cache_key] = (now + hours * 3600.0, b)
         return b
 
+    # 신뢰할 수 있는 데이터 소스 목록. 이 소스가 아니면 해당 필드를 점수 계산에서 제외.
+    _TRUSTED_DEBT_SOURCES = ("pykrx", "dart")
+
     def _score_bundle(self, bundle: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         per_max = float(self.params.get("per_max_absolute", 30))
         use_sector = bool(self.params.get("per_sector_relative", True))
         roe_min = float(self.params.get("roe_min", 10))
-        # yfinance debtToEquity는 차입금/자본 비율(한국 부채비율과 다름).
-        # 기본 600%으로 완화하여 yfinance 기준 대부분의 한국 대형주가 통과하도록 설정.
-        # DART/pykrx 소스 사용 시 200%로 복원 가능.
-        debt_max = float(self.params.get("debt_ratio_max", 600))
+        debt_max = float(self.params.get("debt_ratio_max", 200))
         growth_min = float(self.params.get("earnings_growth_min", 5))
 
         score = 0
+        max_score = 0  # 유효한 팩터 수 (데이터 부재/신뢰도 부족 시 분모에서 제외)
         details: dict[str, Any] = {}
 
         per = bundle.get("per")
         bench = bundle.get("sector_benchmark_per")
 
-        if per is not None and per <= per_max:
-            if use_sector and bench is not None and bench > 0:
-                if per < bench:
+        if per is not None:
+            max_score += 1
+            if per <= per_max:
+                if use_sector and bench is not None and bench > 0:
+                    if per < bench:
+                        score += 1
+                        details["per_vs_benchmark"] = f"{per:.2f} < 벤치마크 {bench:.2f}"
+                elif not use_sector:
                     score += 1
-                    details["per_vs_benchmark"] = f"{per:.2f} < 벤치마크 {bench:.2f}"
-            elif not use_sector:
-                score += 1
-                details["per_absolute"] = f"{per:.2f} (≤ {per_max})"
+                    details["per_absolute"] = f"{per:.2f} (≤ {per_max})"
 
         roe = bundle.get("roe")
-        if roe is not None and roe >= roe_min:
-            score += 1
-            details["roe"] = round(roe, 2)
+        if roe is not None:
+            max_score += 1
+            if roe >= roe_min:
+                score += 1
+                details["roe"] = round(roe, 2)
 
+        # 부채비율: provider 신뢰도 검증. yfinance debtToEquity는 한국 회계 기준과
+        # 다르므로(차입금/자본 vs 총부채/자본) 신뢰 소스가 아니면 점수 계산에서 제외.
         dr = bundle.get("debt_ratio")
-        if dr is not None and dr <= debt_max:
-            score += 1
-            details["debt_ratio"] = round(dr, 2)
+        source = bundle.get("source", "")
+        debt_source_trusted = any(ts in source for ts in self._TRUSTED_DEBT_SOURCES)
+        if dr is not None and debt_source_trusted:
+            max_score += 1
+            if dr <= debt_max:
+                score += 1
+                details["debt_ratio"] = round(dr, 2)
+        elif dr is not None and not debt_source_trusted:
+            details["debt_ratio_skipped"] = f"{round(dr, 1)}% (소스 '{source}' — 한국 기준 불일치로 점수 제외)"
+            logger.debug("부채비율 점수 제외: 소스 '{}' 미신뢰 (값={:.1f}%)", source, dr)
 
         yoy = bundle.get("op_income_yoy")
-        if yoy is not None and yoy >= growth_min:
-            score += 1
-            details["op_income_yoy_pct"] = round(yoy, 2)
+        if yoy is not None:
+            max_score += 1
+            if yoy >= growth_min:
+                score += 1
+                details["op_income_yoy_pct"] = round(yoy, 2)
 
+        details["_max_score"] = max_score
         return score, details
 
-    def _signal_from_score(self, score: int) -> str:
-        if score >= 3:
+    def _signal_from_score_adaptive(self, score: int, max_score: int) -> str:
+        """유효 팩터 수에 비례하여 신호 임계값을 동적 조정."""
+        if max_score <= 1:
+            return self.HOLD  # 데이터 1개 이하면 판단 불가
+        # 유효 팩터의 75% 이상 충족 시 BUY, 25% 이하 시 SELL
+        buy_threshold = max(2, int(max_score * 0.75))
+        sell_threshold = max(0, int(max_score * 0.25))
+        if score >= buy_threshold:
             return self.BUY
-        if score <= 1:
+        if score <= sell_threshold:
             return self.SELL
         return self.HOLD
+
+    def _signal_from_score(self, score: int, max_score: int = 4) -> str:
+        """유효 팩터 수에 비례하여 신호 결정. max_score가 줄면 임계값도 내려감."""
+        return self._signal_from_score_adaptive(score, max_score)
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
@@ -474,8 +501,9 @@ class FundamentalFactorStrategy(BaseStrategy):
             result["ensemble_skip"] = True
             return result
 
-        sc, _ = self._score_bundle(bundle)
-        sig = self._signal_from_score(sc)
+        sc, det = self._score_bundle(bundle)
+        max_sc = det.get("_max_score", 4)
+        sig = self._signal_from_score(sc, max_sc)
         result["signal"] = sig
         result["strategy_score"] = float(sc)
         result["fundamental_score"] = sc
@@ -506,7 +534,8 @@ class FundamentalFactorStrategy(BaseStrategy):
             }
 
         sc, det = self._score_bundle(bundle)
-        sig = self._signal_from_score(sc)
+        max_sc = det.get("_max_score", 4)
+        sig = self._signal_from_score(sc, max_sc)
         det["_raw"] = {k: bundle.get(k) for k in ("per", "sector_benchmark_per", "roe", "debt_ratio", "op_income_yoy")}
         return {
             "signal": sig,

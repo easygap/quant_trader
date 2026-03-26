@@ -252,6 +252,9 @@ class Scheduler:
             collector = DataCollector()
             strategy = self._get_strategy()
             watchlist = WatchlistManager(self.config).resolve()
+            if not watchlist:
+                logger.error("🚫 watchlist가 비어 있습니다. config/settings.yaml의 watchlist.symbols를 설정하세요.")
+                raise RuntimeError("빈 watchlist — 스케줄러 실행 불가")
             self._entry_candidates = []
 
             from core.market_regime import check_market_regime
