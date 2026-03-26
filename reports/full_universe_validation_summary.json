@@ -1,0 +1,650 @@
+{
+  "scoring": {
+    "by_symbol": {
+      "005930": {
+        "name": "삼성전자",
+        "full": {
+          "total_return": 3.76,
+          "cagr": 0.76,
+          "sharpe_ratio": -0.96,
+          "sortino_ratio": -0.86,
+          "calmar_ratio": 0.12,
+          "max_drawdown": -6.41,
+          "win_rate": 58.0,
+          "profit_factor": 1.22,
+          "ev_per_trade": 6037.0,
+          "annual_turnover_pct": 135.1,
+          "cost_drag_pct": -0.45,
+          "total_trades": 50
+        },
+        "oos": {
+          "total_return": 8.65,
+          "cagr": 5.85,
+          "sharpe_ratio": 0.84,
+          "sortino_ratio": 0.96,
+          "calmar_ratio": 2.8,
+          "max_drawdown": -2.11,
+          "win_rate": 73.3,
+          "profit_factor": 2.78,
+          "ev_per_trade": 28998.0,
+          "annual_turnover_pct": 212.4,
+          "cost_drag_pct": 0.19,
+          "total_trades": 30
+        }
+      },
+      "000660": {
+        "name": "SK하이닉스",
+        "full": {
+          "total_return": 2.49,
+          "cagr": 0.51,
+          "sharpe_ratio": -1.16,
+          "sortino_ratio": -0.81,
+          "calmar_ratio": 0.18,
+          "max_drawdown": -2.88,
+          "win_rate": 66.7,
+          "profit_factor": 1.3,
+          "ev_per_trade": 7263.0,
+          "annual_turnover_pct": 69.9,
+          "cost_drag_pct": 0.27,
+          "total_trades": 36
+        },
+        "oos": {
+          "total_return": 1.97,
+          "cagr": 1.34,
+          "sharpe_ratio": -0.81,
+          "sortino_ratio": -0.51,
+          "calmar_ratio": 0.67,
+          "max_drawdown": -2.02,
+          "win_rate": 75.0,
+          "profit_factor": 1.75,
+          "ev_per_trade": 16504.0,
+          "annual_turnover_pct": 61.5,
+          "cost_drag_pct": 0.06,
+          "total_trades": 12
+        }
+      },
+      "035420": {
+        "name": "NAVER",
+        "full": {
+          "total_return": 7.63,
+          "cagr": 1.52,
+          "sharpe_ratio": -0.43,
+          "sortino_ratio": -0.47,
+          "calmar_ratio": 0.33,
+          "max_drawdown": -4.82,
+          "win_rate": 61.2,
+          "profit_factor": 1.44,
+          "ev_per_trade": 11618.0,
+          "annual_turnover_pct": 149.7,
+          "cost_drag_pct": 0.48,
+          "total_trades": 67
+        },
+        "oos": {
+          "total_return": 8.03,
+          "cagr": 5.43,
+          "sharpe_ratio": 0.63,
+          "sortino_ratio": 0.85,
+          "calmar_ratio": 3.71,
+          "max_drawdown": -1.48,
+          "win_rate": 80.0,
+          "profit_factor": 8.52,
+          "ev_per_trade": 53697.0,
+          "annual_turnover_pct": 90.9,
+          "cost_drag_pct": 0.09,
+          "total_trades": 15
+        }
+      },
+      "005380": {
+        "name": "현대차",
+        "full": {
+          "total_return": 2.76,
+          "cagr": 0.56,
+          "sharpe_ratio": -1.13,
+          "sortino_ratio": -0.99,
+          "calmar_ratio": 0.15,
+          "max_drawdown": -3.89,
+          "win_rate": 65.4,
+          "profit_factor": 1.18,
+          "ev_per_trade": 5326.0,
+          "annual_turnover_pct": 80.6,
+          "cost_drag_pct": -1.22,
+          "total_trades": 26
+        },
+        "oos": {
+          "total_return": 2.04,
+          "cagr": 1.4,
+          "sharpe_ratio": -0.64,
+          "sortino_ratio": -0.45,
+          "calmar_ratio": 0.5,
+          "max_drawdown": -2.83,
+          "win_rate": 77.8,
+          "profit_factor": 1.63,
+          "ev_per_trade": 19519.0,
+          "annual_turnover_pct": 64.4,
+          "cost_drag_pct": -0.25,
+          "total_trades": 9
+        }
+      },
+      "000270": {
+        "name": "기아",
+        "full": {
+          "total_return": -4.27,
+          "cagr": -0.89,
+          "sharpe_ratio": -1.62,
+          "sortino_ratio": -1.26,
+          "calmar_ratio": 0.14,
+          "max_drawdown": -6.07,
+          "win_rate": 48.4,
+          "profit_factor": 0.53,
+          "ev_per_trade": -20114.0,
+          "annual_turnover_pct": 99.4,
+          "cost_drag_pct": -1.76,
+          "total_trades": 31
+        },
+        "oos": {
+          "total_return": -0.97,
+          "cagr": -0.67,
+          "sharpe_ratio": -1.86,
+          "sortino_ratio": -1.27,
+          "calmar_ratio": 0.42,
+          "max_drawdown": -1.6,
+          "win_rate": 50.0,
+          "profit_factor": 0.4,
+          "ev_per_trade": -22117.0,
+          "annual_turnover_pct": 82.2,
+          "cost_drag_pct": -0.75,
+          "total_trades": 8
+        }
+      },
+      "035720": {
+        "name": "카카오",
+        "full": {
+          "total_return": 6.93,
+          "cagr": 1.39,
+          "sharpe_ratio": -0.54,
+          "sortino_ratio": -0.44,
+          "calmar_ratio": 0.28,
+          "max_drawdown": -5.15,
+          "win_rate": 63.0,
+          "profit_factor": 1.5,
+          "ev_per_trade": 12982.0,
+          "annual_turnover_pct": 105.7,
+          "cost_drag_pct": 0.32,
+          "total_trades": 54
+        },
+        "oos": {
+          "total_return": 3.71,
+          "cagr": 2.53,
+          "sharpe_ratio": -0.12,
+          "sortino_ratio": -0.09,
+          "calmar_ratio": 0.6,
+          "max_drawdown": -4.26,
+          "win_rate": 62.5,
+          "profit_factor": 1.69,
+          "ev_per_trade": 15588.0,
+          "annual_turnover_pct": 141.3,
+          "cost_drag_pct": 0.13,
+          "total_trades": 24
+        }
+      },
+      "051910": {
+        "name": "LG화학",
+        "full": {
+          "total_return": -9.2,
+          "cagr": -1.97,
+          "sharpe_ratio": -2.38,
+          "sortino_ratio": -1.42,
+          "calmar_ratio": 0.18,
+          "max_drawdown": -10.78,
+          "win_rate": 46.2,
+          "profit_factor": 0.49,
+          "ev_per_trade": -17570.0,
+          "annual_turnover_pct": 89.5,
+          "cost_drag_pct": 0.25,
+          "total_trades": 52
+        },
+        "oos": {
+          "total_return": -1.6,
+          "cagr": -1.1,
+          "sharpe_ratio": -2.17,
+          "sortino_ratio": -0.98,
+          "calmar_ratio": 0.28,
+          "max_drawdown": -3.88,
+          "win_rate": 50.0,
+          "profit_factor": 0.59,
+          "ev_per_trade": -15918.0,
+          "annual_turnover_pct": 48.1,
+          "cost_drag_pct": 0.04,
+          "total_trades": 10
+        }
+      },
+      "006400": {
+        "name": "삼성SDI",
+        "full": {
+          "total_return": -1.7,
+          "cagr": -0.35,
+          "sharpe_ratio": -1.53,
+          "sortino_ratio": -1.18,
+          "calmar_ratio": 0.07,
+          "max_drawdown": -5.35,
+          "win_rate": 57.1,
+          "profit_factor": 0.86,
+          "ev_per_trade": -3677.0,
+          "annual_turnover_pct": 90.9,
+          "cost_drag_pct": -0.17,
+          "total_trades": 56
+        },
+        "oos": {
+          "total_return": 0.29,
+          "cagr": 0.2,
+          "sharpe_ratio": -1.13,
+          "sortino_ratio": -0.89,
+          "calmar_ratio": 0.11,
+          "max_drawdown": -1.77,
+          "win_rate": 54.5,
+          "profit_factor": 1.06,
+          "ev_per_trade": 1419.0,
+          "annual_turnover_pct": 101.7,
+          "cost_drag_pct": 0.09,
+          "total_trades": 22
+        }
+      },
+      "068270": {
+        "name": "셀트리온",
+        "full": {
+          "total_return": -7.18,
+          "cagr": -1.54,
+          "sharpe_ratio": -1.7,
+          "sortino_ratio": -1.33,
+          "calmar_ratio": 0.14,
+          "max_drawdown": -11.05,
+          "win_rate": 52.9,
+          "profit_factor": 0.56,
+          "ev_per_trade": -14647.0,
+          "annual_turnover_pct": 117.9,
+          "cost_drag_pct": -0.06,
+          "total_trades": 51
+        },
+        "oos": {
+          "total_return": 4.03,
+          "cagr": 2.77,
+          "sharpe_ratio": -0.08,
+          "sortino_ratio": -0.09,
+          "calmar_ratio": 1.83,
+          "max_drawdown": -1.52,
+          "win_rate": 91.7,
+          "profit_factor": 5.57,
+          "ev_per_trade": 33817.0,
+          "annual_turnover_pct": 99.6,
+          "cost_drag_pct": 0.1,
+          "total_trades": 12
+        }
+      },
+      "003670": {
+        "name": "포스코퓨처엠",
+        "full": {
+          "total_return": 5.81,
+          "cagr": 1.17,
+          "sharpe_ratio": -0.75,
+          "sortino_ratio": -0.72,
+          "calmar_ratio": 0.24,
+          "max_drawdown": -5.06,
+          "win_rate": 59.5,
+          "profit_factor": 1.33,
+          "ev_per_trade": 6535.0,
+          "annual_turnover_pct": 108.1,
+          "cost_drag_pct": -0.4,
+          "total_trades": 79
+        },
+        "oos": {
+          "total_return": -1.12,
+          "cagr": -0.77,
+          "sharpe_ratio": -1.4,
+          "sortino_ratio": -1.36,
+          "calmar_ratio": 0.21,
+          "max_drawdown": -3.7,
+          "win_rate": 52.9,
+          "profit_factor": 0.86,
+          "ev_per_trade": -3200.0,
+          "annual_turnover_pct": 146.4,
+          "cost_drag_pct": 0.13,
+          "total_trades": 34
+        }
+      }
+    },
+    "agg": {
+      "avg_sharpe": -1.22,
+      "avg_return": 0.7,
+      "avg_mdd": -6.15,
+      "avg_win_rate": 57.8,
+      "avg_ev_per_trade": -625.0,
+      "n_symbols": 10
+    }
+  },
+  "mean_reversion": {
+    "by_symbol": {
+      "005930": {
+        "name": "삼성전자",
+        "full": {
+          "total_return": 0.67,
+          "cagr": 0.14,
+          "sharpe_ratio": -2.63,
+          "sortino_ratio": -1.25,
+          "calmar_ratio": 0.04,
+          "max_drawdown": -3.53,
+          "win_rate": 63.6,
+          "profit_factor": 1.21,
+          "ev_per_trade": 6282.0,
+          "annual_turnover_pct": 27.8,
+          "cost_drag_pct": 0.08,
+          "total_trades": 11
+        },
+        "oos": {
+          "total_return": 1.29,
+          "cagr": 0.88,
+          "sharpe_ratio": -3.2,
+          "sortino_ratio": -11.36,
+          "calmar_ratio": 15.7,
+          "max_drawdown": -0.06,
+          "win_rate": 100.0,
+          "profit_factor": 0,
+          "ev_per_trade": 64820.0,
+          "annual_turnover_pct": 12.8,
+          "cost_drag_pct": 0.01,
+          "total_trades": 2
+        }
+      },
+      "000660": {
+        "name": "SK하이닉스",
+        "full": {
+          "total_return": -1.07,
+          "cagr": -0.22,
+          "sharpe_ratio": -2.62,
+          "sortino_ratio": -0.97,
+          "calmar_ratio": 0.07,
+          "max_drawdown": -2.94,
+          "win_rate": 55.6,
+          "profit_factor": 0.78,
+          "ev_per_trade": -5819.0,
+          "annual_turnover_pct": 34.4,
+          "cost_drag_pct": 0.1,
+          "total_trades": 18
+        },
+        "oos": {
+          "total_return": 1.1,
+          "cagr": 0.75,
+          "sharpe_ratio": -1.55,
+          "sortino_ratio": -0.49,
+          "calmar_ratio": 0.58,
+          "max_drawdown": -1.3,
+          "win_rate": 85.7,
+          "profit_factor": 2.03,
+          "ev_per_trade": 15788.0,
+          "annual_turnover_pct": 29.2,
+          "cost_drag_pct": 0.03,
+          "total_trades": 7
+        }
+      },
+      "035420": {
+        "name": "NAVER",
+        "full": {
+          "total_return": -5.8,
+          "cagr": -1.22,
+          "sharpe_ratio": -2.43,
+          "sortino_ratio": -1.12,
+          "calmar_ratio": 0.19,
+          "max_drawdown": -6.36,
+          "win_rate": 38.9,
+          "profit_factor": 0.38,
+          "ev_per_trade": -32070.0,
+          "annual_turnover_pct": 44.9,
+          "cost_drag_pct": 0.13,
+          "total_trades": 18
+        },
+        "oos": {
+          "total_return": -2.4,
+          "cagr": -1.65,
+          "sharpe_ratio": -2.5,
+          "sortino_ratio": -0.79,
+          "calmar_ratio": 0.67,
+          "max_drawdown": -2.46,
+          "win_rate": 40.0,
+          "profit_factor": 0.31,
+          "ev_per_trade": -47912.0,
+          "annual_turnover_pct": 34.8,
+          "cost_drag_pct": 0.03,
+          "total_trades": 5
+        }
+      },
+      "005380": {
+        "name": "현대차",
+        "full": {
+          "total_return": 0.94,
+          "cagr": 0.19,
+          "sharpe_ratio": -2.28,
+          "sortino_ratio": -1.03,
+          "calmar_ratio": 0.06,
+          "max_drawdown": -3.39,
+          "win_rate": 62.5,
+          "profit_factor": 1.26,
+          "ev_per_trade": 6024.0,
+          "annual_turnover_pct": 34.9,
+          "cost_drag_pct": 0.1,
+          "total_trades": 16
+        },
+        "oos": {
+          "total_return": 2.49,
+          "cagr": 1.7,
+          "sharpe_ratio": -1.15,
+          "sortino_ratio": -0.69,
+          "calmar_ratio": 2.62,
+          "max_drawdown": -0.65,
+          "win_rate": 83.3,
+          "profit_factor": 29.6,
+          "ev_per_trade": 41595.0,
+          "annual_turnover_pct": 32.5,
+          "cost_drag_pct": 0.03,
+          "total_trades": 6
+        }
+      },
+      "000270": {
+        "name": "기아",
+        "full": {
+          "total_return": -4.67,
+          "cagr": -0.98,
+          "sharpe_ratio": -2.23,
+          "sortino_ratio": -0.98,
+          "calmar_ratio": 0.18,
+          "max_drawdown": -5.47,
+          "win_rate": 36.4,
+          "profit_factor": 0.28,
+          "ev_per_trade": -49443.0,
+          "annual_turnover_pct": 42.9,
+          "cost_drag_pct": -0.68,
+          "total_trades": 11
+        },
+        "oos": {
+          "total_return": -1.38,
+          "cagr": -0.94,
+          "sharpe_ratio": -4.8,
+          "sortino_ratio": -0.71,
+          "calmar_ratio": 0.63,
+          "max_drawdown": -1.51,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "ev_per_trade": -137392.0,
+          "annual_turnover_pct": 10.9,
+          "cost_drag_pct": 0.01,
+          "total_trades": 1
+        }
+      },
+      "035720": {
+        "name": "카카오",
+        "full": {
+          "total_return": -1.78,
+          "cagr": -0.37,
+          "sharpe_ratio": -2.54,
+          "sortino_ratio": -0.97,
+          "calmar_ratio": 0.06,
+          "max_drawdown": -5.97,
+          "win_rate": 64.7,
+          "profit_factor": 0.7,
+          "ev_per_trade": -10699.0,
+          "annual_turnover_pct": 37.0,
+          "cost_drag_pct": 0.04,
+          "total_trades": 17
+        },
+        "oos": {
+          "total_return": 4.26,
+          "cagr": 2.9,
+          "sharpe_ratio": -0.08,
+          "sortino_ratio": -0.08,
+          "calmar_ratio": 4.74,
+          "max_drawdown": -0.62,
+          "win_rate": 100.0,
+          "profit_factor": 0,
+          "ev_per_trade": 42653.0,
+          "annual_turnover_pct": 39.3,
+          "cost_drag_pct": 0.04,
+          "total_trades": 10
+        }
+      },
+      "051910": {
+        "name": "LG화학",
+        "full": {
+          "total_return": -2.77,
+          "cagr": -0.58,
+          "sharpe_ratio": -3.29,
+          "sortino_ratio": -1.13,
+          "calmar_ratio": 0.12,
+          "max_drawdown": -4.62,
+          "win_rate": 43.8,
+          "profit_factor": 0.49,
+          "ev_per_trade": -17172.0,
+          "annual_turnover_pct": 29.1,
+          "cost_drag_pct": 0.08,
+          "total_trades": 16
+        },
+        "oos": {
+          "total_return": -0.37,
+          "cagr": -0.25,
+          "sharpe_ratio": -6.89,
+          "sortino_ratio": -1.32,
+          "calmar_ratio": 0.34,
+          "max_drawdown": -0.74,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "ev_per_trade": -36580.0,
+          "annual_turnover_pct": 6.9,
+          "cost_drag_pct": 0.01,
+          "total_trades": 1
+        }
+      },
+      "006400": {
+        "name": "삼성SDI",
+        "full": {
+          "total_return": -3.32,
+          "cagr": -0.69,
+          "sharpe_ratio": -2.67,
+          "sortino_ratio": -1.67,
+          "calmar_ratio": 0.2,
+          "max_drawdown": -3.49,
+          "win_rate": 36.8,
+          "profit_factor": 0.54,
+          "ev_per_trade": -17349.0,
+          "annual_turnover_pct": 37.5,
+          "cost_drag_pct": 0.11,
+          "total_trades": 19
+        },
+        "oos": {
+          "total_return": -1.4,
+          "cagr": -0.96,
+          "sharpe_ratio": -6.52,
+          "sortino_ratio": -1.88,
+          "calmar_ratio": 0.68,
+          "max_drawdown": -1.4,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "ev_per_trade": -69741.0,
+          "annual_turnover_pct": 13.7,
+          "cost_drag_pct": 0.01,
+          "total_trades": 2
+        }
+      },
+      "068270": {
+        "name": "셀트리온",
+        "full": {
+          "total_return": 2.31,
+          "cagr": 0.48,
+          "sharpe_ratio": -1.44,
+          "sortino_ratio": -0.67,
+          "calmar_ratio": 0.19,
+          "max_drawdown": -2.52,
+          "win_rate": 66.7,
+          "profit_factor": 1.32,
+          "ev_per_trade": 8677.0,
+          "annual_turnover_pct": 43.2,
+          "cost_drag_pct": -0.4,
+          "total_trades": 21
+        },
+        "oos": {
+          "total_return": 2.99,
+          "cagr": 2.06,
+          "sharpe_ratio": -0.44,
+          "sortino_ratio": -0.58,
+          "calmar_ratio": 4.11,
+          "max_drawdown": -0.5,
+          "win_rate": 100.0,
+          "profit_factor": 0,
+          "ev_per_trade": 87431.0,
+          "annual_turnover_pct": 26.3,
+          "cost_drag_pct": -0.35,
+          "total_trades": 3
+        }
+      },
+      "003670": {
+        "name": "포스코퓨처엠",
+        "full": {
+          "total_return": -5.07,
+          "cagr": -1.07,
+          "sharpe_ratio": -2.89,
+          "sortino_ratio": -1.21,
+          "calmar_ratio": 0.15,
+          "max_drawdown": -6.81,
+          "win_rate": 40.0,
+          "profit_factor": 0.37,
+          "ev_per_trade": -20191.0,
+          "annual_turnover_pct": 38.3,
+          "cost_drag_pct": 0.11,
+          "total_trades": 25
+        },
+        "oos": {
+          "total_return": -0.28,
+          "cagr": -0.19,
+          "sharpe_ratio": -2.21,
+          "sortino_ratio": -1.01,
+          "calmar_ratio": 0.1,
+          "max_drawdown": -1.89,
+          "win_rate": 57.1,
+          "profit_factor": 0.82,
+          "ev_per_trade": -3914.0,
+          "annual_turnover_pct": 28.2,
+          "cost_drag_pct": 0.02,
+          "total_trades": 7
+        }
+      }
+    },
+    "agg": {
+      "avg_sharpe": -2.5,
+      "avg_return": -2.06,
+      "avg_mdd": -4.51,
+      "avg_win_rate": 50.9,
+      "avg_ev_per_trade": -13176.0,
+      "n_symbols": 10
+    }
+  },
+  "benchmark": {
+    "KOSPI_return_pct": 81.29,
+    "period": "2021-03~2026-03"
+  }
+}
