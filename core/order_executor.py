@@ -23,6 +23,11 @@ from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
 from core.position_lock import PositionLock
 
+try:
+    from monitoring.paper_monitor import log_event as _log_op_event
+except ImportError:
+    def _log_op_event(*a, **kw): pass
+
 
 class OrderExecutor:
     """
@@ -273,9 +278,11 @@ class OrderExecutor:
             if OrderGuard.has_pending(symbol):
                 reason_text = f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."
                 logger.warning(reason_text)
+                _log_op_event("DUPLICATE_BLOCKED", reason_text, severity="warning", symbol=symbol, strategy=strategy, mode=self.mode)
                 return {"success": False, "reason": reason_text}
             if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
                 reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
+                _log_op_event("DUPLICATE_BLOCKED", reason_text, severity="warning", symbol=symbol, strategy=strategy, mode=self.mode)
                 return {"success": False, "reason": reason_text}
             order_result = self._execute_with_retry(
                 self.kis_api.buy_order, symbol, quantity, int(price),
@@ -286,7 +293,8 @@ class OrderExecutor:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
-        # DB에 매매 기록 저장
+        # DB에 매매 기록 저장 (시각·체결가 차이 포함)
+        _now = datetime.now()
         save_trade(
             symbol=symbol,
             action="BUY",
@@ -300,7 +308,11 @@ class OrderExecutor:
             reason=reason,
             mode=self.mode,
             account_key=self.account_key,
+            signal_at=_now,
+            order_at=_now,
+            expected_price=price,
         )
+        _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원", symbol=symbol, strategy=strategy, mode=self.mode)
 
         # 포지션 저장
         save_position(
