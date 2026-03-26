@@ -18,6 +18,11 @@ from core.trading_hours import TradingHours
 from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
 from core.notifier import Notifier
+
+try:
+    from monitoring.paper_monitor import log_event as _log_op
+except ImportError:
+    def _log_op(*a, **kw): pass
 from database.repositories import (
     get_all_positions,
     get_daily_trade_summary,
@@ -96,6 +101,7 @@ class Scheduler:
     def __init__(self, strategy_name: str = "scoring", config: Config = None):
         self.config = config or Config.get()
         self.strategy_name = strategy_name
+        self._mode = self.config.trading.get("mode", "paper")
         self.trading_hours = TradingHours(self.config)
         self.blackswan = BlackSwanDetector(self.config)
         self.portfolio = PortfolioManager(self.config, account_key=self.strategy_name)
@@ -252,6 +258,9 @@ class Scheduler:
             collector = DataCollector()
             strategy = self._get_strategy()
             watchlist = WatchlistManager(self.config).resolve()
+            if not watchlist:
+                logger.error("🚫 watchlist가 비어 있습니다. config/settings.yaml의 watchlist.symbols를 설정하세요.")
+                raise RuntimeError("빈 watchlist — 스케줄러 실행 불가")
             self._entry_candidates = []
 
             from core.market_regime import check_market_regime
@@ -271,12 +280,16 @@ class Scheduler:
                     if df.empty or len(df) < 30:
                         continue
 
+                    _signal_time = datetime.now()
                     signal_info = strategy.generate_signal(df, symbol=symbol)
                     signal_info["symbol"] = symbol
+                    signal_info["_signal_at"] = _signal_time
                     signals.append(signal_info)
 
                     if signal_info["signal"] != "HOLD":
                         self.discord.send_signal_alert(symbol, signal_info)
+                        _log_op("SIGNAL", f"{signal_info['signal']} {symbol} score={signal_info.get('score', 0)}",
+                                symbol=symbol, strategy=self.strategy_name, mode=self._mode)
 
                     if (
                         self.auto_entry
@@ -292,7 +305,8 @@ class Scheduler:
                             "price": signal_info.get("close", 0),
                             "atr": signal_info.get("atr"),
                             "score": signal_info.get("score", 0),
-                            "reason": "live pre-market candidate",
+                            "_signal_at": signal_info.get("_signal_at"),
+                            "reason": "pre-market candidate",
                             "avg_daily_volume": avg_vol,
                             "market_regime_scale": self._market_regime_scale,
                             "timestamp": datetime.now(),
@@ -595,9 +609,10 @@ class Scheduler:
                 current_invested=summary["current_value"],
                 atr=candidate.get("atr"),
                 signal_score=candidate.get("score", 0),
-                reason=candidate.get("reason", "live auto-entry"),
+                reason=candidate.get("reason", "auto-entry"),
                 strategy=self.strategy_name,
                 avg_daily_volume=candidate.get("avg_daily_volume"),
+                signal_at=candidate.get("_signal_at"),
             )
             if result.get("success"):
                 self.discord.send_trade_alert(result)
@@ -672,6 +687,8 @@ class Scheduler:
 
                 if bs_result["triggered"]:
                     self.discord.send_message(f"🚨 블랙스완 발동!\n{bs_result['reason']}", critical=True)
+                    _log_op("BLACKSWAN", bs_result["reason"], severity="critical",
+                            symbol=pos.symbol, strategy=self.strategy_name, mode=self._mode)
                     executor.execute_sell(
                         pos.symbol, current_price,
                         reason="블랙스완 긴급 매도",
@@ -681,7 +698,9 @@ class Scheduler:
 
                 check = executor.check_stop_loss_take_profit(pos.symbol, current_price)
                 if check["action"]:
-                    sell_qty = check.get("partial_qty")  # 부분 익절 시에만 존재
+                    _log_op("SL_TP", f"{check['action']} {pos.symbol} @ {current_price:,.0f}",
+                            severity="warning", symbol=pos.symbol, strategy=self.strategy_name, mode=self._mode)
+                    sell_qty = check.get("partial_qty")
                     result = executor.execute_sell(
                         pos.symbol, current_price,
                         quantity=sell_qty,
@@ -752,9 +771,19 @@ class Scheduler:
             except Exception as backup_err:
                 logger.warning("DB 백업 스킵/실패: {}", backup_err)
 
-            # paper 모드: 장마감 시 실전 전환 준비 자동 평가
-            if self.config.trading.get("mode") == "paper":
+            # paper 모드: 장마감 시 실전 전환 준비 자동 평가 + 주간 리포트 (금요일)
+            if self._mode == "paper":
                 self._check_live_readiness()
+                # 금요일이면 주간 리포트 자동 생성
+                if datetime.now().weekday() == 4:
+                    try:
+                        from monitoring.paper_monitor import WeeklyReportGenerator
+                        gen = WeeklyReportGenerator(self.config, account_key=self.strategy_name)
+                        report = gen.generate(weeks_back=1)
+                        gen.save(report)
+                        logger.info("📊 주간 paper 리포트 자동 생성 완료")
+                    except Exception as wr_err:
+                        logger.warning("주간 리포트 생성 실패: {}", wr_err)
 
             # 일일 루프 모니터링 지표 기록
             metrics = self._loop_metrics.summary()

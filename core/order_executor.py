@@ -86,6 +86,7 @@ class OrderExecutor:
         reason: str = "",
         strategy: str = "",
         avg_daily_volume: float = None,
+        signal_at: "datetime | None" = None,
     ) -> dict:
         """
         매수 주문 실행
@@ -105,7 +106,7 @@ class OrderExecutor:
         """
         with PositionLock():
             return self._execute_buy_impl(
-                symbol, price, capital, available_cash, current_invested, atr, signal_score, reason, strategy, avg_daily_volume
+                symbol, price, capital, available_cash, current_invested, atr, signal_score, reason, strategy, avg_daily_volume, signal_at=signal_at
             )
 
     def _execute_buy_impl(
@@ -120,6 +121,7 @@ class OrderExecutor:
         reason: str = "",
         strategy: str = "",
         avg_daily_volume: float = None,
+        signal_at: "datetime | None" = None,
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
         if self._should_block_new_buy_volatility_window():
@@ -294,7 +296,7 @@ class OrderExecutor:
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
 
         # DB에 매매 기록 저장 (시각·체결가 차이 포함)
-        _now = datetime.now()
+        _order_at = datetime.now()
         save_trade(
             symbol=symbol,
             action="BUY",
@@ -308,8 +310,8 @@ class OrderExecutor:
             reason=reason,
             mode=self.mode,
             account_key=self.account_key,
-            signal_at=_now,
-            order_at=_now,
+            signal_at=signal_at or _order_at,
+            order_at=_order_at,
             expected_price=price,
         )
         _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원", symbol=symbol, strategy=strategy, mode=self.mode)
