@@ -10,11 +10,21 @@ from config.config_loader import Config
 
 # 전략명 → (모듈 경로, 클래스명)  — lazy import로 순환 참조 방지
 _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
-    "scoring":         ("strategies.scoring_strategy",  "ScoringStrategy"),
-    "mean_reversion":  ("strategies.mean_reversion",    "MeanReversionStrategy"),
-    "trend_following": ("strategies.trend_following",    "TrendFollowingStrategy"),
-    "fundamental_factor": ("strategies.fundamental_factor", "FundamentalFactorStrategy"),
-    "ensemble":        ("core.strategy_ensemble",       "StrategyEnsemble"),
+    "scoring":             ("strategies.scoring_strategy",   "ScoringStrategy"),
+    "mean_reversion":      ("strategies.mean_reversion",     "MeanReversionStrategy"),
+    "trend_following":     ("strategies.trend_following",     "TrendFollowingStrategy"),
+    "fundamental_factor":  ("strategies.fundamental_factor",  "FundamentalFactorStrategy"),
+    "fundamental_first":   ("strategies.fundamental_first",   "FundamentalFirstStrategy"),
+    "ensemble":            ("core.strategy_ensemble",         "StrategyEnsemble"),
+}
+
+# 비권장 전략 경고 (선택 시 로그 출력)
+_DEPRECATED_STRATEGIES: dict[str, str] = {
+    "mean_reversion": (
+        "⚠️ mean_reversion 전략은 한국 시장에서 비권장입니다. "
+        "하락 종목의 평균 회귀 불발 위험이 높고, Scoring과 정보원이 중복됩니다. "
+        "fundamental_first 전략을 권장합니다."
+    ),
 }
 
 
@@ -44,6 +54,11 @@ def create_strategy(name: str, config: Config = None):
     if name not in _STRATEGY_REGISTRY:
         available = ", ".join(_STRATEGY_REGISTRY.keys())
         raise ValueError(f"알 수 없는 전략: '{name}'. 사용 가능: {available}")
+
+    # 비권장 전략 경고
+    if name in _DEPRECATED_STRATEGIES:
+        import logging
+        logging.getLogger("strategies").warning(_DEPRECATED_STRATEGIES[name])
 
     module_path, class_name = _STRATEGY_REGISTRY[name]
     module = importlib.import_module(module_path)
