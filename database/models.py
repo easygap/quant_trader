@@ -146,6 +146,7 @@ class PortfolioSnapshot(Base):
     daily_return = Column(Float)                                # 일일 수익률 (%)
     cumulative_return = Column(Float)                           # 누적 수익률 (%)
     mdd = Column(Float)                                         # 현재 MDD (%)
+    peak_value = Column(Float)                                   # 역대 최고 평가금 (MDD 기준점, 재시작 시 복구용)
     position_count = Column(Integer, default=0)                 # 보유 종목 수
     created_at = Column(DateTime, default=datetime.now)
 

@@ -126,10 +126,43 @@ class Config:
         return cls._instance
 
     def _load(self):
-        """설정 파일 로드"""
+        """설정 파일 로드 및 필수 파라미터 검증."""
         self._settings = load_settings()
         self._strategies = load_strategies()
         self._risk_params = load_risk_params()
+        self._validate_critical_params()
+
+    def _validate_critical_params(self):
+        """운영에 치명적인 설정 값을 로드 시점에 검증. 문제 시 즉시 예외."""
+        import logging
+        _log = logging.getLogger("config_loader")
+        errors = []
+
+        # risk_params 필수 키
+        ps = self._risk_params.get("position_sizing", {})
+        ic = ps.get("initial_capital")
+        if ic is None or not isinstance(ic, (int, float)) or ic <= 0:
+            errors.append(f"risk_params.position_sizing.initial_capital이 유효하지 않습니다: {ic!r}")
+
+        rr = ps.get("risk_ratio")
+        if rr is not None and (not isinstance(rr, (int, float)) or rr <= 0 or rr > 1):
+            errors.append(f"risk_params.position_sizing.risk_ratio 범위 오류 (0 < x ≤ 1): {rr!r}")
+
+        # drawdown 한도
+        dd = self._risk_params.get("drawdown", {})
+        mdd = dd.get("max_portfolio_mdd")
+        if mdd is not None and (not isinstance(mdd, (int, float)) or mdd <= 0 or mdd > 1):
+            errors.append(f"risk_params.drawdown.max_portfolio_mdd 범위 오류 (0 < x ≤ 1): {mdd!r}")
+
+        # trading 모드
+        mode = (self._settings.get("trading") or {}).get("mode", "paper")
+        if mode not in ("paper", "live", "backtest", "schedule"):
+            errors.append(f"settings.trading.mode가 유효하지 않습니다: {mode!r}")
+
+        if errors:
+            msg = "설정 검증 실패:\n  - " + "\n  - ".join(errors)
+            _log.error(msg)
+            raise ValueError(msg)
 
     def reload(self):
         """설정 파일 다시 로드 (런타임 변경 반영)"""

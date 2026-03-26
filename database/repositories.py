@@ -507,28 +507,6 @@ def update_position_targets(
         session.close()
 
 
-@with_retry
-def get_portfolio_peak_value(account_key: str = "") -> float:
-    """
-    PortfolioSnapshot 테이블에서 해당 계좌의 역대 최고 total_value를 반환.
-    MDD 피크를 재시작 후에도 유지하기 위한 용도.
-    스냅샷이 없으면 0.0 반환.
-    """
-    from sqlalchemy import func
-    session = get_session()
-    try:
-        ak = account_key or ""
-        result = session.query(func.max(PortfolioSnapshot.total_value)).filter(
-            PortfolioSnapshot.account_key == ak,
-        ).scalar()
-        return float(result) if result else 0.0
-    except Exception as e:
-        logger.error("포트폴리오 피크 조회 실패: {}", e)
-        return 0.0
-    finally:
-        session.close()
-
-
 # =============================================================
 # 포트폴리오 스냅샷 관련
 # =============================================================
@@ -543,6 +521,7 @@ def save_portfolio_snapshot(
     mdd: float = 0,
     position_count: int = 0,
     account_key: str = "",
+    peak_value: float = None,
 ):
     """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분)."""
     session = get_session()
@@ -558,6 +537,7 @@ def save_portfolio_snapshot(
             daily_return=daily_return,
             cumulative_return=cumulative_return,
             mdd=mdd,
+            peak_value=peak_value,
             position_count=position_count,
         )
         # merge by (account_key, date)
@@ -571,6 +551,7 @@ def save_portfolio_snapshot(
             existing.daily_return = daily_return
             existing.cumulative_return = cumulative_return
             existing.mdd = mdd
+            existing.peak_value = peak_value
             existing.position_count = position_count
         else:
             session.add(snapshot)
@@ -578,6 +559,29 @@ def save_portfolio_snapshot(
     except Exception as e:
         session.rollback()
         logger.error("포트폴리오 스냅샷 저장 실패: {}", e)
+    finally:
+        session.close()
+
+
+@with_retry
+def get_latest_peak_value(account_key: str = "") -> float | None:
+    """DB에서 가장 최근 스냅샷의 peak_value를 복구. 없으면 None."""
+    session = get_session()
+    try:
+        ak = account_key or ""
+        row = (
+            session.query(PortfolioSnapshot.peak_value)
+            .filter(
+                PortfolioSnapshot.account_key == ak,
+                PortfolioSnapshot.peak_value.isnot(None),
+            )
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.debug("peak_value 복구 실패 (신규 DB 또는 컬럼 미존재): {}", e)
+        return None
     finally:
         session.close()
 
