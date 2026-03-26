@@ -12,6 +12,7 @@ from database.repositories import (
     get_trade_cash_summary,
     save_portfolio_snapshot,
     get_latest_peak_value,
+    get_strategy_performance_summary,
 )
 
 
@@ -186,6 +187,63 @@ class PortfolioManager:
             "포트폴리오 스냅샷 저장: 총={:,.0f}원 | 수익={:.2f}% | MDD={:.2f}%",
             summary["total_value"], summary["total_return"], summary["mdd"],
         )
+
+    def get_paper_performance_report(self, days: int = 30) -> dict:
+        """
+        Paper 모드 성과 요약 리포트.
+        전략별 성과, 포트폴리오 수익률, 거래 비용 비율을 포함합니다.
+
+        Returns:
+            {"portfolio": {...}, "by_strategy": {...}, "cost_analysis": {...}}
+        """
+        summary = self.get_portfolio_summary()
+        mode = "paper" if not self._is_live else "live"
+        strategy_perf = get_strategy_performance_summary(
+            mode=mode,
+            account_key=self.account_key if self.account_key else None,
+            days=days,
+        )
+        from database.repositories import get_trade_cash_summary
+        cash_summary = get_trade_cash_summary(
+            mode=mode,
+            account_key=self.account_key if self.account_key else None,
+        )
+        total_cost = cash_summary["commission"] + cash_summary["tax"] + cash_summary["slippage"]
+        cost_to_capital = (total_cost / self.initial_capital * 100) if self.initial_capital > 0 else 0
+
+        report = {
+            "portfolio": {
+                "total_value": summary["total_value"],
+                "total_return_pct": summary["total_return"],
+                "mdd_pct": summary["mdd"],
+                "position_count": summary["position_count"],
+                "mode": mode,
+                "days": days,
+            },
+            "by_strategy": strategy_perf,
+            "cost_analysis": {
+                "total_commission": cash_summary["commission"],
+                "total_tax": cash_summary["tax"],
+                "total_slippage": cash_summary["slippage"],
+                "total_cost": total_cost,
+                "cost_to_capital_pct": round(cost_to_capital, 2),
+                "total_trades": cash_summary["total_trades"],
+            },
+        }
+
+        # 요약 로그
+        logger.info(
+            "[Paper 성과] 수익={:.2f}% | MDD={:.2f}% | 총비용={:,.0f}원 ({:.2f}% of 자본) | 거래 {}건",
+            summary["total_return"], summary["mdd"],
+            total_cost, cost_to_capital, cash_summary["total_trades"],
+        )
+        for strat, perf in strategy_perf.items():
+            logger.info(
+                "  [{}] 거래 {}건 | 승률 {:.1f}% | PnL {:,.0f}원 | 비용 {:,.0f}원",
+                strat, perf["trades"], perf["win_rate"], perf["total_pnl"], perf["total_cost"],
+            )
+
+        return report
 
     def get_current_capital(self) -> float:
         """

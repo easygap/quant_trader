@@ -252,6 +252,41 @@ def get_trade_cash_summary(
     }
 
 
+def get_strategy_performance_summary(
+    mode: Optional[str] = None,
+    account_key: Optional[str] = None,
+    days: int = 30,
+) -> dict[str, dict]:
+    """
+    전략별 성과 분리 측정.
+
+    Returns:
+        {"scoring": {"trades": 12, "wins": 7, "win_rate": 58.3, "total_pnl": 150000, "total_cost": 5000}, ...}
+    """
+    since = datetime.now() - timedelta(days=days) if days > 0 else None
+    trades = get_trade_history(mode=mode, start_date=since, account_key=account_key)
+    by_strategy: dict[str, dict] = {}
+    for t in trades:
+        strat = t.strategy or "unknown"
+        if strat not in by_strategy:
+            by_strategy[strat] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "total_cost": 0.0}
+        action = (t.action or "").upper()
+        if action == "BUY":
+            continue
+        s = by_strategy[strat]
+        s["trades"] += 1
+        pnl = _extract_pnl_from_reason(t.reason or "")
+        s["total_pnl"] += pnl
+        s["total_cost"] += (t.commission or 0) + (t.tax or 0) + (t.slippage or 0)
+        if pnl > 0:
+            s["wins"] += 1
+        elif pnl < 0:
+            s["losses"] += 1
+    for strat, s in by_strategy.items():
+        s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0.0
+    return by_strategy
+
+
 def _extract_pnl_from_reason(reason: str) -> float:
     """OrderExecutor가 reason에 남긴 'PnL: 12,345원' 값을 파싱."""
     if not reason:

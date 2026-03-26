@@ -217,6 +217,14 @@ class Backtester:
         div_config = self.risk_params.get("diversification", {})
         pos_limits = self.risk_params.get("position_limits") or {}
 
+        # 유동성 제한: 주문량이 일평균 거래량의 N%를 초과하면 매수 차단
+        liq_config = self.risk_params.get("liquidity_filter") or {}
+        bt_max_participation = float(liq_config.get("backtest_max_participation_rate", 0.01))  # 기본 1%
+
+        # 월간 거래 횟수 제한 (과매매 억제)
+        max_monthly_trades = int(pos_limits.get("max_monthly_roundtrips", 0))  # 0이면 무제한
+        monthly_trade_counts: dict[str, int] = {}  # "YYYY-MM" -> count
+
         sl_rate = sl_config.get("fixed_rate", 0.03)
         sl_type = sl_config.get("type", "fixed")
         atr_mult = sl_config.get("atr_multiplier", 2.0)
@@ -396,6 +404,16 @@ class Backtester:
 
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
+                # 월간 거래 횟수 제한 체크
+                if max_monthly_trades > 0:
+                    month_key = str(date)[:7] if hasattr(date, 'strftime') else str(date)[:7]
+                    try:
+                        month_key = date.strftime("%Y-%m")
+                    except Exception:
+                        pass
+                    if monthly_trade_counts.get(month_key, 0) >= max_monthly_trades:
+                        signal = "HOLD"  # 이번 달 거래 상한 도달 → 매수 차단
+
                 costs = self.risk_manager.calculate_transaction_costs(
                     close, 1, "BUY", avg_daily_volume=row_volume
                 )
@@ -417,6 +435,14 @@ class Backtester:
                     max(0, qty_by_cap),
                     max(0, qty_by_total_cap),
                 )
+
+                # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
+                if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
+                    max_qty_by_volume = int(row_volume * bt_max_participation)
+                    if max_qty_by_volume <= 0:
+                        quantity = 0  # 유동성 부족 → 매수 불가
+                    elif quantity > max_qty_by_volume:
+                        quantity = max_qty_by_volume  # 유동성 한도까지만 매수
 
                 if quantity > 0:
                     buy_costs = self.risk_manager.calculate_transaction_costs(
@@ -441,6 +467,13 @@ class Backtester:
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
                         "commission": commission,
                     })
+                    # 월간 거래 횟수 카운트
+                    if max_monthly_trades > 0:
+                        try:
+                            mk = date.strftime("%Y-%m")
+                        except Exception:
+                            mk = str(date)[:7]
+                        monthly_trade_counts[mk] = monthly_trade_counts.get(mk, 0) + 1
 
             elif signal == "SELL" and position > 0:
                 costs = self.risk_manager.calculate_transaction_costs(
