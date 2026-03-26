@@ -1,0 +1,65 @@
+[
+  {
+    "id": 7,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "035420",
+    "strategy": "scoring",
+    "message": "SELL 035420 score=-1.5",
+    "created_at": "2026-03-26 17:19:30.797100"
+  },
+  {
+    "id": 6,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "000660",
+    "strategy": "scoring",
+    "message": "SELL 000660 score=-1.5",
+    "created_at": "2026-03-26 17:19:30.580823"
+  },
+  {
+    "id": 5,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "005930",
+    "strategy": "scoring",
+    "message": "SELL 005930 score=-1.5",
+    "created_at": "2026-03-26 17:19:30.359710"
+  },
+  {
+    "id": 4,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "005930",
+    "strategy": "scoring",
+    "message": "BUY 005930 36주 @ 54,200원",
+    "created_at": "2026-03-26 17:11:18.808741"
+  },
+  {
+    "id": 3,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "035420",
+    "strategy": "scoring",
+    "message": "SELL 035420 score=-1.5",
+    "created_at": "2026-03-26 17:02:13.345533"
+  },
+  {
+    "id": 2,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "000660",
+    "strategy": "scoring",
+    "message": "SELL 000660 score=-1.5",
+    "created_at": "2026-03-26 17:02:13.127023"
+  },
+  {
+    "id": 1,
+    "event_type": "SIGNAL",
+    "severity": "info",
+    "symbol": "005930",
+    "strategy": "scoring",
+    "message": "SELL 005930 score=-1.5",
+    "created_at": "2026-03-26 17:02:12.904122"
+  }
+]
