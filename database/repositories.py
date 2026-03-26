@@ -132,8 +132,12 @@ def save_trade(
     reason: str = "",
     mode: str = "paper",
     account_key: str = "",
+    signal_at: datetime = None,
+    order_at: datetime = None,
+    expected_price: float = None,
 ) -> TradeHistory:
-    """매매 기록 저장 (account_key: 전략별 계좌 구분, 다중 계좌 시 사용)."""
+    """매매 기록 저장. signal_at/order_at/expected_price는 paper monitoring용."""
+    price_gap = round(price - expected_price, 1) if expected_price is not None else None
     session = get_session()
     try:
         trade = TradeHistory(
@@ -150,6 +154,10 @@ def save_trade(
             signal_score=signal_score,
             reason=reason,
             mode=mode,
+            signal_at=signal_at,
+            order_at=order_at or datetime.now(),
+            expected_price=expected_price,
+            price_gap=price_gap,
         )
         session.add(trade)
         session.commit()
