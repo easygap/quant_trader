@@ -176,18 +176,25 @@ class BlackSwanDetector:
             return self.recovery_scale
         return 1.0
 
-    def can_trade(self) -> dict:
+    def can_trade(self, action: str = "BUY") -> dict:
         """
-        매매 가능 여부 (주문 실행 전 호출)
+        매매 가능 여부 (주문 실행 전 호출).
+
+        Args:
+            action: "BUY" 또는 "SELL". 쿨다운 중에도 긴급 매도(SL/TP/블랙스완)는 허용.
 
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
         if self.is_on_cooldown():
+            # 쿨다운 중에도 매도(손절/익절/트레일링/긴급매도)는 허용 — 포지션을 방치하면 추가 손실 발생
+            if action == "SELL":
+                logger.info("블랙스완 쿨다운 중이나 매도(긴급/SL/TP) 허용")
+                return {"allowed": True, "reason": "쿨다운 중 매도 허용"}
             remaining = self._cooldown_until - datetime.now()
             return {
                 "allowed": False,
-                "reason": f"블랙스완 쿨다운 중 (남은 시간: {remaining})",
+                "reason": f"블랙스완 쿨다운 중 — 신규 매수 차단 (남은 시간: {remaining})",
             }
         return {"allowed": True, "reason": ""}
 
