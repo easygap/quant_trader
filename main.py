@@ -723,16 +723,9 @@ def run_paper_trading(args):
 
 
 def _compute_config_hash() -> str:
-    """strategies.yaml + risk_params.yaml의 SHA256 해시. 설정 변경 감지용."""
-    import hashlib
-    from pathlib import Path
-    config_dir = Path(__file__).parent / "config"
-    h = hashlib.sha256()
-    for fname in sorted(["strategies.yaml", "risk_params.yaml"]):
-        fpath = config_dir / fname
-        if fpath.exists():
-            h.update(fpath.read_bytes())
-    return h.hexdigest()
+    """strategies.yaml + risk_params.yaml의 SHA256 해시. 설정 변경 감지용 (레거시 호환)."""
+    from config.config_loader import compute_yaml_hash
+    return compute_yaml_hash()
 
 
 def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
