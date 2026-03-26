@@ -2,8 +2,10 @@
 
 > **실험 기간**: 2026-03-27 ~ 2026-06-19 (60영업일)
 > **생성일**: 2026-03-26
-> **Git Commit**: c182823 (HEAD)
-> **Config Hash**: 1366a00b19c4aa58
+> **Git Commit**: (실험 시작 시 기록)
+> **YAML Hash**: `0d02815a51ea7715` (파일 동결 확인)
+> **Resolved Hash (signal-only)**: `7681f2771efbe6a9` (auto_entry=false)
+> **Resolved Hash (full paper)**: `92cecd97b49315c0` (auto_entry=true)
 > **auto_entry 기본값**: `false` (settings.yaml) — full paper만 환경변수로 `true` 전환
 
 ---
@@ -15,19 +17,17 @@
 ```bash
 # (1) Git HEAD 확인
 git rev-parse --short HEAD
-# 기대: c182823
 
-# (2) Config Hash 확인
+# (2) 듀얼 해시 확인 (YAML + Resolved)
 python -c "
-import hashlib; h = hashlib.sha256()
-for f in ['config/strategies.yaml','config/risk_params.yaml',
-          'config/settings.yaml.example','config/baskets.yaml']:
-    try:
-        with open(f,'rb') as fh: h.update(fh.read())
-    except FileNotFoundError: pass
-print(h.hexdigest()[:16])
+from config.config_loader import Config
+c = Config.get()
+print(f'YAML Hash:     {c.yaml_hash[:16]}')
+print(f'Resolved Hash: {c.resolved_hash[:16]}')
+print(f'auto_entry:    {c.auto_entry} (source={c.auto_entry_source})')
 "
-# 기대: 1366a00b19c4aa58
+# signal-only 기대: YAML=0d02815a51ea7715, Resolved=7681f2771efbe6a9, auto_entry=False
+# full paper 기대:  YAML=0d02815a51ea7715, Resolved=92cecd97b49315c0, auto_entry=True
 
 # (3) 실매매 차단 확인
 grep ENABLE_LIVE_TRADING .env        # 출력 없거나 =false
@@ -35,7 +35,7 @@ grep use_mock config/settings.yaml*  # use_mock: true
 
 # (4) auto_entry 기본값 확인
 grep auto_entry config/settings.yaml*
-# auto_entry: false (기본)
+# auto_entry: false (YAML 원본)
 
 # (5) DB 무결성
 python -c "from database.connection import get_engine; print('DB OK')"
@@ -207,9 +207,14 @@ sudo systemctl restart quant_trader
 | `MAX_CALLS_PER_MIN` | API 분당 제한 | 300 |
 
 ### Full Paper 전용
-| 변수 | 설명 | 기본값 |
-|------|------|--------|
-| `QUANT_AUTO_ENTRY` | `true`로 설정 시 모의 주문 실행 | `false` |
+| 변수 | 설명 | 기본값 | 허용값 |
+|------|------|--------|--------|
+| `QUANT_AUTO_ENTRY` | `true`로 설정 시 모의 주문 실행 | `false` | `true/false/1/0/on/off/yes/no` |
+
+- 해석 위치: `config/config_loader.py` (`_resolve_auto_entry`)
+- 시작 시 로그에 `auto_entry resolved: True (source=ENV)` 출력
+- **live 모드에서는 무시됨** (경고 로그 출력 후 YAML 값 사용)
+- 잘못된 값(예: `maybe`, `2`) → 즉시 `ValueError` 발생, 서비스 시작 차단
 
 ### 절대 설정하면 안 되는 것
 | 변수 | 이유 |
@@ -220,48 +225,58 @@ sudo systemctl restart quant_trader
 
 ## 5. Git Commit / Config Hash 기록 방법
 
+### 듀얼 해시 개념
+
+| 해시 | 대상 | 목적 | 변경 조건 |
+|------|------|------|-----------|
+| **YAML Hash** | YAML 파일 원본 바이트 | 파일 동결 확인 | YAML 파일 수정 시 |
+| **Resolved Hash** | 환경변수 반영 후 실행 설정 | 실제 동작 동결 확인 | YAML 수정 또는 ENV 변경 시 |
+
+**왜 두 개가 필요한가?**
+- YAML Hash가 같은데 Resolved Hash가 다르면 → "문서는 안 바뀌었지만 환경변수가 달라 동작이 바뀜" 감지
+- YAML Hash가 다르면 → 파일 자체가 수정됨 (실험 무효)
+
 ### 실험 시작 시 기록
 ```bash
 # Git commit hash
 git rev-parse HEAD
-# 예: c182823285a2afc53944aba9021d36389dd12df4
 
-# Config hash (모든 설정 파일 SHA-256 앞 16자리)
+# 듀얼 해시 출력
 python -c "
-import hashlib; h = hashlib.sha256()
-for f in ['config/strategies.yaml','config/risk_params.yaml',
-          'config/settings.yaml.example','config/baskets.yaml']:
-    try:
-        with open(f,'rb') as fh: h.update(fh.read())
-    except FileNotFoundError: pass
-print(h.hexdigest()[:16])
+from config.config_loader import Config
+c = Config.get()
+print(f'YAML Hash:     {c.yaml_hash[:16]}')
+print(f'Resolved Hash: {c.resolved_hash[:16]}')
+print(f'auto_entry:    {c.auto_entry} (source={c.auto_entry_source})')
 "
-# 예: 1366a00b19c4aa58
 ```
+
+### 기대값
+
+| 항목 | Signal-Only | Full Paper |
+|------|-------------|------------|
+| YAML Hash | `0d02815a51ea7715` | `0d02815a51ea7715` (동일) |
+| Resolved Hash | `7681f2771efbe6a9` | `92cecd97b49315c0` |
+| auto_entry | `False (YAML)` | `True (ENV)` |
 
 ### 실험 중 무결성 검증 (주간 점검 시)
 ```bash
-EXPECTED="1366a00b19c4aa58"
-CURRENT=$(python -c "
-import hashlib; h = hashlib.sha256()
-for f in ['config/strategies.yaml','config/risk_params.yaml',
-          'config/settings.yaml.example','config/baskets.yaml']:
-    try:
-        with open(f,'rb') as fh: h.update(fh.read())
-    except FileNotFoundError: pass
-print(h.hexdigest()[:16])
-")
-if [ "$CURRENT" = "$EXPECTED" ]; then
-    echo "OK: config unchanged ($CURRENT)"
-else
-    echo "ALERT: config changed! expected=$EXPECTED current=$CURRENT"
-fi
+python -c "
+from config.config_loader import Config
+c = Config.get()
+yaml_ok = c.yaml_hash[:16] == '0d02815a51ea7715'
+print(f'YAML Hash:     {c.yaml_hash[:16]} [{\"OK\" if yaml_ok else \"CHANGED!\"}]')
+print(f'Resolved Hash: {c.resolved_hash[:16]}')
+print(f'auto_entry:    {c.auto_entry} (source={c.auto_entry_source})')
+if not yaml_ok:
+    print('ALERT: YAML 파일이 변경되었습니다! 실험 무효 가능.')
+"
 ```
 
 ### 실험 중 코드 무결성 검증
 ```bash
 git status --porcelain    # 출력이 비어있어야 정상
-git rev-parse HEAD        # c182823285a2afc53944aba9021d36389dd12df4
+git rev-parse --short HEAD
 ```
 
 ---
@@ -312,8 +327,10 @@ git rev-parse HEAD        # c182823285a2afc53944aba9021d36389dd12df4
 | watchlist | `top_n` | `20` |
 | watchlist | `market` | `KOSPI` |
 | 설정 | `trading.auto_entry` | `false` (yaml 원본) |
-| 코드 | Git HEAD | `c182823` |
-| 설정 | Config Hash | `1366a00b19c4aa58` |
+| 코드 | Git HEAD | (실험 시작 시 기록) |
+| 설정 | YAML Hash | `0d02815a51ea7715` |
+| 설정 | Resolved Hash (signal-only) | `7681f2771efbe6a9` |
+| 설정 | Resolved Hash (full paper) | `92cecd97b49315c0` |
 
 ### 변경 가능한 항목 (실험에 영향 없음)
 
@@ -407,16 +424,28 @@ sudo systemctl start quant_trader
 
 ---
 
-## 부록: 파일 체크섬 기록
+## 부록: 해시 기록
 
+### YAML Hash 대상 파일
 ```
 config/strategies.yaml
 config/risk_params.yaml
+config/settings.yaml
 config/settings.yaml.example
 config/baskets.yaml
-config/holidays.yaml
-config/us_holidays.yaml
 ```
 
-**Config Hash (SHA-256 앞 16자리)**: `1366a00b19c4aa58`
-**Git Commit (full)**: `c182823285a2afc53944aba9021d36389dd12df4`
+### 해시 값 (SHA-256 앞 16자리)
+
+| 해시 종류 | 값 | 비고 |
+|-----------|---|------|
+| YAML Hash | `0d02815a51ea7715` | 파일 원본 동결 |
+| Resolved Hash (signal-only) | `7681f2771efbe6a9` | auto_entry=false |
+| Resolved Hash (full paper) | `92cecd97b49315c0` | auto_entry=true |
+
+### Precedence 규칙
+```
+ENV(QUANT_AUTO_ENTRY) > YAML(trading.auto_entry) > default(false)
+단, live 모드에서는 ENV 무시 → YAML 값만 사용
+해석 위치: config/config_loader.py _resolve_auto_entry()
+```

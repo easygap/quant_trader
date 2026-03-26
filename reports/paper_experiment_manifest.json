@@ -7,16 +7,29 @@
     "000660",
     "035420"
   ],
+  "watchlist_mode": "top_market_cap (top_n=20, market=KOSPI)",
   "benchmark": "KOSPI (KS11)",
-  "git_commit": "f6ed8ea",
-  "config_hash": "5611a6d9c5d4823c",
+  "git_commit": "(실험 시작 시 기록)",
+  "yaml_hash": "0d02815a51ea7715",
+  "resolved_hash": {
+    "signal_only": "7681f2771efbe6a9",
+    "full_paper": "92cecd97b49315c0"
+  },
+  "auto_entry": {
+    "yaml_default": false,
+    "resolution": "ENV(QUANT_AUTO_ENTRY) > YAML > default(false)",
+    "live_mode_override": "ENV 무시, YAML만 사용"
+  },
   "fee_settings": {
     "commission_rate": 0.00015,
     "tax_rate": 0.002,
     "slippage": 0.0005,
     "dynamic_slippage": true
   },
-  "run_mode": "paper (schedule)",
-  "run_command": "python main.py --mode schedule --strategy scoring",
+  "run_modes": {
+    "spot_check": "python main.py --mode paper --strategy scoring --symbol 005930",
+    "signal_only": "python main.py --mode schedule --strategy scoring",
+    "full_paper": "QUANT_AUTO_ENTRY=true python main.py --mode schedule --strategy scoring"
+  },
   "operator_notes": "scoring experimental 상태. 모든 전략 검증 미통과. live 전환 불가. 60영업일 관측 후 GoLive 체크."
 }
