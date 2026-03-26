@@ -2,6 +2,8 @@
 펀더멘털 팩터 전략
 - 가격(OHLC)이 아닌 재무 지표만으로 신호 산출 (pykrx 우선 → yfinance 폴백).
 - 백테스트 시 DataFrame에 종목코드를 넣으려면 df.attrs['symbol'] = '005930' 설정.
+- Point-in-time 안전장치: as_of_date가 주어지면 해당 시점 기준 공시 가용 데이터만 사용.
+  한국 상장사는 분기 종료 후 통상 45일 내 실적 공시. 안전 마진으로 60일 적용.
 """
 
 from __future__ import annotations
@@ -55,13 +57,18 @@ def _clean_per(x) -> Optional[float]:
         return None
 
 
-def _try_dates_for_fundamental_table(markets: tuple[str, ...]) -> tuple[Optional[pd.DataFrame], str, str]:
-    """최근 영업일 후보로 get_market_fundamental_by_ticker 조회."""
+def _try_dates_for_fundamental_table(
+    markets: tuple[str, ...],
+    as_of_date: datetime = None,
+) -> tuple[Optional[pd.DataFrame], str, str]:
+    """최근 영업일 후보로 get_market_fundamental_by_ticker 조회.
+    as_of_date가 주어지면 해당 날짜 이전 영업일에서만 조회 (look-ahead 방지).
+    """
     if not HAS_PYKRX:
         return None, "", ""
-    today = datetime.now().date()
+    ref = as_of_date.date() if as_of_date else datetime.now().date()
     for delta in range(0, 15):
-        d = (today - timedelta(days=delta)).strftime("%Y%m%d")
+        d = (ref - timedelta(days=delta)).strftime("%Y%m%d")
         for mkt in markets:
             try:
                 df = pykrx_stock.get_market_fundamental_by_ticker(d, market=mkt, alternative=True)
@@ -75,19 +82,22 @@ def _try_dates_for_fundamental_table(markets: tuple[str, ...]) -> tuple[Optional
     return None, "", ""
 
 
-def _market_fundamental_for_symbol(symbol: str) -> tuple[Optional[pd.DataFrame], str, str]:
+def _market_fundamental_for_symbol(
+    symbol: str,
+    as_of_date: datetime = None,
+) -> tuple[Optional[pd.DataFrame], str, str]:
     """종목이 포함된 시장(KOSPI/KOSDAQ) 스냅샷 우선, 없으면 첫 유효 테이블."""
     s6 = "".join(c for c in str(symbol) if c.isdigit()).zfill(6)[-6:]
     if len(s6) != 6:
-        return _try_dates_for_fundamental_table(("KOSPI", "KOSDAQ"))
+        return _try_dates_for_fundamental_table(("KOSPI", "KOSDAQ"), as_of_date=as_of_date)
     for mkt in ("KOSPI", "KOSDAQ"):
-        mdf, dstr, mkt_out = _try_dates_for_fundamental_table((mkt,))
+        mdf, dstr, mkt_out = _try_dates_for_fundamental_table((mkt,), as_of_date=as_of_date)
         if mdf is None or mdf.empty:
             continue
         for ix in mdf.index:
             if _ticker_norm(ix) == s6:
                 return mdf, dstr, mkt_out
-    return _try_dates_for_fundamental_table(("KOSPI", "KOSDAQ"))
+    return _try_dates_for_fundamental_table(("KOSPI", "KOSDAQ"), as_of_date=as_of_date)
 
 
 def _per_from_mdf(market_df: pd.DataFrame, t6: str) -> Optional[float]:
@@ -97,16 +107,17 @@ def _per_from_mdf(market_df: pd.DataFrame, t6: str) -> Optional[float]:
     return None
 
 
-def _stock_per_pykrx(symbol: str) -> Optional[float]:
-    """일별 시계열에서 최근 PER."""
+def _stock_per_pykrx(symbol: str, as_of_date: datetime = None) -> Optional[float]:
+    """일별 시계열에서 최근 PER. as_of_date가 주어지면 해당 시점까지만 조회."""
     if not HAS_PYKRX:
         return None
     s = "".join(c for c in str(symbol) if c.isdigit()).zfill(6)[-6:]
     if len(s) != 6:
         return None
     try:
-        today = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        ref = as_of_date or datetime.now()
+        today = ref.strftime("%Y%m%d")
+        start = (ref - timedelta(days=30)).strftime("%Y%m%d")
         per_df = pykrx_stock.get_market_fundamental(start, today, s)
         if per_df is None or per_df.empty or "PER" not in per_df.columns:
             return None
@@ -254,7 +265,7 @@ def _yf_operating_income_yoy(t: "yf.Ticker") -> Optional[float]:
             return None
         cur = float(vals.iloc[0])
         prev_y = float(vals.iloc[4])
-        if prev_y == 0:
+        if prev_y == 0 or abs(prev_y) < 1e-6:
             return None
         return (cur / prev_y - 1.0) * 100.0
     except Exception:
@@ -274,8 +285,10 @@ def _yf_per(symbol: str) -> Optional[float]:
         return None
 
 
-def _fetch_fundamental_bundle(symbol: str) -> dict[str, Any]:
-    """pykrx + yfinance 병합 펀더멘털 스냅샷."""
+def _fetch_fundamental_bundle(symbol: str, as_of_date: datetime = None) -> dict[str, Any]:
+    """pykrx + yfinance 병합 펀더멘털 스냅샷.
+    as_of_date: 백테스트 시점. 주어지면 해당 시점 기준 공시 가용 데이터만 사용.
+    """
     out: dict[str, Any] = {
         "per": None,
         "sector_benchmark_per": None,
@@ -285,8 +298,8 @@ def _fetch_fundamental_bundle(symbol: str) -> dict[str, Any]:
         "op_income_yoy": None,
         "source": "",
     }
-    per_pykrx = _stock_per_pykrx(symbol)
-    mdf, dstr, mkt = _market_fundamental_for_symbol(symbol)
+    per_pykrx = _stock_per_pykrx(symbol, as_of_date=as_of_date)
+    mdf, dstr, mkt = _market_fundamental_for_symbol(symbol, as_of_date=as_of_date)
     bench: Optional[float] = None
     if mdf is not None and not mdf.empty:
         bench_ind = _industry_avg_per_pykrx(symbol, dstr, mkt, mdf)
@@ -326,25 +339,38 @@ class FundamentalFactorStrategy(BaseStrategy):
     SELL = "SELL"
     HOLD = "HOLD"
 
-    def __init__(self, config: Config = None):
+    # Point-in-time 안전 마진: 분기 종료 후 실적 공시까지 최소 일수.
+    # 한국 상장사 통상 45일 이내 공시, 안전 마진 60일.
+    PIT_SAFE_MARGIN_DAYS = 60
+
+    def __init__(self, config: Config = None, as_of_date: datetime = None):
         super().__init__(
             name="fundamental_factor",
             description="펀더멘털 팩터 — PER·ROE·부채·영업이익 성장 (가격과 독립)",
         )
         self.config = config or Config.get()
         self.params = self.config.strategies.get("fundamental_factor", {})
+        self._as_of_date = as_of_date
 
-    def _cached_bundle(self, symbol: str) -> dict[str, Any]:
+    def _cached_bundle(self, symbol: str, as_of_date: datetime = None) -> dict[str, Any]:
         hours = float(self.params.get("data_cache_hours", 24))
         now = time.time()
         sym = "".join(c for c in str(symbol) if c.isdigit()).zfill(6)[-6:]
         if not sym:
             return {}
-        ent = _CACHE.get(sym)
+
+        ref_date = as_of_date or self._as_of_date
+        # Point-in-time: 백테스트 시 공시 가용 시점으로 조회 시점을 후퇴
+        pit_date = None
+        if ref_date is not None:
+            pit_date = ref_date - timedelta(days=self.PIT_SAFE_MARGIN_DAYS)
+
+        cache_key = f"{sym}_{pit_date.strftime('%Y%m%d') if pit_date else 'live'}"
+        ent = _CACHE.get(cache_key)
         if ent and ent[0] > now:
             return ent[1]
-        b = _fetch_fundamental_bundle(sym)
-        _CACHE[sym] = (now + hours * 3600.0, b)
+        b = _fetch_fundamental_bundle(sym, as_of_date=pit_date)
+        _CACHE[cache_key] = (now + hours * 3600.0, b)
         return b
 
     def _score_bundle(self, bundle: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -412,7 +438,19 @@ class FundamentalFactorStrategy(BaseStrategy):
             result["ensemble_skip"] = True
             return result
 
-        bundle = self._cached_bundle(sym)
+        # 백테스트: DataFrame의 마지막 날짜를 as_of_date로 사용
+        row_date = None
+        if self._as_of_date:
+            row_date = self._as_of_date
+        elif hasattr(result.index, 'max') and len(result) > 0:
+            try:
+                last_idx = result.index[-1]
+                if isinstance(last_idx, (datetime, pd.Timestamp)):
+                    row_date = last_idx.to_pydatetime() if hasattr(last_idx, 'to_pydatetime') else last_idx
+            except Exception:
+                pass
+
+        bundle = self._cached_bundle(sym, as_of_date=row_date)
         if not any(
             bundle.get(k) is not None
             for k in ("per", "sector_benchmark_per", "roe", "debt_ratio", "op_income_yoy")
