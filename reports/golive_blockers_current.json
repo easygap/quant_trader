@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-03-26T15:03:50.709195",
+  "go_live": false,
+  "verdict": "NO-GO",
+  "blockers": [
+    {
+      "id": 1,
+      "type": "HARD",
+      "desc": "승인된 전략 0개",
+      "resolution": "WF 통과 전략 필요"
+    },
+    {
+      "id": 2,
+      "type": "HARD",
+      "desc": "Paper 운영 0일 (최소 60일)",
+      "resolution": "paper 모드 60영업일 운영"
+    },
+    {
+      "id": 3,
+      "type": "HARD",
+      "desc": "벤치마크 대비 초과수익 음수",
+      "resolution": "전략 개선 또는 유니버스 변경"
+    },
+    {
+      "id": 4,
+      "type": "SOFT",
+      "desc": "pykrx 데이터 소스 불가",
+      "resolution": "yfinance forwardPE로 대체 완료"
+    },
+    {
+      "id": 5,
+      "type": "SOFT",
+      "desc": "yfinance debtToEquity 한국 기준 불일치",
+      "resolution": "DART API 또는 수동 보정 필요"
+    }
+  ]
+}
