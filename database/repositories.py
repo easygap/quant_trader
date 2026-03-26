@@ -132,8 +132,12 @@ def save_trade(
     reason: str = "",
     mode: str = "paper",
     account_key: str = "",
+    signal_at: datetime = None,
+    order_at: datetime = None,
+    expected_price: float = None,
 ) -> TradeHistory:
-    """매매 기록 저장 (account_key: 전략별 계좌 구분, 다중 계좌 시 사용)."""
+    """매매 기록 저장. signal_at/order_at/expected_price는 paper monitoring용."""
+    price_gap = round(price - expected_price, 1) if expected_price is not None else None
     session = get_session()
     try:
         trade = TradeHistory(
@@ -150,6 +154,10 @@ def save_trade(
             signal_score=signal_score,
             reason=reason,
             mode=mode,
+            signal_at=signal_at,
+            order_at=order_at or datetime.now(),
+            expected_price=expected_price,
+            price_gap=price_gap,
         )
         session.add(trade)
         session.commit()
@@ -250,6 +258,41 @@ def get_trade_cash_summary(
         "tax": round(total_tax, 0),
         "slippage": round(total_slippage, 0),
     }
+
+
+def get_strategy_performance_summary(
+    mode: Optional[str] = None,
+    account_key: Optional[str] = None,
+    days: int = 30,
+) -> dict[str, dict]:
+    """
+    전략별 성과 분리 측정.
+
+    Returns:
+        {"scoring": {"trades": 12, "wins": 7, "win_rate": 58.3, "total_pnl": 150000, "total_cost": 5000}, ...}
+    """
+    since = datetime.now() - timedelta(days=days) if days > 0 else None
+    trades = get_trade_history(mode=mode, start_date=since, account_key=account_key)
+    by_strategy: dict[str, dict] = {}
+    for t in trades:
+        strat = t.strategy or "unknown"
+        if strat not in by_strategy:
+            by_strategy[strat] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "total_cost": 0.0}
+        action = (t.action or "").upper()
+        if action == "BUY":
+            continue
+        s = by_strategy[strat]
+        s["trades"] += 1
+        pnl = _extract_pnl_from_reason(t.reason or "")
+        s["total_pnl"] += pnl
+        s["total_cost"] += (t.commission or 0) + (t.tax or 0) + (t.slippage or 0)
+        if pnl > 0:
+            s["wins"] += 1
+        elif pnl < 0:
+            s["losses"] += 1
+    for strat, s in by_strategy.items():
+        s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0.0
+    return by_strategy
 
 
 def _extract_pnl_from_reason(reason: str) -> float:

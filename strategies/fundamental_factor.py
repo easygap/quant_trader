@@ -209,7 +209,13 @@ def _yf_first_ticker(symbol: str) -> Optional[Any]:
 
 
 def _yf_roe_debt_op_yoy(symbol: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """yfinance: ROE(%), 부채비율(%), 영업이익 YoY(%)."""
+    """yfinance: ROE(%), 부채비율(%), 영업이익 YoY(%).
+
+    주의: yfinance debtToEquity는 totalDebt/equity로, 한국 회계의 부채비율(totalLiabilities/equity)과
+    다릅니다. 차입금 비율에 가까우며 한국 기업은 이 값이 높게 나올 수 있습니다.
+    이 값을 그대로 사용하면 건전한 기업도 부채 항목에서 탈락할 수 있으므로,
+    debt_ratio_max 설정을 yfinance 기준에 맞게 조정하거나 이 필드를 skip하세요.
+    """
     if not HAS_YF:
         return None, None, None
     try:
@@ -273,13 +279,17 @@ def _yf_operating_income_yoy(t: "yf.Ticker") -> Optional[float]:
 
 
 def _yf_per(symbol: str) -> Optional[float]:
+    """yfinance PER: trailingPE 우선, 없으면 forwardPE 폴백."""
     if not HAS_YF:
         return None
     try:
         t = _yf_first_ticker(symbol)
         if t is None:
             return None
-        per = (t.info or {}).get("trailingPE")
+        info = t.info or {}
+        per = info.get("trailingPE")
+        if per is None:
+            per = info.get("forwardPE")
         return _clean_per(per)
     except Exception:
         return None
@@ -377,7 +387,10 @@ class FundamentalFactorStrategy(BaseStrategy):
         per_max = float(self.params.get("per_max_absolute", 30))
         use_sector = bool(self.params.get("per_sector_relative", True))
         roe_min = float(self.params.get("roe_min", 10))
-        debt_max = float(self.params.get("debt_ratio_max", 200))
+        # yfinance debtToEquity는 차입금/자본 비율(한국 부채비율과 다름).
+        # 기본 600%으로 완화하여 yfinance 기준 대부분의 한국 대형주가 통과하도록 설정.
+        # DART/pykrx 소스 사용 시 200%로 복원 가능.
+        debt_max = float(self.params.get("debt_ratio_max", 600))
         growth_min = float(self.params.get("earnings_growth_min", 5))
 
         score = 0

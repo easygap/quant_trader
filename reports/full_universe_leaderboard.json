@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-03-26T15:04:16.277673",
+  "benchmark_kospi_return_pct": 81.29,
+  "period": "2021-03 ~ 2026-03 (5년)",
+  "universe": "코스피 대형주 10종목",
+  "strategies": [
+    {
+      "name": "scoring",
+      "avg_return_pct": 0.7,
+      "avg_sharpe": -1.22,
+      "avg_mdd_pct": -6.15,
+      "avg_win_rate_pct": 57.8,
+      "avg_ev_per_trade": -625.0,
+      "excess_return_pct": -80.59,
+      "verdict": "experimental"
+    },
+    {
+      "name": "mean_reversion",
+      "avg_return_pct": -2.06,
+      "avg_sharpe": -2.5,
+      "avg_mdd_pct": -4.51,
+      "avg_win_rate_pct": 50.9,
+      "avg_ev_per_trade": -13176.0,
+      "excess_return_pct": -83.35,
+      "verdict": "off"
+    },
+    {
+      "name": "fundamental_factor",
+      "note": "PER forwardPE 수신 복구 완료. 백테스트는 yfinance API 호출 제한으로 대규모 실행 불가. WF 미실행.",
+      "verdict": "pending_validation"
+    },
+    {
+      "name": "fundamental_first",
+      "note": "fundamental_factor 종속. 동일 데이터 한계.",
+      "verdict": "pending_validation"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "benchmark": "KOSPI",
+  "period": "2021-03-26 ~ 2026-03-26",
+  "kospi_return_pct": 81.29,
+  "scoring_avg_return_pct": 0.7,
+  "scoring_excess_return_pct": -80.59,
+  "mean_reversion_avg_return_pct": -2.06,
+  "mean_reversion_excess_return_pct": -83.35,
+  "note": "두 전략 모두 KOSPI 대비 대폭 언더퍼폼. 5년 KOSPI +81.29% 대비 Scoring +0.7%, MR -2.06%"
+}
