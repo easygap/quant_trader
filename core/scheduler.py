@@ -106,9 +106,7 @@ class Scheduler:
         self.blackswan = BlackSwanDetector(self.config)
         self.portfolio = PortfolioManager(self.config, account_key=self.strategy_name)
         self.discord = Notifier(self.config)
-        self.auto_entry = os.environ.get(
-            "QUANT_AUTO_ENTRY", str(self.config.trading.get("auto_entry", False))
-        ).lower() in ("true", "1", "yes")
+        self.auto_entry = self.config.auto_entry
 
         self.monitor_interval = 600  # 기본 10분 (적응형 주기로 동적 변경됨)
 
@@ -125,8 +123,9 @@ class Scheduler:
         self._loop_metrics = LoopMetrics()
 
         logger.info(
-            "Scheduler 초기화 (전략: {}, 모니터링 간격: {}초, auto_entry: {})",
+            "Scheduler 초기화 (전략: {}, 모니터링 간격: {}초, auto_entry: {} [source={}])",
             strategy_name, self.monitor_interval, self.auto_entry,
+            self.config.auto_entry_source,
         )
 
     def startup_recovery(self):

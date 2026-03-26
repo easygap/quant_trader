@@ -13,21 +13,20 @@
 - [ ] Git HEAD 일치 확인
   ```bash
   git rev-parse --short HEAD
-  # 기대값: c182823
   ```
 
-- [ ] Config Hash 일치 확인
+- [ ] 듀얼 해시 확인 (YAML + Resolved)
   ```bash
   python -c "
-  import hashlib; h = hashlib.sha256()
-  for f in ['config/strategies.yaml','config/risk_params.yaml',
-            'config/settings.yaml.example','config/baskets.yaml']:
-      try:
-          with open(f,'rb') as fh: h.update(fh.read())
-      except FileNotFoundError: pass
-  print(h.hexdigest()[:16])
+  from config.config_loader import Config
+  c = Config.get()
+  yaml_ok = c.yaml_hash[:16] == '0d02815a51ea7715'
+  print(f'YAML Hash:     {c.yaml_hash[:16]} [{\"OK\" if yaml_ok else \"CHANGED!\"}]')
+  print(f'Resolved Hash: {c.resolved_hash[:16]}')
+  print(f'auto_entry:    {c.auto_entry} (source={c.auto_entry_source})')
   "
-  # 기대값: 1366a00b19c4aa58
+  # YAML Hash 기대값: 0d02815a51ea7715 (모드 무관)
+  # Resolved Hash: signal-only=7681f2771efbe6a9 / full paper=92cecd97b49315c0
   ```
 
 - [ ] uncommitted 변경 없음: `git status --porcelain` (비어있어야 함)
@@ -36,12 +35,6 @@
   ```bash
   grep ENABLE_LIVE_TRADING .env        # 출력 없거나 =false
   grep use_mock config/settings.yaml*  # use_mock: true
-  ```
-
-- [ ] auto_entry 설정 확인
-  ```bash
-  grep auto_entry config/settings.yaml*  # false (yaml 원본)
-  grep QUANT_AUTO_ENTRY .env             # full paper면 true, signal-only면 false/없음
   ```
 
 ---
