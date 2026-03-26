@@ -9,6 +9,7 @@
 단일 분할 검증: run(). 워크포워드(슬라이딩 윈도우) 검증: run_walk_forward().
 """
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -464,9 +465,22 @@ class StrategyValidator:
     def _save_walk_forward_report(self, result: dict) -> Path:
         date_part = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_strategy = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(result["strategy"]))
+        # 텍스트 리포트
         path = self.output_dir / f"validation_walkforward_{date_part}_{safe_strategy}.txt"
         path.write_text(self._render_walk_forward_report(result), encoding="utf-8")
         logger.info("워크포워드 검증 리포트 저장: {}", path)
+        # JSON (기계 판독·비교용)
+        json_path = self.output_dir / f"validation_walkforward_{date_part}_{safe_strategy}.json"
+        json_data = {
+            k: v for k, v in result.items()
+            if k not in ("report_path",)
+        }
+        # datetime 등 직렬화 불가 타입 처리
+        json_path.write_text(
+            json.dumps(json_data, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        logger.info("워크포워드 검증 JSON 저장: {}", json_path)
         return path
 
     def _render_walk_forward_report(self, result: dict) -> str:
