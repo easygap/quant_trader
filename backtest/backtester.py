@@ -147,8 +147,11 @@ class Backtester:
         else:
             df_analyzed["_avg_daily_volume"] = np.nan
 
+        # 시장국면 시리즈 사전 계산 (TICKET-02)
+        regime_series = self._precompute_regime_series(df_analyzed)
+
         # 시뮬레이션 실행 (시점 T에서는 row T만 사용, T+1 이후 미참조)
-        result = self._simulate(df_analyzed, initial_capital)
+        result = self._simulate(df_analyzed, initial_capital, regime_series=regime_series)
         result["look_ahead_bias_verified"] = (
             "STRICT" if strict_lookahead else "DISABLED_WITH_WARNING"
         )
@@ -191,7 +194,108 @@ class Backtester:
             config = self.config.with_strategy_overrides(name, overrides[name])
         return create_strategy(name, config)
 
-    def _simulate(self, df: pd.DataFrame, initial_capital: float) -> dict:
+    def _precompute_regime_series(self, df: pd.DataFrame) -> pd.Series:
+        """
+        백테스트 기간의 시장국면을 사전 계산하여 날짜별 Series로 반환.
+
+        Look-ahead bias 방지:
+          시점 T의 regime은 T-1일까지의 지수 종가만으로 계산한다.
+          즉 T일 종가는 regime 계산에 사용하지 않는다.
+          이는 실거래에서 "장전에 전일 기준 국면 판단 → 당일 매매 결정"과 일치.
+
+        Returns:
+            pd.Series (index=df.index):
+              "bullish" (정상), "caution" (포지션 축소), "bearish" (매수 차단)
+        """
+        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        default = pd.Series("bullish", index=df.index)
+
+        if not regime_cfg.get("enabled", False):
+            return default
+
+        index_symbol = regime_cfg.get("index_symbol", "KS11")
+        ma_days = max(20, int(regime_cfg.get("ma_days", 200)))
+        short_days = max(1, int(regime_cfg.get("short_momentum_days", 20)))
+        short_threshold = float(regime_cfg.get("short_momentum_threshold", -5.0))
+
+        # 지수 데이터 로드 — 백테스트 기간 + 이동평균 계산에 필요한 과거 데이터
+        try:
+            from core.data_collector import DataCollector
+            collector = DataCollector()
+            margin_days = ma_days + 60  # MA 계산에 충분한 여유
+            first_date = df.index[0]
+            if hasattr(first_date, "strftime"):
+                from datetime import timedelta
+                start_str = (first_date - timedelta(days=margin_days + 30)).strftime("%Y-%m-%d")
+            else:
+                start_str = None
+            last_date = df.index[-1]
+            end_str = last_date.strftime("%Y-%m-%d") if hasattr(last_date, "strftime") else None
+
+            index_df = collector.fetch_korean_stock(index_symbol, start_date=start_str, end_date=end_str)
+            if index_df is None or index_df.empty or len(index_df) < ma_days:
+                logger.warning("백테스트 regime: 지수 {} 데이터 부족 — 국면 필터 비활성화", index_symbol)
+                return default
+        except Exception as e:
+            logger.warning("백테스트 regime: 지수 데이터 로드 실패 — 국면 필터 비활성화: {}", e)
+            return default
+
+        # 지수 종가 기반 지표 계산
+        idx_close = index_df["close"].astype(float)
+        idx_ma = idx_close.rolling(ma_days, min_periods=ma_days).mean()
+        idx_momentum = idx_close.pct_change(short_days) * 100  # N일 수익률(%)
+
+        # 날짜별 regime 판별 — T일 regime은 T-1일 지수 데이터까지만 사용
+        regime_map = {}
+        idx_dates = index_df.index.tolist()
+        for i in range(1, len(idx_dates)):
+            # T-1일까지의 데이터로 regime 계산
+            prev_idx = i - 1
+            prev_close = float(idx_close.iloc[prev_idx])
+            prev_ma = idx_ma.iloc[prev_idx]
+            prev_momentum = idx_momentum.iloc[prev_idx]
+
+            if pd.isna(prev_ma) or pd.isna(prev_momentum):
+                regime_map[idx_dates[i]] = "bullish"
+                continue
+
+            below_ma = prev_close < float(prev_ma)
+            momentum_triggered = float(prev_momentum) <= short_threshold
+
+            triggered = sum([below_ma, momentum_triggered])
+            if triggered >= 2:
+                regime_map[idx_dates[i]] = "bearish"
+            elif triggered == 1:
+                regime_map[idx_dates[i]] = "caution"
+            else:
+                regime_map[idx_dates[i]] = "bullish"
+
+        # 종목 DataFrame 날짜에 맞춰 regime 매핑
+        regimes = []
+        for date in df.index:
+            if date in regime_map:
+                regimes.append(regime_map[date])
+            else:
+                # 날짜가 정확히 매칭되지 않으면 직전 유효 regime 사용
+                matched = "bullish"
+                for idx_date in sorted(regime_map.keys()):
+                    if idx_date <= date:
+                        matched = regime_map[idx_date]
+                    else:
+                        break
+                regimes.append(matched)
+
+        result = pd.Series(regimes, index=df.index)
+        n_bearish = (result == "bearish").sum()
+        n_caution = (result == "caution").sum()
+        n_bullish = (result == "bullish").sum()
+        logger.info(
+            "백테스트 regime 사전계산 완료: bullish={}일, caution={}일, bearish={}일",
+            n_bullish, n_caution, n_bearish,
+        )
+        return result
+
+    def _simulate(self, df: pd.DataFrame, initial_capital: float, regime_series: pd.Series = None) -> dict:
         """
         거래 시뮬레이션 실행.
         방어: 날짜 순으로 순회하며 당일(row T) 데이터만 사용 — T+1 이후 행 미참조로 Look-Ahead Bias 없음.
@@ -254,6 +358,13 @@ class Backtester:
 
         min_holding_days = pos_limits.get("min_holding_days", 0)
         max_holding_days = pos_limits.get("max_holding_days", 0)
+
+        # 시장국면 필터 설정 (TICKET-02)
+        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        regime_enabled = regime_cfg.get("enabled", False) and regime_series is not None
+        caution_scale = float(regime_cfg.get("caution_scale", 0.5))
+        regime_buy_blocks = 0   # bearish에서 차단된 매수 신호 수 (메트릭용)
+        regime_caution_buys = 0  # caution에서 축소된 매수 수 (메트릭용)
 
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
@@ -411,6 +522,15 @@ class Backtester:
                 if monthly_trade_counts.get(_mk, 0) >= max_monthly_trades:
                     signal = "HOLD"
 
+            # 시장국면 필터 (TICKET-02): bearish→매수 차단, caution→포지션 축소
+            # regime은 T-1일까지의 지수 종가로 사전 계산됨 (look-ahead bias 없음)
+            regime_at_t = "bullish"
+            if regime_enabled and date in regime_series.index:
+                regime_at_t = regime_series.loc[date]
+            if signal == "BUY" and regime_at_t == "bearish":
+                signal = "HOLD"
+                regime_buy_blocks += 1
+
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -434,6 +554,11 @@ class Backtester:
                     max(0, qty_by_cap),
                     max(0, qty_by_total_cap),
                 )
+
+                # 시장국면 caution 시 포지션 축소 (TICKET-02)
+                if quantity > 0 and regime_at_t == "caution":
+                    quantity = max(1, int(quantity * caution_scale))
+                    regime_caution_buys += 1
 
                 # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
                 if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
@@ -509,6 +634,8 @@ class Backtester:
         return {
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve),
+            "regime_buy_blocks": regime_buy_blocks,
+            "regime_caution_buys": regime_caution_buys,
         }
 
     def _calculate_metrics(self, result: dict, initial_capital: float) -> dict:
@@ -704,6 +831,8 @@ class Backtester:
             "monthly_returns": monthly_returns,
             "gross_return": round(gross_return, 2),
             "cost_drag_pct": cost_drag,
+            "regime_buy_blocks": result.get("regime_buy_blocks", 0),
+            "regime_caution_buys": result.get("regime_caution_buys", 0),
         }
 
     @staticmethod
