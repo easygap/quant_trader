@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v2.7
+> **문서 버전**: v2.8
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-03-25
+> **최종 수정**: 2026-03-27
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -50,31 +50,42 @@
 | **수익 목표** | 검증된 전략으로 벤치마크(코스피 지수) 대비 초과 수익 달성. **가중치 최적화·워크포워드 검증·paper 1개월 운영을 모두 통과한 후에만 기대할 수 있는 목표**이며, 검증 없이 "연 20%" 같은 수치를 설정하는 것은 위험 |
 | **대응 속도** | 실시간 시세 반영 (1초 이내 분석·주문) |
 
-### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요
+### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v2.8 업데이트)
 
-> **핵심 판단: 현재 상태로 실전 자동매매를 돌리면 수익보다 손실 가능성이 더 높습니다.**
+> **핵심 판단: 시스템은 research-only 상태이며, live 자동매매는 코드 레벨 hard gate로 차단되어 있습니다.**
 
-인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응 등)는 프로덕션 수준에 가깝게 설계되어 있습니다. 그러나 **파이프라인에 흘려보내는 신호(Signal) 자체의 근거가 매우 약합니다.** 아래 문제들이 해결되기 전까지 실전 투입은 금지입니다.
+인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OperationEvent 기록, 주문 lifecycle 추적)는 프로덕션 수준에 가깝게 완성되었습니다. 그러나 **전략 신호의 실전 유효성이 검증되지 않았으므로** live 전환은 불가합니다.
 
-**신호 품질 문제 요약**:
+**전략 상태 레지스트리** (v2.8 현재):
 
-| 문제 | 상세 |
-|------|------|
-| **가중치 미검증** | RSI +2, MACD +2, 볼린저 +1 등 현재 가중치는 직관·예시용이며 통계적·실증적 근거 없음. 이 상태로 실거래 시 노이즈를 실행하는 것 |
-| **지표 다중공선성** | 스코어의 대부분이 "가격이 최근 올랐냐 내렸냐" 한 가지 정보를 여러 번 세는 형태 |
-| **앙상블 허구적 다각화** | technical과 momentum_factor는 실질적으로 같은 가격 정보 기반. 다수결 의미 퇴색 |
-| **한국 시장 미최적화** | 200일선, ADX 25, RSI 30/70 등 파라미터는 미국 시장 기준. 한국 시장(박스권 등락, 빠른 추세 전환)에 미조정 |
-| **과매매 위험** | 10분마다 신호 확인 구조에서 임계값 근처 신호 변동 시 왕복 수수료 0.23%가 빠르게 누적 |
+| 전략 | 상태 | 허용 모드 | 사유 |
+|------|------|-----------|------|
+| **scoring** | `experimental` | backtest, paper | OOS Sharpe 0.84, WF 미통과 |
+| **mean_reversion** | `disabled` | backtest only | Sharpe -2.50, 구조적 한계 |
+| **fundamental_factor** | `disabled` | backtest only | yfinance 부채비율 한국 기준 불일치, WF 미실행 |
+| **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속, WF 미실행 |
+| **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
+| **trend_following** | `disabled` | backtest only | 미검증 |
 
-**실전 투입 전 반드시 완료해야 할 4가지**:
+**Live 진입 Hard Gate** (5개 조건 전부 충족 필수, `main.py:_check_live_readiness_gate`):
+1. 승인된 전략 1개 이상 (`reports/approved_strategies.json` + config hash 일치)
+2. 최근 Walk-Forward 통과 (`reports/validation_walkforward_*.json`)
+3. 비용 반영 후 벤치마크 대비 초과수익 ≥ 0 (`reports/benchmark_comparison.json`)
+4. Paper trading 60영업일 이상 (DB `portfolio_snapshots`)
+5. 데이터 소스 health check 통과
 
-1. `backtest_universe.mode`를 `historical`로 설정 후 백테스트 재실행 → 실제 기대 수익률 재확인
-2. 가중치 최적화 파이프라인 3단계(`check_correlation` → `optimize --include-weights --auto-correlation` → `validate --walk-forward`) 실행 → OOS 샤프 1.0 이상 달성
-3. `data_source.preferred: fdr`, `allow_kis_fallback: false` 설정 확인
-4. paper 모드 최소 1개월 운영 → `check_live_readiness` 통과(방향성 일치율 70%, 수익률 차이 5%p 이내)
+**Paper 운영 현황** (v2.8):
+- scoring 전략 60영업일 paper 실험 준비 완료
+- signal-only (기본) / full paper (`QUANT_AUTO_ENTRY=true` 환경변수) 2모드 분리
+- lifecycle 테스트 하네스 4/4 PASS (signal_at/order_at/fill_at/expected_fill/price_gap)
+- 주간 리포트 자동 생성, GoLive 체크리스트 구현 완료
+
+**실전 투입 전 반드시 완료해야 할 승격 경로** (`reports/strategy_promotion_policy.md` 참고):
+1. `experimental → paper_candidate`: OOS Sharpe ≥ 0.5, WF 통과율 ≥ 60%, 비용 후 CAGR > 0
+2. `paper_candidate → live_candidate`: Paper 60영업일, 승률 ≥ 40%, MDD > -20%, Sharpe ≥ 0.3
+3. hard gate 5개 조건 충족 → `--mode live --confirm-live` 가능
 
 **지속적 손실이 발생할 수 있는 구체적 시나리오** (§4.6 참고):
-
 - **시나리오 A**: 과매매로 인한 수수료 손실 (월 10회 왕복 시 수수료만 2.3%)
 - **시나리오 B**: 생존자 편향으로 과대평가된 백테스트 (실전 수익률이 수십 %p 하락)
 - **시나리오 C**: 파라미터 과적합 (같은 시대의 OOS도 간접 과적합 가능)
@@ -893,8 +904,8 @@ quant_trader/
 | **backtest_momentum_top** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. 리밸런싱·시장 국면 필터·포트폴리오 스탑 지원 | `run_backtest_momentum_top()` → momentum_top_portfolio.run_momentum_top_portfolio_backtest() |
 | **validate** | 전략 검증 (3~5년, 샤프·MDD·벤치마크·in/out-of-sample). `--walk-forward` 시 워크포워드 | `run_strategy_validation()` → StrategyValidator.run / run_walk_forward |
 | **paper** | 모의투자 1회 순회 (워치리스트 종료 후 프로세스 종료) | `run_paper_trading()` → WatchlistManager, 전략.generate_signal, OrderExecutor(paper) |
-| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). `trading.mode=live`이면 거부 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
-| **live** | 실전 매매 (ENABLE_LIVE_TRADING=true + --confirm-live 필수) | `run_live_trading()` → KIS 인증 → Scheduler.run() |
+| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). 기본=signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. `trading.mode=live`이면 거부 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
+| **live** | 실전 매매. **4중 보안**: ① `is_strategy_allowed(live)` ② `ENABLE_LIVE_TRADING=true` ③ `--confirm-live` ④ `_check_live_readiness_gate()` 5개 조건 | `run_live_trading()` → hard gate → KIS 인증 → Scheduler.run() |
 | **liquidate** | 긴급 전 종목 매도 | `run_emergency_liquidate()` → DB 포지션 조회 → 종목별 매도 |
 | **compare** | 모의투자 vs 백테스트 비교 + **실전 전환 준비 평가** | `run_compare_paper_backtest()` → paper_compare.run_compare + check_live_readiness |
 | **optimize** | 전략 파라미터 최적화 (grid / bayesian / 가중치 대칭 Grid) | `run_param_optimize()` → param_optimizer, train_ratio·OOS |
@@ -912,6 +923,7 @@ quant_trader/
 - `--walk-forward` → validate 모드에서 슬라이딩 윈도우 워크포워드 검증
 - `--no-benchmark-top50` → validate 모드에서 코스피 Top50 벤치마크 비활성화
 - `--confirm-live` → live 모드 진입 시 필수 확인 플래그
+- `--force-live` → hard gate 우회 (위험: 검증 미통과 상태에서 live 강제 진입)
 - `--basket <name>` → rebalance 모드에서 대상 바스켓 지정 (미지정 시 enabled=true 전체)
 - `--dry-run` → rebalance 모드에서 실제 주문 없이 계획만 출력
 - `--initial-capital` → backtest / backtest_momentum_top 초기 자본금
