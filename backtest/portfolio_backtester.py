@@ -114,6 +114,14 @@ class PortfolioBacktester:
             "symbols": valid_symbols,
             "initial_capital": initial_capital,
             "per_symbol_stats": result.get("per_symbol_stats", {}),
+            # 진단 계측 전달
+            "exit_reason_counts": result.get("exit_reason_counts", {}),
+            "blocked_buy_examples": result.get("blocked_buy_examples", []),
+            "scaled_buy_examples": result.get("scaled_buy_examples", []),
+            "avg_bullish_notional": result.get("avg_bullish_notional", 0),
+            "avg_caution_notional": result.get("avg_caution_notional", 0),
+            "regime_buy_blocks": result.get("regime_buy_blocks", 0),
+            "regime_caution_buys": result.get("regime_caution_buys", 0),
         }
 
     def _precompute_regime_series(self, all_dates: list) -> pd.Series:
@@ -229,11 +237,38 @@ class PortfolioBacktester:
 
         sl_config = self.risk_params.get("stop_loss", {})
         sl_rate = sl_config.get("fixed_rate", 0.03)
+        sl_type = sl_config.get("type", "fixed")
+        atr_mult = sl_config.get("atr_multiplier", 2.0)
         tp_config = self.risk_params.get("take_profit", {})
         tp_rate = tp_config.get("fixed_rate", 0.08)
         ts_config = self.risk_params.get("trailing_stop", {})
         ts_enabled = ts_config.get("enabled", False)
-        ts_rate = ts_config.get("fixed_rate", 0.05)
+        ts_type = ts_config.get("type", "fixed")
+        ts_fixed_rate = ts_config.get("fixed_rate", 0.05)
+        ts_atr_mult = ts_config.get("atr_multiplier", 3.0)
+
+        def _get_atr(sig_df, date):
+            """signal DataFrame에서 해당 날짜의 ATR 값 추출. 없으면 None."""
+            if sig_df is None or date not in sig_df.index:
+                return None
+            v = sig_df.loc[date].get("atr")
+            if v is not None and pd.notna(v) and v > 0:
+                return float(v)
+            return None
+
+        def _stop_loss_price(avg_price, row_atr):
+            """backtester.py L347-350과 동일 로직."""
+            if sl_type == "atr" and row_atr is not None:
+                return avg_price - row_atr * atr_mult
+            return avg_price * (1 - sl_rate)
+
+        def _trailing_stop_price(hwm, row_atr):
+            """backtester.py L352-357과 동일 로직."""
+            if not ts_enabled or hwm <= 0:
+                return None
+            if ts_type == "atr" and row_atr is not None:
+                return hwm - row_atr * ts_atr_mult
+            return hwm * (1 - ts_fixed_rate)
 
         pos_limits = self.risk_params.get("position_limits", {}) or {}
         max_holding_days = pos_limits.get("max_holding_days", 0)
@@ -246,6 +281,13 @@ class PortfolioBacktester:
         caution_scale = float(regime_cfg.get("caution_scale", 0.5))
         regime_buy_blocks = 0
         regime_caution_buys = 0
+
+        # ── 진단 계측 (ablation diagnostics) ──
+        exit_reason_counts = {}
+        blocked_buy_examples = []
+        scaled_buy_examples = []
+        bullish_buy_notionals = []
+        caution_buy_notionals = []
 
         for date in all_dates:
             total_pos_value = sum(
@@ -265,21 +307,24 @@ class PortfolioBacktester:
                 pos["high_water_mark"] = max(pos["high_water_mark"], close)
 
                 sell_reason = None
+                row_atr = _get_atr(sig_df, date)
                 if max_holding_days > 0 and hasattr(date, "date"):
                     hd = (date - pos["buy_date"]).days if pos["buy_date"] is not None else 0
                     if hd >= max_holding_days:
                         sell_reason = "MAX_HOLD"
-                if not sell_reason and close <= pos["avg_price"] * (1 - sl_rate):
+                if not sell_reason and close <= _stop_loss_price(pos["avg_price"], row_atr):
                     sell_reason = "STOP_LOSS"
                 if not sell_reason and close >= pos["avg_price"] * (1 + tp_rate):
                     sell_reason = "TAKE_PROFIT"
-                if not sell_reason and ts_enabled and close <= pos["high_water_mark"] * (1 - ts_rate):
+                ts_price = _trailing_stop_price(pos["high_water_mark"], row_atr)
+                if not sell_reason and ts_price is not None and close <= ts_price:
                     sell_reason = "TRAILING_STOP"
                 if not sell_reason and row.get("signal") == "SELL":
                     sell_reason = "SELL"
 
                 if sell_reason:
                     to_sell.append((sym, close, sell_reason))
+                    exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
 
             for sym, close, reason in to_sell:
                 pos = positions.pop(sym)
@@ -323,6 +368,16 @@ class PortfolioBacktester:
                     and signals[sym].loc[date].get("signal") == "BUY"
                 )
                 regime_buy_blocks += n_blocked
+                if n_blocked > 0 and len(blocked_buy_examples) < 10:
+                    for sym in symbols:
+                        if sym not in positions and signals.get(sym) is not None and date in signals[sym].index:
+                            r = signals[sym].loc[date]
+                            if r.get("signal") == "BUY":
+                                blocked_buy_examples.append({
+                                    "date": str(date)[:10], "symbol": sym,
+                                    "score": float(r.get("total_score", r.get("strategy_score", 0))),
+                                    "reason": "bearish",
+                                })
 
             buy_candidates.sort(key=lambda x: -x[2])
 
@@ -346,8 +401,9 @@ class PortfolioBacktester:
                     break
 
                 max_invest = total_equity_now * max_position_ratio
-                stop_loss = close * (1 - sl_rate)
-                risk_per_share = max(close - stop_loss, close * 0.001)
+                buy_atr = _get_atr(signals.get(sym), date)
+                stop_at_buy = _stop_loss_price(close, buy_atr)
+                risk_per_share = max(close - stop_at_buy, close * 0.001)
                 risk_amount = total_equity_now * self.risk_params.get("position_sizing", {}).get("max_risk_per_trade", 0.01)
                 qty = min(
                     int(risk_amount / risk_per_share),
@@ -359,8 +415,18 @@ class PortfolioBacktester:
 
                 # 시장국면 caution 시 포지션 축소 (TICKET-05)
                 if qty > 0 and regime_at_t == "caution":
+                    original_qty = qty
                     qty = max(1, int(qty * caution_scale))
                     regime_caution_buys += 1
+                    caution_buy_notionals.append(close * qty)
+                    if len(scaled_buy_examples) < 10:
+                        scaled_buy_examples.append({
+                            "date": str(date)[:10], "symbol": sym,
+                            "original_qty": original_qty, "scaled_qty": qty,
+                            "ratio": round(qty / original_qty, 2) if original_qty > 0 else 0,
+                        })
+                elif qty > 0 and regime_at_t == "bullish":
+                    bullish_buy_notionals.append(close * qty)
 
                 if qty <= 0 or close * qty > cash * 0.95:
                     continue
@@ -408,6 +474,12 @@ class PortfolioBacktester:
             "per_symbol_stats": per_symbol_stats,
             "regime_buy_blocks": regime_buy_blocks,
             "regime_caution_buys": regime_caution_buys,
+            # ── 진단 계측 ──
+            "exit_reason_counts": exit_reason_counts,
+            "blocked_buy_examples": blocked_buy_examples,
+            "scaled_buy_examples": scaled_buy_examples,
+            "avg_bullish_notional": round(sum(bullish_buy_notionals) / len(bullish_buy_notionals), 0) if bullish_buy_notionals else 0,
+            "avg_caution_notional": round(sum(caution_buy_notionals) / len(caution_buy_notionals), 0) if caution_buy_notionals else 0,
         }
 
     @staticmethod
@@ -531,4 +603,22 @@ class PortfolioBacktester:
                     f"    {sym}: PnL={stats['total_pnl']:>12,.0f}원 | "
                     f"거래={stats['trades']}회 | 승률={stats['win_rate']:.1f}%"
                 )
+        # ── 진단 계측 출력 ──
+        print("-" * 60)
+        print("  [진단: exit reason 분포]")
+        for reason, cnt in sorted(result.get("exit_reason_counts", {}).items(), key=lambda x: -x[1]):
+            print(f"    {reason:20s}: {cnt:>5d}건")
+        print(f"  [진단: regime 계측]")
+        print(f"    regime_buy_blocks  : {result.get('regime_buy_blocks', 0):>5d}건")
+        print(f"    regime_caution_buys: {result.get('regime_caution_buys', 0):>5d}건")
+        print(f"    avg_bullish_notional: {result.get('avg_bullish_notional', 0):>12,.0f}원")
+        print(f"    avg_caution_notional: {result.get('avg_caution_notional', 0):>12,.0f}원")
+        if result.get("blocked_buy_examples"):
+            print(f"  [진단: blocked BUY 예시 (최대 10건)]")
+            for ex in result["blocked_buy_examples"]:
+                print(f"    {ex['date']} {ex['symbol']} score={ex['score']:.1f} reason={ex['reason']}")
+        if result.get("scaled_buy_examples"):
+            print(f"  [진단: caution 축소 예시 (최대 10건)]")
+            for ex in result["scaled_buy_examples"]:
+                print(f"    {ex['date']} {ex['symbol']} qty={ex['original_qty']}->{ex['scaled_qty']} ratio={ex['ratio']}")
         print("=" * 60 + "\n")
