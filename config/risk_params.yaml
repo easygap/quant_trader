@@ -27,7 +27,7 @@ position_sizing:
 stop_loss:
   type: "atr"                 # fixed (고정 비율) 또는 atr (변동성 기반)
   fixed_rate: 0.03            # 고정 손절 비율 (3%)
-  atr_multiplier: 2.0         # ATR 기반 손절 배수
+  atr_multiplier: 2.5         # ATR 기반 손절 배수 (2.0→2.5: TICKET-01 정상 조정 조기손절 완화)
 
 # --- 익절매 (Take Profit) ---
 # 트레일링 스탑(5%)보다 먼저 도달 가능한 수준으로 설정.
@@ -106,6 +106,18 @@ gap_risk:
   enabled: true
   gap_down_threshold: -0.03       # 전일 종가 대비 시가 -3% 이상 갭다운이면 즉시 청산
   gap_up_entry_block: 0.05        # 전일 대비 +5% 이상 갭업 종목은 당일 신규 매수 차단 (추격매수 방지)
+
+# --- 백테스트 시장국면 필터 (TICKET-02) ---
+# 백테스트에서 시장국면(bullish/caution/bearish)을 반영하여 신규 매수를 제어.
+# 실거래의 market_regime.py와 동일 로직을 백테스트 시점별로 적용.
+# look-ahead bias 방지: 시점 T의 regime은 T-1일까지의 지수 종가만으로 계산.
+backtest_regime_filter:
+  enabled: true                       # false면 기존과 동일 (국면 필터 없이 백테스트)
+  index_symbol: "KS11"                # 국면 판별에 사용할 지수
+  ma_days: 200                        # 장기 이동평균 일수
+  short_momentum_days: 20             # 단기 모멘텀 계산 일수
+  short_momentum_threshold: -5.0      # 단기 모멘텀 하락 기준 (%)
+  caution_scale: 0.5                  # caution 국면 시 포지션 축소 배수 (50%)
 
 # --- 전략 성과 자동 열화 감지 ---
 # 시장 국면이 바뀌면 기존 전략이 손실을 낼 수 있음 → 최근 N거래 승률이 임계값 아래로 떨어지면 신규 매수 자동 중단
