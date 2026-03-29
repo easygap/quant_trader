@@ -1,6 +1,6 @@
 {
   "test": "full_paper_lifecycle",
-  "timestamp": "2026-03-26T17:51:53.336776",
+  "timestamp": "2026-03-29T01:53:39.775617",
   "buy_success": true,
   "trade_count": 1,
   "event_count": 1,
@@ -8,15 +8,15 @@
     {
       "action": "BUY",
       "symbol": "005930",
-      "quantity": 18,
+      "quantity": 36,
       "price": 54200.0,
-      "signal_at": "2026-03-26 17:51:52.618076",
-      "order_at": "2026-03-26 17:51:53.334773",
-      "executed_at": "2026-03-26 17:51:53.334773",
+      "signal_at": "2026-03-29 01:53:39.583849",
+      "order_at": "2026-03-29 01:53:39.771402",
+      "executed_at": "2026-03-29 01:53:39.772406",
       "expected_price": 54200.0,
       "price_gap": 0.0,
-      "commission": 146.0,
-      "slippage": 1800.0,
+      "commission": 293.0,
+      "slippage": 3600.0,
       "strategy": "scoring",
       "mode": "paper"
     }
@@ -26,7 +26,7 @@
       "event_type": "SIGNAL",
       "severity": "info",
       "symbol": "005930",
-      "message": "BUY 005930 18주 @ 54,200원"
+      "message": "BUY 005930 36주 @ 54,200원"
     }
   ]
 }
