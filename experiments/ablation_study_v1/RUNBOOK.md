@@ -205,9 +205,9 @@ python main.py --mode backtest --strategy scoring \
 ### 설정 복원
 
 ```bash
-# 실험 완료 후 반드시 원래 상태로 복원
+# 실험 완료 후 승인 기준선(P1)으로 복원
 sed -i 's/atr_multiplier: 2.0/atr_multiplier: 2.5/' config/risk_params.yaml
-sed -i 's/^  enabled: false/  enabled: true/' config/risk_params.yaml
+sed -i '/^backtest_regime_filter:/,/^[a-z]/ s/enabled: true/enabled: false/' config/risk_params.yaml
 ```
 
 ---
@@ -400,10 +400,10 @@ run_single S2_035720 regime_only 035720 2.0 true
 run_single S3_035720 all_on      035720 2.5 true
 
 # ============================================================
-# 설정 복원 (현재 상태 = all ON)
+# 설정 복원 (승인 기준선 = P1: ATR 2.5, regime OFF)
 # ============================================================
 set_atr 2.5
-set_regime true
+set_regime false
 
 echo ""
 echo "============================================"
@@ -497,8 +497,9 @@ python main.py --mode portfolio_backtest --strategy scoring \
   --start 2024-01-01 --end 2025-12-31 \
   2>&1 | tee experiments/ablation_study_v1/logs/P3_regime_only.log
 
-# 설정 복원
+# 설정 복원 (승인 기준선 P1: ATR 2.5, regime OFF)
 sed -i 's/atr_multiplier: 2.0/atr_multiplier: 2.5/' config/risk_params.yaml
+sed -i '/^backtest_regime_filter:/,/^[a-z]/ s/enabled: true/enabled: false/' config/risk_params.yaml
 ```
 
 > P0 vs P7로 전체 효과 크기 확인 → P3으로 regime 단독 기여 분리 → 나머지 실험 필요성 판단
@@ -515,3 +516,92 @@ sed -i 's/atr_multiplier: 2.0/atr_multiplier: 2.5/' config/risk_params.yaml
 | 조합 효과 | 상호 보완: ATR은 개별 포지션 보호, regime은 시장 수준 보호 | 비선형 상호작용 가능 (가설) |
 
 **모든 기대 수치는 가설이며, 실험 결과로 대체됩니다.**
+
+---
+
+## 13. 실험 결과 (ATR 경로 수정 후 재실행)
+
+> 실행일: 2026-03-28 | ATR 손절 경로 정상화(commit 685bbb6) 이후 재측정
+> OOS 기간: 2024-01-01 ~ 2025-12-31 | 포트폴리오: KR_CORE_5 (005930,000660,035720,051910,006400)
+
+| ID | 실험명 | ATR | Regime | Return% | CAGR% | MDD% | Sharpe | Sortino | PF | Calmar | Trades | WinRate% |
+|----|--------|-----|--------|---------|-------|------|--------|---------|----|--------|--------|----------|
+| P0 | baseline | 2.0 | OFF | 1.27 | 0.66 | -7.42 | -0.53 | -0.69 | 1.03 | 0.09 | 109 | 36.7 |
+| **P1** | **ATR only** | **2.5** | **OFF** | **2.35** | **1.22** | **-5.44** | **-0.50** | **-0.68** | **1.11** | **0.22** | **108** | **36.1** |
+| P7 | all ON | 2.5 | ON | 1.68 | 0.87 | -5.93 | -0.66 | -0.91 | 1.08 | 0.15 | 105 | 34.3 |
+
+### Delta 표 (P0 baseline 대비)
+
+| ID | ΔReturn | ΔCAGR | ΔMDD | ΔSharpe | ΔSortino | ΔPF | ΔTrades | 판정 |
+|----|---------|-------|------|---------|----------|-----|---------|------|
+| **P1** | **+1.08** | **+0.56** | **+1.98** | **+0.03** | **+0.01** | **+0.08** | **-1** | **ADOPT** |
+| P7 | +0.41 | +0.21 | +1.49 | -0.13 | -0.22 | +0.05 | -4 | REJECT |
+
+### P1 Exit Reason 분포
+
+| Exit Reason | 건수 |
+|-------------|------|
+| TRAILING_STOP | 67 |
+| TAKE_PROFIT | 34 |
+| STOP_LOSS | 3 |
+| SELL | 3 |
+| MAX_HOLD | 1 |
+
+---
+
+## 14. 의사결정 로그
+
+```
+일자: 2026-03-28
+결정: P7(regime ON) REJECTED → P1(ATR 2.5, regime OFF) ADOPTED as baseline
+사유:
+1. P7은 P1 대비 수익률 -0.67%p, MDD +0.49%p, Sharpe -0.16, Sortino -0.23 전 지표 열위.
+2. regime 필터가 bearish 7건 차단, caution 39건 축소했으나 오히려 bullish 기회도 위축시켜 순효과 음수.
+3. ATR 2.5 단독(P1)이 P0 대비 MDD 1.98%p 개선 + 수익률 1.08%p 상승 — 충분한 단독 기여.
+4. regime 필터는 현재 MA200 단일지표 기반으로 정밀도 부족 — 재설계 없이 활성화할 근거 없음.
+5. 코드는 feature flag(enabled: false)로 보존하여 향후 재실험 가능.
+승인자: 프로젝트 오너
+```
+
+### RUNBOOK 최종 결론
+
+> **Regime 필터(TICKET-02/05)는 현재 구현 수준에서 포트폴리오 성과를 개선하지 못한다. 기본값 OFF로 롤백하고, ATR 2.5(TICKET-01) 단독 적용을 승인 기준선(P1)으로 확정한다. Regime 로직은 삭제하지 않고 feature flag로 보존하며, 멀티팩터 국면 판별기 재설계 후 재실험한다.**
+
+---
+
+## 15. 승인 기준선 요약 — P1 (ATR 2.5, Regime OFF)
+
+```
+Approved Baseline: P1
+Config: atr_multiplier=2.5, backtest_regime_filter.enabled=false
+OOS Period: 2024-01-01 ~ 2025-12-31
+Universe: KR_CORE_5 (005930, 000660, 035720, 051910, 006400)
+Initial Capital: 10,000,000 KRW
+
+total_return    :    2.35%
+CAGR            :    1.22%
+MDD             :   -5.44%
+Sharpe          :   -0.50
+Sortino         :   -0.68
+Profit Factor   :    1.11
+Calmar          :    0.22
+total_trades    :  108
+win_rate        :   36.1%
+STOP_LOSS       :    3건 (2.8%)
+TAKE_PROFIT     :   34건 (31.5%)
+TRAILING_STOP   :   67건 (62.0%)
+SELL            :    3건 (2.8%)
+MAX_HOLD        :    1건 (0.9%)
+regime_buy_blocks   : 0
+regime_caution_buys : 0
+```
+
+---
+
+## 16. 후속 Backlog
+
+| # | 티켓 | 설명 | 우선순위 |
+|---|------|------|----------|
+| BL-01 | regime 재설계 | MA200 단일지표 → 멀티팩터(VIX+신용스프레드+breadth) 국면 판별기. IS/OOS 분리 재실험 | P2 |
+| BL-02 | 전략 알파 개선 | 현재 Sharpe -0.50으로 위험조정수익 음수. 팩터 가중치 최적화 + 섹터 로테이션 검토 | P1 |
+| BL-03 | turnover/노출 메트릭 보강 | portfolio_backtester에 annual_turnover_pct, gross/net exposure 추가. 과매매 진단 자동화 | P2 |

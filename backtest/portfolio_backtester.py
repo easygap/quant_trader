@@ -335,10 +335,16 @@ class PortfolioBacktester:
                 pnl = (sell_price - pos["avg_price"]) * pos["qty"] - costs["commission"] - costs["tax"]
                 cash += sell_price * pos["qty"] - costs["commission"] - costs["tax"]
                 per_symbol_pnl[sym] = per_symbol_pnl.get(sym, 0) + pnl
+                holding_days = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
                 trades.append({
                     "date": date, "symbol": sym, "action": reason,
                     "price": sell_price, "quantity": pos["qty"],
                     "pnl": pnl, "pnl_rate": ((sell_price / pos["avg_price"]) - 1) * 100,
+                    "entry_score": pos.get("entry_score", 0),
+                    "score_macd": pos.get("score_macd", 0),
+                    "score_bollinger": pos.get("score_bollinger", 0),
+                    "score_volume": pos.get("score_volume", 0),
+                    "holding_days": holding_days,
                 })
 
             # 시장국면 판별 (TICKET-05): T-1일 지수 기준, look-ahead bias 없음
@@ -438,13 +444,25 @@ class PortfolioBacktester:
                     continue
 
                 cash -= total_cost
+                # 진입 시점 개별 지표 점수 기록 (signal quality 진단용)
+                sig_row = signals[sym].loc[date]
+                entry_scores = {
+                    "entry_score": score,
+                    "score_macd": float(sig_row.get("score_macd", 0)),
+                    "score_bollinger": float(sig_row.get("score_bollinger", 0)),
+                    "score_volume": float(sig_row.get("score_volume", 0)),
+                    "score_rsi": float(sig_row.get("score_rsi", 0)),
+                    "score_ma": float(sig_row.get("score_ma", 0)),
+                }
                 positions[sym] = {
                     "qty": qty, "avg_price": buy_price,
                     "buy_date": date, "high_water_mark": buy_price,
+                    **entry_scores,
                 }
                 trades.append({
                     "date": date, "symbol": sym, "action": "BUY",
                     "price": buy_price, "quantity": qty, "pnl": 0, "pnl_rate": 0,
+                    **entry_scores,
                 })
 
             portfolio_value = cash + sum(
@@ -621,4 +639,126 @@ class PortfolioBacktester:
             print(f"  [진단: caution 축소 예시 (최대 10건)]")
             for ex in result["scaled_buy_examples"]:
                 print(f"    {ex['date']} {ex['symbol']} qty={ex['original_qty']}->{ex['scaled_qty']} ratio={ex['ratio']}")
+
+        # ── Signal Quality 진단 ──
+        self._print_signal_quality_diagnostics(result.get("trades", []))
         print("=" * 60 + "\n")
+
+    def _print_signal_quality_diagnostics(self, trades: list):
+        """신호 품질 진단: score별 성과, exit reason별 PnL, 보유기간 분석, 종목×반기 분해."""
+        sell_trades = [t for t in trades if t.get("action") != "BUY"]
+        if not sell_trades:
+            return
+
+        print("-" * 60)
+        print("  [Signal Quality 진단]")
+
+        # --- 1) Entry score 분포 및 score별 성과 ---
+        print("  (1) 진입 score별 성과")
+        score_buckets = {}
+        for t in sell_trades:
+            s = t.get("entry_score", 0)
+            bucket = f"{int(s)}" if s == int(s) else f"{s:.1f}"
+            if s < 2.5:
+                bucket = "2.0-2.4"
+            elif s < 3.0:
+                bucket = "2.5-2.9"
+            elif s < 4.0:
+                bucket = "3.0-3.9"
+            else:
+                bucket = "4.0+"
+            score_buckets.setdefault(bucket, []).append(t)
+
+        print(f"    {'Score':<10} {'건수':>5} {'승률%':>7} {'평균PnL':>10} {'총PnL':>12}")
+        for bucket in sorted(score_buckets.keys()):
+            ts = score_buckets[bucket]
+            wins = sum(1 for t in ts if t["pnl"] > 0)
+            avg_pnl = sum(t["pnl"] for t in ts) / len(ts)
+            total_pnl = sum(t["pnl"] for t in ts)
+            wr = wins / len(ts) * 100
+            print(f"    {bucket:<10} {len(ts):>5d} {wr:>6.1f}% {avg_pnl:>10,.0f} {total_pnl:>12,.0f}")
+
+        # --- 2) Exit reason별 PnL ---
+        print("  (2) Exit reason별 PnL")
+        reason_buckets = {}
+        for t in sell_trades:
+            reason_buckets.setdefault(t["action"], []).append(t)
+
+        print(f"    {'Reason':<18} {'건수':>5} {'승률%':>7} {'평균PnL':>10} {'총PnL':>12} {'평균PnL%':>8}")
+        for reason in sorted(reason_buckets.keys(), key=lambda r: -sum(t["pnl"] for t in reason_buckets[r])):
+            ts = reason_buckets[reason]
+            wins = sum(1 for t in ts if t["pnl"] > 0)
+            avg_pnl = sum(t["pnl"] for t in ts) / len(ts)
+            total_pnl = sum(t["pnl"] for t in ts)
+            avg_pnl_rate = sum(t.get("pnl_rate", 0) for t in ts) / len(ts)
+            wr = wins / len(ts) * 100
+            print(f"    {reason:<18} {len(ts):>5d} {wr:>6.1f}% {avg_pnl:>10,.0f} {total_pnl:>12,.0f} {avg_pnl_rate:>7.2f}%")
+
+        # --- 3) 보유기간 분석 ---
+        holding_trades = [t for t in sell_trades if t.get("holding_days") is not None]
+        if holding_trades:
+            print("  (3) 보유기간별 성과")
+            hold_buckets = {}
+            for t in holding_trades:
+                hd = t["holding_days"]
+                if hd <= 3:
+                    b = "1-3일"
+                elif hd <= 7:
+                    b = "4-7일"
+                elif hd <= 14:
+                    b = "8-14일"
+                elif hd <= 30:
+                    b = "15-30일"
+                else:
+                    b = "30일+"
+                hold_buckets.setdefault(b, []).append(t)
+
+            print(f"    {'보유기간':<10} {'건수':>5} {'승률%':>7} {'평균PnL':>10} {'총PnL':>12}")
+            for b in ["1-3일", "4-7일", "8-14일", "15-30일", "30일+"]:
+                if b not in hold_buckets:
+                    continue
+                ts = hold_buckets[b]
+                wins = sum(1 for t in ts if t["pnl"] > 0)
+                avg_pnl = sum(t["pnl"] for t in ts) / len(ts)
+                total_pnl = sum(t["pnl"] for t in ts)
+                wr = wins / len(ts) * 100
+                print(f"    {b:<10} {len(ts):>5d} {wr:>6.1f}% {avg_pnl:>10,.0f} {total_pnl:>12,.0f}")
+
+        # --- 4) 종목 × 반기 분해 ---
+        print("  (4) 종목 × 반기 PnL 분해")
+        sym_half = {}
+        for t in sell_trades:
+            sym = t["symbol"]
+            d = t["date"]
+            half = f"{d.year}-H1" if hasattr(d, "month") and d.month <= 6 else f"{d.year}-H2"
+            key = (sym, half)
+            sym_half.setdefault(key, []).append(t)
+
+        halves = sorted(set(h for _, h in sym_half.keys()))
+        syms = sorted(set(s for s, _ in sym_half.keys()))
+        header = f"    {'종목':<8}" + "".join(f"{h:>12}" for h in halves) + f"{'합계':>12}"
+        print(header)
+        for sym in syms:
+            row = f"    {sym:<8}"
+            total = 0
+            for h in halves:
+                pnl = sum(t["pnl"] for t in sym_half.get((sym, h), []))
+                total += pnl
+                row += f"{pnl:>12,.0f}"
+            row += f"{total:>12,.0f}"
+            print(row)
+
+        # --- 5) 개별 지표 기여도 (진입 시 발화 비율) ---
+        print("  (5) 진입 시 지표 발화 비율 및 승률")
+        indicators = [("score_macd", "MACD"), ("score_bollinger", "Bollinger"), ("score_volume", "Volume")]
+        for key, name in indicators:
+            fired = [t for t in sell_trades if t.get(key, 0) > 0]
+            not_fired = [t for t in sell_trades if t.get(key, 0) <= 0]
+            if fired:
+                wr = sum(1 for t in fired if t["pnl"] > 0) / len(fired) * 100
+                avg_pnl = sum(t["pnl"] for t in fired) / len(fired)
+                print(f"    {name:<12} 발화={len(fired):>3d}건 승률={wr:.1f}% 평균PnL={avg_pnl:>8,.0f}")
+            if not_fired:
+                wr_nf = sum(1 for t in not_fired if t["pnl"] > 0) / len(not_fired) * 100
+                avg_pnl_nf = sum(t["pnl"] for t in not_fired) / len(not_fired)
+                print(f"    {name:<12} 미발화={len(not_fired):>3d}건 승률={wr_nf:.1f}% 평균PnL={avg_pnl_nf:>8,.0f}")
