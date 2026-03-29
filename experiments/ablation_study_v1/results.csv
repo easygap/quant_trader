@@ -1,0 +1,5 @@
+exp_id,exp_name,mode,symbols,atr_mult,regime_enabled,start,end,timestamp
+P0,baseline,portfolio,KR_CORE_5,2.0,false,2024-01-01,2025-12-31,2026-03-28T00:50:11+09:00
+P1,atr_only,portfolio,KR_CORE_5,2.5,false,2024-01-01,2025-12-31,2026-03-28T00:50:15+09:00
+P3,regime_only,portfolio,KR_CORE_5,2.0,true,2024-01-01,2025-12-31,2026-03-28T00:50:19+09:00
+P7,all_on,portfolio,KR_CORE_5,2.5,true,2024-01-01,2025-12-31,2026-03-28T00:50:23+09:00

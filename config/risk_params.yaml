@@ -112,7 +112,7 @@ gap_risk:
 # 실거래의 market_regime.py와 동일 로직을 백테스트 시점별로 적용.
 # look-ahead bias 방지: 시점 T의 regime은 T-1일까지의 지수 종가만으로 계산.
 backtest_regime_filter:
-  enabled: true                       # false면 기존과 동일 (국면 필터 없이 백테스트)
+  enabled: false                      # P1 채택 (2026-03-28): regime ON(P7)이 모든 지표에서 열위 → 기본 OFF 롤백. 코드는 feature flag로 보존.
   index_symbol: "KS11"                # 국면 판별에 사용할 지수
   ma_days: 200                        # 장기 이동평균 일수
   short_momentum_days: 20             # 단기 모멘텀 계산 일수
