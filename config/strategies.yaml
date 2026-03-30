@@ -133,6 +133,15 @@ scoring:
     ma_golden_cross: 1        # 이동평균 골든크로스 (⚠️ 직관값, 미검증)
     ma_dead_cross: -1         # 이동평균 데드크로스 (⚠️ 직관값, 미검증)
 
+# --- 추세 눌림목 전략 (Trend Pullback) ---
+# 장기 상승추세(close > SMA200) 종목에서 단기 과매도(RSI < rsi_entry) 눌림에 진입.
+# ADX > adx_min 으로 추세 존재 확인. 청산: close < SMA200 또는 RSI > rsi_exit.
+# ATR trailing stop은 backtester 기존 설정(ATR 2.5) 사용.
+trend_pullback:
+  rsi_entry: 35             # 진입: RSI 이 값 미만 (단기 과매도)
+  adx_min: 20               # 진입: ADX 이 값 초과 (추세 존재)
+  rsi_exit: 70              # 청산: RSI 이 값 초과 (과매수)
+
 # --- 평균 회귀 전략 ---
 # 한계: 한국 시장에서 큰 폭 하락은 펀더멘털(실적·분식·대주주 등) 비중이 커서 평균 회귀가 성립하지 않는 종목이 많음.
 # Z-Score < -2 는 "기술적 과매도"와 "악화 기업"을 구분하지 못하며, ADX < adx_filter 도 하락 추세 구간에서 낮게 나와 필터가 불완전함.

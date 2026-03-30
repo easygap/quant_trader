@@ -22,7 +22,7 @@ import pandas as pd
 from loguru import logger
 
 from config.config_loader import Config
-from core.data_collector import DataCollector
+from core.data_collector import DataCollector, get_kospi_tickers_fdr
 
 _FACTOR_MODES = {
     "momentum_top",
@@ -174,7 +174,13 @@ class WatchlistManager:
             return "historical"
         return mode
 
-    def _build_top_market_cap_watchlist(self, settings: dict) -> list[str]:
+    def _build_top_market_cap_watchlist(
+        self,
+        settings: dict,
+        liquidity_as_of: str | None = None,
+        force_universe_mode: str | None = None,
+        data_collector: DataCollector | None = None,
+    ) -> list[str]:
         market = str(settings.get("market", "KOSPI")).upper()
         top_n = max(1, int(settings.get("top_n", 20)))
         risk_params = getattr(self.config, "risk_params", {}) or {}
@@ -185,7 +191,7 @@ class WatchlistManager:
         risk_params = getattr(self.config, "risk_params", {}) or {}
         universe = risk_params.get("backtest_universe") or {}
         exclude_admin = universe.get("exclude_administrative", True)
-        u_mode = self._get_universe_mode()
+        u_mode = (force_universe_mode or self._get_universe_mode()).strip().lower()
         try:
             stocks = DataCollector.get_krx_stock_list(
                 as_of_date=self.as_of_date,
@@ -219,7 +225,9 @@ class WatchlistManager:
         df = df.sort_values(marcap_col, ascending=False)
         symbols = self._normalize_symbols(df[code_col].head(candidate_n).tolist())
         if use_liq:
-            symbols = self._apply_liquidity_filter(symbols)
+            symbols = self._apply_liquidity_filter(
+                symbols, as_of_end=liquidity_as_of, data_collector=data_collector,
+            )
         symbols = symbols[:top_n]
 
         logger.info(
@@ -230,12 +238,29 @@ class WatchlistManager:
         )
         return symbols
 
-    def _get_candidate_symbols(self, settings: dict, max_candidates: int) -> list[str]:
+    def _get_candidate_symbols(
+        self,
+        settings: dict,
+        max_candidates: int,
+        liquidity_as_of: str | None = None,
+        force_universe_mode: str | None = None,
+        data_collector: DataCollector | None = None,
+    ) -> list[str]:
         """팩터 계산용 후보 종목 리스트 (시총 상위 N개). 유동성 필터는 상위 호출에서 적용."""
         s = {**settings, "market": settings.get("market", "KOSPI"), "top_n": max_candidates}
-        return self._build_top_market_cap_watchlist(s)
+        return self._build_top_market_cap_watchlist(
+            s,
+            liquidity_as_of=liquidity_as_of,
+            force_universe_mode=force_universe_mode,
+            data_collector=data_collector,
+        )
 
-    def _apply_liquidity_filter(self, symbols: list[str]) -> list[str]:
+    def _apply_liquidity_filter(
+        self,
+        symbols: list[str],
+        as_of_end: str | None = None,
+        data_collector: DataCollector | None = None,
+    ) -> list[str]:
         """
         20일 평균 거래대금(원) 하한으로 저유동 종목을 제외한다.
         risk_params.liquidity_filter.enabled=false 이면 원본 그대로 반환.
@@ -253,11 +278,11 @@ class WatchlistManager:
             return list(symbols) if symbols else []
         strict = liq.get("strict", True)
 
-        collector = DataCollector(self.config)
+        collector = data_collector if data_collector is not None else DataCollector(self.config)
         passed = []
         skipped_no_data = []
         for sym in symbols:
-            avg_val = self._compute_avg_trading_value_20d(collector, sym)
+            avg_val = self._compute_avg_trading_value_20d(collector, sym, as_of_end=as_of_end)
             if avg_val is not None and avg_val >= min_krw:
                 passed.append(sym)
             elif avg_val is None:
@@ -284,10 +309,15 @@ class WatchlistManager:
         return passed
 
     @staticmethod
-    def _compute_avg_trading_value_20d(collector: DataCollector, symbol: str) -> float | None:
+    def _compute_avg_trading_value_20d(
+        collector: DataCollector, symbol: str, as_of_end: str | None = None,
+    ) -> float | None:
         """최근 20거래일 평균 거래대금(원). close * volume 합계/일수. 데이터 부족 시 None."""
         try:
-            end_d = datetime.now()
+            if as_of_end:
+                end_d = datetime.strptime(as_of_end, "%Y-%m-%d")
+            else:
+                end_d = datetime.now()
             start_d = (end_d - timedelta(days=45)).strftime("%Y-%m-%d")
             end_str = end_d.strftime("%Y-%m-%d")
             df = collector.fetch_korean_stock(symbol, start_d, end_str)
@@ -430,6 +460,65 @@ class WatchlistManager:
             len(symbols),
         )
         return symbols
+
+    def build_momentum_top_as_of(
+        self,
+        end_date: str,
+        data_collector: DataCollector | None = None,
+        top_n_override: int | None = None,
+    ) -> list[str]:
+        """특정 일자(YYYY-MM-DD) 종가 기준 12개월 수익률 상위 top_n. 캐시 미사용(백테스트용).
+
+        해당 일자의 KRX 유니버스·유동성(as_of)과 동일 구간 수익률로 live momentum_top과 동일한 정의를 맞춘다.
+        data_collector를 넘기면 동일 인스턴스로 유동성·12m 수익률 조회(가격 구간 캐시 공유).
+        top_n_override가 있으면 watchlist top_n을 덮어쓴다(백테스트 스윕용, config는 변경하지 않음).
+        """
+        prev_as_of = self.as_of_date
+        try:
+            self.as_of_date = end_date
+            settings = dict(self.config.watchlist_settings)
+            if top_n_override is not None:
+                settings["top_n"] = max(1, int(top_n_override))
+            top_n = max(1, int(settings.get("top_n", 20)))
+            pool = max(top_n + 20, 60)
+            dc = data_collector if data_collector is not None else DataCollector(self.config)
+            candidates = self._get_candidate_symbols(
+                settings, pool, liquidity_as_of=end_date, data_collector=dc,
+            )
+            if not candidates:
+                logger.warning(
+                    "momentum_top as_of={}: 후보 풀이 비었습니다. "
+                    "get_kospi_tickers_fdr(top_n={})로 시총 상위 후보를 채웁니다.",
+                    end_date,
+                    pool,
+                )
+                candidates = self._normalize_symbols(get_kospi_tickers_fdr(top_n=pool))
+            if not candidates:
+                return []
+
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            start_1y = (end_dt - timedelta(days=400)).strftime("%Y-%m-%d")
+            end_str = end_date
+
+            results = []
+            for sym in candidates:
+                ret_12m = self._compute_12m_return(dc, sym, start_1y, end_str)
+                if ret_12m is not None:
+                    results.append((sym, ret_12m))
+
+            if not results:
+                logger.warning("모멘텀(as_of={}): 12개월 수익률 계산 가능한 종목 없음.", end_date)
+                return []
+
+            results.sort(key=lambda x: x[1], reverse=True)
+            symbols = self._normalize_symbols([r[0] for r in results[:top_n]])
+            logger.debug(
+                "momentum_top as_of {} → 상위 {}개 (후보 {}개 중)",
+                end_date, len(symbols), len(results),
+            )
+            return symbols
+        finally:
+            self.as_of_date = prev_as_of
 
     def _build_low_vol_top_watchlist(self, settings: dict) -> list[str]:
         """저변동성 팩터: 60일 실현변동성(연율화) 하위 = 저변동성 상위 종목."""

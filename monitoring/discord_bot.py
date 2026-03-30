@@ -159,6 +159,21 @@ class DiscordBot:
             {"name": "🔄 당일 매매", "value": f"{report.get('total_trades', 0)}건", "inline": True},
         ]
 
+        diag = report.get("strategy_diagnosis")
+        if diag:
+            if isinstance(diag, (list, tuple)):
+                diag_text = "\n".join(str(x) for x in diag)
+            else:
+                diag_text = str(diag)
+            diag_text = diag_text.strip()
+            if len(diag_text) > 1000:
+                diag_text = diag_text[:997] + "..."
+            fields.append({
+                "name": "📋 전략 진단 (장마감)",
+                "value": diag_text or "—",
+                "inline": False,
+            })
+
         cum_return = report.get("cumulative_return", 0)
         color = 0x27AE60 if cum_return >= 0 else 0xE74C3C
 
