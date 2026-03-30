@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
-> **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.  
-> **문서 버전**: v2.6
-> **최종 수정**: 2026-03-25
+> **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
+> **문서 버전**: v2.8
+> **최종 수정**: 2026-03-27
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -55,8 +55,8 @@
 | **backtest_momentum_top** | `run_backtest_momentum_top(args)` | momentum_top_portfolio.run_momentum_top_portfolio_backtest() — 다종목 동일비중 모멘텀 포트폴리오, 리밸런싱·시장 국면·포트폴리오 스탑 |
 | **validate** | `run_strategy_validation(args)` | backtest.strategy_validator (3~5년, 샤프·MDD·벤치마크 KS11·코스피 상위 50 동일비중, in/out-of-sample, **손익비 자동 경고+디스코드**). `--no-benchmark-top50` 으로 Top50 비활성화 |
 | **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
-| **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용) |
-| **live** | `run_live_trading(args)` | KISApi, PortfolioManager(sync), Scheduler |
+| **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용). 기본 signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper |
+| **live** | `run_live_trading(args)` | 4중 보안(전략 상태·환경변수·CLI 플래그·hard gate 5조건) → KISApi, PortfolioManager(sync), Scheduler |
 | **liquidate** | `run_emergency_liquidate(args)` | DB 포지션 조회 → 종목별 매도(KIS 현재가 주문) |
 | **compare** | `run_compare_paper_backtest(args)` | backtest.paper_compare (run_compare + **check_live_readiness**), divergence 경고 + **실전 전환 준비 자동 평가·디스코드 알림** |
 | **optimize** | `run_param_optimize(args)` | backtest.param_optimizer (Grid/Bayesian), Backtester.run(param_overrides=) |
@@ -151,7 +151,8 @@ quant_trader/
 │   ├── liquidate_trigger.py     # HTTP POST /liquidate 긴급 청산 (X-Token 인증)
 │   ├── dashboard.py             # 콘솔 대시보드 (선택, show_summary_line)
 │   ├── dashboard_runtime_state.py # 대시보드 런타임 상태 관리 (스케줄러·전략 실행 현황 실시간 상태 전달)
-│   └── web_dashboard.py         # aiohttp 웹 대시보드 (포트폴리오·스냅샷 JSON/HTML, 10초 폴링)
+│   ├── web_dashboard.py         # aiohttp 웹 대시보드 (포트폴리오·스냅샷 JSON/HTML, 10초 폴링)
+│   └── paper_monitor.py         # Paper 운영 모니터링: log_event(), WeeklyReportGenerator, GoLiveChecker
 ├── tests/                       # pytest tests/ -q
 │   ├── __init__.py
 │   ├── test_backtester_strategies.py    # 백테스터 전략별 시뮬레이션 검증
@@ -169,8 +170,14 @@ quant_trader/
 │   ├── test_trading_hours.py            # 장 시간·휴장일 검증
 │   ├── test_watchlist_manager.py        # watchlist 모드별 resolve 검증
 │   ├── test_basket_rebalancer.py       # 바스켓 리밸런서 (설정·비중·드리프트·트리거·주문·실행)
-│   └── test_us_market_support.py      # 미국 티커·TradingHours NYSE 등
-├── deploy/                      # (선택) Oracle Cloud 등 — setup.sh, systemd, logrotate
+│   ├── test_us_market_support.py      # 미국 티커·TradingHours NYSE 등
+│   └── test_paper_lifecycle.py        # Full paper lifecycle 테스트 (BUY/SELL/snapshot, 격리 DB)
+├── deploy/                      # (선택) Oracle Cloud ARM 서버 상시 구동
+│   ├── README.md               # Oracle Cloud Free Tier ARM 배포 가이드
+│   ├── setup.sh                # 시스템 셋업 (Python 3.11, venv, pip install)
+│   ├── install_service.sh      # systemd 서비스 등록 스크립트
+│   ├── quant_trader.service    # systemd 유닛 파일 (schedule 모드, auto-restart)
+│   └── logrotate.conf          # 로그 로테이션 정책 (copytruncate)
 ├── docs/
 │   ├── PROJECT_GUIDE.md         # 본 문서
 │   └── BACKTEST_IMPROVEMENT.md  # 백테스트 손익 개선 포인트
@@ -287,6 +294,7 @@ quant_trader/
 | **dashboard.py** | 콘솔 대시보드(선택). |
 | **dashboard_runtime_state.py** | 대시보드 런타임 상태 관리. 스케줄러·전략 실행 현황 등 실시간 상태를 웹 대시보드에 전달하는 중간 계층. |
 | **web_dashboard.py** | aiohttp. 포트폴리오 요약·포지션·최근 30일 스냅샷. 10초 폴링. `--mode dashboard` 또는 `python -m monitoring.web_dashboard [--port 8080]`. |
+| **paper_monitor.py** | Paper 운영 모니터링 (v2.8 추가). `log_event()`: OperationEvent DB 기록 (SIGNAL/API_FAILURE/BLACKSWAN 등). `WeeklyReportGenerator`: 주간 리포트 JSON/TXT 자동 생성. `GoLiveChecker`: 8개 기준 + 5개 blocker로 live 전환 판정. |
 
 ### 3.9 tests/
 
@@ -305,6 +313,7 @@ quant_trader/
 | **test_signal_generator.py** | 신호 생성·스코어링. |
 | **test_strategy_validator.py** | 전략 검증(validate) 로직. |
 | **test_trading_hours.py** | 장 시간·휴장일. |
+| **test_paper_lifecycle.py** | Full paper lifecycle (BUY/SELL/Snapshot, 격리 DB truncate, 4/4 PASS). |
 | **test_watchlist_manager.py** | watchlist 모드별 resolve. |
 | **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행). |
 | **test_us_market_support.py** | `fetch_stock` 미국 라우팅, 미국 장/휴장일 관련 `TradingHours` 동작. |
@@ -498,6 +507,31 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
+### 전략 상태 레지스트리 (v2.8)
+
+| 전략 | 상태 | 허용 모드 | 사유 |
+|------|------|-----------|------|
+| **scoring** | `experimental` | backtest, paper | OOS Sharpe 0.84, WF 미통과 |
+| **mean_reversion** | `disabled` | backtest only | Sharpe -2.50 |
+| **fundamental_factor** | `disabled` | backtest only | yfinance 부채비율 불일치, WF 미실행 |
+| **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속 |
+| **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
+| **trend_following** | `disabled` | backtest only | 미검증 |
+
+### Live 진입 Hard Gate (4중 보안)
+
+1. `strategies/__init__.py:is_strategy_allowed(strategy, "live")` — live_candidate만 허용
+2. 환경변수 `ENABLE_LIVE_TRADING=true`
+3. CLI 플래그 `--confirm-live`
+4. `main.py:_check_live_readiness_gate()` — 5개 조건 (승인 전략·WF·벤치마크·paper 60일·데이터)
+
+### Paper 모드 2가지
+
+| 모드 | 설정 | 동작 |
+|------|------|------|
+| **signal-only** (기본) | auto_entry 미설정 | 신호 분석만, 주문 없음 |
+| **full paper** | `QUANT_AUTO_ENTRY=true` 환경변수 | BUY/SELL 자동 실행 (paper DB만 기록) |
+
 ### 현재 시스템의 핵심 한계
 
 | 한계 | 설명 |
@@ -506,8 +540,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **다중공선성** | RSI, MACD, MA 등이 같은 가격 정보를 중복 반영 |
 | **앙상블 독립성 부족** | technical과 momentum_factor가 실질적으로 같은 정보 사용 |
 | **한국 시장 미최적화** | 파라미터가 미국 시장 기준값 (200일선, ADX 25 등) |
-| **과매매 방어** | ✅ 히스터리시스(구현)·최소 보유 기간 3일(구현). 직관값 가중치 상태에서는 여전히 위험 존재 |
-| **운영 자동화** | ✅ 헬스체크·포지션 보정·휴장일 갱신·Dead-letter·바스켓 리밸런싱 모두 구현 완료 |
+| **과매매 방어** | ✅ 히스터리시스·최소 보유 기간 3일·월간 거래 제한 구현 완료 |
+| **운영 자동화** | ✅ 헬스체크·포지션 보정·OperationEvent·주간 리포트·GoLive 체크 모두 구현 완료 |
 
 ### 검증 요구 사항
 
@@ -670,6 +704,6 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 ---
 
-> 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`  
-> **문서 버전**: v2.6
-> **최종 수정**: 2026-03-25 (`backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/모드/전략 표 갱신)
+> 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
+> **문서 버전**: v2.8
+> **최종 수정**: 2026-03-27 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)

@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v2.6
+> **문서 버전**: v2.8
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-03-25
+> **최종 수정**: 2026-03-27
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -13,10 +13,10 @@
 2. [기술 스택](#2-기술-스택)
 3. [핵심 기술 지표](#3-핵심-기술-지표)
 4. [매매 전략 로직](#4-매매-전략-로직) — 4.5 **전략별 수익 가능성 진단**, 4.6 **손실 시나리오**, 4.7 **구조적 한계**
-5. [리스크 관리](#5-리스크-관리) — 5.13 **신호 히스터리시스**(구현 완료), 5.14 **최소 보유 기간**(구현 완료)
+5. [리스크 관리](#5-리스크-관리) — 5.13 히스터리시스, 5.14 최소 보유, **5.15~5.17 갭·국면 적응·장중 동적 손절/재스캔**(v3.0)
 6. [시스템 아키텍처 및 프로젝트 구조](#6-시스템-아키텍처-및-프로젝트-구조)
 7. [실행 모드 및 CLI](#7-실행-모드-및-cli)
-8. [백테스팅 & 검증](#8-백테스팅--검증)
+8. [백테스팅 & 검증](#8-백테스팅--검증) — 8.5 **멀티종목 포트폴리오 백테스트**(v3.0)
 9. [예외 처리 및 안정성](#9-예외-처리-및-안정성) — 9.1 **운영 안정성 개선 필요 사항**
 10. [개발 로드맵 & 우선순위별 액션 아이템](#10-개발-로드맵--우선순위별-액션-아이템)
 11. [주의사항](#11-주의사항)
@@ -50,31 +50,42 @@
 | **수익 목표** | 검증된 전략으로 벤치마크(코스피 지수) 대비 초과 수익 달성. **가중치 최적화·워크포워드 검증·paper 1개월 운영을 모두 통과한 후에만 기대할 수 있는 목표**이며, 검증 없이 "연 20%" 같은 수치를 설정하는 것은 위험 |
 | **대응 속도** | 실시간 시세 반영 (1초 이내 분석·주문) |
 
-### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요
+### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v2.8 업데이트)
 
-> **핵심 판단: 현재 상태로 실전 자동매매를 돌리면 수익보다 손실 가능성이 더 높습니다.**
+> **핵심 판단: 시스템은 research-only 상태이며, live 자동매매는 코드 레벨 hard gate로 차단되어 있습니다.**
 
-인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응 등)는 프로덕션 수준에 가깝게 설계되어 있습니다. 그러나 **파이프라인에 흘려보내는 신호(Signal) 자체의 근거가 매우 약합니다.** 아래 문제들이 해결되기 전까지 실전 투입은 금지입니다.
+인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OperationEvent 기록, 주문 lifecycle 추적)는 프로덕션 수준에 가깝게 완성되었습니다. 그러나 **전략 신호의 실전 유효성이 검증되지 않았으므로** live 전환은 불가합니다.
 
-**신호 품질 문제 요약**:
+**전략 상태 레지스트리** (v2.8 현재):
 
-| 문제 | 상세 |
-|------|------|
-| **가중치 미검증** | RSI +2, MACD +2, 볼린저 +1 등 현재 가중치는 직관·예시용이며 통계적·실증적 근거 없음. 이 상태로 실거래 시 노이즈를 실행하는 것 |
-| **지표 다중공선성** | 스코어의 대부분이 "가격이 최근 올랐냐 내렸냐" 한 가지 정보를 여러 번 세는 형태 |
-| **앙상블 허구적 다각화** | technical과 momentum_factor는 실질적으로 같은 가격 정보 기반. 다수결 의미 퇴색 |
-| **한국 시장 미최적화** | 200일선, ADX 25, RSI 30/70 등 파라미터는 미국 시장 기준. 한국 시장(박스권 등락, 빠른 추세 전환)에 미조정 |
-| **과매매 위험** | 10분마다 신호 확인 구조에서 임계값 근처 신호 변동 시 왕복 수수료 0.23%가 빠르게 누적 |
+| 전략 | 상태 | 허용 모드 | 사유 |
+|------|------|-----------|------|
+| **scoring** | `experimental` | backtest, paper | OOS Sharpe 0.84, WF 미통과 |
+| **mean_reversion** | `disabled` | backtest only | Sharpe -2.50, 구조적 한계 |
+| **fundamental_factor** | `disabled` | backtest only | yfinance 부채비율 한국 기준 불일치, WF 미실행 |
+| **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속, WF 미실행 |
+| **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
+| **trend_following** | `disabled` | backtest only | 미검증 |
 
-**실전 투입 전 반드시 완료해야 할 4가지**:
+**Live 진입 Hard Gate** (5개 조건 전부 충족 필수, `main.py:_check_live_readiness_gate`):
+1. 승인된 전략 1개 이상 (`reports/approved_strategies.json` + config hash 일치)
+2. 최근 Walk-Forward 통과 (`reports/validation_walkforward_*.json`)
+3. 비용 반영 후 벤치마크 대비 초과수익 ≥ 0 (`reports/benchmark_comparison.json`)
+4. Paper trading 60영업일 이상 (DB `portfolio_snapshots`)
+5. 데이터 소스 health check 통과
 
-1. `backtest_universe.mode`를 `historical`로 설정 후 백테스트 재실행 → 실제 기대 수익률 재확인
-2. 가중치 최적화 파이프라인 3단계(`check_correlation` → `optimize --include-weights --auto-correlation` → `validate --walk-forward`) 실행 → OOS 샤프 1.0 이상 달성
-3. `data_source.preferred: fdr`, `allow_kis_fallback: false` 설정 확인
-4. paper 모드 최소 1개월 운영 → `check_live_readiness` 통과(방향성 일치율 70%, 수익률 차이 5%p 이내)
+**Paper 운영 현황** (v2.8):
+- scoring 전략 60영업일 paper 실험 준비 완료
+- signal-only (기본) / full paper (`QUANT_AUTO_ENTRY=true` 환경변수) 2모드 분리
+- lifecycle 테스트 하네스 4/4 PASS (signal_at/order_at/fill_at/expected_fill/price_gap)
+- 주간 리포트 자동 생성, GoLive 체크리스트 구현 완료
+
+**실전 투입 전 반드시 완료해야 할 승격 경로** (`reports/strategy_promotion_policy.md` 참고):
+1. `experimental → paper_candidate`: OOS Sharpe ≥ 0.5, WF 통과율 ≥ 60%, 비용 후 CAGR > 0
+2. `paper_candidate → live_candidate`: Paper 60영업일, 승률 ≥ 40%, MDD > -20%, Sharpe ≥ 0.3
+3. hard gate 5개 조건 충족 → `--mode live --confirm-live` 가능
 
 **지속적 손실이 발생할 수 있는 구체적 시나리오** (§4.6 참고):
-
 - **시나리오 A**: 과매매로 인한 수수료 손실 (월 10회 왕복 시 수수료만 2.3%)
 - **시나리오 B**: 생존자 편향으로 과대평가된 백테스트 (실전 수익률이 수십 %p 하락)
 - **시나리오 C**: 파라미터 과적합 (같은 시대의 OOS도 간접 과적합 가능)
@@ -131,7 +142,8 @@
 
 | 기술 | 선정 사유 |
 |------|----------|
-| **자체 Backtester** | `backtest/backtester.py` — 수수료·세금·슬리피지·손절/익절/트레일링 스탑 반영, **strict-lookahead 기본** |
+| **자체 Backtester** | `backtest/backtester.py` — 수수료·세금·슬리피지·손절/익절/트레일링 스탑 반영, **strict-lookahead 기본**. 성과 지표: 샤프·**소르티노**·MDD·**MDD 회복 기간**·**VaR/CVaR(일 95%)**·**최대 연속 손실 거래 수** 등 |
+| **PortfolioBacktester** | `backtest/portfolio_backtester.py` — **멀티종목** 동시 운용 시뮬레이션, 분산 제한·최대 포지션 수·투자비중 상한 반영, 종목별 성과 요약 (`--mode portfolio_backtest`) |
 | **strategy_validator** | 최소 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중) 비교, in/out-of-sample 분리 검증, **손익비 자동 경고(추세 추종 ≥ 2.0) + 디스코드 알림** |
 | **param_optimizer** | Grid Search / Bayesian(scikit-optimize) 파라미터 최적화 |
 
@@ -545,19 +557,22 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 
 구현: **`core/risk_manager.py`**, 설정: **`config/risk_params.yaml`**
 
-### 5.1 포지션 사이징 — 1% 룰
+### 5.1 포지션 사이징 — 1% 룰 + 신호 강도 스케일링 (v3.0)
 
 - **규칙**: 1회 거래 최대 손실 = 자본의 1%
 - **설정**: `position_sizing.max_risk_per_trade: 0.01`, `initial_capital`
+- **신호 강도 스케일링** (`position_sizing.signal_scaling`, 기본 `enabled: true`): `calculate_position_size(..., signal_score=)` 에서 스코어 절댓값이 클수록 기본 수량에 **선형 보간 배수** 적용(기본 `min_scale` 0.5 ~ `max_scale` 1.5, `score_range` 예: [2, 5]). **OrderExecutor** 매수 시 `signal_score` 전달.
 
 ### 5.2 손절매 (Stop Loss)
 
 - **타입**: `fixed`(고정 비율) 또는 `atr`(변동성 기반). `stop_loss.type`, `fixed_rate`, `atr_multiplier`
+- **시장 국면 배수 (v3.0)**: `calculate_stop_loss(..., regime_multiplier=1.0)` — **OrderExecutor**가 `get_regime_adjusted_params()`의 `stop_loss_multiplier`를 곱해 하락장에서 손절을 타이트하게 조정. `strategies.yaml` → `regime_adaptive` 참고.
 
 ### 5.3 익절매 (Take Profit)
 
 - **설정**: `take_profit.fixed_rate`, `partial_exit`, `partial_ratio`, `partial_target` (부분 익절)
 - **현재 기본값**: 전량 익절 `fixed_rate: 0.08` (8%), 부분 익절 `partial_target: 0.04` (4%), `partial_ratio: 0.5` (50%)
+- **시장 국면 배수 (v3.0)**: `calculate_take_profit(..., regime_multiplier=1.0)` — bearish/caution 시 익절 목표를 낮춰 빠른 실현.
 
 ### 5.4 트레일링 스탑
 
@@ -574,6 +589,12 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 - **대응**: `diversification.max_sector_ratio`(기본 0.40 = 40%)를 설정하면, 매수 시 **해당 종목의 업종(KRX Sector)**이 기존 보유 포지션 중 동일 업종 총 투자금과 합산해 총자산 대비 상한을 초과하면 매수를 차단합니다. 업종 정보는 `DataCollector.get_sector_map()`으로 FDR `StockListing('KRX')`의 `Sector` 컬럼을 사용합니다.
 - **동작**: `OrderExecutor._execute_buy_impl()` → `RiskManager.check_diversification(symbol=, sector_map=, positions=)` 에서 업종 비중 초과 시 `{"can_buy": False, "reason": "업종 'XXX' 비중 N% > 상한 40%"}` 반환.
 - **FDR 미설치·조회 실패**: 업종 매핑이 빈 dict이면 업종 체크는 자동 스킵되어 기존처럼 동작합니다.
+
+**종목 간 가격 수익률 상관관계 (v3.0)**
+
+- **문제**: 업종 분산만으로는 **동일 팩터(예: 반도체)** 에 몰린 고상관 종목 다수 보유를 막기 어렵습니다.
+- **설정**: `diversification.correlation_risk` — `enabled`, `lookback_days`, `high_corr_threshold`(기본 0.7), `high_corr_scale`(기본 0.5)
+- **동작**: `RiskManager.check_correlation_risk(symbol, existing_symbols)` 가 일봉 수익률 상관을 계산해 고상관 보유 종목이 있으면 **계산된 수량에 scale을 곱해 축소**. `OrderExecutor` 매수 직전 호출.
 
 ### 5.6 최대 보유 기간
 
@@ -594,14 +615,20 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 ### 5.10 블랙스완 대응 (긴급 청산 + 재진입)
 
 - **구현**: `core/blackswan_detector.py`. 급락 감지 시 전량 매도·디스코드 경고·쿨다운 동안 신규 매수 차단.
-- **설정**: `trading.blackswan_recovery_minutes`(기본 120), `blackswan_recovery_scale`(기본 0.5)
+- **설정 (v3.0 — `config/risk_params.yaml` → `blackswan`)**: 임계값·쿨다운·recovery를 **코드 하드코딩 없이** YAML에서 조정합니다.
+  - `single_stock_threshold` (기본 -0.05): 개별 종목 전일 대비 급락
+  - `portfolio_threshold` (기본 -0.03): 포트폴리오 일일 급락
+  - `consecutive_days`, `consecutive_threshold`: 연속 하락 감지
+  - `cooldown_minutes` (기본 60): 쿨다운 기본 길이(반복 발동 시 최대 240분까지 증가)
+  - `recovery_minutes` (기본 120), `recovery_scale` (기본 0.5): 쿨다운 해제 후 점진적 재진입
+- **참고**: `settings.yaml`의 `trading.blackswan_recovery_minutes` / `blackswan_recovery_scale`은 **과거 문서 호환용**으로 언급되었으나, **현재 구현은 `risk_params.yaml`의 `blackswan` 블록을 우선**합니다. 운영 시 한 곳(`risk_params`)으로 통일하는 것을 권장합니다.
 
 **⚠️ 쿨다운 이후 재진입 로직**
 
 - **문제**: 블랙스완 전량 매도 → 쿨다운 만료 후, 시장이 회복되었을 때 다음 모니터링 사이클까지 대기하면 급락 직후 반등 구간을 놓칠 수 있습니다. 또한 곧바로 100% 사이징으로 재진입하면 하락이 더 이어질 때 추가 손실 위험이 있습니다.
 - **대응**:
   1. **즉시 신호 재평가**: 쿨다운이 해제되는 순간 `BlackSwanDetector.consume_cooldown_ended_flag()`가 `True`를 반환하고, `Scheduler._run_monitoring()`이 이를 감지해 **워치리스트 전 종목을 즉시 재스캔**(`_run_post_cooldown_rescan`)합니다. 매수 신호가 나오면 진입 후보에 추가되어 같은 사이클에서 실행됩니다.
-  2. **점진적 사이징 복구 (recovery)**: 쿨다운 해제 시 `blackswan_recovery_minutes`(기본 120분) 동안 **recovery 기간**에 진입합니다. 이 기간 중 `get_recovery_scale()`이 `blackswan_recovery_scale`(기본 0.5)을 반환하여, 포지션 사이징이 **시장 국면 scale × recovery scale**로 곱연산됩니다. 예: 시장 국면 caution(50%) + recovery(50%) → 사이징 25%.
+  2. **점진적 사이징 복구 (recovery)**: 쿨다운 해제 시 `recovery_minutes`(risk_params `blackswan`) 동안 **recovery 기간**에 진입합니다. 이 기간 중 `get_recovery_scale()`이 `recovery_scale`을 반환하여, 포지션 사이징이 **시장 국면 scale × recovery scale**로 곱연산됩니다. 예: 시장 국면 caution(50%) + recovery(50%) → 사이징 25%.
   3. **recovery 종료 후**: `_recovery_until` 경과 시 자동으로 `1.0` 복귀, 정상 사이징으로 운영됩니다.
 
 ### 5.11 실적 발표일(어닝) 필터
@@ -679,6 +706,27 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 - **설정**: `risk_params.yaml` → `position_limits.min_holding_days` (현재 3, 0 = 비활성)
 - **구현 위치**: `core/order_executor.py` → `_execute_sell_impl()` (실전), `backtest/backtester.py` → `_simulate()` (백테스트) 양쪽 모두 적용.
 
+### 5.15 갭 리스크 방어 (`gap_risk`) — v3.0
+
+- **목적**: 전일 종가 대비 시가·현재가가 크게 **갭다운**이면 지정가 손절이 체결되지 않고 손실이 확대될 수 있음. **갭업 추격 매수**는 단기 과열 구간 진입 위험.
+- **설정**: `config/risk_params.yaml` → `gap_risk` (`enabled`, `gap_down_threshold` 기본 -3%, `gap_up_entry_block` 기본 +5%)
+- **동작**:
+  - **스케줄러** `_check_exit_signals`: 전일 대비 현재가가 `gap_down_threshold` 이하이면 해당 포지션 **즉시 매도** 시도·알림.
+  - **OrderExecutor** 매수 전: 당일 시가(또는 최근 봉)가 전일 종가 대비 `gap_up_entry_block` 이상이면 **신규 매수 차단**.
+
+### 5.16 시장 국면 적응형 전략 파라미터 (`regime_adaptive`) — v3.0
+
+- **목적**: `check_market_regime()` 결과(bullish / caution / bearish)에 따라 **손절·익절 배수**를 바꿔 하락장에서 손실 속도를 줄이고 익절을 빨리 가져감.
+- **설정**: `config/strategies.yaml` → `regime_adaptive` (`enabled`, `bullish` / `caution` / `bearish` 각각 `buy_threshold_offset`, `stop_loss_multiplier`, `take_profit_multiplier`)
+- **구현**: `core/market_regime.py` → `get_regime_adjusted_params(config, collector)`  
+  **OrderExecutor**가 매수 시 `calculate_stop_loss` / `calculate_take_profit`에 국면 배수 전달.
+
+### 5.17 스케줄러 장중 — 동적 손절 갱신·신호 재스캔 — v3.0
+
+- **동적 손절**: `_update_dynamic_stop_losses()` — 보유 종목별 최신 일봉·ATR로 손절가 재계산. **기존보다 손절가만 높아지는(래칟) 방향**만 DB 반영 (`database.repositories.update_stop_loss_price`).
+- **장중 재스캔**: `auto_entry` 가 켜진 경우 `_rescan_for_new_entries()` — 워치리스트에서 미보유 종목을 다시 분석해 BUY 신호 시 `_entry_candidates`에 추가(시장 국면 bearish면 스킵).
+- **위치**: `core/scheduler.py` → `_run_monitoring()` 내부, 손절/익절 체크 후 실행.
+
 ---
 
 ## 6. 시스템 아키텍처 및 프로젝트 구조
@@ -694,7 +742,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 │ 주문 생성 │ OrderGuard │ 재시도(지수 백오프+지터) │ Dead-letter 큐 │ 바스켓 리밸런서 │
 ├─────────────────────────────────────────────────────────────────┤
 │                      🛡️ 리스크 관리 레이어                       │
-│     손절/익절/트레일링 스탑 │ 포지션 사이징 │ MDD·성과열화·시장 국면 필터 │
+│ 손절/익절/트레일링 │ 포지션 사이징·신호스케일 │ 상관축소·갭리스크 │ MDD·성과열화·시장국면·국면적응 │
 ├─────────────────────────────────────────────────────────────────┤
 │                      🎯 전략 레이어                              │
 │ 전략 레지스트리(플러그인) │ 스코어링/평균회귀/추세추종/펀더멘털/앙상블 │ generate_signal │
@@ -724,7 +772,7 @@ quant_trader/
 │   ├── config_loader.py         # YAML 통합 로더. settings/strategies/risk_params 로드, .env 덮어쓰기, Config.get() 싱글톤
 │   ├── settings.yaml.example    # 설정 예시 (실제 settings.yaml 은 .gitignore)
 │   ├── settings.yaml            # KIS API, database, logging, data_source, trading, discord, telegram, dashboard, watchlist
-│   ├── strategies.yaml          # indicators, scoring, mean_reversion, trend_following, momentum_factor, volatility_condition, ensemble 파라미터
+│   ├── strategies.yaml          # indicators, scoring, mean_reversion, trend_following, fundamental_factor, momentum_factor, volatility_condition, ensemble 파라미터
 │   ├── risk_params.yaml         # backtest_universe, liquidity_filter, 포지션/손절/익절/트레일링/분산/MDD/성과열화/거래비용
 │   ├── baskets.yaml             # 바스켓 포트폴리오 & 리밸런싱 설정 (종목별 목표 비중, drift/weekly/monthly 트리거, 신호 가중 모드)
 │   ├── holidays.yaml.example    # 휴장일 예시
@@ -736,16 +784,16 @@ quant_trader/
 │   ├── watchlist_manager.py     # 관심 종목: manual/top_market_cap/kospi200/momentum_top/low_vol_top/momentum_lowvol + 유동성 필터 + 리밸런싱 주기(캐시) + as_of_date 지원(백테스트 시 과거 유니버스)
 │   ├── indicator_engine.py      # pandas-ta: RSI, MACD, 볼린저, MA(SMA/EMA), 스토캐스틱, ADX, ATR, OBV, volume_ratio. calculate_all(df)
 │   ├── signal_generator.py      # 멀티 지표 스코어링 신호 (BUY/SELL/HOLD, score, score_details). collinearity_mode(representative_only 권장)
-│   ├── risk_manager.py          # 포지션 사이징(1% 룰), check_diversification(업종 비중 포함), check_recent_performance, 손절/익절/트레일링, 거래비용
-│   ├── order_executor.py        # 매수/매도 실행. paper: DB만, live: KIS API. PositionLock, OrderGuard, 미체결 확인, 유동성·어닝 필터, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
+│   ├── risk_manager.py          # 포지션 사이징(1% 룰·신호 강도 스케일), check_diversification(업종), **check_correlation_risk**, check_recent_performance, 손절/익절/트레일링(국면 배수), 거래비용
+│   ├── order_executor.py        # 매수/매도. 국면 손절·익절, 상관 축소, **갭업 매수 차단**, 유동성·어닝·분산, Dead-letter
 │   ├── portfolio_manager.py     # 보유 포지션·잔고·수익률. sync_with_broker(KIS 잔고↔DB 크로스체크), save_daily_snapshot()
 │   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
-│   ├── scheduler.py             # 무한 루프: 장전/장중(10분 간격)/장마감. 시장 국면 필터, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전 전환 자동 평가 (`--mode schedule` 또는 live)
+│   ├── scheduler.py             # 장전/장중(10분)/장마감. **갭다운 즉시 청산**, 동적 손절 갱신, auto_entry 시 장중 재스캔, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전 전환 평가
 │   ├── runtime_lock.py        # `data/.scheduler.lock` — schedule 모드 단일 인스턴스(중복 실행 방지)
 │   ├── trading_hours.py         # 한국 장·휴장일(holidays.yaml → pykrx → fallback). 미국: us_holidays.yaml + 동부 09:30~16:00 (`is_us_trading_day` 등)
 │   ├── holidays_updater.py      # 휴장일 YAML 자동 갱신 (pykrx 또는 fallback)
-│   ├── blackswan_detector.py    # 급락 감지 → 전량 매도·쿨다운·recovery(점진적 재진입, recovery_scale)
-│   ├── market_regime.py         # 시장 국면 필터: 3중 신호(200일선 + 단기 모멘텀 + MA 크로스) → bearish/caution/bullish
+│   ├── blackswan_detector.py    # 급락 감지 — 임계값·쿨다운·recovery는 **risk_params.blackswan**
+│   ├── market_regime.py         # 시장 국면 3중 신호 + **get_regime_adjusted_params()** (손절·익절 국면 배수)
 │   ├── fundamental_loader.py    # 펀더멘털(PER·부채비율) 조회 — pykrx(우선) → yfinance(폴백). 평균회귀 필터용
 │   ├── dart_loader.py           # DART Open API: corp_code 매핑, 정기공시 기반 실적 시점 추정(earnings_filter 폴백)
 │   ├── earnings_filter.py       # 실적일 필터: yfinance → (선택) DART 추정. trading.skip_earnings_days
@@ -773,7 +821,8 @@ quant_trader/
 │   └── circuit_breaker.py       # CLOSED → OPEN → HALF_OPEN. API 연속 5회 실패 시 60초 차단, Notifier 알림
 ├── backtest/
 │   ├── __init__.py
-│   ├── backtester.py            # 시뮬레이션: strict_lookahead 기본, 수수료·세금·슬리피지·동적 슬리피지·손절/익절/트레일링, 과매매 분석
+│   ├── backtester.py            # 단일 종목 시뮬. strict_lookahead, 과매매 분석, **Sortino·VaR/CVaR·연속손실·MDD회복기간** 등 메트릭
+│   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션 등)
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중), in/out-of-sample, 손익비 자동 경고+디스코드
 │   ├── momentum_top_portfolio.py # 다종목 동일비중 모멘텀 포트폴리오 백테스트 (리밸런싱·시장 국면 필터·포트폴리오 스탑). run_momentum_top_portfolio_backtest(), print_momentum_top_portfolio_report()
@@ -782,7 +831,7 @@ quant_trader/
 ├── database/
 │   ├── __init__.py
 │   ├── models.py                # ORM 모델 6종(StockPrice, TradeHistory, Position, PortfolioSnapshot, DailyReport, FailedOrder). SQLite WAL/PostgreSQL 지원, scoped_session, @with_retry, db_session()
-│   ├── repositories.py          # CRUD — 읽기·쓰기 전체 함수 @with_retry 적용, get_paper_performance_metrics, save_failed_order/get_pending_failed_orders/resolve_failed_order (Dead-letter)
+│   ├── repositories.py          # CRUD, **update_stop_loss_price**(래칟 손절 갱신), Dead-letter, 스냅샷 등
 │   └── backup.py                # SQLite Online Backup API로 WAL 안전 백업 (실패 시 shutil 폴백 + -wal/-shm 포함), 보관 일수 자동 삭제
 ├── monitoring/
 │   ├── __init__.py
@@ -810,7 +859,12 @@ quant_trader/
 │   ├── test_watchlist_manager.py        # watchlist 모드별 resolve 검증
 │   ├── test_basket_rebalancer.py       # 바스켓 리밸런서 (설정·비중·드리프트·트리거·주문·실행)
 │   └── test_us_market_support.py      # fetch_stock 미국 라우팅·TradingHours 미국 장 판별 등
-├── deploy/                      # (선택) Oracle Cloud 등 상시 구동용 setup.sh, systemd 유닛, logrotate
+├── deploy/                      # (선택) Oracle Cloud ARM 서버 상시 구동
+│   ├── README.md               # Oracle Cloud Free Tier ARM 배포 가이드
+│   ├── setup.sh                # 시스템 셋업 (Python 3.11, venv, pip install)
+│   ├── install_service.sh      # systemd 서비스 등록 스크립트
+│   ├── quant_trader.service    # systemd 유닛 파일 (schedule 모드, auto-restart)
+│   └── logrotate.conf          # 로그 로테이션 정책 (copytruncate)
 ├── docs/
 │   ├── PROJECT_GUIDE.md         # 파일별 역할·실행 모드·데이터 흐름 상세
 │   └── BACKTEST_IMPROVEMENT.md  # 백테스트 손익 개선 포인트 (손익비·상승장·손절/익절·가중치 파이프라인)
@@ -850,8 +904,8 @@ quant_trader/
 | **backtest_momentum_top** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. 리밸런싱·시장 국면 필터·포트폴리오 스탑 지원 | `run_backtest_momentum_top()` → momentum_top_portfolio.run_momentum_top_portfolio_backtest() |
 | **validate** | 전략 검증 (3~5년, 샤프·MDD·벤치마크·in/out-of-sample). `--walk-forward` 시 워크포워드 | `run_strategy_validation()` → StrategyValidator.run / run_walk_forward |
 | **paper** | 모의투자 1회 순회 (워치리스트 종료 후 프로세스 종료) | `run_paper_trading()` → WatchlistManager, 전략.generate_signal, OrderExecutor(paper) |
-| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). `trading.mode=live`이면 거부 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
-| **live** | 실전 매매 (ENABLE_LIVE_TRADING=true + --confirm-live 필수) | `run_live_trading()` → KIS 인증 → Scheduler.run() |
+| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). 기본=signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. `trading.mode=live`이면 거부 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
+| **live** | 실전 매매. **4중 보안**: ① `is_strategy_allowed(live)` ② `ENABLE_LIVE_TRADING=true` ③ `--confirm-live` ④ `_check_live_readiness_gate()` 5개 조건 | `run_live_trading()` → hard gate → KIS 인증 → Scheduler.run() |
 | **liquidate** | 긴급 전 종목 매도 | `run_emergency_liquidate()` → DB 포지션 조회 → 종목별 매도 |
 | **compare** | 모의투자 vs 백테스트 비교 + **실전 전환 준비 평가** | `run_compare_paper_backtest()` → paper_compare.run_compare + check_live_readiness |
 | **optimize** | 전략 파라미터 최적화 (grid / bayesian / 가중치 대칭 Grid) | `run_param_optimize()` → param_optimizer, train_ratio·OOS |
@@ -869,6 +923,7 @@ quant_trader/
 - `--walk-forward` → validate 모드에서 슬라이딩 윈도우 워크포워드 검증
 - `--no-benchmark-top50` → validate 모드에서 코스피 Top50 벤치마크 비활성화
 - `--confirm-live` → live 모드 진입 시 필수 확인 플래그
+- `--force-live` → hard gate 우회 (위험: 검증 미통과 상태에서 live 강제 진입)
 - `--basket <name>` → rebalance 모드에서 대상 바스켓 지정 (미지정 시 enabled=true 전체)
 - `--dry-run` → rebalance 모드에서 실제 주문 없이 계획만 출력
 - `--initial-capital` → backtest / backtest_momentum_top 초기 자본금
@@ -888,7 +943,11 @@ quant_trader/
 |------|------|-----------|------|
 | 총 수익률 | 누적 수익 | 벤치마크(코스피 지수) 초과 | "연 20%" 같은 절대 목표는 비현실적. 검증 후 달성 가능한 수치로 재설정 |
 | 샤프 지수 | 위험 대비 수익 | ≥ 1.0 (OOS 기준) | 1.5 이상이면 우수. **가중치 최적화 전 직관값으로는 달성 어려움** |
+| **소르티노 비율** | 하방 변동성 대비 수익 (손실 분산만 위험으로 간주) | 전략별 상이 | 백테스트 리포트에 포함 (v3.0) |
 | MDD | 고점 대비 최대 하락 | < 20% | 15% 이내 권장 |
+| **MDD 회복 기간** | 고점 대비 최저점까지 갔다가 **다시 고점을 회복**하기까지의 일수 | 짧을수록 유리 | 연속 악재·롱온리 전략 진단에 유용 (v3.0) |
+| **VaR / CVaR** | 일별 수익 분포 기준 꼬리 리스크 (예: 95% VaR, CVaR) | — | 손실 분포의 **극단 꼬리** 관점 (v3.0) |
+| **최대 연속 손실 일수** | 연속으로 손실이 난 거래일 수 | — | 연속 악재 구간 노출도 파악 (v3.0) |
 | 승률 | 수익 거래 비율 | 전략별 상이 | 추세 추종은 40% 이하 가능 (손익비로 보완) |
 | 손익비 (Profit Factor) | 평균 수익/평균 손실 | > 1.5 (추세 추종 ≥ 2.0) | < 1.0이면 순손실 구조 |
 | 칼마 비율 | 연 수익률/MDD | > 1.0 | — |
@@ -983,6 +1042,13 @@ quant_trader/
 
 **주의**: 이 신호는 의사결정 보조 도구이며, 최종 실전 전환은 사용자가 직접 판단해야 합니다. 특히 paper 기간이 특정 시장 국면에만 해당하는 경우 실전에서 결과가 달라질 수 있습니다.
 
+### 8.5 멀티종목 포트폴리오 백테스트 (`portfolio_backtest`) — v3.0
+
+- **목적**: 단일 종목 백테스트(`backtest`)와 달리, **여러 종목을 동시에** 보유·매매하며 분산·최대 포지션 한도 등을 반영한 시뮬레이션.
+- **실행**: `python main.py --mode portfolio_backtest --symbols 005930,000660,...` (`--start` / `--end` 등 기간 옵션은 `main.py`와 동일 패턴)
+- **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계.
+- **활용**: 유니버스 후보 종목 묶음에 대한 **동시 보유 시나리오** 검증, 단일 종목 백테스트와의 성과 비교.
+
 ---
 
 ## 9. 예외 처리 및 안정성
@@ -1057,11 +1123,13 @@ quant_trader/
 - 90일 이상 경과 또는 새해(1/1~1/7)에 `holidays_updater`를 자동 호출하여 갱신합니다.
 - **구현 위치**: `core/scheduler.py` → `_maybe_update_holidays()`
 
-**⚠️ WebSocket 재연결 시 데이터 갭 — 잠재적 위험 (미구현)**
+**⚠️ WebSocket 재연결 시 데이터 갭 — 잠재적 위험 (부분 완화 / 미완)**
 
-- **문제**: KIS 웹소켓이 끊겼다가 재연결될 때 그 사이의 데이터 갭 처리가 명확하지 않습니다.
-- **필요 사항**: (1) 재연결 시 REST API로 최근 체결 데이터를 보충 조회, (2) 갭 기간 중 가격 급변 확인, (3) 갭 발생 시 블랙스완 감지를 보수적으로 트리거.
-- **우선순위**: **중기 개선 (3~6개월 내)**
+- **문제**: KIS 웹소켓이 끊겼다가 재연결될 때 그 사이의 **틱·호가 스트림** 갭 처리가 명확하지 않습니다.
+- **v3.0 부분 완화**: 장중 스케줄러는 **REST 기반**으로 주기적으로 시세·포지션을 갱신하며, `risk_params.gap_risk`에 따라 **전일 대비 갭다운**이 임계값 이하이면 즉시 청산을 시도합니다(웹소켓과 별개 경로). 다만 **갭 구간 내부의 초단기 급변**을 웹소켓 없이 포착하는 것은 여전히 한계가 있습니다.
+- **부분 구현**: `api/websocket_handler.py`가 갭 보충 후 변동폭을 `BlackSwanDetector.report_websocket_gap_volatility()`에 넘기며, **관측 변동 ≥ 5%** 시 쿨다운을 발동할 수 있음(로그·운영자 점검 위주).
+- **남은 과제**: (1) 갭 구간 REST 보충의 **전 종목·전 구간** 커버리지, (2) 갭 중 급변과 **긴급 매도** 정책의 일원화, (3) 실전에서 웹소켓+스케줄러 **이중 경로** 테스트·모니터링 강화.
+- **우선순위**: **중기 개선 (3~6개월 내)** (표 §10의 WebSocket 갭 처리 항목과 동일 계열)
 
 **✅ 10분 루프 모니터링 — 구현 완료**
 
@@ -1088,7 +1156,7 @@ quant_trader/
 - [x] RiskManager (포지션 사이징, 분산, 성과 열화, 손절/익절/트레일링, 거래 비용)
 - [x] Backtester (strict-lookahead, 수수료·세금·동적 슬리피지), StrategyValidator, ParamOptimizer
 - [x] OrderExecutor (paper/live), PositionLock, OrderGuard, PortfolioManager, Scheduler
-- [x] BlackSwanDetector, MarketRegime(3중 신호), EarningsFilter, FundamentalLoader
+- [x] BlackSwanDetector(**risk_params.blackswan**), MarketRegime(3중 신호·**get_regime_adjusted_params**), EarningsFilter, FundamentalLoader
 - [x] 통합 알림 이중화(Notifier), 웹 대시보드, LiquidateTrigger, DB 백업
 - [x] 워크포워드 검증, 벤치마크(KS11 + Top50), 과매매 분석
 - [x] test_integration.py, pytest 테스트 suite (`tests/` 기준 다수 파일, 미국 시장·스케줄 등 포함)
@@ -1130,6 +1198,15 @@ quant_trader/
 - [x] **전략 진단 보조** — `core/strategy_diagnostics.py` (`DiagnosticLine`), 전략별 신호·점수 진단 라인 생성
 - [x] **대시보드 런타임 상태** — `monitoring/dashboard_runtime_state.py`, 스케줄러·전략 실행 현황 실시간 상태 전달
 
+### v3.0 구현 완료 (리스크·백테스트·운영)
+
+- [x] **블랙스완 임계값·쿨다운·recovery** — `config/risk_params.yaml` → `blackswan` (코드 하드코딩 제거)
+- [x] **갭 리스크** — `gap_risk`: 스케줄러 갭다운 즉시 청산, OrderExecutor 갭업 추격 매수 차단
+- [x] **국면 적응형 손절·익절** — `strategies.yaml` → `regime_adaptive` + `market_regime.get_regime_adjusted_params`
+- [x] **스케줄러 장중** — 동적 손절 래칟 갱신(`update_stop_loss_price`), `auto_entry` 시 신호 재스캔
+- [x] **CLI** — `--mode portfolio_backtest`, `--symbols`
+- [x] **백테스트 메트릭 확장** — 소르티노, VaR/CVaR, MDD 회복일, 최대 연속 손실일
+
 ### 단기 개선 (1~2개월 내)
 
 | # | 액션 | 상세 | 참고 |
@@ -1161,7 +1238,7 @@ quant_trader/
 
 - **신호 품질 미검증**: 현재 가중치(RSI +2, MACD +2, 볼린저 +1 등)는 직관·예시용이며 통계적 근거가 없습니다. **이 상태로 실전 자동매매를 돌리면 수익보다 손실 가능성이 더 높습니다.** §1.3의 "실전 투입 전 반드시 완료해야 할 4가지"를 모두 마칠 때까지 실전 투입을 하지 마세요.
 - **과적합**: OOS 검증·워크포워드를 통과해도 같은 시대의 데이터로 검증하면 간접적으로 과적합될 수 있습니다. 여러 시장 국면(상승·하락·횡보)이 포함된 기간으로 검증하세요.
-- **블랙스완**: 비상 손절·현금 비중 유지. 웹소켓 재연결 갭 중 급락 감지 누락 가능성 있음(§9.1).
+- **블랙스완·갭**: 비상 손절·현금 비중 유지. REST 주기 갱신·`gap_risk`로 갭다운 대응은 보강되었으나, 웹소켓 단절 구간의 **초단기** 급변은 여전히 누락 가능(§9.1).
 
 ### ⚠️ 경고
 
@@ -1204,4 +1281,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-03-25 (v2.6: `backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/CLI 표 갱신)
+> **최종 수정**: 2026-03-27 (v2.8: `backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/CLI 표 갱신; §6.2 strategies.yaml `fundamental_factor` 반영, deploy/ 구성 명시, 문서 간 양식·교차 참조 통일)

@@ -211,6 +211,34 @@ class DataCollector:
             "history": dict(self._source_history),
         }
 
+    def check_source_consistency(self, mode: str = "paper") -> list[str]:
+        """
+        수집 이력에서 수정주가/비수정주가 혼용 여부를 점검합니다.
+        live 모드에서 KIS(비수정) 소스가 섞여 있으면 경고를 반환합니다.
+
+        Returns:
+            경고 메시지 리스트 (비어 있으면 이상 없음)
+        """
+        warnings = []
+        kis_symbols = [s for s, src in self._source_history.items() if src == "KIS"]
+        other_symbols = [s for s, src in self._source_history.items() if src != "KIS"]
+        if kis_symbols and other_symbols:
+            warnings.append(
+                f"⚠️ 가격 소스 불일치: {len(kis_symbols)}개 종목이 KIS(비수정주가), "
+                f"{len(other_symbols)}개 종목이 FDR/yfinance(수정주가) 사용 중. "
+                f"지표/신호가 종목별로 다른 기준으로 계산됩니다. "
+                f"KIS 종목: {kis_symbols[:5]}{'...' if len(kis_symbols) > 5 else ''}"
+            )
+        if mode == "live" and kis_symbols:
+            warnings.append(
+                f"⚠️ Live 모드에서 KIS(비수정주가) 소스 사용 중: {kis_symbols[:5]}. "
+                f"백테스트(FDR 수정주가)와 지표가 달라질 수 있습니다. "
+                f"pip install FinanceDataReader 설치를 권장합니다."
+            )
+        for w in warnings:
+            logger.warning(w)
+        return warnings
+
     @staticmethod
     def is_us_ticker(symbol: str) -> bool:
         """
@@ -265,17 +293,30 @@ class DataCollector:
         return self.fetch_korean_stock(symbol, start_date, end_date)
 
     def check_source_consistency(self, reference_source: str = "FinanceDataReader") -> list[str]:
-        """수집 이력에서 reference_source와 다른 소스를 사용한 종목 반환."""
+        """
+        수집 이력에서 reference_source와 다른 소스를 사용한 종목 반환.
+        라이브 모드에서 KIS 폴백이 발생하면 에러 레벨로 기록.
+        """
         mismatched = []
         for symbol, src in self._source_history.items():
             if src != reference_source:
                 mismatched.append(f"{symbol}({src})")
         if mismatched and self._warn_on_source_mismatch:
-            logger.warning(
-                "데이터 소스 불일치 감지(reference={}): {}",
-                reference_source,
-                mismatched,
-            )
+            # KIS 폴백이 포함된 경우 에러 레벨로 격상
+            has_kis_fallback = any("KIS" in m for m in mismatched)
+            if has_kis_fallback:
+                logger.error(
+                    "🚨 데이터 소스 불일치 (KIS 비수정주가 폴백 감지): {}. "
+                    "백테스트(수정주가)와 실전 시그널이 달라질 수 있습니다. "
+                    "pip install FinanceDataReader 후 allow_kis_fallback: false 설정 권장.",
+                    mismatched,
+                )
+            else:
+                logger.warning(
+                    "데이터 소스 불일치 감지(reference={}): {}",
+                    reference_source,
+                    mismatched,
+                )
         return mismatched
 
     @staticmethod

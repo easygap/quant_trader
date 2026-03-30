@@ -9,6 +9,7 @@
 단일 분할 검증: run(). 워크포워드(슬라이딩 윈도우) 검증: run_walk_forward().
 """
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -41,6 +42,15 @@ def _get_kospi_top_n_symbols(
     universe = (cfg.risk_params or {}).get("backtest_universe") or {}
     mode = (universe.get("mode") or "current").strip().lower()
     exclude_admin = universe.get("exclude_administrative", True)
+
+    # 생존자 편향 경고: current 모드는 현재 시점 종목을 과거에 적용하므로 벤치마크가 과대평가됨
+    if mode == "current":
+        logger.warning(
+            "⚠️ 벤치마크 생존자 편향 경고: universe_mode='current'는 현재 시점 상위 종목을 "
+            "과거 구간에 적용합니다. 상장폐지·시총 하락 종목이 제외되어 벤치마크가 과대평가됩니다. "
+            "완화하려면 risk_params.backtest_universe.mode를 'kospi200'으로 설정하세요."
+        )
+
     try:
         stocks = DataCollector.get_krx_stock_list(
             as_of_date=as_of_date,
@@ -463,9 +473,22 @@ class StrategyValidator:
     def _save_walk_forward_report(self, result: dict) -> Path:
         date_part = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_strategy = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in str(result["strategy"]))
+        # 텍스트 리포트
         path = self.output_dir / f"validation_walkforward_{date_part}_{safe_strategy}.txt"
         path.write_text(self._render_walk_forward_report(result), encoding="utf-8")
         logger.info("워크포워드 검증 리포트 저장: {}", path)
+        # JSON (기계 판독·비교용)
+        json_path = self.output_dir / f"validation_walkforward_{date_part}_{safe_strategy}.json"
+        json_data = {
+            k: v for k, v in result.items()
+            if k not in ("report_path",)
+        }
+        # datetime 등 직렬화 불가 타입 처리
+        json_path.write_text(
+            json.dumps(json_data, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        logger.info("워크포워드 검증 JSON 저장: {}", json_path)
         return path
 
     def _render_walk_forward_report(self, result: dict) -> str:
@@ -667,8 +690,154 @@ class StrategyValidator:
         benchmark_return = benchmark.get("total_return", 0)
         benchmark_sharpe = benchmark.get("sharpe_ratio", 0)
         benchmark_mdd = benchmark.get("max_drawdown", 0)
+        cagr = metrics.get("cagr", 0)
+        sortino = metrics.get("sortino_ratio", 0)
+        calmar = metrics.get("calmar_ratio", 0)
+        turnover = metrics.get("annual_turnover_pct", 0)
+        ev = metrics.get("ev_per_trade", 0)
+        cost_drag = metrics.get("cost_drag_pct", 0)
         return "\n".join([
             f"[{title}]",
-            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | 샤프 {metrics.get('sharpe_ratio', 0):>5.2f} | MDD {metrics.get('max_drawdown', 0):>6.2f}%",
-            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프 {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}%",
+            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | CAGR {cagr:>6.2f}% | 샤프 {metrics.get('sharpe_ratio', 0):>5.2f} | 소르티노 {sortino:>5.2f}",
+            f"MDD {metrics.get('max_drawdown', 0):>6.2f}% | 칼마 {calmar:>5.2f} | 턴오버 {turnover:>6.1f}%/y | 비용 드래그 {cost_drag:>5.2f}%",
+            f"승률 {metrics.get('win_rate', 0):>5.1f}% | EV/거래 {ev:>8,.0f}원 | 거래 {metrics.get('total_trades', 0)}건",
+            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프 {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}% | 초과수익 {metrics.get('total_return', 0) - benchmark_return:>+.2f}%",
         ])
+
+    # ═══════════════════════════════════════════════════════════
+    # Strategy Ablation Test
+    # ═══════════════════════════════════════════════════════════
+
+    def run_ablation(
+        self,
+        symbol: str,
+        strategies: list[str] = None,
+        start_date: str = None,
+        end_date: str = None,
+        validation_years: int = 5,
+    ) -> dict:
+        """
+        전략 절삭 검증 (Ablation Test).
+        각 전략을 개별·조합으로 실행하여 기여도를 분리 측정합니다.
+
+        Returns:
+            {
+                "individual": {"scoring": {metrics}, "mean_reversion": {...}, ...},
+                "overfitting_flags": [...],
+                "halt_warnings": [...],
+                "report_path": str,
+            }
+        """
+        if strategies is None:
+            strategies = ["scoring", "mean_reversion", "fundamental_factor"]
+        start_date, end_date = self._resolve_dates(start_date, end_date, validation_years)
+        df = self.collector.fetch_korean_stock(symbol, start_date, end_date)
+        if df.empty or len(df) < 120:
+            raise ValueError(f"절삭 검증용 데이터 부족: {symbol}")
+
+        split_idx = max(60, int(len(df) * 0.7))
+        split_idx = min(split_idx, len(df) - 30)
+        oos_df = df.iloc[split_idx:].copy()
+
+        results = {}
+        for strat in strategies:
+            try:
+                full = self.backtester.run(df.copy(), strategy_name=strat, strict_lookahead=True)
+                oos = self.backtester.run(oos_df.copy(), strategy_name=strat, strict_lookahead=True)
+                results[strat] = {
+                    "full": full["metrics"],
+                    "oos": oos["metrics"],
+                }
+            except Exception as e:
+                logger.warning("절삭 검증 실패 ({}): {}", strat, e)
+                results[strat] = {"full": {}, "oos": {}, "error": str(e)}
+
+        # 오버피팅 징후 점검
+        overfitting_flags = []
+        for strat, r in results.items():
+            full_m = r.get("full", {})
+            oos_m = r.get("oos", {})
+            if not full_m or not oos_m:
+                continue
+            full_sharpe = full_m.get("sharpe_ratio", 0)
+            oos_sharpe = oos_m.get("sharpe_ratio", 0)
+            full_ret = full_m.get("total_return", 0)
+            oos_ret = oos_m.get("total_return", 0)
+
+            # 샤프 50% 이상 하락
+            if full_sharpe > 0 and oos_sharpe < full_sharpe * 0.5:
+                overfitting_flags.append(
+                    f"⚠️ [{strat}] OOS 샤프({oos_sharpe:.2f})가 FULL({full_sharpe:.2f})의 50% 미만 — 오버피팅 의심"
+                )
+            # 수익률 부호 반전
+            if full_ret > 5 and oos_ret < 0:
+                overfitting_flags.append(
+                    f"🚨 [{strat}] FULL 수익 +{full_ret:.1f}% → OOS 손실 {oos_ret:.1f}% — 오버피팅 강력 의심"
+                )
+
+        # 전략 중단 경고 조건
+        halt_warnings = []
+        for strat, r in results.items():
+            oos_m = r.get("oos", {})
+            if not oos_m:
+                continue
+            if oos_m.get("sharpe_ratio", 0) < 0:
+                halt_warnings.append(f"🛑 [{strat}] OOS 샤프 음수({oos_m['sharpe_ratio']:.2f}) — 전략 중단 권고")
+            if oos_m.get("max_drawdown", 0) < -30:
+                halt_warnings.append(f"🛑 [{strat}] OOS MDD {oos_m['max_drawdown']:.1f}% — 전략 중단 권고")
+            ev = oos_m.get("ev_per_trade", 0)
+            if oos_m.get("total_trades", 0) > 5 and ev < 0:
+                halt_warnings.append(f"⚠️ [{strat}] OOS 거래당 기대값 {ev:,.0f}원 — 음의 기대값")
+
+        for flag in overfitting_flags:
+            logger.warning(flag)
+        for hw in halt_warnings:
+            logger.warning(hw)
+
+        output = {
+            "symbol": symbol,
+            "period": f"{df.index[0].date()} ~ {df.index[-1].date()}",
+            "split_date": str(df.index[split_idx].date()),
+            "individual": results,
+            "overfitting_flags": overfitting_flags,
+            "halt_warnings": halt_warnings,
+        }
+
+        # 리포트 저장
+        report_path = self._save_ablation_report(output)
+        output["report_path"] = str(report_path)
+        return output
+
+    def _save_ablation_report(self, result: dict) -> Path:
+        date_part = datetime.now().strftime("%Y%m%d_%H%M%S")
+        json_path = self.output_dir / f"ablation_{date_part}.json"
+        json_path.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        # 텍스트 요약
+        txt_path = self.output_dir / f"ablation_{date_part}.txt"
+        lines = [
+            "=" * 70,
+            f"Strategy Ablation Report | {result['symbol']}",
+            f"기간: {result['period']} | OOS 분할: {result['split_date']}~",
+            "=" * 70,
+            "",
+            f"{'전략':<25} | {'FULL Sharpe':>12} | {'OOS Sharpe':>11} | {'FULL 수익률':>12} | {'OOS 수익률':>11} | {'OOS EV/거래':>12}",
+            "-" * 95,
+        ]
+        for strat, r in result["individual"].items():
+            fm = r.get("full", {})
+            om = r.get("oos", {})
+            lines.append(
+                f"{strat:<25} | {fm.get('sharpe_ratio', 0):>12.2f} | {om.get('sharpe_ratio', 0):>11.2f} | "
+                f"{fm.get('total_return', 0):>11.2f}% | {om.get('total_return', 0):>10.2f}% | "
+                f"{om.get('ev_per_trade', 0):>11,.0f}원"
+            )
+        if result["overfitting_flags"]:
+            lines.extend(["", "오버피팅 징후:"] + [f"  {f}" for f in result["overfitting_flags"]])
+        if result["halt_warnings"]:
+            lines.extend(["", "전략 중단 경고:"] + [f"  {w}" for w in result["halt_warnings"]])
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info("절삭 검증 리포트 저장: {}", txt_path)
+        return txt_path

@@ -1,26 +1,25 @@
 # QUANT TRADER
 
 국내 주식 자동매매를 공부하고 실험보려고 만든 개인 프로젝트입니다.  
-지표·펀더멘털 기반으로 매매 신호를 만들고, 백테스트부터 모의투자·실전까지 한 흐름으로 돌릴 수 있게 짜 두었습니다.
+지표·펀더멘털 기반으로 신호를 만들고, 백테스트부터 모의투자·실전 매매까지 한 흐름으로 실행할 수 있게 구성했습니다.
 
-실전 주문과 잔고 조회는 **KIS API**를 씁니다. 일봉 수집은 한국(FDR·yfinance·KIS 폴백)과 미국 티커(yfinance)를 쓸 수 있고, 리스크·알림·대시보드·리밸런싱 등은 붙여가며 확장 중입니다.
+실전 주문과 잔고 조회는 KIS API를 사용합니다.  
+데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> 인프라 쪽은 어느 정도 손을 댔지만, **신호가 실제로 돈이 되는지는 아직 충분히 검증하지 않은 상태**로 보는 게 맞습니다. 실전 자동매매보다는 백테스트·모의 중심으로 검증하고 고치는 용도로 생각해 주세요.
+> 현재는 자동매매 인프라를 정리해가는 단계에 가깝습니다.  
+> 실전 운영보다는 백테스트와 모의투자를 통해 전략을 검증하고 개선하는 용도로 보는 편이 맞습니다.
 
 ## 주요 기능
 
-**실행 흐름**  
-백테스트 · 전략 검증(워크포워드 등) · 모의 1회(`paper`) · 모의 상시 루프(`schedule`) · 실전(`live`) · 성과 비교 · 파라미터 최적화 · 지표/앙상블 상관 분석 · 바스켓 리밸런싱 · 웹 대시보드 · 긴급 청산 등 — `python main.py --mode …`로 분기합니다. 모드·진입점 표는 [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md)를 보세요.
-
-**전략·신호**  
-기술적 지표(RSI, MACD, 볼린저, 스토캐스틱, ADX, ATR, OBV 등) 기반 스코어링, 평균회귀, 추세추종, 펀더멘털 팩터, 앙상블(구성은 `config/strategies.yaml`의 `ensemble`).
-
-**운용·리스크**  
-워치리스트(시총·팩터 모드 등), 손절·익절·트레일링, 포지션·업종 비중, 시장 국면 필터, 블랙스완 대응, 어닝 필터(yfinance + 선택 DART), 알림(디스코드 → 텔레그램 → 이메일).
+- 백테스트 / 포트폴리오 백테스트
+- 모의투자 / 실전 매매
+- 전략 검증 / 성과 비교 / 파라미터 최적화
+- 스코어링 / 평균회귀 / 추세추종 / 펀더멘털 / 앙상블 전략
+- 리스크 관리, 알림, 바스켓 리밸런싱, 웹 대시보드
 
 ## 사용 환경
 
-* Python 3.11 ~ 3.12 (`pyproject.toml`: `>=3.11,<3.13`)
+- Python 3.11 ~ 3.12
 
 ## 설치
 
@@ -30,12 +29,14 @@ pip install -r requirements.txt
 
 ## 설정
 
-* `config/settings.yaml.example` → `config/settings.yaml`
-* `.env.example` 참고 후 `.env` (KIS 키, 알림, 선택: `DART_API_KEY` 등)
-* `config/holidays.yaml`(한국)은 없으면 자동 생성될 수 있고, `python main.py --update-holidays`로 갱신 가능
-* 미국 휴장일이 필요하면 `config/us_holidays.yaml`을 추가
+실행 전에 설정 파일과 환경변수를 먼저 준비해야 합니다.
 
-실전에서 장중 자동 진입을 쓰려면 예를 들어:
+- `config/settings.yaml.example` → `config/settings.yaml`
+- `.env.example` 참고 후 `.env` 작성
+- `config/holidays.yaml`은 필요 시 갱신 가능
+- 미국 휴장일이 필요하면 `config/us_holidays.yaml` 추가
+
+실전 자동 진입을 사용할 경우에는 아래 설정이 필요합니다.
 
 ```yaml
 trading.auto_entry: true
@@ -44,16 +45,19 @@ trading.auto_entry: true
 ## 실행
 
 ```bash
-# 백테스트
+# 단일 종목 백테스트
 python main.py --mode backtest --strategy scoring --symbol 005930
 
-# 모의투자 (워치리스트 1회)
+# 포트폴리오 백테스트
+python main.py --mode portfolio_backtest --strategy scoring --symbols 005930,000660 --start 2023-01-01 --end 2024-12-31
+
+# 모의투자
 python main.py --mode paper --strategy scoring
 
-# 모의 스케줄 루프 (상시 구동용)
+# 모의 스케줄 루프
 python main.py --mode schedule --strategy scoring
 
-# 실전 (환경변수 + 플래그 둘 다 필요)
+# 실전 매매
 python main.py --mode live --strategy scoring --confirm-live
 
 # 전략 검증
@@ -62,12 +66,11 @@ python main.py --mode validate --strategy scoring --symbol 005930 --validation-y
 # 성과 비교
 python main.py --mode compare --start 2025-01-01 --end 2025-03-19 --strategy scoring
 
-# 파라미터 최적화 (예: 스코어링 가중치까지)
+# 파라미터 최적화
 python main.py --mode optimize --strategy scoring --include-weights --auto-correlation
 
 # 바스켓 리밸런싱
 python main.py --mode rebalance
-python main.py --mode rebalance --basket kr_blue_chip --dry-run
 
 # 웹 대시보드
 python main.py --mode dashboard
@@ -76,11 +79,21 @@ python main.py --mode dashboard
 python main.py --update-holidays
 ```
 
-실전 `live`는 **`ENABLE_LIVE_TRADING=true`** 와 **`--confirm-live`** 가 함께 있어야 합니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` 설정과 `--confirm-live` 옵션이 함께 필요합니다.
 
-## 안정성 관련
+## 리스크 관리
 
-백테스트 look-ahead 완화(strict 기본), 포지션·비중 제한, 미체결·중복 주문 방지, 성과 열화 시 진입 제한, 시장 국면·블랙스완, DB 백업·잔고 크로스체크, 긴급 청산, 알림 채널 폴백 등을 넣어 두었습니다. 세부 키는 `config/risk_params.yaml`·`settings.yaml`을 참고하세요.
+기본적인 안전장치는 넣어두었습니다.
+
+- look-ahead 완화 백테스트
+- 포지션 수 / 자금 비중 제한
+- 미체결 / 중복 주문 방지
+- 성과 열화 시 진입 제한
+- 시장 국면 / 블랙스완 대응
+- DB 백업 / 잔고 크로스체크 / 긴급 청산
+- 알림 채널 fallback
+
+세부 설정은 `config/risk_params.yaml`, `config/strategies.yaml`, `config/settings.yaml`에서 관리합니다.
 
 ## 테스트
 
@@ -88,7 +101,7 @@ python main.py --update-holidays
 pytest tests/ -q
 ```
 
-외부 API·웹소켓이 필요한 부분은 모킹합니다.
+외부 API나 웹소켓이 필요한 부분은 모킹해서 테스트합니다.
 
 ## 프로젝트 구조
 
@@ -101,16 +114,18 @@ pytest tests/ -q
 * `monitoring/` — 로깅, 알림, 대시보드, 청산 트리거
 * `tests/` — 테스트
 * `docs/` — 문서
-* `deploy/` — (선택) 서버 상시 구동 예시
+* `deploy/` — (선택) Oracle Cloud ARM 서버 상시 구동(systemd, logrotate)
 
-## 더 읽을 곳
+## 문서
 
 | 문서 | 내용 |
 |------|------|
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
 | [`docs/BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 손익 개선 포인트(손익비·상승장·손절/익절·가중치 파이프라인) |
+| [`deploy/README.md`](deploy/README.md) | Oracle Cloud Free Tier ARM 배포·systemd 상시 구동 가이드 |
 
 ## 주의
 
-실전 투입 전에는 백테스트·검증·모의를 충분히 거친 뒤 쓰는 것을 권장합니다. **지금 단계에서는 신호 품질 검증이 운영 안정성보다 더 중요합니다.** 사용으로 인한 손실은 본인 책임입니다.
+실전 투입 전에는 백테스트, 검증, 모의투자를 충분히 거친 뒤 사용하는 것을 권장합니다.  
+현재 단계에서는 운영 안정성보다 전략 자체의 검증이 더 중요합니다.

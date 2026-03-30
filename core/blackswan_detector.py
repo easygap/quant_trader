@@ -45,6 +45,7 @@ class BlackSwanDetector:
         self.cooldown_minutes = 60             # 기본 1시간 매매 중단
         self._cooldown_until = None            # 매매 재개 시각
         self._triggered_count = 0              # 발동 횟수
+        self._triggered_date = None            # 발동 일자 (일 단위 리셋용)
 
         # 쿨다운 해제 후 recovery 관리
         trading = self.config.trading if hasattr(self.config, "trading") else self.config.get("trading", {})
@@ -53,7 +54,6 @@ class BlackSwanDetector:
         self._recovery_until = None
         self._cooldown_just_ended = False
 
-        # 연속 하락 추적
         self._daily_returns: list[float] = []
 
         logger.info("BlackSwanDetector 초기화 완료")
@@ -235,29 +235,40 @@ class BlackSwanDetector:
             return self.recovery_scale
         return 1.0
 
-    def can_trade(self) -> dict:
+    def can_trade(self, action: str = "BUY") -> dict:
         """
-        매매 가능 여부 (주문 실행 전 호출)
+        매매 가능 여부 (주문 실행 전 호출).
+
+        Args:
+            action: "BUY" 또는 "SELL". 쿨다운 중에도 긴급 매도(SL/TP/블랙스완)는 허용.
 
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
         if self.is_on_cooldown():
+            # 쿨다운 중에도 매도(손절/익절/트레일링/긴급매도)는 허용 — 포지션을 방치하면 추가 손실 발생
+            if action == "SELL":
+                logger.info("블랙스완 쿨다운 중이나 매도(긴급/SL/TP) 허용")
+                return {"allowed": True, "reason": "쿨다운 중 매도 허용"}
             remaining = self._cooldown_until - datetime.now()
             return {
                 "allowed": False,
-                "reason": f"블랙스완 쿨다운 중 (남은 시간: {remaining})",
+                "reason": f"블랙스완 쿨다운 중 — 신규 매수 차단 (남은 시간: {remaining})",
             }
         return {"allowed": True, "reason": ""}
 
     def _activate_cooldown(self):
-        """쿨다운 활성화"""
+        """쿨다운 활성화. 일자가 바뀌면 발동 횟수를 리셋."""
+        today = datetime.now().date()
+        if self._triggered_date != today:
+            self._triggered_count = 0
+            self._triggered_date = today
         self._triggered_count += 1
         # 반복 발동 시 쿨다운 시간 증가 (최대 4시간)
         cooldown = min(self.cooldown_minutes * self._triggered_count, 240)
         self._cooldown_until = datetime.now() + timedelta(minutes=cooldown)
         logger.warning(
-            "⏸️ 매매 중단 — {}분 쿨다운 (발동 횟수: {})",
+            "⏸️ 매매 중단 — {}분 쿨다운 (금일 발동 횟수: {})",
             cooldown, self._triggered_count,
         )
 
