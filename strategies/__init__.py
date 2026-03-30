@@ -23,6 +23,7 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
     "fundamental_first":   ("strategies.fundamental_first",   "FundamentalFirstStrategy"),
     "momentum_factor":     ("strategies.momentum_factor",     "MomentumFactorStrategy"),
     "ensemble":            ("core.strategy_ensemble",         "StrategyEnsemble"),
+    "trend_pullback":      ("strategies.trend_pullback",      "TrendPullbackStrategy"),
 }
 
 # ── 전략 상태 레지스트리 (Hard Gate 기준) ──
@@ -34,6 +35,7 @@ STRATEGY_STATUS: dict[str, dict] = {
     "fundamental_first":  {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "fundamental_factor 종속, WF 미실행"},
     "momentum_factor":    {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "WF 미실행"},
     "ensemble":           {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "구성 전략 모두 미승인"},
+    "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest", "paper"], "reason": "C-1 MVP, WF 미실행"},
 }
 
 
