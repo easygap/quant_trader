@@ -462,9 +462,10 @@ class SignalGenerator:
             golden_cross = macd_above & (~macd_above_prev)
             dead_cross = (~macd_above) & macd_above_prev
 
-            # 기본: MACD > Signal 유지 중 절반 점수
-            score[macd_above] = buy_weight * 0.5
-            score[~macd_above] = sell_weight * 0.5
+            # 기본: MACD > Signal 유지 중 약화 점수 (0.15배)
+            # 크로스 없이 유지만으로 buy_threshold 도달을 방지
+            score[macd_above] = buy_weight * 0.15
+            score[~macd_above] = sell_weight * 0.15
 
             # 크로스 당일은 풀 점수로 덮어쓰기
             score[golden_cross] = buy_weight
@@ -508,11 +509,12 @@ class SignalGenerator:
         """
         거래량 점수 계산
         - 거래량이 평균 대비 150% 이상이면 추세 확인 신호
-        - 가격 상승 + 거래량 급증 → +1점
-        - 가격 하락 + 거래량 급증 → -1점
+        - 가격 상승 + 거래량 급증 → +1점 (MACD 동방향 시 1.5배 부스트)
+        - 가격 하락 + 거래량 급증 → -1점 (MACD 동방향 시 1.5배 부스트)
         """
         surge_ratio = self.indicator_params.get("volume", {}).get("surge_ratio", 1.5)
         weight = self._get_weights()["volume_surge"]
+        boost = 1.5  # MACD 동방향 확인 시 부스트 배수
 
         score = pd.Series(0.0, index=df.index)
 
@@ -520,8 +522,22 @@ class SignalGenerator:
             volume_surge = df["volume_ratio"] > surge_ratio
             price_up = df["close"] > df["close"].shift(1)
 
-            score = score.where(~(volume_surge & price_up), weight)
-            score = score.where(~(volume_surge & ~price_up), -weight)
+            # MACD 방향과 Volume 방향이 일치하면 부스트
+            macd_bullish = (
+                (df["macd"] > df["macd_signal"]) if "macd" in df.columns and "macd_signal" in df.columns
+                else pd.Series(False, index=df.index)
+            )
+
+            # 기본 Volume 점수
+            bull_volume = volume_surge & price_up
+            bear_volume = volume_surge & ~price_up
+
+            score[bull_volume] = weight
+            score[bear_volume] = -weight
+
+            # MACD 동방향 확인 시 부스트
+            score[bull_volume & macd_bullish] = weight * boost
+            score[bear_volume & ~macd_bullish] = -weight * boost
 
         return score
 
