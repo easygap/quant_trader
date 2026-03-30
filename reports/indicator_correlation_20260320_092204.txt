@@ -1,0 +1,44 @@
+======================================================================
+스코어링 지표 독립성 검증 (상관계수)
+기준: |상관계수| >= 0.7 인 쌍을 고상관으로 판단
+======================================================================
+
+[참고] 상관계수는 실매매 total_score에 쓰이는 collinearity(representative_only 등) 적용 **전** 개별 점수 시리즈(score_rsi, score_macd, …) 기준입니다.
+
+[다중공선성 안내] 대부분의 지표는 가격·이동평균 변형입니다. 스코어가 실질적으로
+1~2개 지표에 지배당하지 않으려면, 실질적 독립 정보 3그룹 각 대표 1개만 두는 것을 권장:
+  (1) 가격 모멘텀: MA 골든/데드크로스 또는 MACD (택 1)
+  (2) 변동성: 볼린저
+  (3) 거래량: volume_surge
+RSI·스토캐스틱은 둘 다 오실레이터로 고상관. MACD와 MA 크로스는 같은 추세 정보.
+
+
+[상관계수 행렬]
+                 score_rsi  score_macd  score_bollinger  score_volume  score_ma
+score_rsi         1.000000   -0.272549         0.439735     -0.292950 -0.016962
+score_macd       -0.272549    1.000000        -0.371670      0.266980  0.114491
+score_bollinger   0.439735   -0.371670         1.000000     -0.479143 -0.053469
+score_volume     -0.292950    0.266980        -0.479143      1.000000  0.085481
+score_ma         -0.016962    0.114491        -0.053469      0.085481  1.000000
+
+고상관 쌍 수: 0
+
+고상관 쌍 없음. 현재 지표 조합은 독립성 기준을 만족합니다.
+
+======================================================================
+[자동 비활성화 대상 가중치]
+  없음 (모든 지표 유지)
+
+[다음 단계 — 가중치 최적화 파이프라인]
+  ① 상관 분석 (현재 단계) — 완료
+  ② 가중치 최적화 (OOS 샤프 ≥ 1.0 게이트):
+     python main.py --mode optimize --strategy scoring --include-weights --symbol 005930 --start 2024-03-20 --end 2026-03-20
+  ③ 워크포워드 검증 (여러 기간 안정성):
+     python main.py --mode validate --walk-forward --strategy scoring --symbol 005930 --validation-years 5
+
+  [원스텝] 상관 분석 + 최적화를 한 번에 실행:
+     python main.py --mode optimize --strategy scoring --include-weights --auto-correlation --symbol 005930 --start 2024-03-20 --end 2026-03-20
+
+=== 다음 단계 명령어 ===
+python main.py --mode optimize --strategy scoring --include-weights --auto-correlation --symbol 005930
+======================================================================

@@ -46,6 +46,44 @@ from loguru import logger
 from core.watchlist_manager import WatchlistManager
 
 
+def run_portfolio_backtest(args):
+    """멀티종목 포트폴리오 백테스팅 모드 실행"""
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    logger.info("=" * 50)
+    logger.info("포트폴리오 백테스팅 모드 시작")
+    logger.info("=" * 50)
+
+    symbols_str = getattr(args, "symbols", "") or ""
+    if not symbols_str:
+        logger.error(
+            "--symbols 옵션으로 종목 코드를 지정하세요. "
+            "예: --symbols 005930,000660,035720,051910,006400"
+        )
+        return
+
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if len(symbols) < 2:
+        logger.error("포트폴리오 백테스트는 최소 2개 종목이 필요합니다.")
+        return
+
+    logger.info("종목: {} ({}개)", symbols, len(symbols))
+
+    pbt = PortfolioBacktester()
+    result = pbt.run(
+        symbols=symbols,
+        strategy_name=args.strategy,
+        start_date=args.start,
+        end_date=args.end,
+    )
+
+    if not result:
+        logger.error("포트폴리오 백테스트 결과가 비어 있습니다.")
+        return
+
+    pbt.print_report(result)
+
+
 def run_backtest(args):
     """백테스팅 모드 실행"""
     from core.data_collector import DataCollector
@@ -598,11 +636,17 @@ def run_paper_trading(args):
     from core.portfolio_manager import PortfolioManager
     from core.notifier import Notifier
     from database.repositories import get_position, get_all_positions
+    from strategies import is_strategy_allowed
 
     config = Config.get()
+    strategy_name = getattr(args, "strategy", None) or config.active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "paper")
+    if not allowed:
+        logger.error("🚫 전략 실행 차단: {}", reason)
+        sys.exit(1)
 
     logger.info("=" * 50)
-    logger.info("📄 페이퍼 트레이딩 모드 시작")
+    logger.info("📄 페이퍼 트레이딩 모드 시작 (전략: {}, 상태: experimental 이상)", strategy_name)
     logger.info("=" * 50)
 
     collector = DataCollector()
@@ -611,6 +655,13 @@ def run_paper_trading(args):
     discord = Notifier(config)
     executor = OrderExecutor(config, account_key=account_key)
 
+    raw_watchlist = config.watchlist  # settings.yaml의 watchlist.symbols (설정 원본)
+    if not raw_watchlist:
+        logger.error(
+            "🚫 watchlist가 비어 있습니다. config/settings.yaml의 watchlist.symbols를 설정하세요. "
+            "기본 종목(005930) 폴백을 사용하지 않습니다."
+        )
+        sys.exit(1)
     watchlist = WatchlistManager(config).resolve()
 
     logger.info("관심 종목: {} (계좌/전략: {})", watchlist, account_key or "default")
@@ -654,15 +705,24 @@ def run_paper_trading(args):
                 continue
 
             # 신호 생성 (평균회귀 시 symbol 전달 → 펀더멘털 필터 사용)
+            _sig_time = datetime.now()
             signal_info = strategy.generate_signal(df, symbol=symbol)
+            signal_info["_signal_at"] = _sig_time
 
             logger.info(
                 "종목 {} | 신호: {} | 점수: {} | 상세: {}",
                 symbol, signal_info["signal"], signal_info["score"], signal_info["details"],
             )
 
+            # 모든 비-HOLD 신호를 OperationEvent에 기록
             if signal_info["signal"] != "HOLD":
                 discord.send_signal_alert(symbol, signal_info)
+                try:
+                    from monitoring.paper_monitor import log_event
+                    log_event("SIGNAL", f"{signal_info['signal']} {symbol} score={signal_info.get('score', 0)}",
+                              symbol=symbol, strategy=strategy_name, mode="paper")
+                except Exception:
+                    pass
 
             if signal_info["signal"] == "BUY" and not get_position(symbol, account_key=account_key):
                 from core.market_regime import check_market_regime
@@ -688,6 +748,7 @@ def run_paper_trading(args):
                     reason="paper auto-entry",
                     strategy=args.strategy,
                     avg_daily_volume=avg_vol,
+                    signal_at=signal_info.get("_signal_at"),
                 )
                 if order_result.get("success"):
                     discord.send_trade_alert(order_result)
@@ -716,11 +777,151 @@ def run_paper_trading(args):
     logger.info("  보유 종목: {}개", summary["position_count"])
 
 
+def _compute_config_hash() -> str:
+    """strategies.yaml + risk_params.yaml의 SHA256 해시. 설정 변경 감지용."""
+    import hashlib
+    from pathlib import Path
+    config_dir = Path(__file__).parent / "config"
+    h = hashlib.sha256()
+    for fname in sorted(["strategies.yaml", "risk_params.yaml"]):
+        fpath = config_dir / fname
+        if fpath.exists():
+            h.update(fpath.read_bytes())
+    return h.hexdigest()
+
+
+def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
+    """
+    라이브 전 필수 검증 게이트 (Hard Gate).
+    하나라도 실패하면 live 진입 불가. 실패 항목 리스트를 반환 (빈 리스트 = 통과).
+
+    5개 필수 조건:
+    1) 승인된 전략 1개 이상 (reports/approved_strategies.json)
+    2) 해당 전략의 최근 WF 통과 (reports/validation_walkforward_*.json)
+    3) 벤치마크 대비 초과수익 검증 (reports/benchmark_comparison.json)
+    4) Paper trading 60영업일 이상 (DB portfolio_snapshots)
+    5) 데이터 소스 health check (PER 수신 가능)
+    """
+    from pathlib import Path
+    import json
+
+    issues = []
+    reports_dir = Path("reports")
+
+    # ── 조건 1: 승인된 전략 존재 (자동 생성 파일 + 해시 검증) ──
+    import hashlib
+    approved_path = reports_dir / "approved_strategies.json"
+    approved_strategies = []
+    if approved_path.exists():
+        try:
+            approved_data = json.loads(approved_path.read_text(encoding="utf-8"))
+            # 해시 검증: 승인 시점의 config 해시와 현재가 일치해야 함
+            saved_config_hash = approved_data.get("config_hash", "")
+            current_config_hash = _compute_config_hash()
+            if saved_config_hash and saved_config_hash != current_config_hash:
+                issues.append(
+                    f"승인 파일의 config_hash({saved_config_hash[:12]}...)가 현재({current_config_hash[:12]}...)와 불일치. "
+                    "설정 변경 후 재검증이 필요합니다. python main.py --mode validate --walk-forward 실행."
+                )
+            # 자동 생성 여부 확인 (수동 편집 방지)
+            if not approved_data.get("auto_generated"):
+                issues.append(
+                    "승인 파일이 검증 파이프라인이 아닌 수동으로 생성됨. "
+                    "python main.py --mode validate --walk-forward 로 자동 생성하세요."
+                )
+            approved_strategies = [
+                s["name"] for s in approved_data.get("strategies", [])
+                if s.get("status") == "approved"
+            ]
+        except Exception:
+            pass
+    if not approved_strategies:
+        issues.append(
+            "승인된 전략 없음. python main.py --mode validate --walk-forward 실행 후 "
+            "WF 통과 전략이 자동으로 approved_strategies.json에 기록됩니다."
+        )
+    elif strategy_name not in approved_strategies:
+        issues.append(
+            f"전략 '{strategy_name}'이 승인 목록에 없음. 승인된 전략: {approved_strategies}"
+        )
+
+    # ── 조건 2: WF 통과 기록 ──
+    wf_passed = False
+    for wf_file in sorted(reports_dir.glob("validation_walkforward_*.json"), reverse=True):
+        try:
+            wf_data = json.loads(wf_file.read_text(encoding="utf-8"))
+            if wf_data.get("strategy") == strategy_name and wf_data.get("wf_passed"):
+                wf_passed = True
+                break
+        except Exception:
+            continue
+    if not wf_passed:
+        issues.append(
+            f"전략 '{strategy_name}'의 Walk-Forward 통과 기록 없음. "
+            "python main.py --mode validate --walk-forward --strategy <name> 실행 필요."
+        )
+
+    # ── 조건 3: 벤치마크 초과수익 검증 ──
+    bench_path = reports_dir / "benchmark_comparison.json"
+    if bench_path.exists():
+        try:
+            bench = json.loads(bench_path.read_text(encoding="utf-8"))
+            excess_key = f"{strategy_name}_excess_return_pct"
+            excess = bench.get(excess_key)
+            if excess is not None and excess < 0:
+                issues.append(
+                    f"전략 '{strategy_name}' 벤치마크 대비 초과수익 {excess:+.1f}% (음수). "
+                    "벤치마크를 이기지 못하는 전략은 live 불가."
+                )
+        except Exception:
+            pass
+    else:
+        issues.append("벤치마크 비교 파일 없음 (reports/benchmark_comparison.json).")
+
+    # ── 조건 4: Paper 60영업일 이상 ──
+    try:
+        from database.repositories import get_portfolio_snapshots
+        snapshots = get_portfolio_snapshots(days=120)
+        paper_days = len(snapshots) if not snapshots.empty else 0
+        if paper_days < 60:
+            issues.append(
+                f"Paper 운영 {paper_days}일 (최소 60영업일 필요). "
+                "python main.py --mode schedule 로 paper 운영을 계속하세요."
+            )
+    except Exception:
+        issues.append("Paper 운영 기록 조회 실패 — DB 확인 필요.")
+
+    # ── 조건 5: 데이터 소스 health check ──
+    try:
+        from core.data_collector import DataCollector
+        dc = DataCollector()
+        test_df = dc.fetch_korean_stock("005930", "2026-01-01", "2026-03-26")
+        if test_df.empty:
+            issues.append("데이터 소스 health check 실패: 005930 데이터 수집 불가.")
+        source_info = dc.get_last_source_info()
+        if source_info.get("source") == "KIS":
+            issues.append(
+                "데이터 소스가 KIS(비수정주가) — FDR 또는 yfinance 사용을 권장합니다."
+            )
+    except Exception as e:
+        issues.append(f"데이터 소스 health check 오류: {e}")
+
+    return issues
+
+
 def run_live_trading(args):
     """
     실전 매매 모드 실행.
-    이중 확인: ENABLE_LIVE_TRADING=true 환경변수 + --confirm-live 플래그 필수.
+    4중 확인: 전략 상태 → 환경변수 → --confirm-live → 5개 조건 hard gate.
     """
+    from strategies import is_strategy_allowed
+    strategy_name = getattr(args, "strategy", None) or Config.get().active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "live")
+    if not allowed:
+        logger.error("🚫 Live 전략 실행 차단: {}", reason)
+        logger.error("전략 상태를 live_candidate로 승격하려면 승인 기준을 충족하세요.")
+        sys.exit(1)
+
     if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
         logger.error(
             "실전 모드 진입 거부: 환경변수 ENABLE_LIVE_TRADING=true 가 필요합니다. "
@@ -740,6 +941,21 @@ def run_live_trading(args):
     logger.info("=" * 50)
 
     config = Config.get()
+
+    # ── 라이브 전 필수 검증 게이트 ──
+    force_live = getattr(args, "force_live", False)
+    if not force_live:
+        gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
+        if gate_issues:
+            logger.error("=" * 50)
+            logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
+            for issue in gate_issues:
+                logger.error("  - {}", issue)
+            logger.error("강제 진행: --force-live 플래그 추가")
+            logger.error("=" * 50)
+            sys.exit(1)
+        logger.info("✅ 라이브 전 검증 게이트 통과")
+
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
 
@@ -788,7 +1004,13 @@ def run_scheduler_loop(args):
     systemd 상시 구동 시 `--mode paper` 한 사이클 종료와 달리 프로세스를 유지한다.
     config.trading.mode 가 live 이면 거부 (--mode live --confirm-live 사용).
     """
+    from strategies import is_strategy_allowed
     config = Config.get()
+    strategy_name = getattr(args, "strategy", None) or config.active_strategy
+    allowed, reason = is_strategy_allowed(strategy_name, "schedule")
+    if not allowed:
+        logger.error("🚫 스케줄러 전략 실행 차단: {}", reason)
+        sys.exit(1)
     if str(config.trading.get("mode", "paper")).lower() == "live":
         logger.error(
             "config.trading.mode 가 live 입니다. 실전 루프는 "
@@ -1047,6 +1269,7 @@ def main():
         choices=[
             "backtest",
             "backtest_momentum_top",
+            "portfolio_backtest",
             "validate",
             "paper",
             "schedule",
@@ -1059,7 +1282,7 @@ def main():
             "check_ensemble_correlation",
             "rebalance",
         ],
-        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목.",
+        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1086,6 +1309,10 @@ def main():
     parser.add_argument(
         "--confirm-live", action="store_true",
         help="실전 모드 진입 시 필수. 미지정 시 live 모드 진입 거부.",
+    )
+    parser.add_argument(
+        "--force-live", action="store_true",
+        help="라이브 검증 게이트 강제 통과. 검증 미완료 상태에서 실전 진입 시 사용.",
     )
     parser.add_argument(
         "--output-dir", type=str, default="reports",
@@ -1172,6 +1399,10 @@ def main():
         "--stop-cooldown", type=int, default=0,
         help="[backtest_momentum_top] 포트폴리오 손절 후 N거래일 뒤 재진입(0=다음 리밸런스까지 대기). 기본 0",
     )
+    parser.add_argument(
+        "--symbols", type=str, default="",
+        help="[portfolio_backtest 모드] 종목 코드 쉼표 구분 (예: 005930,000660,035720,051910,006400)",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -1198,6 +1429,8 @@ def main():
             run_backtest(args)
         elif args.mode == "backtest_momentum_top":
             run_backtest_momentum_top(args)
+        elif args.mode == "portfolio_backtest":
+            run_portfolio_backtest(args)
         elif args.mode == "validate":
             run_strategy_validation(args)
         elif args.mode == "paper":
