@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "action": "BUY",
+    "symbol": "005930",
+    "quantity": 36,
+    "price": 54200.0,
+    "strategy": "scoring",
+    "reason": "shakedown BUY test",
+    "signal_at": "2026-03-26 17:11:17.977608",
+    "order_at": "2026-03-26 17:11:18.805762",
+    "executed_at": "2026-03-26 17:11:18.806761",
+    "expected_price": 54200.0,
+    "price_gap": 0.0,
+    "commission": 293.0,
+    "tax": 0.0,
+    "slippage": 3600.0,
+    "mode": "paper"
+  }
+]

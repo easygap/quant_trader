@@ -15,7 +15,8 @@ from loguru import logger
 
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
-    Position, PortfolioSnapshot, DailyReport, FailedOrder
+    Position, PortfolioSnapshot, DailyReport, FailedOrder,
+    PendingOrderGuard,
 )
 
 
@@ -131,10 +132,13 @@ def save_trade(
     reason: str = "",
     mode: str = "paper",
     account_key: str = "",
+    signal_at: datetime = None,
+    order_at: datetime = None,
     expected_price: Optional[float] = None,
     actual_slippage_pct: Optional[float] = None,
 ) -> TradeHistory:
-    """매매 기록 저장 (account_key: 전략별 계좌 구분, 다중 계좌 시 사용)."""
+    """매매 기록 저장. signal_at/order_at/expected_price는 paper monitoring용."""
+    price_gap = round(price - expected_price, 1) if expected_price is not None else None
     session = get_session()
     try:
         trade = TradeHistory(
@@ -153,6 +157,9 @@ def save_trade(
             signal_score=signal_score,
             reason=reason,
             mode=mode,
+            signal_at=signal_at,
+            order_at=order_at or datetime.now(),
+            price_gap=price_gap,
         )
         session.add(trade)
         session.commit()
@@ -253,6 +260,41 @@ def get_trade_cash_summary(
         "tax": round(total_tax, 0),
         "slippage": round(total_slippage, 0),
     }
+
+
+def get_strategy_performance_summary(
+    mode: Optional[str] = None,
+    account_key: Optional[str] = None,
+    days: int = 30,
+) -> dict[str, dict]:
+    """
+    전략별 성과 분리 측정.
+
+    Returns:
+        {"scoring": {"trades": 12, "wins": 7, "win_rate": 58.3, "total_pnl": 150000, "total_cost": 5000}, ...}
+    """
+    since = datetime.now() - timedelta(days=days) if days > 0 else None
+    trades = get_trade_history(mode=mode, start_date=since, account_key=account_key)
+    by_strategy: dict[str, dict] = {}
+    for t in trades:
+        strat = t.strategy or "unknown"
+        if strat not in by_strategy:
+            by_strategy[strat] = {"trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0, "total_cost": 0.0}
+        action = (t.action or "").upper()
+        if action == "BUY":
+            continue
+        s = by_strategy[strat]
+        s["trades"] += 1
+        pnl = _extract_pnl_from_reason(t.reason or "")
+        s["total_pnl"] += pnl
+        s["total_cost"] += (t.commission or 0) + (t.tax or 0) + (t.slippage or 0)
+        if pnl > 0:
+            s["wins"] += 1
+        elif pnl < 0:
+            s["losses"] += 1
+    for strat, s in by_strategy.items():
+        s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0.0
+    return by_strategy
 
 
 def _extract_pnl_from_reason(reason: str) -> float:
@@ -476,6 +518,40 @@ def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float
         session.close()
 
 
+@with_retry
+def update_position_targets(
+    symbol: str,
+    stop_loss_price: float = None,
+    take_profit_price: float = None,
+    trailing_stop_price: float = None,
+    account_key: str = "",
+):
+    """
+    포지션의 손절/익절/트레일링 가격을 업데이트 (부분 매도 후 재조정 등).
+    None인 필드는 변경하지 않음.
+    """
+    session = get_session()
+    try:
+        ak = account_key or ""
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
+        if not position:
+            return
+        if stop_loss_price is not None:
+            position.stop_loss_price = stop_loss_price
+        if take_profit_price is not None:
+            position.take_profit_price = take_profit_price
+        if trailing_stop_price is not None:
+            position.trailing_stop_price = trailing_stop_price
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error("포지션 타겟 업데이트 실패: {}", e)
+    finally:
+        session.close()
+
+
 # =============================================================
 # 포트폴리오 스냅샷 관련
 # =============================================================
@@ -490,6 +566,7 @@ def save_portfolio_snapshot(
     mdd: float = 0,
     position_count: int = 0,
     account_key: str = "",
+    peak_value: float = None,
 ):
     """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분)."""
     session = get_session()
@@ -505,6 +582,7 @@ def save_portfolio_snapshot(
             daily_return=daily_return,
             cumulative_return=cumulative_return,
             mdd=mdd,
+            peak_value=peak_value,
             position_count=position_count,
         )
         # merge by (account_key, date)
@@ -518,6 +596,7 @@ def save_portfolio_snapshot(
             existing.daily_return = daily_return
             existing.cumulative_return = cumulative_return
             existing.mdd = mdd
+            existing.peak_value = peak_value
             existing.position_count = position_count
         else:
             session.add(snapshot)
@@ -525,6 +604,29 @@ def save_portfolio_snapshot(
     except Exception as e:
         session.rollback()
         logger.error("포트폴리오 스냅샷 저장 실패: {}", e)
+    finally:
+        session.close()
+
+
+@with_retry
+def get_latest_peak_value(account_key: str = "") -> float | None:
+    """DB에서 가장 최근 스냅샷의 peak_value를 복구. 없으면 None."""
+    session = get_session()
+    try:
+        ak = account_key or ""
+        row = (
+            session.query(PortfolioSnapshot.peak_value)
+            .filter(
+                PortfolioSnapshot.account_key == ak,
+                PortfolioSnapshot.peak_value.isnot(None),
+            )
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.debug("peak_value 복구 실패 (신규 DB 또는 컬럼 미존재): {}", e)
+        return None
     finally:
         session.close()
 
@@ -806,5 +908,62 @@ def resolve_failed_order(order_id: int, status: str = "retried"):
     except Exception as e:
         session.rollback()
         logger.error("Dead-letter 상태 변경 실패: {}", e)
+    finally:
+        session.close()
+
+
+# =============================================================
+# 중복 주문 방지 (DB 영속 가드)
+# =============================================================
+
+@with_retry
+def save_order_guard(symbol: str, expires_at: datetime):
+    """중복 주문 방지 레코드 저장 (upsert)."""
+    session = get_session()
+    try:
+        existing = session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol
+        ).first()
+        if existing:
+            existing.expires_at = expires_at
+        else:
+            session.add(PendingOrderGuard(symbol=symbol, expires_at=expires_at))
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.debug("OrderGuard DB 저장 실패: {}", e)
+    finally:
+        session.close()
+
+
+@with_retry
+def has_pending_order_guard(symbol: str) -> bool:
+    """DB에 유효한(미만료) 중복 주문 방지 레코드가 있는지 확인."""
+    session = get_session()
+    try:
+        now = datetime.now()
+        record = session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol,
+            PendingOrderGuard.expires_at > now,
+        ).first()
+        return record is not None
+    except Exception:
+        return False
+    finally:
+        session.close()
+
+
+@with_retry
+def clear_order_guard(symbol: str):
+    """중복 주문 방지 레코드 제거."""
+    session = get_session()
+    try:
+        session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol
+        ).delete()
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.debug("OrderGuard DB 제거 실패: {}", e)
     finally:
         session.close()

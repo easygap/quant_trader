@@ -91,7 +91,11 @@ class TradeHistory(Base):
     signal_score = Column(Float)                                # 매매 신호 점수
     reason = Column(Text)                                       # 매매 사유 (상세)
     mode = Column(String(20), default="paper")                  # paper / live
-    executed_at = Column(DateTime, default=datetime.now)        # 체결 시간
+    signal_at = Column(DateTime)                                # 신호 발생 시각
+    order_at = Column(DateTime)                                 # 주문 전송 시각
+    executed_at = Column(DateTime, default=datetime.now)        # 체결 시각
+    expected_price = Column(Float)                              # 예상 체결가 (신호 시점 close)
+    price_gap = Column(Float)                                   # 실제 - 예상 체결가 차이
     created_at = Column(DateTime, default=datetime.now)
 
     def __repr__(self):
@@ -148,6 +152,7 @@ class PortfolioSnapshot(Base):
     daily_return = Column(Float)                                # 일일 수익률 (%)
     cumulative_return = Column(Float)                           # 누적 수익률 (%)
     mdd = Column(Float)                                         # 현재 MDD (%)
+    peak_value = Column(Float)                                   # 역대 최고 평가금 (MDD 기준점, 재시작 시 복구용)
     position_count = Column(Integer, default=0)                 # 보유 종목 수
     created_at = Column(DateTime, default=datetime.now)
 
@@ -213,6 +218,45 @@ class FailedOrder(Base):
 
     def __repr__(self):
         return f"<FailedOrder({self.symbol} {self.action} {self.quantity}주 @{self.price}, status={self.status})>"
+
+
+class OperationEvent(Base):
+    """
+    운영 이벤트 로그 테이블.
+    경고, API 실패, 중복 주문 차단, 블랙스완 발동 등 모든 운영 이벤트를 기록.
+    Paper trading 3개월 모니터링의 핵심 데이터.
+    """
+    __tablename__ = "operation_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_type = Column(String(50), nullable=False, index=True)  # WARNING, API_FAILURE, DUPLICATE_BLOCKED, BLACKSWAN, SIGNAL, SL_TP
+    severity = Column(String(20), default="info")                 # info, warning, error, critical
+    symbol = Column(String(20))
+    strategy = Column(String(50))
+    message = Column(Text, nullable=False)
+    detail = Column(Text)                                         # JSON 추가 데이터
+    mode = Column(String(20), default="paper")
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    def __repr__(self):
+        return f"<OperationEvent({self.event_type}, {self.severity}, {self.symbol})>"
+
+
+class PendingOrderGuard(Base):
+    """
+    중복 주문 방지 DB 테이블.
+    프로세스 재시작 시에도 중복 주문 방지를 유지하기 위한 영속 가드.
+    TTL 기반으로 expires_at 이후 자동 무효화.
+    """
+    __tablename__ = "pending_order_guards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(20), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+    def __repr__(self):
+        return f"<PendingOrderGuard({self.symbol}, expires={self.expires_at})>"
 
 
 # =============================================================
