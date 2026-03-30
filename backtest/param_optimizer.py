@@ -450,12 +450,14 @@ def grid_search_scoring_weights(
             "search_space_report": weight_search_report,
         }
 
-    # trades=0(score=0)이 trades>0(score<0)보다 위로 오는 버그 방지:
-    # total_trades>0 우선, 그 안에서 score 내림차순
+    # trades=0 조합은 Sharpe=0이 되어 음수 Sharpe(실거래 있음)보다 높게 정렬되는 버그 방지
     results.sort(
-        key=lambda x: (x["metrics"].get("total_trades", 0) > 0, x["score"]),
+        key=lambda x: x["score"] if x["metrics"].get("total_trades", 0) > 0 else float("-inf"),
         reverse=True,
     )
+    # trades>0 결과가 하나도 없으면 기존 정렬 유지
+    if results[0]["metrics"].get("total_trades", 0) == 0:
+        logger.warning("모든 조합에서 거래가 발생하지 않았습니다. IS best 선정 불가.")
     best = results[0]
     logger.info(
         "IS best: weights={}, threshold={}, score={:.4f}, total_trades={}, return={:.2f}%",
