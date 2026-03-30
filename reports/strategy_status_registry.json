@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-03-26T15:24:44.098532",
+  "strategies": {
+    "scoring": {
+      "status": "experimental",
+      "allowed_modes": [
+        "backtest",
+        "paper"
+      ]
+    },
+    "mean_reversion": {
+      "status": "disabled",
+      "reason": "Sharpe -2.50"
+    },
+    "fundamental_factor": {
+      "status": "disabled",
+      "reason": "WF 미실행"
+    },
+    "fundamental_first": {
+      "status": "disabled",
+      "reason": "WF 미실행"
+    },
+    "ensemble": {
+      "status": "disabled",
+      "reason": "구성전략 미승인"
+    },
+    "trend_following": {
+      "status": "disabled",
+      "reason": "미검증"
+    }
+  }
+}

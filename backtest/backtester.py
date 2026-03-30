@@ -147,8 +147,11 @@ class Backtester:
         else:
             df_analyzed["_avg_daily_volume"] = np.nan
 
+        # 시장국면 시리즈 사전 계산 (TICKET-02)
+        regime_series = self._precompute_regime_series(df_analyzed)
+
         # 시뮬레이션 실행 (시점 T에서는 row T만 사용, T+1 이후 미참조)
-        result = self._simulate(df_analyzed, initial_capital)
+        result = self._simulate(df_analyzed, initial_capital, regime_series=regime_series)
         result["look_ahead_bias_verified"] = (
             "STRICT" if strict_lookahead else "DISABLED_WITH_WARNING"
         )
@@ -191,7 +194,108 @@ class Backtester:
             config = self.config.with_strategy_overrides(name, overrides[name])
         return create_strategy(name, config)
 
-    def _simulate(self, df: pd.DataFrame, initial_capital: float) -> dict:
+    def _precompute_regime_series(self, df: pd.DataFrame) -> pd.Series:
+        """
+        백테스트 기간의 시장국면을 사전 계산하여 날짜별 Series로 반환.
+
+        Look-ahead bias 방지:
+          시점 T의 regime은 T-1일까지의 지수 종가만으로 계산한다.
+          즉 T일 종가는 regime 계산에 사용하지 않는다.
+          이는 실거래에서 "장전에 전일 기준 국면 판단 → 당일 매매 결정"과 일치.
+
+        Returns:
+            pd.Series (index=df.index):
+              "bullish" (정상), "caution" (포지션 축소), "bearish" (매수 차단)
+        """
+        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        default = pd.Series("bullish", index=df.index)
+
+        if not regime_cfg.get("enabled", False):
+            return default
+
+        index_symbol = regime_cfg.get("index_symbol", "KS11")
+        ma_days = max(20, int(regime_cfg.get("ma_days", 200)))
+        short_days = max(1, int(regime_cfg.get("short_momentum_days", 20)))
+        short_threshold = float(regime_cfg.get("short_momentum_threshold", -5.0))
+
+        # 지수 데이터 로드 — 백테스트 기간 + 이동평균 계산에 필요한 과거 데이터
+        try:
+            from core.data_collector import DataCollector
+            collector = DataCollector()
+            margin_days = ma_days + 60  # MA 계산에 충분한 여유
+            first_date = df.index[0]
+            if hasattr(first_date, "strftime"):
+                from datetime import timedelta
+                start_str = (first_date - timedelta(days=margin_days + 30)).strftime("%Y-%m-%d")
+            else:
+                start_str = None
+            last_date = df.index[-1]
+            end_str = last_date.strftime("%Y-%m-%d") if hasattr(last_date, "strftime") else None
+
+            index_df = collector.fetch_korean_stock(index_symbol, start_date=start_str, end_date=end_str)
+            if index_df is None or index_df.empty or len(index_df) < ma_days:
+                logger.warning("백테스트 regime: 지수 {} 데이터 부족 — 국면 필터 비활성화", index_symbol)
+                return default
+        except Exception as e:
+            logger.warning("백테스트 regime: 지수 데이터 로드 실패 — 국면 필터 비활성화: {}", e)
+            return default
+
+        # 지수 종가 기반 지표 계산
+        idx_close = index_df["close"].astype(float)
+        idx_ma = idx_close.rolling(ma_days, min_periods=ma_days).mean()
+        idx_momentum = idx_close.pct_change(short_days) * 100  # N일 수익률(%)
+
+        # 날짜별 regime 판별 — T일 regime은 T-1일 지수 데이터까지만 사용
+        regime_map = {}
+        idx_dates = index_df.index.tolist()
+        for i in range(1, len(idx_dates)):
+            # T-1일까지의 데이터로 regime 계산
+            prev_idx = i - 1
+            prev_close = float(idx_close.iloc[prev_idx])
+            prev_ma = idx_ma.iloc[prev_idx]
+            prev_momentum = idx_momentum.iloc[prev_idx]
+
+            if pd.isna(prev_ma) or pd.isna(prev_momentum):
+                regime_map[idx_dates[i]] = "bullish"
+                continue
+
+            below_ma = prev_close < float(prev_ma)
+            momentum_triggered = float(prev_momentum) <= short_threshold
+
+            triggered = sum([below_ma, momentum_triggered])
+            if triggered >= 2:
+                regime_map[idx_dates[i]] = "bearish"
+            elif triggered == 1:
+                regime_map[idx_dates[i]] = "caution"
+            else:
+                regime_map[idx_dates[i]] = "bullish"
+
+        # 종목 DataFrame 날짜에 맞춰 regime 매핑
+        regimes = []
+        for date in df.index:
+            if date in regime_map:
+                regimes.append(regime_map[date])
+            else:
+                # 날짜가 정확히 매칭되지 않으면 직전 유효 regime 사용
+                matched = "bullish"
+                for idx_date in sorted(regime_map.keys()):
+                    if idx_date <= date:
+                        matched = regime_map[idx_date]
+                    else:
+                        break
+                regimes.append(matched)
+
+        result = pd.Series(regimes, index=df.index)
+        n_bearish = (result == "bearish").sum()
+        n_caution = (result == "caution").sum()
+        n_bullish = (result == "bullish").sum()
+        logger.info(
+            "백테스트 regime 사전계산 완료: bullish={}일, caution={}일, bearish={}일",
+            n_bullish, n_caution, n_bearish,
+        )
+        return result
+
+    def _simulate(self, df: pd.DataFrame, initial_capital: float, regime_series: pd.Series = None) -> dict:
         """
         거래 시뮬레이션 실행.
         방어: 날짜 순으로 순회하며 당일(row T) 데이터만 사용 — T+1 이후 행 미참조로 Look-Ahead Bias 없음.
@@ -216,6 +320,14 @@ class Backtester:
         pos_config = self.risk_params.get("position_sizing", {})
         div_config = self.risk_params.get("diversification", {})
         pos_limits = self.risk_params.get("position_limits") or {}
+
+        # 유동성 제한: 주문량이 일평균 거래량의 N%를 초과하면 매수 차단
+        liq_config = self.risk_params.get("liquidity_filter") or {}
+        bt_max_participation = float(liq_config.get("backtest_max_participation_rate", 0.01))  # 기본 1%
+
+        # 월간 거래 횟수 제한 (과매매 억제)
+        max_monthly_trades = int(pos_limits.get("max_monthly_roundtrips", 0))  # 0이면 무제한
+        monthly_trade_counts: dict[str, int] = {}  # "YYYY-MM" -> count
 
         sl_rate = sl_config.get("fixed_rate", 0.03)
         sl_type = sl_config.get("type", "fixed")
@@ -250,6 +362,13 @@ class Backtester:
         def _slippage_cost_vs_close(execution_price: float, ref_close: float, qty: int) -> float:
             """슬리피지로 인한 체결가 불리분 (원): |(체결가 - 종가) × 수량|."""
             return round(abs((float(execution_price) - float(ref_close)) * int(qty)), 0)
+
+        # 시장국면 필터 설정 (TICKET-02)
+        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        regime_enabled = regime_cfg.get("enabled", False) and regime_series is not None
+        caution_scale = float(regime_cfg.get("caution_scale", 0.5))
+        regime_buy_blocks = 0   # bearish에서 차단된 매수 신호 수 (메트릭용)
+        regime_caution_buys = 0  # caution에서 축소된 매수 수 (메트릭용)
 
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
@@ -408,6 +527,24 @@ class Backtester:
                 if holding_days_now < min_holding_days and signal == "SELL":
                     signal = "HOLD"
 
+            # 월간 거래 횟수 제한: 상한 도달 시 BUY 신호를 HOLD로 차단
+            if signal == "BUY" and max_monthly_trades > 0:
+                try:
+                    _mk = date.strftime("%Y-%m")
+                except Exception:
+                    _mk = str(date)[:7]
+                if monthly_trade_counts.get(_mk, 0) >= max_monthly_trades:
+                    signal = "HOLD"
+
+            # 시장국면 필터 (TICKET-02): bearish→매수 차단, caution→포지션 축소
+            # regime은 T-1일까지의 지수 종가로 사전 계산됨 (look-ahead bias 없음)
+            regime_at_t = "bullish"
+            if regime_enabled and date in regime_series.index:
+                regime_at_t = regime_series.loc[date]
+            if signal == "BUY" and regime_at_t == "bearish":
+                signal = "HOLD"
+                regime_buy_blocks += 1
+
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -431,6 +568,19 @@ class Backtester:
                     max(0, qty_by_cap),
                     max(0, qty_by_total_cap),
                 )
+
+                # 시장국면 caution 시 포지션 축소 (TICKET-02)
+                if quantity > 0 and regime_at_t == "caution":
+                    quantity = max(1, int(quantity * caution_scale))
+                    regime_caution_buys += 1
+
+                # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
+                if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
+                    max_qty_by_volume = int(row_volume * bt_max_participation)
+                    if max_qty_by_volume <= 0:
+                        quantity = 0  # 유동성 부족 → 매수 불가
+                    elif quantity > max_qty_by_volume:
+                        quantity = max_qty_by_volume  # 유동성 한도까지만 매수
 
                 if quantity > 0:
                     buy_costs = self.risk_manager.calculate_transaction_costs(
@@ -457,6 +607,13 @@ class Backtester:
                         "tax": 0.0,
                         "slippage_cost": _slippage_cost_vs_close(buy_price, close, quantity),
                     })
+                    # 월간 거래 횟수 카운트
+                    if max_monthly_trades > 0:
+                        try:
+                            mk = date.strftime("%Y-%m")
+                        except Exception:
+                            mk = str(date)[:7]
+                        monthly_trade_counts[mk] = monthly_trade_counts.get(mk, 0) + 1
 
             elif signal == "SELL" and position > 0:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -495,6 +652,8 @@ class Backtester:
         return {
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve),
+            "regime_buy_blocks": regime_buy_blocks,
+            "regime_caution_buys": regime_caution_buys,
         }
 
     def _calculate_metrics(self, result: dict, initial_capital: float) -> dict:
@@ -520,13 +679,57 @@ class Backtester:
         else:
             sharpe = 0
 
+        # 소르티노 비율 (하방 변동성만 사용 — 수익은 불이익이 아니므로 제외)
+        downside_returns = daily_returns[daily_returns < 0]
+        if len(downside_returns) > 0 and downside_returns.std() > 0:
+            downside_std = downside_returns.std() * np.sqrt(252)
+            sortino = (daily_returns.mean() * 252 - 0.03) / downside_std
+        else:
+            sortino = sharpe
+
+        # 매매 기준 성과
+        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
+
+        # 꼬리 리스크: VaR 95%, CVaR 95% (일일 기준)
+        if len(daily_returns) >= 20:
+            var_95 = float(np.percentile(daily_returns, 5))
+            cvar_95 = float(daily_returns[daily_returns <= var_95].mean()) if (daily_returns <= var_95).any() else var_95
+        else:
+            var_95 = 0
+            cvar_95 = 0
+
+        # 최대 연속 손실 거래 수
+        max_consec_loss = 0
+        cur_consec = 0
+        for t in sell_trades:
+            if t["pnl"] <= 0:
+                cur_consec += 1
+                max_consec_loss = max(max_consec_loss, cur_consec)
+            else:
+                cur_consec = 0
+
         # MDD (최대 낙폭)
         equity["peak"] = equity["value"].cummax()
         equity["drawdown"] = (equity["value"] - equity["peak"]) / equity["peak"]
         max_drawdown = equity["drawdown"].min() * 100
 
-        # 매매 기준 성과
-        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
+        # MDD 회복 기간 (일)
+        mdd_recovery_days = 0
+        if max_drawdown < 0:
+            dd_series = equity["drawdown"]
+            in_dd = False
+            cur_dd_start = 0
+            for idx_i in range(len(dd_series)):
+                if dd_series.iloc[idx_i] < 0:
+                    if not in_dd:
+                        in_dd = True
+                        cur_dd_start = idx_i
+                else:
+                    if in_dd:
+                        mdd_recovery_days = max(mdd_recovery_days, idx_i - cur_dd_start)
+                        in_dd = False
+            if in_dd:
+                mdd_recovery_days = max(mdd_recovery_days, len(dd_series) - cur_dd_start)
         winning = [t for t in sell_trades if t["pnl"] > 0]
         losing = [t for t in sell_trades if t["pnl"] <= 0]
 
@@ -587,11 +790,53 @@ class Backtester:
         else:
             commission_to_profit_ratio = None
 
+        # ── 누락 메트릭 보강 ──────────────────────────────────
+
+        # 1) CAGR: 복리 연환산 수익률
+        cagr = 0.0
+        if initial_capital > 0 and final_value > 0 and years_bt > 0:
+            cagr = ((final_value / initial_capital) ** (1 / years_bt) - 1) * 100
+
+        # 2) Turnover: 연간 총 거래대금 / 평균 자산 (100% = 전 자산 1회 회전)
+        total_buy_amount = sum(t["price"] * t["quantity"] for t in trades if t["action"] == "BUY")
+        avg_equity = equity["value"].mean() if not equity.empty else initial_capital
+        annual_turnover = (total_buy_amount / avg_equity / years_bt * 100) if avg_equity > 0 and years_bt > 0 else 0
+
+        # 3) 거래당 기대값 (Expected Value per Trade)
+        all_pnl = [t["pnl"] for t in sell_trades]
+        ev_per_trade = float(np.mean(all_pnl)) if all_pnl else 0.0
+
+        # 4) 월별 성과 분해
+        monthly_returns = {}
+        if not equity.empty:
+            eq_copy = equity[["date", "value"]].copy()
+            eq_copy["date"] = pd.to_datetime(eq_copy["date"])
+            eq_copy = eq_copy.set_index("date").resample("ME").last()
+            if len(eq_copy) > 1:
+                m_ret = eq_copy["value"].pct_change().dropna()
+                for idx, val in m_ret.items():
+                    monthly_returns[idx.strftime("%Y-%m")] = round(val * 100, 2)
+
+        # 5) 비용 반영 전 수익률 (gross return) — 비용 차감 전 성과로 비용 영향 정량화
+        total_costs = total_commission + sum(
+            t.get("commission", 0) for t in sell_trades
+        )
+        # sell_trades의 tax는 pnl에 이미 차감됨, commission은 별도 기록
+        gross_pnl = sum(t["pnl"] for t in sell_trades) + total_costs
+        gross_return = (gross_pnl / initial_capital * 100) if initial_capital > 0 else 0
+        cost_drag = round(gross_return - total_return, 2)
+
         return {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
+            "cagr": round(cagr, 2),
             "sharpe_ratio": round(sharpe, 2),
+            "sortino_ratio": round(sortino, 2),
             "max_drawdown": round(max_drawdown, 2),
+            "mdd_recovery_days": mdd_recovery_days,
+            "var_95_daily": round(var_95 * 100, 3),
+            "cvar_95_daily": round(cvar_95 * 100, 3),
+            "max_consecutive_losses": max_consec_loss,
             "win_rate": round(win_rate, 1),
             "profit_factor": round(profit_factor, 2),
             "calmar_ratio": round(calmar, 2),
@@ -611,13 +856,23 @@ class Backtester:
             "commission_to_profit_ratio": commission_to_profit_ratio,
             "monthly_roundtrips_per_symbol": monthly_roundtrips_per_symbol,
             "annual_roundtrips_total": annual_roundtrips_total,
+            "annual_turnover_pct": round(annual_turnover, 1),
+            "ev_per_trade": round(ev_per_trade, 0),
+            "monthly_returns": monthly_returns,
+            "gross_return": round(gross_return, 2),
+            "cost_drag_pct": cost_drag,
+            "regime_buy_blocks": result.get("regime_buy_blocks", 0),
+            "regime_caution_buys": result.get("regime_caution_buys", 0),
         }
 
     @staticmethod
     def _empty_metrics():
         return {
-            "total_return": 0, "annual_return": 0, "sharpe_ratio": 0,
-            "max_drawdown": 0, "win_rate": 0, "profit_factor": 0,
+            "total_return": 0, "annual_return": 0, "cagr": 0,
+            "sharpe_ratio": 0,
+            "sortino_ratio": 0, "max_drawdown": 0, "mdd_recovery_days": 0,
+            "var_95_daily": 0, "cvar_95_daily": 0, "max_consecutive_losses": 0,
+            "win_rate": 0, "profit_factor": 0,
             "calmar_ratio": 0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "avg_win": 0, "avg_loss": 0,
             "final_value": 0, "initial_capital": 0,
@@ -627,6 +882,11 @@ class Backtester:
             "commission_to_profit_ratio": None,
             "monthly_roundtrips_per_symbol": 0.0,
             "annual_roundtrips_total": 0.0,
+            "annual_turnover_pct": 0.0,
+            "ev_per_trade": 0,
+            "monthly_returns": {},
+            "gross_return": 0,
+            "cost_drag_pct": 0,
         }
 
     def print_report(self, result: dict):
@@ -647,8 +907,13 @@ class Backtester:
         print(f"  연간 수익률   : {m['annual_return']:>13.2f}%")
         print("-" * 60)
         print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}")
+        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}")
         print(f"  최대 낙폭     : {m['max_drawdown']:>13.2f}%")
+        print(f"  MDD 회복 기간 : {m.get('mdd_recovery_days', 0):>13d}일")
         print(f"  칼마 비율     : {m['calmar_ratio']:>13.2f}")
+        print(f"  VaR 95%(일)   : {m.get('var_95_daily', 0):>13.3f}%")
+        print(f"  CVaR 95%(일)  : {m.get('cvar_95_daily', 0):>13.3f}%")
+        print(f"  최대 연속 손실: {m.get('max_consecutive_losses', 0):>13d}회")
         print("-" * 60)
         print(f"  총 매매 횟수  : {m['total_trades']:>13d}회")
         print(f"  승률          : {m['win_rate']:>13.1f}%")

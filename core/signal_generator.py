@@ -121,7 +121,7 @@ class SignalGenerator:
                 )
 
     def _get_weights(self) -> dict:
-        """스코어링 가중치 dict 반환. 미설정 또는 필수 키 누락 시 KeyError."""
+        """스코어링 가중치 dict 반환. 미설정·필수 키 누락·값 이상 시 예외."""
         weights = (self.strategy_params.get("scoring") or {}).get("weights")
         if not weights:
             raise KeyError(
@@ -134,7 +134,24 @@ class SignalGenerator:
                 f"scoring.weights에 필수 키가 없습니다: {missing}. "
                 "strategies.yaml의 scoring.weights를 확인하세요."
             )
+        self._validate_weights(weights)
         return weights
+
+    @staticmethod
+    def _validate_weights(weights: dict):
+        """가중치 값 유효성 검증: 숫자·유한·합리적 범위."""
+        import numpy as _np
+        for key, val in weights.items():
+            if val is None:
+                raise ValueError(f"가중치 '{key}'가 None입니다.")
+            if not isinstance(val, (int, float)):
+                raise ValueError(f"가중치 '{key}'가 숫자가 아닙니다: {val!r} (type={type(val).__name__})")
+            if not _np.isfinite(val):
+                raise ValueError(f"가중치 '{key}'가 유한하지 않습니다: {val}")
+            if abs(val) > 10:
+                logger.warning(
+                    "⚠️ 가중치 '{}'가 비정상적으로 큽니다: {}. 의도된 값인지 확인하세요.", key, val
+                )
 
     # 그룹 → score 컬럼 매핑 (representative_only 모드용)
     _SCORE_GROUP_MAP = {
