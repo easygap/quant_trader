@@ -20,6 +20,10 @@ from backtest.backtester import Backtester
 from config.config_loader import Config
 from core.data_collector import DataCollector
 from core.notifier import Notifier
+from core.strategy_diagnostics import (
+    append_backtest_diagnostic_warnings,
+    append_walk_forward_metrics_diagnostic_warnings,
+)
 
 
 def _get_kospi_top_n_symbols(
@@ -272,6 +276,8 @@ class StrategyValidator:
         self._check_profit_factor_warnings(
             validation, strategy_name, full_result["metrics"], out_sample_result["metrics"]
         )
+        # 승률·일자별 왕복·수수료/이익 비율 (손익비는 위 함수에만 둠 — 중복 없음)
+        append_backtest_diagnostic_warnings(validation, out_sample_result)
 
         result = {
             "symbol": symbol,
@@ -407,6 +413,8 @@ class StrategyValidator:
                 )
                 wf_warnings.append(msg)
                 logger.warning(msg)
+
+        append_walk_forward_metrics_diagnostic_warnings(windows, wf_warnings)
 
         result = {
             "symbol": symbol,

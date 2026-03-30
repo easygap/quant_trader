@@ -65,8 +65,18 @@ def test_scheduler_monitoring_runs_without_api(monkeypatch):
     monkeypatch.setattr("core.scheduler.get_all_positions", fake_get_all)
 
     class FakeKIS:
+        def __init__(self, account_no=None, *args, **kwargs):
+            pass
+
         def get_current_price(self, symbol):
             return None
+
+        def get_rate_limit_stats(self):
+            return {
+                "requests_last_60s": 0,
+                "minute_utilization_pct": 0.0,
+                "max_per_min": 300,
+            }
 
     monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
     scheduler = Scheduler(strategy_name="scoring")
