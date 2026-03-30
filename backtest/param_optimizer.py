@@ -273,8 +273,12 @@ def grid_search(
         }
 
     # max: sharpe, total_return, calmar / min: max_drawdown(보통 음수이므로 절대값 기준으로 최소화)
+    # trades=0(score=0)이 trades>0(score<0)보다 위로 오는 버그 방지
     higher_is_better = metric != "max_drawdown"
-    best = max(results, key=lambda x: x["score"]) if higher_is_better else min(results, key=lambda x: x["score"])
+    if higher_is_better:
+        best = max(results, key=lambda x: (x["metrics"].get("total_trades", 0) > 0, x["score"]))
+    else:
+        best = min(results, key=lambda x: (x["metrics"].get("total_trades", 0) == 0, x["score"]))
     best_params = best["params"]
     best_score = best["score"]
 
@@ -446,8 +450,19 @@ def grid_search_scoring_weights(
             "search_space_report": weight_search_report,
         }
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    # trades=0(score=0)이 trades>0(score<0)보다 위로 오는 버그 방지:
+    # total_trades>0 우선, 그 안에서 score 내림차순
+    results.sort(
+        key=lambda x: (x["metrics"].get("total_trades", 0) > 0, x["score"]),
+        reverse=True,
+    )
     best = results[0]
+    logger.info(
+        "IS best: weights={}, threshold={}, score={:.4f}, total_trades={}, return={:.2f}%",
+        best["weight_combo"], best["threshold"], best["score"],
+        best["metrics"].get("total_trades", 0),
+        best["metrics"].get("total_return", 0) * 100,
+    )
 
     if df_oos is None or len(df_oos) < 30:
         print("OOS 게이트 실패: 이 가중치는 채택 불가")
@@ -467,6 +482,12 @@ def grid_search_scoring_weights(
     else:
         oos_sharpe = 0.0
 
+    oos_trades = oos_metrics.get("total_trades", 0) if oos_metrics else 0
+    logger.info(
+        "OOS result: sharpe={:.4f}, total_trades={}, return={:.2f}%",
+        oos_sharpe, oos_trades,
+        (oos_metrics.get("total_return", 0) * 100) if oos_metrics else 0,
+    )
     if oos_sharpe < oos_sharpe_gate:
         print("OOS 게이트 실패: 이 가중치는 채택 불가")
         logger.warning(
