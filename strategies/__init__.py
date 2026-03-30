@@ -16,13 +16,15 @@ from config.config_loader import Config
 
 # ── 전략 코드 레지스트리 ──
 _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
-    "scoring":             ("strategies.scoring_strategy",   "ScoringStrategy"),
+    "scoring":             ("strategies.scoring_strategy",    "ScoringStrategy"),
     "mean_reversion":      ("strategies.mean_reversion",     "MeanReversionStrategy"),
     "trend_following":     ("strategies.trend_following",     "TrendFollowingStrategy"),
     "trend_pullback":      ("strategies.trend_pullback",      "TrendPullbackStrategy"),
     "fundamental_factor":  ("strategies.fundamental_factor",  "FundamentalFactorStrategy"),
     "fundamental_first":   ("strategies.fundamental_first",   "FundamentalFirstStrategy"),
+    "momentum_factor":     ("strategies.momentum_factor",     "MomentumFactorStrategy"),
     "ensemble":            ("core.strategy_ensemble",         "StrategyEnsemble"),
+    "trend_pullback":      ("strategies.trend_pullback",      "TrendPullbackStrategy"),
 }
 
 # ── 전략 상태 레지스트리 (Hard Gate 기준) ──
@@ -33,7 +35,9 @@ STRATEGY_STATUS: dict[str, dict] = {
     "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest"],          "reason": "C-3A 구조 재설계 검증 중"},
     "fundamental_factor": {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "yfinance debtToEquity 한국 기준 불일치, WF 미실행"},
     "fundamental_first":  {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "fundamental_factor 종속, WF 미실행"},
+    "momentum_factor":    {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "WF 미실행"},
     "ensemble":           {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "구성 전략 모두 미승인"},
+    "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest", "paper"], "reason": "C-1 MVP, WF 미실행"},
 }
 
 

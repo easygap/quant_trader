@@ -42,6 +42,9 @@ class OrderExecutor:
     """
 
     MAX_RETRIES = 3  # 주문 재시도 최대 횟수
+    # risk_params.slippage 기본 0.05% 대비 3배 초과 시 warning, 1% 초과 시 디스코드
+    SLIPPAGE_WARN_PCT = 0.15
+    SLIPPAGE_DISCORD_PCT = 1.0
 
     def __init__(self, config: Config = None, account_key: str = ""):
         self.config = config or Config.get()
@@ -272,8 +275,10 @@ class OrderExecutor:
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
-        # 주문 실행 (재시도 포함)
-        order_result = None
+        # 주문 실행 (재시도 포함) — 실전은 체결가 조회 후 비용·DB 반영
+        expected_price = float(price)
+        fill_price = expected_price
+        actual_slippage_pct = None
         if self.mode == "live":
             # 중복 주문 방지: ① 앱 레벨 TTL 가드 ② 해당 종목 미체결 주문 존재 여부(KIS 조회)
             ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
@@ -293,14 +298,23 @@ class OrderExecutor:
             )
             if order_result is None:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
+            fill_price, actual_slippage_pct = self._resolve_live_execution(
+                symbol, expected_price, order_result if isinstance(order_result, dict) else None,
+            )
+            self._report_execution_slippage(
+                symbol, "BUY", expected_price, fill_price, actual_slippage_pct,
+            )
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            costs = self.risk_manager.calculate_transaction_costs(
+                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+            )
 
         # DB에 매매 기록 저장 (시각·체결가 차이 포함)
         _order_at = datetime.now()
         save_trade(
             symbol=symbol,
             action="BUY",
-            price=price,
+            price=fill_price,
             quantity=quantity,
             commission=costs["commission"],
             tax=0,
@@ -312,14 +326,15 @@ class OrderExecutor:
             account_key=self.account_key,
             signal_at=signal_at or _order_at,
             order_at=_order_at,
-            expected_price=price,
+            expected_price=expected_price,
+            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
         )
         _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원", symbol=symbol, strategy=strategy, mode=self.mode)
 
         # 포지션 저장
         save_position(
             symbol=symbol,
-            avg_price=price,
+            avg_price=fill_price,
             quantity=quantity,
             stop_loss_price=stop_loss,
             take_profit_price=tp_info["target_final"],
@@ -329,15 +344,15 @@ class OrderExecutor:
         )
 
         # 매매 로그
-        log_trade("BUY", symbol, price, quantity, reason)
+        log_trade("BUY", symbol, fill_price, quantity, reason)
 
         result = {
             "success": True,
             "symbol": symbol,
             "action": "BUY",
-            "price": price,
+            "price": fill_price,
             "quantity": quantity,
-            "total_amount": price * quantity,
+            "total_amount": fill_price * quantity,
             "stop_loss": stop_loss,
             "take_profit": tp_info["target_final"],
             "trailing_stop": trailing_stop,
@@ -347,7 +362,7 @@ class OrderExecutor:
 
         logger.info(
             "✅ 매수 완료: {} {}주 @ {:,.0f}원 | 손절={:,.0f} | 익절={:,.0f}",
-            symbol, quantity, price, stop_loss, tp_info["target_final"],
+            symbol, quantity, fill_price, stop_loss, tp_info["target_final"],
         )
 
         return result
@@ -409,18 +424,9 @@ class OrderExecutor:
                     return {"success": False, "reason": msg}
 
         sell_qty = quantity or position.quantity
-
-        # 거래 비용 계산 (증권거래세+농특세 0.20% + 설정 시 양도소득세; avg_price로 양도소득세 계산)
-        costs = self.risk_manager.calculate_transaction_costs(
-            price, sell_qty, "SELL",
-            avg_daily_volume=avg_daily_volume,
-            avg_price=float(position.avg_price),
-        )
-        total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
-
-        # 수익률 계산 (세금·수수료 반영 후 순손익)
-        pnl = (price - position.avg_price) * sell_qty - costs["commission"] - total_tax
-        pnl_rate = ((price / position.avg_price) - 1) * 100
+        expected_price = float(price)
+        fill_price = expected_price
+        actual_slippage_pct = None
 
         # 주문 전 안전 체크 (매도: 쿨다운 중에도 허용)
         pre_check = self._pre_order_check(action="SELL")
@@ -445,13 +451,29 @@ class OrderExecutor:
             )
             if order_result is None:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
+            fill_price, actual_slippage_pct = self._resolve_live_execution(
+                symbol, expected_price, order_result if isinstance(order_result, dict) else None,
+            )
+            self._report_execution_slippage(
+                symbol, "SELL", expected_price, fill_price, actual_slippage_pct,
+            )
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+
+        # 거래 비용·손익 (실전은 조회한 체결가 기준)
+        costs = self.risk_manager.calculate_transaction_costs(
+            fill_price, sell_qty, "SELL",
+            avg_daily_volume=avg_daily_volume,
+            avg_price=float(position.avg_price),
+        )
+        total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
+        pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
+        pnl_rate = ((fill_price / position.avg_price) - 1) * 100
 
         # DB에 매매 기록 저장 (tax = 증권거래세 + 양도소득세)
         save_trade(
             symbol=symbol,
             action="SELL",
-            price=price,
+            price=fill_price,
             quantity=sell_qty,
             commission=costs["commission"],
             tax=total_tax,
@@ -461,6 +483,8 @@ class OrderExecutor:
             reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
             mode=self.mode,
             account_key=self.account_key,
+            expected_price=expected_price if self.mode == "live" else None,
+            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
         )
 
         # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position + 손절/익절 재조정
@@ -480,15 +504,15 @@ class OrderExecutor:
                 )
 
         # 매매 로그
-        log_trade("SELL", symbol, price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")
+        log_trade("SELL", symbol, fill_price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")
 
         result = {
             "success": True,
             "symbol": symbol,
             "action": "SELL",
-            "price": price,
+            "price": fill_price,
             "quantity": sell_qty,
-            "total_amount": price * sell_qty,
+            "total_amount": fill_price * sell_qty,
             "pnl": round(pnl, 0),
             "pnl_rate": round(pnl_rate, 2),
             "costs": costs,
@@ -498,7 +522,7 @@ class OrderExecutor:
         emoji = "📈" if pnl >= 0 else "📉"
         logger.info(
             "{} 매도 완료: {} {}주 @ {:,.0f}원 | 수익: {:,.0f}원 ({:.2f}%)",
-            emoji, symbol, sell_qty, price, pnl, pnl_rate,
+            emoji, symbol, sell_qty, fill_price, pnl, pnl_rate,
         )
 
         return result
@@ -623,6 +647,65 @@ class OrderExecutor:
                 return True
 
         return False
+
+    # =============================================================
+    # 실전 체결가·슬리피지
+    # =============================================================
+
+    def _resolve_live_execution(
+        self,
+        symbol: str,
+        expected_price: float,
+        order_output: dict | None,
+    ) -> tuple[float, float | None]:
+        """
+        체결가 조회 후 (체결가, actual_slippage_pct) 반환.
+        조회 실패 시 (expected_price, None). 슬리피지 % = (체결가 - 예상가) / 예상가 * 100.
+        """
+        if not order_output:
+            return expected_price, None
+        fill = self.kis_api.get_filled_avg_price_after_order(symbol, order_output)
+        if fill is None or fill <= 0:
+            logger.warning(
+                "실전 체결가 조회 실패 — 기록은 예상가 기준: {}", symbol,
+            )
+            return expected_price, None
+        if expected_price <= 0:
+            return fill, None
+        pct = (fill - expected_price) / expected_price * 100.0
+        return fill, pct
+
+    def _report_execution_slippage(
+        self,
+        symbol: str,
+        action: str,
+        expected_price: float,
+        fill_price: float,
+        actual_slippage_pct: float | None,
+    ) -> None:
+        if actual_slippage_pct is None:
+            return
+        a = abs(actual_slippage_pct)
+        if a > self.SLIPPAGE_DISCORD_PCT:
+            logger.warning(
+                "슬리피지 {:.3f}% (1% 초과) — {} {} | 예상 {:,.0f}원 → 체결 {:,.0f}원",
+                actual_slippage_pct, symbol, action, expected_price, fill_price,
+            )
+            try:
+                from core.notifier import Notifier
+                Notifier().send_message(
+                    "[슬리피지 경고] "
+                    f"{symbol} {action} | 실제 슬리피지 {actual_slippage_pct:+.3f}% "
+                    f"(예상 {expected_price:,.0f}원 → 체결 {fill_price:,.0f}원)",
+                )
+            except Exception as e:
+                logger.debug("슬리피지 디스코드 알림 실패: {}", e)
+        elif a > self.SLIPPAGE_WARN_PCT:
+            logger.warning(
+                "슬리피지 {:.3f}% (백테스트 가정 0.05%의 3배 초과) — {} {} | "
+                "예상 {:,.0f}원 → 체결 {:,.0f}원",
+                actual_slippage_pct, symbol, action, expected_price, fill_price,
+            )
 
     # =============================================================
     # 안전 체크 및 재시도
