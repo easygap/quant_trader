@@ -1281,4 +1281,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-03-25 (v2.7: §6.2 strategies.yaml `fundamental_factor` 반영, deploy/ 구성 명시, 문서 간 양식·교차 참조 통일)
+> **최종 수정**: 2026-03-27 (v2.8: `backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/CLI 표 갱신; §6.2 strategies.yaml `fundamental_factor` 반영, deploy/ 구성 명시, 문서 간 양식·교차 참조 통일)

@@ -134,6 +134,65 @@ class BlackSwanDetector:
 
         return {"triggered": False, "change_rate": change_rate, "reason": ""}
 
+    def status_snapshot(self) -> dict:
+        """
+        대시보드·모니터링용 현재 상태 (쿨다운·recovery·정상).
+
+        Returns:
+            {
+                "state": "normal" | "cooldown" | "recovery",
+                "display": str,  # 사람이 읽기 쉬운 한 줄
+                "remaining_seconds": int | None,
+                "recovery_scale": float | None,
+            }
+        """
+        now = datetime.now()
+        if self.is_on_cooldown():
+            if self._cooldown_until is None:
+                return {
+                    "state": "normal",
+                    "display": "정상",
+                    "remaining_seconds": None,
+                    "recovery_scale": None,
+                }
+            rem = max(0, int((self._cooldown_until - now).total_seconds()))
+            m, s = divmod(rem, 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                ttxt = f"{h}시간 {m}분"
+            elif m > 0:
+                ttxt = f"{m}분 {s}초"
+            else:
+                ttxt = f"{s}초"
+            return {
+                "state": "cooldown",
+                "display": f"쿨다운 중 (남은 시간 약 {ttxt})",
+                "remaining_seconds": rem,
+                "recovery_scale": None,
+            }
+        if self.is_in_recovery():
+            if self._recovery_until is None:
+                return {
+                    "state": "normal",
+                    "display": "정상",
+                    "remaining_seconds": None,
+                    "recovery_scale": None,
+                }
+            rem = max(0, int((self._recovery_until - now).total_seconds()))
+            m, s = divmod(rem, 60)
+            return {
+                "state": "recovery",
+                "display": f"recovery 중 (남은 약 {m}분 {s}초, 사이징 {self.recovery_scale * 100:.0f}%)",
+                "remaining_seconds": rem,
+                "recovery_scale": self.recovery_scale,
+            }
+        return {
+            "state": "normal",
+            "display": "정상",
+            "remaining_seconds": None,
+            "recovery_scale": None,
+        }
+
     def is_on_cooldown(self) -> bool:
         """현재 쿨다운(매매 중단) 상태인지 확인"""
         if self._cooldown_until is None:
