@@ -85,6 +85,8 @@ class TradeHistory(Base):
     commission = Column(Float, default=0)                       # 수수료
     tax = Column(Float, default=0)                              # 세금
     slippage = Column(Float, default=0)                         # 슬리피지
+    expected_price = Column(Float, nullable=True)               # 주문 시점 예상 체결가(현재가)
+    actual_slippage_pct = Column(Float, nullable=True)          # 실제 슬리피지 %(체결 후)
     strategy = Column(String(50))                               # 사용된 전략명
     signal_score = Column(Float)                                # 매매 신호 점수
     reason = Column(Text)                                       # 매매 사유 (상세)
@@ -349,6 +351,36 @@ def _migrate_add_account_key(engine):
                     raise
 
 
+def _migrate_trade_history_slippage_columns(engine):
+    """기존 DB에 expected_price, actual_slippage_pct 추가 (실전 슬리피지 추적)."""
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    col_type = "REAL" if dialect == "sqlite" else "DOUBLE PRECISION"
+    cols = [
+        ("trade_history", "expected_price"),
+        ("trade_history", "actual_slippage_pct"),
+    ]
+    with engine.connect() as conn:
+        for table, col in cols:
+            try:
+                if dialect == "sqlite":
+                    r = conn.execute(text(f"PRAGMA table_info({table})"))
+                    if any(row[1] == col for row in r.fetchall()):
+                        continue
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                else:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+                    )
+                conn.commit()
+            except Exception as e:
+                if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                    conn.rollback()
+                else:
+                    conn.rollback()
+                    raise
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -360,6 +392,10 @@ def init_database():
     Base.metadata.create_all(engine)
     try:
         _migrate_add_account_key(engine)
+    except Exception:
+        pass
+    try:
+        _migrate_trade_history_slippage_columns(engine)
     except Exception:
         pass
 

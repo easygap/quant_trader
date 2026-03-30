@@ -20,6 +20,9 @@
     # 특정 기간 백테스팅
     python main.py --mode backtest --strategy scoring --symbol 005930 --start 2023-01-01 --end 2025-12-31
 
+    # momentum_top 동일비중 멀티종목 (워치리스트 정의와 동일, KS11 대비)
+    python main.py --mode backtest_momentum_top --start 2019-01-01 --end 2026-03-23 --rebalance-days 20
+
     # 긴급 전체 청산 (수동 개입·블랙스완 외 상황에서 즉시 전 종목 매도)
     python main.py --mode liquidate
 
@@ -133,7 +136,42 @@ def run_backtest(args):
             "백테스트 리포트 저장 완료 | txt={} | html={}",
             report_paths.get("text_path", ""),
             report_paths.get("html_path", ""),
-        )        
+        )
+
+
+def run_backtest_momentum_top(args):
+    """momentum_top 정의(12개월 수익률 상위 N) 동일비중 멀티종목 백테스트. KS11 등 벤치와 지표 비교."""
+    from backtest.momentum_top_portfolio import (
+        print_momentum_top_portfolio_report,
+        run_momentum_top_portfolio_backtest,
+    )
+
+    logger.info("=" * 50)
+    logger.info("📊 momentum_top 포트폴리오 백테스트")
+    logger.info("=" * 50)
+
+    start = args.start or "2019-01-01"
+    end = args.end or "2026-03-23"
+    bench = getattr(args, "benchmark_symbol", None) or "KS11"
+    ic = getattr(args, "initial_capital", None)
+    reb = max(1, int(getattr(args, "rebalance_days", 20)))
+
+    result = run_momentum_top_portfolio_backtest(
+        start_date=start,
+        end_date=end,
+        rebalance_every=reb,
+        initial_capital=ic,
+        benchmark_symbol=bench,
+        top_n_override=getattr(args, "top_n", None),
+        use_market_filter=getattr(args, "market_filter", False),
+        cash_buffer=float(getattr(args, "cash_buffer", 0.0) or 0.0),
+        portfolio_stop=float(getattr(args, "portfolio_stop", 0.0) or 0.0),
+        stop_cooldown=int(getattr(args, "stop_cooldown", 0) or 0),
+    )
+    if not result:
+        logger.error("momentum_top 포트폴리오 백테스트 실패")
+        return
+    print_momentum_top_portfolio_report(result, config=Config.get())
 
 
 def _run_auto_correlation(df, config, threshold=0.7):
@@ -170,6 +208,8 @@ def run_param_optimize(args):
     --auto-correlation: 최적화 전 상관 분석 자동 실행, 고상관 지표 비활성화 후 최적화.
     권장 파이프라인: check_correlation → optimize --include-weights → validate --walk-forward.
     """
+    from datetime import datetime, timedelta
+
     from core.data_collector import DataCollector
     from backtest.param_optimizer import grid_search, bayesian_optimize, grid_search_scoring_weights
 
@@ -180,7 +220,18 @@ def run_param_optimize(args):
     config = Config.get()
     collector = DataCollector()
     symbol = args.symbol or "005930"
-    df = collector.fetch_stock(symbol, args.start, args.end)
+    end_date = args.end
+    start_date = args.start
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if not start_date:
+        vy = getattr(args, "validation_years", 5)
+        start_date = (datetime.now() - timedelta(days=365 * vy)).strftime("%Y-%m-%d")
+        logger.info(
+            "최적화 --start 미지정 → check_correlation·validate와 동일하게 최근 {}년 구간 사용",
+            vy,
+        )
+    df = collector.fetch_stock(symbol, start_date, end_date)
     if df.empty or len(df) < 252:
         logger.error("데이터가 없거나 1년 미만입니다. --start, --end 및 데이터 소스를 확인하세요.")
         return
@@ -214,6 +265,10 @@ def run_param_optimize(args):
             disabled_weights=disabled or None,
         )
         if result is None:
+            logger.warning(
+                "가중치 최적화 결과 없음: OOS 구간 부족(30거래일 미만)이거나 OOS 샤프가 게이트(기본 1.0) 미달입니다. "
+                "로그·stdout 메시지를 확인하세요. 기간을 늘리려면 --validation-years 또는 --start/--end 를 지정할 수 있습니다."
+            )
             return
         if result.get("message"):
             logger.warning(result["message"])
@@ -989,8 +1044,22 @@ def main():
     )
     parser.add_argument(
         "--mode", type=str, default="backtest",
-        choices=["backtest", "validate", "paper", "schedule", "live", "liquidate", "compare", "optimize", "dashboard", "check_correlation", "check_ensemble_correlation", "rebalance"],
-        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
+        choices=[
+            "backtest",
+            "backtest_momentum_top",
+            "validate",
+            "paper",
+            "schedule",
+            "live",
+            "liquidate",
+            "compare",
+            "optimize",
+            "dashboard",
+            "check_correlation",
+            "check_ensemble_correlation",
+            "rebalance",
+        ],
+        help="실행 모드. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목.",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1074,6 +1143,35 @@ def main():
         "--dry-run", action="store_true",
         help="[rebalance 모드] 실제 주문 없이 계획만 출력",
     )
+    parser.add_argument(
+        "--rebalance-days", type=int, default=20,
+        help="[backtest_momentum_top] 거래일 기준 리밸런싱 간격 (기본 20)",
+    )
+    parser.add_argument(
+        "--initial-capital", type=float, default=None,
+        help="[backtest_momentum_top] 초기 자본(원). 미지정 시 risk_params.initial_capital",
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=None,
+        help="[backtest_momentum_top] 모멘텀 상위 보유 종목 수(미지정 시 config watchlist.top_n)",
+    )
+    parser.add_argument(
+        "--market-filter",
+        action="store_true",
+        help="[backtest_momentum_top] KS11 20거래일 수익률 국면 필터(≤-5%% 신규매수 금지, ≤-10%% 전량 현금)",
+    )
+    parser.add_argument(
+        "--cash-buffer", type=float, default=0.0,
+        help="[backtest_momentum_top] 항상 현금으로 남길 비율(0~1, 예: 0.3이면 70%%만 주식 매수). 기본 0",
+    )
+    parser.add_argument(
+        "--portfolio-stop", type=float, default=0.0,
+        help="[backtest_momentum_top] 고점 대비 NAV 하락 시 전량 매도(0~1, 예: 0.15=-15%%). 기본 0=비활성",
+    )
+    parser.add_argument(
+        "--stop-cooldown", type=int, default=0,
+        help="[backtest_momentum_top] 포트폴리오 손절 후 N거래일 뒤 재진입(0=다음 리밸런스까지 대기). 기본 0",
+    )
 
     args = parser.parse_args()
     # Look-Ahead Bias 방지: 기본값 True. --allow-lookahead 사용 시에만 False(해제 시 명시적 경고 출력)
@@ -1098,6 +1196,8 @@ def main():
     try:
         if args.mode == "backtest":
             run_backtest(args)
+        elif args.mode == "backtest_momentum_top":
+            run_backtest_momentum_top(args)
         elif args.mode == "validate":
             run_strategy_validation(args)
         elif args.mode == "paper":

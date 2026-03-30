@@ -9,6 +9,7 @@
 import os
 import time as time_mod
 import shutil
+from collections import deque
 from datetime import datetime, timedelta
 from loguru import logger
 
@@ -18,6 +19,7 @@ from core.trading_hours import TradingHours
 from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
 from core.notifier import Notifier
+from core.strategy_diagnostics import diagnose_live_post_market
 from database.repositories import (
     get_all_positions,
     get_daily_trade_summary,
@@ -31,6 +33,8 @@ from core.position_lock import PositionLock
 class LoopMetrics:
     """10분 루프 모니터링 지표 수집기."""
 
+    _RECENT_N = 5
+
     def __init__(self):
         self.total_loops = 0
         self.total_skips = 0
@@ -41,6 +45,7 @@ class LoopMetrics:
         self._elapsed_sum: float = 0.0
         self.loops_over_8min: int = 0
         self.loops_over_10min: int = 0
+        self._recent_elapsed: deque[float] = deque(maxlen=self._RECENT_N)
 
     def record_success(self, elapsed: float, monitor_interval: float = 600.0):
         """
@@ -53,6 +58,7 @@ class LoopMetrics:
         self.last_elapsed_seconds = elapsed
         self.max_elapsed_seconds = max(self.max_elapsed_seconds, elapsed)
         self._elapsed_sum += elapsed
+        self._recent_elapsed.append(float(elapsed))
         soft = int(monitor_interval * 0.8)
         if soft >= 60 and elapsed > soft:
             self.loops_over_8min += 1
@@ -65,6 +71,10 @@ class LoopMetrics:
 
     def summary(self) -> dict:
         avg = self._elapsed_sum / self.total_loops if self.total_loops else 0.0
+        recent = list(self._recent_elapsed)
+        recent_avg = (
+            round(sum(recent) / len(recent), 1) if recent else None
+        )
         return {
             "total_loops": self.total_loops,
             "total_skips": self.total_skips,
@@ -73,6 +83,8 @@ class LoopMetrics:
             "last_elapsed_s": round(self.last_elapsed_seconds, 1),
             "max_elapsed_s": round(self.max_elapsed_seconds, 1),
             "avg_elapsed_s": round(avg, 1),
+            "recent_elapsed_last5": [round(x, 1) for x in recent],
+            "recent_avg_elapsed_s": recent_avg,
             "loops_over_8min": self.loops_over_8min,
             "loops_over_10min": self.loops_over_10min,
         }
@@ -113,6 +125,8 @@ class Scheduler:
         self._last_sync_broker_time = None  # KIS 잔고 크로스체크 주기용
         self._last_healthcheck_time: datetime | None = None
         self._loop_metrics = LoopMetrics()
+        # 대시보드용: 동일 (종목, 신호, 점수) 반복 기록 방지
+        self._last_signal_for_dashboard: dict[str, tuple] = {}
 
         logger.info(
             "Scheduler 초기화 (전략: {}, 모니터링 간격: {}초, auto_entry: {})",
@@ -199,6 +213,7 @@ class Scheduler:
                         self._last_sync_broker_time = None
                         self._entry_candidates = []
                         self._loop_metrics = LoopMetrics()
+                        self._last_signal_for_dashboard = {}
                         logger.info("📅 새로운 거래일: {}", today)
                         self._maybe_update_holidays()
 
@@ -272,6 +287,7 @@ class Scheduler:
                     signal_info = strategy.generate_signal(df, symbol=symbol)
                     signal_info["symbol"] = symbol
                     signals.append(signal_info)
+                    self._maybe_record_dashboard_signal(signal_info, "pre_market")
 
                     if signal_info["signal"] != "HOLD":
                         self.discord.send_signal_alert(symbol, signal_info)
@@ -352,12 +368,57 @@ class Scheduler:
                 n, est_sec, per_sec,
             )
 
+    def _maybe_record_dashboard_signal(self, signal_info: dict, source: str) -> None:
+        """대시보드용 당일 신호 목록 (동일 종목·동일 신호·점수 반복 시 생략)."""
+        try:
+            sym = signal_info.get("symbol")
+            if not sym:
+                return
+            sig = signal_info.get("signal", "HOLD")
+            score = signal_info.get("score", 0)
+            try:
+                sk = round(float(score), 4)
+            except (TypeError, ValueError):
+                sk = 0.0
+            key = (sig, sk)
+            if self._last_signal_for_dashboard.get(sym) == key:
+                return
+            self._last_signal_for_dashboard[sym] = key
+            from monitoring.dashboard_runtime_state import append_signal
+
+            append_signal(sym, sig, score, strategy_name=self.strategy_name, source=source)
+        except Exception as e:
+            logger.debug("대시보드 신호 기록 스킵: {}", e)
+
+    def _publish_dashboard_runtime_state(self, kis=None) -> None:
+        """웹 대시보드용 JSON 갱신 (루프 지표·블랙스완·KIS rate limit)."""
+        try:
+            from monitoring.dashboard_runtime_state import merge_runtime
+
+            patch = {
+                "loop_metrics": self._loop_metrics.summary(),
+                "blackswan": self.blackswan.status_snapshot(),
+            }
+            if kis is not None:
+                try:
+                    patch["kis_stats"] = kis.get_rate_limit_stats()
+                except Exception:
+                    patch["kis_stats"] = None
+            merge_runtime(patch)
+        except Exception as e:
+            logger.debug("대시보드 런타임 저장 실패: {}", e)
+
     def _run_monitoring(self):
         """장중 모니터링: 진입 후보 실행 + 손절/익절 체크."""
         logger.debug("🔍 장중 모니터링 ({})", datetime.now().strftime("%H:%M:%S"))
         started_at = datetime.now()
 
         self._log_monitoring_watchlist_preflight()
+
+        from api.kis_api import KISApi
+
+        account_no = self.config.get_account_no(self.strategy_name)
+        kis = KISApi(account_no=account_no)
 
         try:
             # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
@@ -371,7 +432,7 @@ class Scheduler:
                     self._execute_entry_candidates()
 
             with PositionLock():
-                self._check_exit_signals()
+                self._check_exit_signals(kis=kis)
 
             # live 모드: KIS 잔고와 DB 포지션 상시 크로스체크 (주기적)
             if self.config.trading.get("mode") == "live":
@@ -398,6 +459,7 @@ class Scheduler:
                 )
 
             self._loop_metrics.record_success(elapsed, self.monitor_interval)
+            self._publish_dashboard_runtime_state(kis=kis)
 
             if elapsed > self.monitor_interval:
                 self._skip_next_monitor_cycle = True
@@ -453,6 +515,8 @@ class Scheduler:
                         avg_vol = None
                         if "volume" in df.columns and not df["volume"].empty:
                             avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
+                        signal_info["symbol"] = symbol
+                        self._maybe_record_dashboard_signal(signal_info, "post_cooldown_rescan")
                         new_candidates.append({
                             "symbol": symbol,
                             "price": signal_info.get("close", 0),
@@ -531,14 +595,15 @@ class Scheduler:
 
         self._entry_candidates = remaining
 
-    def _check_exit_signals(self):
+    def _check_exit_signals(self, kis=None):
         """포지션 순회: 최대 보유 기간 초과 시 강제 정리, 블랙스완, 손절/익절/트레일링 스탑."""
         from core.order_executor import OrderExecutor
         from api.kis_api import KISApi
 
         executor = OrderExecutor(self.config, account_key=self.strategy_name)
         account_no = self.config.get_account_no(self.strategy_name)
-        kis = KISApi(account_no=account_no)
+        if kis is None:
+            kis = KISApi(account_no=account_no)
         positions = get_all_positions(account_key=self.strategy_name)
         today = datetime.now().date()
         max_holding_days = (
@@ -613,6 +678,17 @@ class Scheduler:
                 f"미실현손익 {summary['unrealized_pnl']:,.0f}원 | "
                 f"당일 매매 {trade_summary['total_trades']}건"
             )
+            diag_formatted: list[str] = []
+            try:
+                diag_lines = diagnose_live_post_market(
+                    mode=self.config.trading.get("mode", "paper"),
+                    account_key=self.strategy_name,
+                    today=datetime.now(),
+                )
+                diag_formatted = [d.formatted() for d in diag_lines]
+                report_text += "\n\n[전략 진단]\n" + "\n".join(diag_formatted)
+            except Exception as diag_err:
+                logger.warning("전략 진단 스킵: {}", diag_err)
             save_daily_report(
                 date=datetime.now(),
                 total_trades=trade_summary["total_trades"],
@@ -636,6 +712,7 @@ class Scheduler:
                 "mdd": summary["mdd"],
                 "position_count": summary["position_count"],
                 "total_trades": trade_summary["total_trades"],
+                "strategy_diagnosis": diag_formatted,
             })
 
             # live 모드: 장마감 시 KIS 잔고와 DB 크로스체크 후 백업 (SQLite 손상 대비)

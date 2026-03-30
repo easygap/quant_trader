@@ -109,6 +109,7 @@ pytest tests/ -q
 |------|------|
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
+| [`docs/BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 손익 개선 포인트(손익비·상승장·손절/익절·가중치 파이프라인) |
 
 ## 주의
 

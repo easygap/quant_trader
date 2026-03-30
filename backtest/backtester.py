@@ -247,6 +247,10 @@ class Backtester:
         min_holding_days = pos_limits.get("min_holding_days", 0)
         max_holding_days = pos_limits.get("max_holding_days", 0)
 
+        def _slippage_cost_vs_close(execution_price: float, ref_close: float, qty: int) -> float:
+            """슬리피지로 인한 체결가 불리분 (원): |(체결가 - 종가) × 수량|."""
+            return round(abs((float(execution_price) - float(ref_close)) * int(qty)), 0)
+
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
             signal = row.get("signal", "HOLD")
@@ -279,6 +283,8 @@ class Backtester:
                         "quantity": position, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                         "commission": commission,
+                        "tax": float(tax_amt),
+                        "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
                     })
                     position = 0
                     avg_price = 0
@@ -303,6 +309,8 @@ class Backtester:
                         "quantity": position, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                         "commission": commission,
+                        "tax": float(tax_amt),
+                        "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
                     })
                     position = 0
                     avg_price = 0
@@ -328,6 +336,8 @@ class Backtester:
                         "quantity": sell_qty, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                         "commission": commission,
+                        "tax": float(tax_amt),
+                        "slippage_cost": _slippage_cost_vs_close(sell_price, close, sell_qty),
                     })
                     position -= sell_qty
                     partial_exit_done = True
@@ -354,6 +364,8 @@ class Backtester:
                         "quantity": position, "pnl": pnl,
                         "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                         "commission": commission,
+                        "tax": float(tax_amt),
+                        "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
                     })
                     position = 0
                     avg_price = 0
@@ -380,6 +392,8 @@ class Backtester:
                             "quantity": position, "pnl": pnl,
                             "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                             "commission": commission,
+                            "tax": float(tax_amt),
+                            "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
                         })
                         position = 0
                         avg_price = 0
@@ -440,6 +454,8 @@ class Backtester:
                         "date": date, "action": "BUY", "price": buy_price,
                         "quantity": quantity, "pnl": 0, "pnl_rate": 0,
                         "commission": commission,
+                        "tax": 0.0,
+                        "slippage_cost": _slippage_cost_vs_close(buy_price, close, quantity),
                     })
 
             elif signal == "SELL" and position > 0:
@@ -458,6 +474,8 @@ class Backtester:
                     "quantity": position, "pnl": pnl,
                     "pnl_rate": ((sell_price / avg_price) - 1) * 100,
                     "commission": commission,
+                    "tax": float(tax),
+                    "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
                 })
                 position = 0
                 avg_price = 0
@@ -527,8 +545,16 @@ class Backtester:
         annual_return_pct = total_return / years
         calmar = abs(annual_return_pct / max_drawdown) if max_drawdown != 0 else 0
 
-        # 과매매 분석: 총 수수료, 평균 보유 기간(일)
+        # 과매매 분석: 총 수수료·세금·슬리피지(종가 대비 체결 불리분), 평균 보유 기간(일)
         total_commission = sum(t.get("commission", 0) for t in trades)
+        total_tax = sum(float(t.get("tax", 0) or 0) for t in trades)
+        total_slippage_cost = sum(float(t.get("slippage_cost", 0) or 0) for t in trades)
+        total_transaction_cost = round(total_commission + total_tax + total_slippage_cost, 0)
+        net_profit_abs = abs(final_value - initial_capital)
+        if net_profit_abs < 1e-6:
+            cost_to_net_profit_pct = None
+        else:
+            cost_to_net_profit_pct = round(total_transaction_cost / net_profit_abs * 100, 1)
         position_open_date = None
         holding_days_list = []
         for t in trades:
@@ -577,6 +603,10 @@ class Backtester:
             "final_value": round(final_value, 0),
             "initial_capital": initial_capital,
             "total_commission": round(total_commission, 0),
+            "total_tax": round(total_tax, 0),
+            "total_slippage_cost": round(total_slippage_cost, 0),
+            "total_transaction_cost": total_transaction_cost,
+            "cost_to_net_profit_pct": cost_to_net_profit_pct,
             "avg_holding_days": avg_holding_days,
             "commission_to_profit_ratio": commission_to_profit_ratio,
             "monthly_roundtrips_per_symbol": monthly_roundtrips_per_symbol,
@@ -591,7 +621,9 @@ class Backtester:
             "calmar_ratio": 0, "total_trades": 0, "winning_trades": 0,
             "losing_trades": 0, "avg_win": 0, "avg_loss": 0,
             "final_value": 0, "initial_capital": 0,
-            "total_commission": 0, "avg_holding_days": 0.0,
+            "total_commission": 0, "total_tax": 0, "total_slippage_cost": 0,
+            "total_transaction_cost": 0, "cost_to_net_profit_pct": None,
+            "avg_holding_days": 0.0,
             "commission_to_profit_ratio": None,
             "monthly_roundtrips_per_symbol": 0.0,
             "annual_roundtrips_total": 0.0,
@@ -629,7 +661,16 @@ class Backtester:
         print(f"  평균 보유 기간 : {m.get('avg_holding_days', 0):>11.1f}일")
         n_trades = m.get("total_trades", 0)
         total_comm = m.get("total_commission", 0)
-        print(f"  총 수수료     : {total_comm:>14,.0f}원 (총 거래 {n_trades}회)")
+        total_tax = m.get("total_tax", 0)
+        total_slip = m.get("total_slippage_cost", 0)
+        total_tx_cost = m.get("total_transaction_cost", 0)
+        cnp = m.get("cost_to_net_profit_pct")
+        cnp_s = f"{cnp:.1f}%" if cnp is not None else "N/A"
+        print(f"  총 수수료     : {total_comm:>14,.0f}원 (거래 {n_trades}회)")
+        print(f"  총 세금       : {total_tax:>14,.0f}원")
+        print(f"  총 슬리피지   : {total_slip:>14,.0f}원")
+        print("  " + "─" * 29)
+        print(f"  총 거래비용   : {total_tx_cost:>14,.0f}원 (수익의 {cnp_s})")
         cpr = m.get("commission_to_profit_ratio")
         cpr_s = f"{cpr * 100:.2f}%" if cpr is not None else "N/A"
         print(f"  수수료/총이익 : {cpr_s:>13}")

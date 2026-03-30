@@ -43,6 +43,100 @@ except ImportError:
 from database.repositories import save_stock_prices, get_stock_prices
 
 
+# 시장별 FDR StockListing 전체 테이블(시총순) — 백테스트 중 반복 호출 방지
+_FDR_FULL_LISTING_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def clear_fdr_listing_cache() -> None:
+    """FDR 상장 목록 메모리 캐시 비우기 (테스트·장기 백테스트 세션 구분용)."""
+    _FDR_FULL_LISTING_CACHE.clear()
+
+
+def _fdr_stock_listing_table(market: str, top_n: int | None) -> pd.DataFrame:
+    """FDR StockListing을 Code, Name, Marcap 컬럼 DataFrame으로 정규화. 시총 내림차순.
+
+    동일 시장은 전체 테이블을 1회만 로드해 메모리에 캐시한다(top_n 슬라이스만 복사).
+    """
+    import FinanceDataReader as fdr
+
+    empty = pd.DataFrame(columns=["Code", "Name", "Marcap"])
+    if not HAS_FDR:
+        return empty
+
+    if market not in _FDR_FULL_LISTING_CACHE:
+        try:
+            df = fdr.StockListing(market)
+        except Exception as e:
+            logger.warning("FDR StockListing('{}') 실패: {}", market, e)
+            return empty
+        if df is None or df.empty:
+            _FDR_FULL_LISTING_CACHE[market] = empty
+            return empty.copy()
+
+        code_col = None
+        for col in ("Code", "code", "Symbol", "symbol"):
+            if col in df.columns:
+                code_col = col
+                break
+        if code_col is None:
+            logger.warning("FDR {} 목록에 Code 계열 컬럼이 없습니다.", market)
+            _FDR_FULL_LISTING_CACHE[market] = empty
+            return empty.copy()
+
+        marcap_col = None
+        for col in ("Marcap", "MarketCap", "marcap"):
+            if col in df.columns:
+                marcap_col = col
+                break
+        name_col = None
+        for col in ("Name", "name"):
+            if col in df.columns:
+                name_col = col
+                break
+
+        codes = []
+        names = []
+        marcaps = []
+        for _, row in df.iterrows():
+            c = str(row[code_col]).strip()
+            if not c or c.lower() == "nan":
+                continue
+            codes.append(c.zfill(6))
+            names.append(str(row[name_col]).strip() if name_col and pd.notna(row.get(name_col)) else "")
+            if marcap_col and pd.notna(row.get(marcap_col)):
+                try:
+                    marcaps.append(float(row[marcap_col]))
+                except (TypeError, ValueError):
+                    marcaps.append(0.0)
+            else:
+                marcaps.append(0.0)
+
+        out = pd.DataFrame({"Code": codes, "Name": names, "Marcap": marcaps})
+        if marcap_col and out["Marcap"].sum() > 0:
+            out = out.sort_values("Marcap", ascending=False)
+        out = out.reset_index(drop=True)
+        _FDR_FULL_LISTING_CACHE[market] = out
+
+    full = _FDR_FULL_LISTING_CACHE[market]
+    if full.empty:
+        return empty.copy()
+    if top_n is None:
+        return full.copy()
+    return full.head(int(top_n)).copy().reset_index(drop=True)
+
+
+def get_kospi_tickers_fdr(top_n: int | None = 200) -> list[str]:
+    """FDR KOSPI 상장 목록에서 시총 상위 종목 코드.
+
+    pykrx ``get_market_ticker_list`` 가 동작하지 않는 환경에서 유니버스·후보 풀 폴백용.
+    ``top_n`` 이 None이면 정렬된 전체 KOSPI 코드를 반환한다.
+    """
+    tab = _fdr_stock_listing_table("KOSPI", top_n)
+    if tab.empty:
+        return []
+    return tab["Code"].tolist()
+
+
 class DataCollectionError(RuntimeError):
     """주가 데이터 수집 실패 예외."""
 
@@ -81,10 +175,17 @@ class DataCollector:
         self._last_source: str | None = None
         self._last_adjusted: bool | None = None
         self._source_history: dict[str, str] = {}
+        # 종목별 (wide_start, wide_end, df) — fetch_korean_stock 구간 캐시·병합
+        self._krx_ohlcv_ranges: dict[str, tuple[str, str, pd.DataFrame]] = {}
+        self.quiet_ohlcv_log = False
         logger.info(
             "DataCollector 초기화 완료 (preferred={}, allow_kis_fallback={})",
             self._preferred_source, self._allow_kis_fallback,
         )
+
+    def clear_krx_ohlcv_range_cache(self) -> None:
+        """한국 주가 구간 캐시 비우기."""
+        self._krx_ohlcv_ranges.clear()
 
     def _record_source(self, symbol: str, source: str):
         """수집에 사용된 소스를 기록하고 수정주가 여부를 갱신."""
@@ -177,6 +278,15 @@ class DataCollector:
             )
         return mismatched
 
+    @staticmethod
+    def _slice_krx_df_by_date(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        s = pd.Timestamp(start_date).normalize()
+        e = pd.Timestamp(end_date).normalize()
+        part = df.sort_index().loc[s:e]
+        return part.copy()
+
     def fetch_korean_stock(
         self,
         symbol: str,
@@ -187,8 +297,7 @@ class DataCollector:
         한국 주식 일봉 데이터 수집.
 
         우선순위: FinanceDataReader(수정주가) → yfinance(수정주가) → KIS API(비수정 가능).
-        settings.yaml data_source.preferred로 우선 소스 지정 가능 (fdr/yfinance/kis/auto).
-        data_source.allow_kis_fallback=false면 KIS 폴백을 차단하여 소스 불일치 방지.
+        동일 인스턴스에서 종목별로 요청 구간을 병합해 네트워크 호출을 줄인다(멀티 리밸런스 백테스트용).
 
         Args:
             symbol: 종목 코드 (예: "005930" 삼성전자)
@@ -203,12 +312,41 @@ class DataCollector:
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
 
+        sym = str(symbol).strip()
+        ent = self._krx_ohlcv_ranges.get(sym)
+        if ent:
+            s0, e0, df0 = ent
+            if s0 <= start_date and e0 >= end_date and df0 is not None and not df0.empty:
+                return self._slice_krx_df_by_date(df0, start_date, end_date)
+            fetch_s = min(s0, start_date)
+            fetch_e = max(e0, end_date)
+        else:
+            fetch_s, fetch_e = start_date, end_date
+
+        df_full = self._fetch_korean_stock_uncached(sym, fetch_s, fetch_e)
+        if df_full is not None and not df_full.empty:
+            self._krx_ohlcv_ranges[sym] = (fetch_s, fetch_e, df_full)
+        elif sym in self._krx_ohlcv_ranges:
+            del self._krx_ohlcv_ranges[sym]
+
+        if df_full is None or df_full.empty:
+            return pd.DataFrame()
+        return self._slice_krx_df_by_date(df_full, start_date, end_date)
+
+    def _fetch_korean_stock_uncached(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """fetch_korean_stock의 실제 수집(캐시 미사용)."""
         # 1) FDR
         if HAS_FDR and self._preferred_source in ("auto", "fdr"):
             df = self._try_fdr(symbol, start_date, end_date)
             if df is not None and not df.empty:
                 self._record_source(symbol, "FinanceDataReader")
-                self._log_source_usage(symbol, "FinanceDataReader")
+                if not self.quiet_ohlcv_log:
+                    self._log_source_usage(symbol, "FinanceDataReader")
                 return df
 
         # 2) yfinance
@@ -216,7 +354,8 @@ class DataCollector:
             df = self._fetch_korean_stock_via_yfinance(symbol, start_date, end_date)
             if not df.empty:
                 self._record_source(symbol, "yfinance")
-                self._log_source_usage(symbol, "yfinance")
+                if not self.quiet_ohlcv_log:
+                    self._log_source_usage(symbol, "yfinance")
                 return df
 
         # 3) KIS API (비수정주가 가능)
@@ -235,20 +374,22 @@ class DataCollector:
         df = self.fetch_korean_stock_via_kis(symbol)
         if not df.empty:
             self._record_source(symbol, "KIS")
-            self._log_source_usage(symbol, "KIS")
+            if not self.quiet_ohlcv_log:
+                self._log_source_usage(symbol, "KIS")
         return df
 
     def _try_fdr(
         self, symbol: str, start_date: str, end_date: str,
     ) -> pd.DataFrame | None:
         """FDR 수집 시도. 실패 시 None 반환."""
-        logger.info("한국 주식 데이터 수집 (FDR): {} ({} ~ {})", symbol, start_date, end_date)
+        log = logger.debug if self.quiet_ohlcv_log else logger.info
+        log("한국 주식 데이터 수집 (FDR): {} ({} ~ {})", symbol, start_date, end_date)
         try:
             df = fdr.DataReader(symbol, start_date, end_date)
             df = self._normalize_dataframe(df)
             from core.data_validator import DataValidator
             df = DataValidator.clean_dataframe(df, symbol)
-            logger.info(
+            log(
                 "종목 {} 수집 완료 (소스=FinanceDataReader, 수정주가=Yes): {}건",
                 symbol, len(df),
             )
@@ -473,20 +614,24 @@ class DataCollector:
         """
         pykrx로 과거 특정 날짜에 상장되어 있던 전체 종목 리스트 조회.
         상장폐지 종목 포함 → 생존자 편향 완화.
+        ``get_market_ticker_list`` 실패·빈 목록 시 FDR KOSPI/KOSDAQ 시총순 목록으로 폴백한다.
         """
-        if not HAS_PYKRX or _pykrx_stock is None:
-            logger.warning(
-                "pykrx 미설치 — historical 모드 사용 불가. "
-                "pip install pykrx 후 재시도하거나 mode: current/kospi200 사용."
-            )
-            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
         date_str = (as_of_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
-        try:
-            rows = []
-            for market_name in ("KOSPI", "KOSDAQ"):
-                tickers = _pykrx_stock.get_market_ticker_list(date_str, market=market_name)
-                if not tickers:
-                    continue
+        rows: list[dict] = []
+
+        for market_name in ("KOSPI", "KOSDAQ"):
+            tickers: list = []
+            if HAS_PYKRX and _pykrx_stock is not None:
+                try:
+                    tickers = _pykrx_stock.get_market_ticker_list(date_str, market=market_name) or []
+                except Exception as e:
+                    logger.warning(
+                        "pykrx get_market_ticker_list 실패 (market={}, as_of={}): {} — FDR 폴백",
+                        market_name, as_of_date, e,
+                    )
+                    tickers = []
+
+            if tickers:
                 for t in tickers:
                     code = str(t).strip().zfill(6)
                     try:
@@ -494,20 +639,34 @@ class DataCollector:
                     except Exception:
                         name = ""
                     rows.append({"Code": code, "Name": name, "Market": market_name, "Marcap": 0})
-            if not rows:
-                logger.warning("historical 종목 리스트 조회 결과 없음 (기준일: {})", as_of_date)
-                return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
-            df = pd.DataFrame(rows)
-            logger.info(
-                "historical 종목 리스트 {}개 조회 완료 (기준일: {}, KOSPI+KOSDAQ)",
-                len(df), as_of_date,
+                continue
+
+            tab = _fdr_stock_listing_table(market_name, None)
+            logger.warning(
+                "pykrx {} 티커 목록이 비어 있거나 미사용 — FDR {} 시총순 {}개로 대체 "
+                "(현재 스냅샷·과거 시점 불일치·생존자 편향 주의, as_of={})",
+                market_name, market_name, len(tab), as_of_date,
             )
-            if exclude_administrative:
-                df = DataCollector._exclude_administrative(df)
-            return df
-        except Exception as e:
-            logger.warning("historical 종목 리스트 조회 실패 ({}): {}", as_of_date, e)
+            for _, r in tab.iterrows():
+                rows.append({
+                    "Code": str(r["Code"]).strip().zfill(6),
+                    "Name": str(r.get("Name") or ""),
+                    "Market": market_name,
+                    "Marcap": float(r.get("Marcap") or 0),
+                })
+
+        if not rows:
+            logger.warning("historical 종목 리스트 조회 결과 없음 (기준일: {})", as_of_date)
             return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+
+        df = pd.DataFrame(rows)
+        logger.info(
+            "historical 종목 리스트 {}개 (기준일: {}, KOSPI+KOSDAQ, pykrx 또는 FDR 폴백)",
+            len(df), as_of_date,
+        )
+        if exclude_administrative:
+            df = DataCollector._exclude_administrative(df)
+        return df
 
     @staticmethod
     def get_sector_map() -> dict[str, str]:
@@ -542,20 +701,24 @@ class DataCollector:
 
     @staticmethod
     def _get_kospi200_constituents(as_of_date: Optional[str]) -> pd.DataFrame:
-        """pykrx로 해당 일자 코스피200 구성종목 조회 (생존자 편향 완화용)."""
-        if not HAS_PYKRX or _pykrx_stock is None:
-            logger.warning("pykrx 미설치 — 코스피200 유니버스 사용 불가. pip install pykrx")
-            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+        """pykrx로 해당 일자 코스피200 구성종목 조회 (생존자 편향 완화용). 실패 시 FDR 시총 상위 200 폴백."""
         date_str = (as_of_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
-        try:
-            # 1028 = KOSPI200. 버전에 따라 (code) 또는 (code, date) 시그니처
+        tickers: list | None = None
+
+        if HAS_PYKRX and _pykrx_stock is not None:
             try:
-                tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028", date_str)
-            except TypeError:
-                tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028")
-            if not tickers:
-                logger.warning("코스피200 구성종목 조회 결과 없음 (일자: {})", as_of_date)
-                return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+                try:
+                    tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028", date_str)
+                except TypeError:
+                    tickers = _pykrx_stock.get_index_portfolio_deposit_file("1028")
+            except Exception as e:
+                logger.warning(
+                    "pykrx 코스피200 구성 조회 실패 (as_of={}): {} — get_kospi_tickers_fdr(200) 폴백",
+                    as_of_date, e,
+                )
+                tickers = None
+
+        if tickers:
             rows = []
             for t in tickers:
                 code = str(t).strip().zfill(6)
@@ -570,9 +733,15 @@ class DataCollector:
             df = pd.DataFrame(rows)
             logger.info("코스피200 구성종목 {}개 조회 완료 (기준일: {})", len(df), as_of_date)
             return df
-        except Exception as e:
-            logger.warning("코스피200 구성종목 조회 실패 ({}): {}", as_of_date, e)
-            return pd.DataFrame(columns=["Code", "Name", "Market", "Marcap"])
+
+        fb = get_kospi_tickers_fdr(200)
+        logger.warning(
+            "코스피200 구성종목이 비어 있거나 pykrx 미사용 — get_kospi_tickers_fdr(200)으로 "
+            "{}개 대체 (지수 구성과 다를 수 있음, as_of={})",
+            len(fb), as_of_date,
+        )
+        rows = [{"Code": c, "Name": "", "Market": "KOSPI", "Marcap": 0} for c in fb]
+        return pd.DataFrame(rows)
 
     def _fetch_korean_stock_via_yfinance(
         self,
