@@ -8,6 +8,7 @@ PROJ_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CONFIG="$PROJ_ROOT/config/risk_params.yaml"
 LOGDIR="$PROJ_ROOT/experiments/ablation_study_v1/logs"
 RESULTCSV="$PROJ_ROOT/experiments/ablation_study_v1/results.csv"
+PYTHON="/c/ProgramData/anaconda3/envs/quant/python.exe"
 PHASE="${1:-all}"  # --phase 인자 또는 "all"
 
 mkdir -p "$LOGDIR"
@@ -49,7 +50,7 @@ run_portfolio() {
   verify_config
 
   local logfile="$LOGDIR/${exp_id}_${exp_name}.log"
-  python "$PROJ_ROOT/main.py" --mode portfolio_backtest --strategy scoring \
+  "$PYTHON" "$PROJ_ROOT/main.py" --mode portfolio_backtest --strategy scoring \
     --symbols 005930,000660,035720,051910,006400 \
     --start 2024-01-01 --end 2025-12-31 \
     2>&1 | tee "$logfile"
@@ -70,7 +71,7 @@ run_single() {
   verify_config
 
   local logfile="$LOGDIR/${exp_id}_${exp_name}.log"
-  python "$PROJ_ROOT/main.py" --mode backtest --strategy scoring \
+  "$PYTHON" "$PROJ_ROOT/main.py" --mode backtest --strategy scoring \
     --symbol "$symbol" \
     --start 2024-01-01 --end 2025-12-31 \
     2>&1 | tee "$logfile"
