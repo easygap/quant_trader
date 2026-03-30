@@ -17,6 +17,94 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+
+def _default_backtest_slippage_pct() -> float:
+    """risk_params.slippage 비율을 퍼센트로 (기본 0.05%)."""
+    try:
+        from config.config_loader import Config
+
+        rp = Config.get().risk_params or {}
+        return float(rp.get("slippage", 0.0005)) * 100.0
+    except Exception:
+        return 0.05
+
+
+def compute_live_slippage_vs_backtest(account_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    DB TradeHistory(mode=live)에서 actual_slippage_pct가 있는 건만 집계.
+    Returns None이면 표시할 실전 데이터 없음.
+    """
+    try:
+        from database.repositories import get_trade_history
+
+        trades = get_trade_history(mode="live", account_key=account_key)
+    except Exception as e:
+        logger.debug("실전 슬리피지 집계 생략: {}", e)
+        return None
+    vals = [float(t.actual_slippage_pct) for t in trades if t.actual_slippage_pct is not None]
+    if not vals:
+        return None
+    arr = np.array(vals, dtype=float)
+    bt = _default_backtest_slippage_pct()
+    return {
+        "n": len(vals),
+        "mean_pct": float(np.mean(arr)),
+        "median_pct": float(np.median(arr)),
+        "max_abs_pct": float(np.max(np.abs(arr))),
+        "backtest_assumed_pct": bt,
+    }
+
+
+def _format_live_slippage_text_table(summary: Optional[Dict[str, Any]]) -> List[str]:
+    lines = [
+        "",
+        "=== 실전 vs 백테스트 슬리피지 비교 ===",
+    ]
+    if not summary:
+        lines.append("  실전 체결 슬리피지 기록 없음 (TradeHistory.actual_slippage_pct 미기록).")
+        lines.append("")
+        return lines
+    bt = summary["backtest_assumed_pct"]
+    lines.extend([
+        f"  백테스트 가정 슬리피지 : {bt:.3f}% (risk_params.slippage)",
+        f"  실전 집계 건수         : {summary['n']}건",
+        "-" * 52,
+        f"  평균 (실전)           : {summary['mean_pct']:+.4f}%",
+        f"  중앙값 (실전)         : {summary['median_pct']:+.4f}%",
+        f"  최대 절대값 (실전)     : {summary['max_abs_pct']:.4f}%",
+        "-" * 52,
+        "",
+    ])
+    return lines
+
+
+def _format_live_slippage_html_card(summary: Optional[Dict[str, Any]]) -> str:
+    if not summary:
+        body = (
+            "<p style=\"color:#64748b;font-size:13px;\">"
+            "실전 체결 슬리피지 기록 없음 (<code>TradeHistory.actual_slippage_pct</code>)."
+            "</p>"
+        )
+    else:
+        bt = summary["backtest_assumed_pct"]
+        body = f"""<table>
+            <tbody>
+            <tr><td>백테스트 가정 슬리피지</td><td style="text-align:right;">{bt:.3f}%</td></tr>
+            <tr><td>실전 집계 건수</td><td style="text-align:right;">{summary["n"]}건</td></tr>
+            <tr><td>평균 (실전)</td><td style="text-align:right;">{summary["mean_pct"]:+.4f}%</td></tr>
+            <tr><td>중앙값 (실전)</td><td style="text-align:right;">{summary["median_pct"]:+.4f}%</td></tr>
+            <tr><td>최대 절대값 (실전)</td><td style="text-align:right;">{summary["max_abs_pct"]:.4f}%</td></tr>
+            </tbody>
+        </table>"""
+    return f"""
+    <div class="card" style="margin-top:24px;">
+        <h3 style="margin-bottom:12px;font-size:14px;">📉 실전 vs 백테스트 슬리피지 비교</h3>
+        <p style="color:#64748b;font-size:12px;margin-bottom:12px;">
+            실전 <code>mode=live</code> 거래 중 DB에 기록된 슬리피지 % (체결가 vs 주문 시점 예상가).
+        </p>
+        {body}
+    </div>"""
+
 _TRADES_WITH_PNL = frozenset(
     (
         "SELL",
@@ -393,6 +481,9 @@ class ReportGenerator:
             result["_report_regime_breakdown"] = regime_bd
             lines.extend(_format_regime_text_table(regime_bd))
 
+        slip_summary = compute_live_slippage_vs_backtest()
+        lines.extend(_format_live_slippage_text_table(slip_summary))
+
         lines.extend([
             "[ 매매 성과 ]",
             f"  총 매매 횟수  : {m['total_trades']:>13d}회",
@@ -503,6 +594,9 @@ class ReportGenerator:
         if regime_bd is None:
             regime_bd = compute_market_regime_breakdown(result, warn_bear_underperformance=False)
         regime_html = _format_regime_html_table(regime_bd) if regime_bd else ""
+
+        slip_summary = compute_live_slippage_vs_backtest()
+        live_slip_html = _format_live_slippage_html_card(slip_summary)
 
         mcpr = m.get("commission_to_profit_ratio")
         cpr_disp = f"{mcpr * 100:.2f}%" if mcpr is not None else "N/A"
@@ -622,6 +716,8 @@ class ReportGenerator:
     {overtrading_chart_html}
 
     {regime_html}
+
+    {live_slip_html}
 
     <div class="card">
         <h3 style="margin-bottom:12px;font-size:14px;">📋 거래 내역</h3>

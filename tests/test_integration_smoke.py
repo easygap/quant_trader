@@ -100,6 +100,10 @@ class TestBacktestAndReport:
             for key in (
                 "avg_holding_days",
                 "total_commission",
+                "total_tax",
+                "total_slippage_cost",
+                "total_transaction_cost",
+                "cost_to_net_profit_pct",
                 "commission_to_profit_ratio",
                 "monthly_roundtrips_per_symbol",
                 "annual_roundtrips_total",

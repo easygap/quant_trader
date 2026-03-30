@@ -131,6 +131,8 @@ def save_trade(
     reason: str = "",
     mode: str = "paper",
     account_key: str = "",
+    expected_price: Optional[float] = None,
+    actual_slippage_pct: Optional[float] = None,
 ) -> TradeHistory:
     """매매 기록 저장 (account_key: 전략별 계좌 구분, 다중 계좌 시 사용)."""
     session = get_session()
@@ -145,6 +147,8 @@ def save_trade(
             commission=commission,
             tax=tax,
             slippage=slippage,
+            expected_price=expected_price,
+            actual_slippage_pct=actual_slippage_pct,
             strategy=strategy,
             signal_score=signal_score,
             reason=reason,

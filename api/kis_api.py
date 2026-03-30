@@ -656,6 +656,139 @@ class KISApi:
             logger.error("매도 주문 실패: {} - {}", symbol, msg)
             return None
 
+    @staticmethod
+    def _odno_from_order_output(order_output: Optional[Dict[str, Any]]) -> str:
+        if not order_output or not isinstance(order_output, dict):
+            return ""
+        for k in ("ODNO", "odno", "ORD_NO", "ord_no"):
+            v = order_output.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return ""
+
+    @staticmethod
+    def _avg_price_from_ccld_row(row: Dict[str, Any]) -> Optional[float]:
+        """일별체결 output1 한 행에서 평균 체결가 추출."""
+        if not row or not isinstance(row, dict):
+            return None
+        for k in (
+            "avg_prvs", "AVG_PRVS", "avg_prc", "AVRG_PRC",
+            "pchs_avg_pric", "PCHS_AVG_PRIC", "ccld_avg_pric", "CCLD_AVG_PRIC",
+        ):
+            raw = row.get(k)
+            if raw is None or raw == "":
+                continue
+            try:
+                p = float(raw)
+                if p > 0:
+                    return p
+            except (TypeError, ValueError):
+                continue
+        amt_keys = (
+            ("tot_ccld_amt", "tot_ccld_qty"),
+            ("TOT_CCLD_AMT", "TOT_CCLD_QTY"),
+            ("ccld_amt", "ccld_qty"),
+            ("CCLD_AMT", "CCLD_QTY"),
+        )
+        for ak, qk in amt_keys:
+            try:
+                a = float(row.get(ak) or 0)
+                q = float(row.get(qk) or 0)
+                if a > 0 and q > 0:
+                    return a / q
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _inquire_daily_ccld_rows(
+        self,
+        symbol: str,
+        order_no: str,
+        ccld_dvsn: str = "01",
+    ) -> List[Dict[str, Any]]:
+        """
+        주식일별주문체결조회 output1 목록.
+        ccld_dvsn: 01 체결, 02 미체결 (증권사 스펙 기준).
+        """
+        if not self._is_configured() or not self.cano:
+            return []
+        try:
+            self._ensure_token()
+            tr_id = "VTTC8001R" if self.use_mock else "TTTC8001R"
+            today = datetime.now().strftime("%Y%m%d")
+            params = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "INQR_STRT_DT": today,
+                "INQR_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",
+                "CCLD_DVSN": ccld_dvsn,
+                "PDNO": symbol or "",
+                "ORD_NO": (order_no or "").strip(),
+                "INQR_DVSN": "00",
+            }
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+                tr_id,
+                params=params,
+            )
+            if not data or data.get("rt_cd") != "0":
+                return []
+            output = data.get("output1") or data.get("output") or []
+            if isinstance(output, dict):
+                output = [output] if output else []
+            if not isinstance(output, list):
+                return []
+            return [r for r in output if isinstance(r, dict)]
+        except Exception as e:
+            logger.debug("일별체결조회 실패: {} — {}", symbol, e)
+            return []
+
+    def get_filled_avg_price_after_order(
+        self,
+        symbol: str,
+        order_output: Optional[Dict[str, Any]],
+        max_attempts: int = 6,
+        delay_seconds: float = 0.35,
+    ) -> Optional[float]:
+        """
+        주문 직후 체결 평균가 조회 (일별체결조회, 짧은 폴링).
+        order_output: order-cash 응답의 output. ODNO 없으면 None 반환.
+        """
+        odno = self._odno_from_order_output(order_output)
+        if not odno:
+            logger.debug("주문 응답에 ODNO 없음 — 체결가 조회 생략: {}", symbol)
+            return None
+        want = odno.lstrip("0") or odno
+
+        def _pick_price(rows: List[Dict[str, Any]]) -> Optional[float]:
+            if not rows:
+                return None
+            if len(rows) == 1:
+                return self._avg_price_from_ccld_row(rows[0])
+            for row in rows:
+                r_od = str(row.get("odno") or row.get("ODNO") or "").strip()
+                if not r_od:
+                    continue
+                if r_od != odno and r_od.lstrip("0") != want:
+                    continue
+                px = self._avg_price_from_ccld_row(row)
+                if px and px > 0:
+                    return px
+            return None
+
+        for attempt in range(max_attempts):
+            if attempt:
+                time.sleep(delay_seconds)
+            px = _pick_price(self._inquire_daily_ccld_rows(symbol, odno, ccld_dvsn="01"))
+            if px and px > 0:
+                return px
+            px = _pick_price(self._inquire_daily_ccld_rows(symbol, "", ccld_dvsn="01"))
+            if px and px > 0:
+                return px
+        return None
+
     # =============================================================
     # 미체결 주문 조회 (주문 중복 방지용)
     # =============================================================

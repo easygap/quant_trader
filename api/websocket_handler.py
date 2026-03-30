@@ -4,7 +4,8 @@
 - asyncio 기반 비동기 처리
 - connect() 시 KISApi.get_approval_key()로 웹소켓 전용 승인키 발급 후 구독 메시지에 사용.
   KIS 공식 문서(웹소켓 인증) 변경 시 해당 로직 재검증 필요.
-- 재연결 시 끊긴 구간이 1분 초과면 KISApi.get_price_history()로 분봉 보충 후 급변(3%+) 시 BlackSwanDetector 보고.
+- 재연결 시: 갭 시각 로그 → 3분↑ REST(현재가·일봉)로 캐시 갱신 → 5분↑ BlackSwanDetector 즉시 점검
+  → 1분↑ 분봉 보충·급변(3%+) 보고 → 1분↑ Notifier(디스코드, critical=False) 갭 경고.
 """
 
 import json
@@ -37,6 +38,12 @@ class WebSocketHandler:
     REAL_WS_URL = "ws://ops.koreainvestment.com:21000"
     MOCK_WS_URL = "ws://ops.koreainvestment.com:31000"
 
+    # 재연결 갭 처리 임계값
+    _GAP_MINUTE_BACKFILL = timedelta(seconds=60)   # 분봉 보충·스윙 검사
+    _GAP_REST_REFRESH = timedelta(minutes=3)       # REST 현재가·일봉 → 캐시
+    _GAP_BLACKSWAN_RECHECK = timedelta(minutes=5)  # 급락 로직 즉시 1회
+    _GAP_NOTIFY_MIN = timedelta(seconds=60)        # 디스코드 갭 경고(너무 짧은 끊김은 생략)
+
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
         kis = self.config.kis_api
@@ -64,6 +71,8 @@ class WebSocketHandler:
 
         # 재연결 갭 보충용 (연결 끊김 시각 → 재연결 성공 시 REST 보충)
         self._disconnect_time: Optional[datetime] = None
+        # 웹소켓·REST 갱신 가격 스냅샷 (symbol → dict)
+        self._price_cache: Dict[str, Dict[str, Any]] = {}
 
         logger.info(
             "WebSocketHandler 초기화 (모드: {})",
@@ -106,29 +115,155 @@ class WebSocketHandler:
             return None
         return (hi - lo) / lo * 100.0
 
-    async def _process_reconnect_gap(self, symbols: list[str], gap: timedelta) -> int:
+    def _emit_price_update(self, data: dict) -> None:
+        """등록된 체결가 콜백에 동일 페이로드 전달."""
+        for cb in self._on_price_callbacks:
+            try:
+                cb(data)
+            except Exception as e:
+                logger.error("[WebSocket] price 콜백 오류: {}", e)
+
+    def get_cached_price(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """내부 가격 캐시 조회 (웹소켓 또는 갭 복구 REST로 갱신된 값)."""
+        return self._price_cache.get(symbol)
+
+    def _update_price_cache_from_ws(self, price_data: dict) -> None:
+        sym = price_data.get("symbol")
+        if not sym:
+            return
+        self._price_cache[sym] = {
+            "quote": {
+                "symbol": sym,
+                "price": float(price_data.get("price") or 0),
+                "prev_close": None,
+                "change_rate": float(price_data.get("change_rate") or 0),
+                "volume": int(price_data.get("volume") or 0),
+            },
+            "daily": None,
+            "source_main": "websocket",
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    async def _rest_refresh_price_cache(self, symbols: list[str], api: Any) -> int:
         """
-        갭이 1분 초과 시 REST로 분봉 보충 후 변동률 검사.
+        KIS REST 현재가 + 일봉(최근 소량) 조회로 캐시 갱신 후 콜백 1회씩 전달.
+        """
+        n_ok = 0
+        for symbol in symbols:
+            try:
+                quote = await asyncio.to_thread(api.get_current_price, symbol)
+                daily = await asyncio.to_thread(api.get_daily_prices, symbol, "D", 5)
+                if not quote:
+                    continue
+                n_ok += 1
+                self._price_cache[symbol] = {
+                    "quote": quote,
+                    "daily": daily,
+                    "source_main": "kis_rest_gap_refresh",
+                    "updated_at": datetime.now().isoformat(),
+                }
+                prev_close = float(quote.get("prev_close") or 0)
+                price = float(quote.get("price") or 0)
+                chg = price - prev_close if prev_close else float(quote.get("change_rate") or 0)
+                payload = {
+                    "symbol": symbol,
+                    "price": price,
+                    "volume": int(quote.get("volume") or 0),
+                    "change": chg,
+                    "change_rate": float(quote.get("change_rate") or 0),
+                    "time": datetime.now().strftime("%H%M%S"),
+                    "cumulative_volume": int(quote.get("volume") or 0),
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "kis_rest_gap_refresh",
+                }
+                self._emit_price_update(payload)
+            except Exception as e:
+                logger.warning("[WebSocket] REST 캐시 갱신 실패 {}: {}", symbol, e)
+        logger.info("[WebSocket] 갭 복구 REST 캐시 갱신 완료: {}/{} 종목", n_ok, len(symbols))
+        return n_ok
+
+    async def _run_blackswan_gap_check(
+        self,
+        symbols: list[str],
+        detector: Any,
+        api: Any,
+    ) -> None:
+        """갭 5분 이상 시 개별 종목 급락 로직(check_stock) 즉시 1회 실행."""
+        if api is None:
+            logger.warning("[WebSocket] BlackSwan 갭 점검 생략: KIS API 없음")
+            return
+        for symbol in symbols:
+            try:
+                entry = self._price_cache.get(symbol) or {}
+                q = entry.get("quote") if isinstance(entry, dict) else None
+                if not q or not q.get("price") or not q.get("prev_close"):
+                    q = await asyncio.to_thread(api.get_current_price, symbol)
+                    if q:
+                        self._price_cache[symbol] = {
+                            "quote": q,
+                            "daily": entry.get("daily") if isinstance(entry, dict) else None,
+                            "source_main": "kis_rest_blackswan_fill",
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                if not q:
+                    continue
+                price = float(q.get("price") or 0)
+                prev_close = float(q.get("prev_close") or 0)
+                if price <= 0 or prev_close <= 0:
+                    continue
+                result = detector.check_stock(symbol, price, prev_close)
+                if result.get("triggered"):
+                    logger.warning(
+                        "[WebSocket] 갭 복구 후 BlackSwan 즉시 점검 발동: {} — {}",
+                        symbol,
+                        result.get("reason", ""),
+                    )
+            except Exception as e:
+                logger.warning("[WebSocket] BlackSwan 갭 점검 실패 {}: {}", symbol, e)
+
+    def _notify_websocket_gap_discord(
+        self,
+        disconnect_at: datetime,
+        reconnect_at: datetime,
+        gap: timedelta,
+    ) -> None:
+        try:
+            from core.notifier import Notifier
+
+            gap_sec = gap.total_seconds()
+            body = (
+                f"끊김: {disconnect_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"재연결: {reconnect_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"갭: {gap_sec:.0f}초 ({gap_sec / 60.0:.2f}분)"
+            )
+            Notifier(self.config).send_embed(
+                title="웹소켓 갭 경고",
+                description=body,
+                color=0xF0AD4E,
+                fields=None,
+                critical=False,
+            )
+        except Exception as e:
+            logger.warning("[WebSocket] 갭 디스코드 알림 실패: {}", e)
+
+    async def _minute_bar_gap_backfill(
+        self,
+        symbols: list[str],
+        gap: timedelta,
+        api: Any,
+        detector: Any,
+    ) -> int:
+        """
+        갭이 1분 초과 시 REST 분봉 보충 후 변동률 검사(기존 로직).
         Returns:
-            보충 조회를 수행한 종목 수(갭이 짧으면 0).
+            보충 조회를 시도한 종목 수.
         """
         gap_sec = gap.total_seconds()
-        if gap_sec <= 60:
+        if gap_sec <= self._GAP_MINUTE_BACKFILL.total_seconds():
             return 0
         gap_min = max(1, int(gap_sec / 60))
         minutes_fetch = gap_min + 5
 
-        from api.kis_api import KISApi
-        from core.blackswan_detector import BlackSwanDetector
-
-        api = KISApi()
-        try:
-            await asyncio.to_thread(api.authenticate)
-        except Exception as e:
-            logger.warning("[WebSocket] 갭 보충용 KIS 인증 실패: {}", e)
-            return 0
-
-        detector = BlackSwanDetector(self.config)
         n_queried = 0
         for symbol in symbols:
             n_queried += 1
@@ -145,6 +280,78 @@ class WebSocketHandler:
             except Exception as e:
                 logger.debug("[WebSocket] 갭 보충 조회 실패 {}: {}", symbol, e)
         return n_queried
+
+    async def _after_websocket_reconnected(
+        self,
+        symbols: list[str],
+        reconnect_time: datetime,
+        gap_td: timedelta,
+    ) -> None:
+        """재연결 직후 갭 로그·REST 캐시·블랙스완·분봉 보충·알림 순 처리."""
+        gap_sec = gap_td.total_seconds()
+        disc = self._disconnect_time
+
+        if disc is not None and gap_sec > 0:
+            logger.info(
+                "[WebSocket] 재연결 성공 | 끊김 시각={} | 재연결 시각={} | 갭={:.0f}초 ({:.2f}분)",
+                disc.strftime("%Y-%m-%d %H:%M:%S"),
+                reconnect_time.strftime("%Y-%m-%d %H:%M:%S"),
+                gap_sec,
+                gap_sec / 60.0,
+            )
+
+        api = None
+
+        async def _ensure_api():
+            nonlocal api
+            if api is not None:
+                return api
+            from api.kis_api import KISApi
+
+            api = KISApi()
+            try:
+                await asyncio.to_thread(api.authenticate)
+            except Exception as e:
+                logger.warning("[WebSocket] 갭 처리용 KIS 인증 실패: {}", e)
+                return None
+            return api
+
+        detector = None
+
+        def _detector():
+            nonlocal detector
+            if detector is None:
+                from core.blackswan_detector import BlackSwanDetector
+
+                detector = BlackSwanDetector(self.config)
+            return detector
+
+        needs_kis = (
+            gap_td >= self._GAP_REST_REFRESH
+            or gap_td >= self._GAP_BLACKSWAN_RECHECK
+            or gap_td > self._GAP_MINUTE_BACKFILL
+        )
+        kis = await _ensure_api() if needs_kis else None
+
+        if gap_td >= self._GAP_REST_REFRESH and kis:
+            await self._rest_refresh_price_cache(symbols, kis)
+
+        if gap_td >= self._GAP_BLACKSWAN_RECHECK and kis:
+            await self._run_blackswan_gap_check(symbols, _detector(), kis)
+
+        n_backfill = 0
+        if gap_td > self._GAP_MINUTE_BACKFILL and kis:
+            n_backfill = await self._minute_bar_gap_backfill(
+                symbols, gap_td, kis, _detector()
+            )
+
+        if disc is not None and gap_td >= self._GAP_NOTIFY_MIN:
+            self._notify_websocket_gap_discord(disc, reconnect_time, gap_td)
+
+        logger.info(
+            "[WebSocket] 갭 후속 처리 완료 (분봉 보충 시도 종목 수: {})",
+            n_backfill,
+        )
 
     async def connect(self, symbols: list[str]):
         """
@@ -181,13 +388,7 @@ class WebSocketHandler:
                     else:
                         gap_td = timedelta(0)
 
-                    n_backfill = await self._process_reconnect_gap(symbols, gap_td)
-                    logger.info(
-                        "[WebSocket] 재연결 완료. 갭: {:.0f}초. 보충 조회 종목: {}개",
-                        gap_td.total_seconds(),
-                        n_backfill,
-                    )
-
+                    await self._after_websocket_reconnected(symbols, reconnect_time, gap_td)
                     self._disconnect_time = None
 
                     self._ws = ws
@@ -336,7 +537,7 @@ class WebSocketHandler:
             if tr_id == "H0STCNT0":
                 # 체결 데이터
                 price_data = self._parse_price_data(raw_data)
-                
+
                 # 실시간 데이터 정합성 검증
                 from core.data_validator import DataValidator
                 if price_data and DataValidator.validate_realtime_data(price_data):
@@ -346,8 +547,8 @@ class WebSocketHandler:
                             "웹소켓 첫 실시간 데이터 수신 (tr_id: {}, symbol: {}, price: {})",
                             tr_id, price_data.get("symbol"), price_data.get("price"),
                         )
-                    for callback in self._on_price_callbacks:
-                        callback(price_data)
+                    self._update_price_cache_from_ws(price_data)
+                    self._emit_price_update(price_data)
                 elif price_data:
                     logger.warning("웹소켓 손상 데이터 드롭: {}", price_data)
 
