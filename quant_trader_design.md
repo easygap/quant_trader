@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v2.8
+> **문서 버전**: v3.1
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-03-27
+> **최종 수정**: 2026-03-31
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -50,13 +50,13 @@
 | **수익 목표** | 검증된 전략으로 벤치마크(코스피 지수) 대비 초과 수익 달성. **가중치 최적화·워크포워드 검증·paper 1개월 운영을 모두 통과한 후에만 기대할 수 있는 목표**이며, 검증 없이 "연 20%" 같은 수치를 설정하는 것은 위험 |
 | **대응 속도** | 실시간 시세 반영 (1초 이내 분석·주문) |
 
-### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v2.8 업데이트)
+### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v3.1 업데이트)
 
 > **핵심 판단: 시스템은 research-only 상태이며, live 자동매매는 코드 레벨 hard gate로 차단되어 있습니다.**
 
 인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OperationEvent 기록, 주문 lifecycle 추적)는 프로덕션 수준에 가깝게 완성되었습니다. 그러나 **전략 신호의 실전 유효성이 검증되지 않았으므로** live 전환은 불가합니다.
 
-**전략 상태 레지스트리** (v2.8 현재):
+**전략 상태 레지스트리** (v3.1 현재):
 
 | 전략 | 상태 | 허용 모드 | 사유 |
 |------|------|-----------|------|
@@ -66,6 +66,9 @@
 | **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속, WF 미실행 |
 | **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
 | **trend_following** | `disabled` | backtest only | 미검증 |
+| **trend_pullback** | `experimental` | backtest | C-3A SMA60+RSI pullback, edge 약함 |
+| **breakout_volume** | `experimental` | backtest | C-4 전고점 돌파+거래량 급증. 4종목 OOS 2.70%, Sharpe -0.70. frozen params 통과 |
+| **relative_strength_rotation** | `experimental` | backtest | C-5 월간 상대강도 회전. OOS 6.18% but DEV -4.99%. 하락장 방어 미구현 |
 
 **Live 진입 Hard Gate** (5개 조건 전부 충족 필수, `main.py:_check_live_readiness_gate`):
 1. 승인된 전략 1개 이상 (`reports/approved_strategies.json` + config hash 일치)
@@ -447,6 +450,53 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
   - `auto_downgrade: true` — 고상관 시 conservative 자동 전환
   - `independence_threshold: 0.6` — 상관계수 기준
 - **권고**: **0.6 이상**인 쌍이 있으면 다수결만으로는 독립성이 보장되지 않습니다. conservative 전환은 응급 조치이며, **근본적으로는 전략 구성을 재검토**하세요.
+
+### 4.4b 거래량 동반 돌파 전략 — breakout_volume (C-4)
+
+**가설**: 전고점 돌파 + 거래량 급증이 동반되면 한국 대형주에서 유효한 모멘텀 시그널.
+
+**Entry** (edge-trigger, long only):
+1. `breakout_ref = rolling_max(high, breakout_period).shift(1)` — 현재 봉 제외
+2. `avg_vol_ref = rolling_mean(volume, breakout_period).shift(1)` — 현재 봉 제외
+3. `close > breakout_ref AND volume > avg_vol_ref * surge_ratio AND ADX > adx_min`
+4. 전일 조건 미충족 → 당일 충족 시에만 BUY (edge-trigger)
+
+**Exit**: `close < breakout_ref` (최소 실패 신호). 나머지 손절/트레일링은 ATR 2.5 risk layer 위임.
+
+**Frozen params**: `breakout_period=10, surge_ratio=1.5, adx_min=20`
+
+| 검증 | 유니버스 | 기간 | return | Sharpe | MDD |
+|------|----------|------|--------|--------|-----|
+| OOS 포트폴리오 | 005930,000660,035720,051910 | 2024-2025 | +2.70% | -0.70 | -2.07% |
+| DEV 포트폴리오 | 〃 | 2021-2023 | -2.94% | -2.83 | -4.65% |
+
+**병목**: SIGNAL_SPARSE — 486일 중 BUY 있는 날 53일(11%). 동시 BUY 충돌 2년간 2회.
+
+**구현**: `strategies/breakout_volume.py`, `config/strategies.yaml:breakout_volume`
+
+### 4.4c 상대강도 회전 전략 — relative_strength_rotation (C-5)
+
+**목표**: breakout_volume의 SIGNAL_SPARSE 구간을 보완하는 높은 days_in_market 확보.
+
+**랭킹**: `composite = 0.6 × ret_60d + 0.4 × ret_120d`
+**추세 필터**: `close > SMA(60)`
+**리밸런싱**: 월간 (매월 첫 거래일). max_positions=2.
+**Exit**: 리밸런싱일 모멘텀 음수/SMA 하회, 비리밸런싱일 SMA60 하향 이탈 edge-trigger.
+
+| 검증 | 유니버스 | 기간 | return | Sharpe | MDD |
+|------|----------|------|--------|--------|-----|
+| OOS 단독 | 005930,000660,035720,051910 | 2024-2025 | +6.18% | 0.05 | -3.06% |
+| DEV 단독 | 〃 | 2021-2023 | -4.99% | -1.31 | -7.90% |
+
+**2-sleeve 비중 스윕 결과** (BV/Rotation, 두 구간 평균):
+- 0/100: avg_ret +0.59%, avg_sharpe -0.63, worst_mdd -7.90%
+- 25/75: avg_ret +0.78%, avg_sharpe -0.84, worst_mdd -5.88%
+- 50/50: avg_ret -0.26%, worst_mdd -5.77%
+- 100/0: avg_ret -0.12%, worst_mdd -4.65%
+
+**판정**: NOT_READY_TO_EXPAND — 어떤 비중도 양 구간 모두 양수 수익 불가. DEV 구간 하락장 방어 로직 필요.
+
+**구현**: `strategies/relative_strength_rotation.py`, `scripts/c5_sleeve_backtest.py`, `scripts/c5_weight_sweep.py`
 
 ### 4.5 전략별 수익 가능성 진단
 
@@ -1049,6 +1099,14 @@ quant_trader/
 - **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계.
 - **활용**: 유니버스 후보 종목 묶음에 대한 **동시 보유 시나리오** 검증, 단일 종목 백테스트와의 성과 비교.
 
+### 8.6 멀티전략 2-Sleeve 포트폴리오 검증 — v3.1
+
+- **목적**: 서로 다른 전략을 **독립 sleeve**로 운용하여 자본을 고정 비율로 분리하고, 각 sleeve의 기여를 독립 측정.
+- **구조**: Sleeve A(breakout_volume) + Sleeve B(relative_strength_rotation). 전략 간 total_score 직접 비교 금지, 자본 배분만 고정.
+- **검증 스크립트**: `scripts/c5_sleeve_backtest.py` (단독 vs 50/50 비교), `scripts/c5_weight_sweep.py` (BV 0/25/50/75/100% × 2개 구간)
+- **결과**: §4.4c 참고. 양 구간 모두 양수 수익을 내는 비중 조합 없음 → NOT_READY_TO_EXPAND.
+- **다음 단계**: Rotation 전략에 시장 국면 필터(KS11 SMA200) 추가 후 재검증.
+
 ---
 
 ## 9. 예외 처리 및 안정성
@@ -1281,4 +1339,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-03-27 (v2.8: `backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/CLI 표 갱신; §6.2 strategies.yaml `fundamental_factor` 반영, deploy/ 구성 명시, 문서 간 양식·교차 참조 통일)
+> **최종 수정**: 2026-03-31 (v3.1: C-4 breakout_volume·C-5 relative_strength_rotation 전략 추가, 2-sleeve 멀티전략 포트폴리오 검증 §4.4b/§4.4c/§8.6, 전략 레지스트리 v3.1 갱신, 비중 스윕+강건성 검증 결과 반영)
