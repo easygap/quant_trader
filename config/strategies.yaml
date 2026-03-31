@@ -175,6 +175,22 @@ trend_pullback:
   adx_min: 20                 # ADX 이 값 초과 시 추세 존재
   rsi_exit: 70                # RSI 이 값 초과 시 과열 → 청산
 
+# --- 거래량 동반 돌파 전략 (Breakout + Volume, C-4) ---
+# 전고점 돌파 + 거래량 급증 + ADX 추세 확인. edge-trigger 진입.
+# Exit: close < breakout_ref (최소 실패 신호). 나머지는 ATR 2.5 trailing stop 위임.
+breakout_volume:
+  breakout_period: 10           # 돌파 기준 기간 (rolling max window) — C-4 OOS best
+  surge_ratio: 1.5              # 거래량 급증 배수 (volume > avg_vol * surge_ratio) — C-4 OOS best
+  adx_min: 20                   # ADX 이 값 초과 시 추세 존재
+
+# --- 상대강도 회전 전략 (Relative Strength Rotation, C-5) ---
+# 월간 리밸런싱으로 상대강도 상위 종목 회전 보유. breakout_volume의 SIGNAL_SPARSE 보완용.
+relative_strength_rotation:
+  short_lookback: 60          # 단기 모멘텀 기간 (일)
+  long_lookback: 120          # 장기 모멘텀 기간 (일)
+  sma_period: 60              # 추세 필터 SMA 기간
+  short_weight: 0.6           # 단기 모멘텀 가중치 (장기 = 1 - short_weight)
+
 # --- 추세 추종 전략 ---
 # 진입이 늦는 구조: ADX·200일선·MACD 세 조건 동시 충족 = 이미 상승한 뒤. 손실 거래 잦고 승률 40% 이하 가능.
 # 전략 유효성은 손익비(Profit Factor) ≥ 2.0 달성 여부로 판단. 백테스트/검증 시 손익비 확인 필수.
