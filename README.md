@@ -11,10 +11,11 @@
 
 ## 주요 기능
 
-- 백테스트 / 포트폴리오 백테스트
+- 백테스트 / 포트폴리오 백테스트 / 멀티전략 sleeve 비교
 - 모의투자 / 실전 매매
 - 전략 검증 / 성과 비교 / 파라미터 최적화
 - 스코어링 / 평균회귀 / 추세추종 / 펀더멘털 / 앙상블 전략
+- 거래량 돌파(C-4) / 상대강도 회전(C-5) / 2-sleeve 포트폴리오
 - 리스크 관리, 알림, 바스켓 리밸런싱, 웹 대시보드
 
 ## 사용 환경
@@ -50,6 +51,12 @@ python main.py --mode backtest --strategy scoring --symbol 005930
 
 # 포트폴리오 백테스트
 python main.py --mode portfolio_backtest --strategy scoring --symbols 005930,000660 --start 2023-01-01 --end 2024-12-31
+
+# 거래량 돌파 전략 (C-4) 포트폴리오 백테스트
+python main.py --mode portfolio_backtest --strategy breakout_volume --symbols 005930,000660,035720,051910 --start 2024-01-01 --end 2025-12-31
+
+# 멀티전략 sleeve 비중 스윕 (C-5)
+python scripts/c5_weight_sweep.py
 
 # 모의투자
 python main.py --mode paper --strategy scoring
@@ -107,7 +114,8 @@ pytest tests/ -q
 
 * `config/` — 설정
 * `core/` — 데이터, 지표, 신호, 리스크, 주문, 스케줄러, 알림
-* `strategies/` — 전략
+* `strategies/` — 전략 (scoring, breakout_volume, relative_strength_rotation 등)
+* `scripts/` — 검증 스크립트 (C-4 OOS, C-5 sleeve 비교/비중 스윕)
 * `api/` — KIS REST·웹소켓
 * `backtest/` — 백테스트, 검증, 최적화, 비교
 * `database/` — 모델·백업
@@ -122,7 +130,7 @@ pytest tests/ -q
 |------|------|
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
-| [`docs/BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 손익 개선 포인트(손익비·상승장·손절/익절·가중치 파이프라인) |
+| [`BACKTEST_IMPROVEMENT.md`](BACKTEST_IMPROVEMENT.md) | 백테스트 신뢰성 개선 내역, 알려진 한계, 추가 과제 |
 | [`deploy/README.md`](deploy/README.md) | Oracle Cloud Free Tier ARM 배포·systemd 상시 구동 가이드 |
 
 ## 주의
