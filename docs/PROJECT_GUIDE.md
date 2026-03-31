@@ -248,11 +248,14 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **\_\_init\_\_.py** | 전략 레지스트리. 등록명: **`scoring`**, **`mean_reversion`**, **`trend_following`**, **`fundamental_factor`**, **`momentum_factor`**, **`ensemble`**. `volatility_condition`은 레지스트리에 없음(앙상블 내부 전용). `create_strategy`, `get_strategy_names`, `register_strategy`. |
+| **\_\_init\_\_.py** | 전략 레지스트리. 등록명: **`scoring`**, **`mean_reversion`**, **`trend_following`**, **`trend_pullback`**, **`breakout_volume`**, **`relative_strength_rotation`**, **`fundamental_factor`**, **`momentum_factor`**, **`ensemble`**. `volatility_condition`은 레지스트리에 없음(앙상블 내부 전용). `create_strategy`, `get_strategy_names`, `register_strategy`. |
 | **base_strategy.py** | `analyze(df)` → 지표·신호 붙은 DataFrame, `generate_signal(df, **kwargs)` → 최신 BUY/SELL/HOLD·점수·상세. |
 | **scoring_strategy.py** | IndicatorEngine + SignalGenerator. 총점 ≥ buy_threshold 매수, ≤ sell_threshold 매도. |
 | **mean_reversion.py** | Z-Score·ADX 필터. **52주 이중 필터**, **`restrict_to_kospi200`**, **펀더멘털 필터**(pykrx→yfinance). 설계서 §4.2. |
 | **trend_following.py** | ADX·200일선·MACD·ATR 추세 추종. 손익비 ≥ 2.0 검증 필수(§4.3). |
+| **trend_pullback.py** | C-3A: SMA60 상승추세 + RSI 눌림목 + ADX 추세 확인. edge-trigger 진입. 설계서 §4. |
+| **breakout_volume.py** | C-4: 전고점 돌파 + 거래량 급증 + ADX 추세 확인. edge-trigger 진입. ATR 2.5 trailing stop 위임. frozen params(period=10, surge=1.5, adx=20). 설계서 §4.4b. |
+| **relative_strength_rotation.py** | C-5: 60d+120d 복합 모멘텀 상위 종목 월간 회전 보유. SMA60 추세 필터. max_positions=2. 설계서 §4.4c. |
 | **fundamental_factor.py** | 재무(PER 상대·ROE·부채·영업이익 성장 등)만으로 신호. pykrx→yfinance. 백테스트 시 `df.attrs['symbol']` 권장. |
 | **momentum_factor.py** | N일 수익률만. **CLI 등록 완료** — `--strategy momentum_factor`로 단독 사용 가능 + 앙상블 구성용. |
 | **volatility_condition.py** | N일 실현변동성만. **앙상블 구성용** — 단독 CLI 전략 아님. |
@@ -497,7 +500,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 - **지표**: `core/indicator_engine.py`에서 pandas-ta로 RSI, MACD, 볼린저, MA, 스토캐스틱, ADX, ATR, OBV, volume_ratio 계산. 설정은 `config/strategies.yaml` → `indicators`.
 - **스코어링**: `core/signal_generator.py`가 가중치(weights)로 점수 합산 → buy_threshold/sell_threshold로 BUY/SELL 판단. **⚠️ 가중치는 미검증 직관값이며, 이 상태로 실전 투입하면 노이즈를 실행하는 것**. `collinearity_mode: representative_only`(권장)로 설정하면 MACD+볼린저+거래량 3개만 합산하여 다중공선성을 근본적으로 차단. 반드시 `check_correlation → optimize --include-weights --auto-correlation → validate --walk-forward` 파이프라인으로 최적화 후 사용. **스코어링 전략 단독으로 안정적 수익을 낼 가능성은 낮음** — 설계서 §4.5.1 참고.
-- **전략 (CLI 등록)**: scoring, mean_reversion, trend_following, **fundamental_factor**, **momentum_factor**, **ensemble**. **volatility_condition**은 앙상블 내부 구성용. 앙상블은 `ensemble.components`로 구성·가중치 설정(기본 예시에 fundamental_factor 포함). 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
+- **전략 (CLI 등록)**: scoring, mean_reversion, trend_following, **trend_pullback**, **breakout_volume**, **relative_strength_rotation**, **fundamental_factor**, **momentum_factor**, **ensemble**. **volatility_condition**은 앙상블 내부 구성용. 앙상블은 `ensemble.components`로 구성·가중치 설정(기본 예시에 fundamental_factor 포함). breakout_volume(C-4)과 relative_strength_rotation(C-5)은 2-sleeve 멀티전략 포트폴리오 구조로 검증 중. 각 전략의 시장 비효율성 가정은 설계서 §4 참고.
 
 공식·파라미터·신호 조건 등 **상세는 루트의 `quant_trader_design.md` §3(지표), §4(전략), §5(리스크)** 참고.
 
@@ -507,7 +510,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
-### 전략 상태 레지스트리 (v2.8)
+### 전략 상태 레지스트리 (v3.1)
 
 | 전략 | 상태 | 허용 모드 | 사유 |
 |------|------|-----------|------|
@@ -517,6 +520,9 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속 |
 | **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
 | **trend_following** | `disabled` | backtest only | 미검증 |
+| **trend_pullback** | `experimental` | backtest | C-3A SMA60+RSI pullback, edge 약함 |
+| **breakout_volume** | `experimental` | backtest | C-4 전고점 돌파+거래량 급증. 4종목 OOS 2.70% |
+| **relative_strength_rotation** | `experimental` | backtest | C-5 월간 상대강도 회전. OOS 6.18%, DEV -4.99% |
 
 ### Live 진입 Hard Gate (4중 보안)
 
@@ -599,6 +605,9 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ 다종목 모멘텀 포트폴리오 백테스트 | `--mode backtest_momentum_top` — 리밸런싱·시장 국면·포트폴리오 스탑 |
 | ✅ 전략 진단 보조 | `strategy_diagnostics.py` DiagnosticLine — 전략별 신호·점수 진단 |
 | ✅ 대시보드 런타임 상태 | `dashboard_runtime_state.py` — 스케줄러·전략 실행 현황 실시간 전달 |
+| ✅ C-4 breakout_volume | 전고점 돌파+거래량 급증 전략. frozen params, 4종목 OOS 통과 |
+| ✅ C-5 relative_strength_rotation | 월간 상대강도 회전 전략. 2-sleeve 비중 스윕+강건성 검증 완료 |
+| ✅ 멀티전략 sleeve 비교 | `c5_sleeve_backtest.py`, `c5_weight_sweep.py` — 독립 sleeve 결합 검증 인프라 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
