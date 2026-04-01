@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v2.8
-> **최종 수정**: 2026-03-27
+> **문서 버전**: v4.0
+> **최종 수정**: 2026-04-01
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -91,20 +91,29 @@
 | **호가 단위 미반영** | 한국 시장 호가 단위(5원/10원/50원 등) 미적용 | 체결가 미세 차이 |
 | **장중 가격 미사용** | 일봉 기반 시뮬레이션. 장중 변동 미반영 | 손절/익절 발동 시점 차이 |
 | **단일 종목 검증 한계** | 현재 검증은 watchlist 3종목 위주. 유니버스 전체 검증 미실행 | 전략 일반화 불확실 |
+| **멀티전략 강건성** | BV50/R50 paper 후보 확정. Rotation TS OFF + TP 7% 적용 후 rolling WF 60% positive window. OOS 2.87%, MDD -1.71% | paper 운영 중 guardrail 모니터링 필요 |
 
 ---
 
-## 4. 추가 과제 (미완료)
+## 4. 추가 과제
 
 | 과제 | 우선순위 | 상태 |
 |------|----------|------|
 | 유니버스 전체 (코스피200) 백테스트 | 높음 | 미실행 |
-| Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | 미실행 |
+| Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | 미실행 |
-| 월별 성과 분해 | 중간 | 미구현 |
+| 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
 | 유동성 필터 (일평균 거래대금 기준 종목 제외) | 높음 | 미구현 |
 | Sortino Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
 | Calmar Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
+| Rotation 하락장 방어 (시장 국면 필터) | 높음 | **완료 — KS11 SMA200 필터, abs momentum 필터 테스트 후 NO_MEANINGFUL_IMPROVEMENT 판정. trailing stop 제거(승률 18-29%)로 DEV -4.99% -> -0.96% 개선** |
+| 멀티전략 sleeve 비중 최적화 재검증 | 높음 | **완료 — TS OFF + TP 7% 적용 후 BV50/R50 OOS 2.87%, rolling WF 60% positive** |
+| KR_CORE_10 유니버스 확장 | 중간 | 대기 (BV50/R50 paper 운영 결과 확인 후) |
+| Rotation trailing stop 제거 | 높음 | **완료 — disable_trailing_stop: true. 승률 18-29%, negative EV -> capture rate 71%->79%(DEV), 78%->83%(OOS)** |
+| Rotation TP sweep (8% -> 7%) | 높음 | **완료 — per-strategy TP override. DEV -0.96% -> -0.19%, OOS 4.25% -> 4.71%** |
+| Rolling walk-forward 검증 (10 windows) | 높음 | **완료 — BV50/R50 positive 60%, median +0.45%, worst -2.05%** |
+| Paper 모니터링 인프라 | 높음 | **완료 — c5_paper_monthly_report.py, signal/executed/skipped 카운터, guardrail 설정** |
+| Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 
 ---
 
@@ -117,3 +126,13 @@
 | `reports/live_gate_policy.md` | Live 진입 5개 조건 |
 | `reports/paper_experiment_manifest.json` | 60영업일 paper 실험 설정 |
 | `reports/full_paper_lifecycle_test.json` | Lifecycle 테스트 4/4 PASS 결과 |
+| `scripts/c5_rotation_filter_test.py` | KS11 SMA200 시장 필터 비교 테스트 |
+| `scripts/c5_rotation_absmom_test.py` | 절대 모멘텀 필터 비교 테스트 |
+| `scripts/c5_rotation_trade_diagnostic.py` | 거래 단위 진단 분석 |
+| `scripts/c5_rotation_cooling_test.py` | min_hold_days 냉각 기간 테스트 |
+| `scripts/c5_rotation_no_ts_test.py` | trailing stop 제거 효과 테스트 |
+| `scripts/c5_rotation_tp_sweep.py` | TP 비율 스윕 + sleeve 재비교 |
+| `scripts/c5_sleeve_sweep_nots.py` | TS OFF 상태 sleeve 비중 스윕 |
+| `scripts/c5_rolling_walkforward.py` | rolling walk-forward 검증 (10 windows x 12mo) |
+| `scripts/c5_tp_override_verify.py` | per-strategy TP override 검증 |
+| `scripts/c5_paper_monthly_report.py` | paper trading 월간 리포트 생성 |
