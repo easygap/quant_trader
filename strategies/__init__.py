@@ -20,6 +20,8 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
     "mean_reversion":      ("strategies.mean_reversion",     "MeanReversionStrategy"),
     "trend_following":     ("strategies.trend_following",     "TrendFollowingStrategy"),
     "trend_pullback":      ("strategies.trend_pullback",      "TrendPullbackStrategy"),
+    "breakout_volume":     ("strategies.breakout_volume",     "BreakoutVolumeStrategy"),
+    "relative_strength_rotation": ("strategies.relative_strength_rotation", "RelativeStrengthRotationStrategy"),
     "fundamental_factor":  ("strategies.fundamental_factor",  "FundamentalFactorStrategy"),
     "fundamental_first":   ("strategies.fundamental_first",   "FundamentalFirstStrategy"),
     "momentum_factor":     ("strategies.momentum_factor",     "MomentumFactorStrategy"),
@@ -37,6 +39,8 @@ STRATEGY_STATUS: dict[str, dict] = {
     "fundamental_first":  {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "fundamental_factor 종속, WF 미실행"},
     "momentum_factor":    {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "WF 미실행"},
     "ensemble":           {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "구성 전략 모두 미승인"},
+    "breakout_volume":    {"status": "experimental",  "allowed_modes": ["backtest"],          "reason": "C-4 MVP, coarse sweep 검증 중"},
+    "relative_strength_rotation": {"status": "experimental", "allowed_modes": ["backtest"], "reason": "C-5 MVP, sleeve 결합 검증 중"},
     "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest", "paper"], "reason": "C-1 MVP, WF 미실행"},
 }
 
