@@ -15,7 +15,7 @@
 - 모의투자 / 실전 매매
 - 전략 검증 / 성과 비교 / 파라미터 최적화
 - 스코어링 / 평균회귀 / 추세추종 / 펀더멘털 / 앙상블 전략
-- 거래량 돌파(C-4) / 상대강도 회전(C-5) / 2-sleeve 포트폴리오
+- 거래량 돌파(C-4) / 상대강도 회전(C-5) / 2-sleeve 포트폴리오 (BV50/R50 paper 후보 확정)
 - 리스크 관리, 알림, 바스켓 리밸런싱, 웹 대시보드
 
 ## 사용 환경
@@ -57,6 +57,9 @@ python main.py --mode portfolio_backtest --strategy breakout_volume --symbols 00
 
 # 멀티전략 sleeve 비중 스윕 (C-5)
 python scripts/c5_weight_sweep.py
+
+# paper trading 월간 리포트 (BV50/R50 guardrail 모니터링)
+python scripts/c5_paper_monthly_report.py
 
 # 모의투자
 python main.py --mode paper --strategy scoring
@@ -115,7 +118,7 @@ pytest tests/ -q
 * `config/` — 설정
 * `core/` — 데이터, 지표, 신호, 리스크, 주문, 스케줄러, 알림
 * `strategies/` — 전략 (scoring, breakout_volume, relative_strength_rotation 등)
-* `scripts/` — 검증 스크립트 (C-4 OOS, C-5 sleeve 비교/비중 스윕)
+* `scripts/` — 검증 스크립트 (C-4 OOS, C-5 sleeve 비교/비중 스윕/필터 테스트/rolling WF/paper 리포트)
 * `api/` — KIS REST·웹소켓
 * `backtest/` — 백테스트, 검증, 최적화, 비교
 * `database/` — 모델·백업

@@ -190,6 +190,9 @@ relative_strength_rotation:
   long_lookback: 120          # 장기 모멘텀 기간 (일)
   sma_period: 60              # 추세 필터 SMA 기간
   short_weight: 0.6           # 단기 모멘텀 가중치 (장기 = 1 - short_weight)
+  min_hold_days: 0            # 냉각기: 0=비활성화. 5일 냉각기 테스트 결과 역효과 확인 (DEV return/MDD 악화)
+  disable_trailing_stop: true  # Rotation용 TS 비활성화. TS 승률 18~29%로 negative EV 확인.
+  take_profit_rate: 0.07       # Rotation TP=7%. 전역 8% 대신 사용. TP 스윕 결과 DEV/OOS 균형 최적.
 
 # --- 추세 추종 전략 ---
 # 진입이 늦는 구조: ADX·200일선·MACD 세 조건 동시 충족 = 이미 상승한 뒤. 손실 거래 잦고 승률 40% 이하 가능.

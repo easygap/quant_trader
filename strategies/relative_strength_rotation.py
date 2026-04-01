@@ -46,7 +46,39 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         self.config = config or Config.get()
         self.indicator_engine = IndicatorEngine(self.config)
         self.params = self.config.strategies.get("relative_strength_rotation", {})
+        self._mf_series = None  # KS11 > SMA200 market filter cache
         logger.info("RelativeStrengthRotationStrategy 초기화 완료")
+
+    def _ensure_market_filter(self, dates_index):
+        """KS11 > SMA(200) 시장 필터 사전 계산 (lazy cache, 인스턴스당 1회)."""
+        if self._mf_series is not None:
+            return
+        try:
+            from core.data_collector import DataCollector
+
+            mf_period = self.params.get("market_filter_ma_period", 200)
+            collector = DataCollector()
+            first = dates_index.min()
+            last = dates_index.max()
+            margin = mf_period + 100
+            start = (first - pd.Timedelta(days=margin)).strftime("%Y-%m-%d")
+            end = last.strftime("%Y-%m-%d")
+            ks11 = collector.fetch_korean_stock(
+                "KS11", start_date=start, end_date=end
+            )
+            if ks11 is None or ks11.empty or len(ks11) < mf_period:
+                logger.warning(
+                    "market_filter: KS11 데이터 부족({}/{}) — 필터 비활성화 fallback",
+                    len(ks11) if ks11 is not None else 0,
+                    mf_period,
+                )
+                return
+            close_ks = ks11["close"].astype(float)
+            sma = close_ks.rolling(mf_period, min_periods=mf_period).mean()
+            # T-1 기준: 전일 종가 > 전일 SMA200 → 당일 신규 진입 허용
+            self._mf_series = (close_ks > sma).shift(1).fillna(True)
+        except Exception as e:
+            logger.warning("market_filter: KS11 로드 실패 — 필터 비활성화: {}", e)
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """모멘텀 지표 계산 + 월간 리밸런싱 signal 생성."""
@@ -84,6 +116,34 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
 
         # Entry: 리밸런싱 + 양수 모멘텀 + 추세 유지
         entry_cond = rebalance & positive_momentum & above_trend
+
+        # ── 종목 절대모멘텀 필터 (T-1 기준) ──
+        abs_mom = self.params.get("abs_momentum_filter", "none")
+        if abs_mom == "A":
+            # 전일 120일 수익률 > 0
+            abs_pass = (ret_long.shift(1) > 0).fillna(False)
+            entry_cond = entry_cond & abs_pass
+            analyzed["abs_mom_pass"] = abs_pass
+        elif abs_mom == "B":
+            # 전일 60일 AND 120일 수익률 모두 > 0
+            abs_pass = (
+                (ret_short.shift(1) > 0) & (ret_long.shift(1) > 0)
+            ).fillna(False)
+            entry_cond = entry_cond & abs_pass
+            analyzed["abs_mom_pass"] = abs_pass
+
+        # ── 시장 필터: KS11 > SMA200 (T-1 기준) ──
+        if self.params.get("market_filter_sma200", False):
+            self._ensure_market_filter(analyzed.index)
+            if self._mf_series is not None:
+                mf_aligned = self._mf_series.reindex(
+                    analyzed.index, method="ffill"
+                ).fillna(True)
+                entry_cond = entry_cond & mf_aligned
+                analyzed["market_filter_pass"] = mf_aligned
+            else:
+                analyzed["market_filter_pass"] = True
+        # 기존 보유 포지션은 강제 청산하지 않음 — exit 규칙 그대로 유지
 
         # Exit (리밸런싱): 모멘텀 음수 또는 추세 붕괴
         exit_rebalance = rebalance & (~positive_momentum | ~above_trend)
