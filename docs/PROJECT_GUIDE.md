@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v3.2
-> **최종 수정**: 2026-04-01
+> **문서 버전**: v3.3
+> **최종 수정**: 2026-04-02
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -511,7 +511,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
-### 전략 상태 레지스트리 (v4.0)
+### 전략 상태 레지스트리 (v4.1)
 
 | 전략 | 상태 | 허용 모드 | 사유 |
 |------|------|-----------|------|
@@ -522,8 +522,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
 | **trend_following** | `disabled` | backtest only | 미검증 |
 | **trend_pullback** | `experimental` | backtest | C-3A SMA60+RSI pullback, edge 약함 |
-| **breakout_volume** | `experimental` | backtest | C-4 전고점 돌파+거래량 급증. BV50/R50 sleeve paper 후보의 Sleeve A |
-| **relative_strength_rotation** | `paper_candidate` | backtest, paper | C-5 월간 상대강도 회전. TS OFF, TP 7%. BV50/R50 OOS 2.87%, rolling WF 60% positive |
+| **breakout_volume** | `paper_candidate` | backtest, paper | C-4 전고점 돌파+거래량 급증. BV50/R50 Sleeve A. **Paper 가동 중 (2026-04-01~)** |
+| **relative_strength_rotation** | `paper_candidate` | backtest, paper | C-5 월간 상대강도 회전. TS OFF, TP 7%. **Paper 가동 중 (2026-04-01~)** |
 
 ### Live 진입 Hard Gate (4중 보안)
 
@@ -613,6 +613,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ Entry filter 탐색 | KS11 SMA200, abs momentum, min_hold_days 테스트 — 모두 불채택 |
 | ✅ Rolling walk-forward | 10 windows x 12mo, 6mo step. BV50/R50 positive 60%, median +0.45% |
 | ✅ Paper 모니터링 | `c5_paper_monthly_report.py`, signal/executed/skipped 카운터, guardrail 설정 |
+| ✅ **BV50/R50 Paper 가동** | 2026-04-01 개시, 목표 60영업일. 일간 로그 `paper_log.txt`, Frozen manifest: BV50/R50, Rot TP=7% TS=OFF |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
@@ -719,5 +720,5 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 ---
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
-> **문서 버전**: v3.2
-> **최종 수정**: 2026-04-01 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)
+> **문서 버전**: v3.3
+> **최종 수정**: 2026-04-02 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)
