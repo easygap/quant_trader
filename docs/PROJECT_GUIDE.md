@@ -1,7 +1,7 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v3.3
+> **문서 버전**: v4.0
 > **최종 수정**: 2026-04-02
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
@@ -71,7 +71,7 @@
 
 ```
 quant_trader/
-├── main.py                      # CLI 진입점, --mode 분기 (13개 모드)
+├── main.py                      # CLI 진입점, --mode 분기 (14개 모드)
 ├── test_integration.py          # 통합 검증 스크립트 (단일 실행, pytest 아님)
 ├── pyproject.toml               # 프로젝트 메타데이터 (Python >=3.11,<3.13, 패키지, pytest 설정)
 ├── requirements.txt             # pip 의존성 목록
@@ -511,26 +511,26 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
-### 전략 상태 레지스트리 (v4.1)
+### 전략 상태 레지스트리 (v5.0 — `core/promotion_engine.py` 자동 판정)
 
-| 전략 | 상태 | 허용 모드 | 사유 |
-|------|------|-----------|------|
-| **scoring** | `experimental` | backtest, paper | OOS Sharpe 0.84, WF 미통과 |
-| **mean_reversion** | `disabled` | backtest only | Sharpe -2.50 |
-| **fundamental_factor** | `disabled` | backtest only | yfinance 부채비율 불일치, WF 미실행 |
-| **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속 |
-| **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
-| **trend_following** | `disabled` | backtest only | 미검증 |
-| **trend_pullback** | `experimental` | backtest | C-3A SMA60+RSI pullback, edge 약함 |
-| **breakout_volume** | `paper_candidate` | backtest, paper | C-4 전고점 돌파+거래량 급증. BV50/R50 Sleeve A. **Paper 가동 중 (2026-04-01~)** |
-| **relative_strength_rotation** | `paper_candidate` | backtest, paper | C-5 월간 상대강도 회전. TS OFF, TP 7%. **Paper 가동 중 (2026-04-01~)** |
+| 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% |
+|------|------|-----------|------|-----|-----------|
+| **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 |
+| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 |
+| **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 |
+| **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 |
+| **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 |
+| **ensemble** | `disabled` | backtest only | — | — | 0/0 |
 
-### Live 진입 Hard Gate (4중 보안)
+승격 규칙: `research_only → paper_only → provisional_paper_candidate → live_candidate`  
+판정: `python tools/evaluate_and_promote.py --canonical` → artifact → engine → registry CI 검증
+
+### Live 진입 Hard Gate (우회 불가 — `--force-live` 제거됨)
 
 1. `strategies/__init__.py:is_strategy_allowed(strategy, "live")` — live_candidate만 허용
 2. 환경변수 `ENABLE_LIVE_TRADING=true`
 3. CLI 플래그 `--confirm-live`
-4. `main.py:_check_live_readiness_gate()` — 5개 조건 (승인 전략·WF·벤치마크·paper 60일·데이터)
+4. `main.py:_check_live_readiness_gate()` — 5개 조건 (승인 파일·WF·벤치마크·paper 60일·데이터), silent skip 불가
 
 ### Paper 모드 2가지
 
@@ -547,7 +547,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **다중공선성** | RSI, MACD, MA 등이 같은 가격 정보를 중복 반영 |
 | **앙상블 독립성 부족** | technical과 momentum_factor가 실질적으로 같은 정보 사용 |
 | **한국 시장 미최적화** | 파라미터가 미국 시장 기준값 (200일선, ADX 25 등) |
-| **과매매 방어** | ✅ 히스터리시스·최소 보유 기간 3일·월간 거래 제한 구현 완료 |
+| **과매매 방어** | ✅ 히스터리시스·최소 보유 기간 5일·월간 왕복 8회 제한 구현 완료 |
 | **운영 자동화** | ✅ 헬스체크·포지션 보정·OperationEvent·주간 리포트·GoLive 체크 모두 구현 완료 |
 
 ### 검증 요구 사항
@@ -613,7 +613,13 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ Entry filter 탐색 | KS11 SMA200, abs momentum, min_hold_days 테스트 — 모두 불채택 |
 | ✅ Rolling walk-forward | 10 windows x 12mo, 6mo step. BV50/R50 positive 60%, median +0.45% |
 | ✅ Paper 모니터링 | `c5_paper_monthly_report.py`, signal/executed/skipped 카운터, guardrail 설정 |
-| ✅ **BV50/R50 Paper 가동** | 2026-04-01 개시, 목표 60영업일. 일간 로그 `paper_log.txt`, Frozen manifest: BV50/R50, Rot TP=7% TS=OFF |
+| ✅ **BV50/R50 Paper 가동** | 2026-04-01 개시, 목표 60영업일. Paper Evidence 체계 (`core/paper_evidence.py`) |
+| ✅ **주문 상태기계** | `core/order_state.py` — OrderStatus 9개 상태, FILLED 전 position 없음 invariant |
+| ✅ **승격 규칙 v3** | `core/promotion_engine.py` — metrics 기반 자동 판정 + artifact-driven |
+| ✅ **`--force-live` 제거** | hard gate 우회 불가. approved_strategies.json 미존재 시 에러 |
+| ✅ **벤치마크 거래비용** | `_buy_and_hold_metrics`에 commission/tax/slippage 반영 |
+| ✅ **debiased 전략 재평가** | 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows |
+| ✅ **테스트 226건 green** | 기존 7 fail 해소 + 신규 83건 추가 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
@@ -720,5 +726,5 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 ---
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
-> **문서 버전**: v3.3
+> **문서 버전**: v4.0
 > **최종 수정**: 2026-04-02 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)

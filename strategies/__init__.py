@@ -1,13 +1,18 @@
 """
 전략 패키지 — 플러그인 레지스트리 + 상태 관리
 
-전략 상태 (Strategy Status):
-- disabled:          사용 불가. 코드 존재하나 검증 실패 또는 구조적 결함.
-- experimental:      paper 모드에서만 실행 가능. 검증 진행 중.
-- paper_candidate:   paper 운영 승인. WF 통과 + 벤치마크 초과수익 양수.
-- live_candidate:    live 전환 대기. paper 60일 + GoLive 체크 통과.
+전략 상태 (Strategy Status) — 승격 규칙 v2 (2026-04-02 debiased 평가 기준):
 
-승격 경로: disabled → experimental → paper_candidate → live_candidate
+  research_only:    backtest만 허용. 절대수익 음수 또는 PF<1.0.
+  paper_only:       backtest + paper. 절대수익>0, PF≥1.0, WF positive≥50%.
+                    벤치마크 초과수익 불요구. opportunity cost 기준 음수 허용.
+  paper_candidate:  paper 60영업일 실험 대상. paper_only + WF Sharpe>0≥50%,
+                    exposure-matched excess > -100%p, MDD > -20%.
+                    (provisional) 표기 시 일부 기준 경계 미달.
+  live_candidate:   live 전환 대기. paper_candidate + paper 60일 완주,
+                    paper Sharpe≥0.3, same-universe excess≥0.
+
+승격 경로: research_only → paper_only → paper_candidate → live_candidate
 강등: 어느 단계에서든 기준 미달 시 즉시 하위 단계로 강등.
 """
 
@@ -26,22 +31,70 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
     "fundamental_first":   ("strategies.fundamental_first",   "FundamentalFirstStrategy"),
     "momentum_factor":     ("strategies.momentum_factor",     "MomentumFactorStrategy"),
     "ensemble":            ("core.strategy_ensemble",         "StrategyEnsemble"),
-    "trend_pullback":      ("strategies.trend_pullback",      "TrendPullbackStrategy"),
 }
 
-# ── 전략 상태 레지스트리 (Hard Gate 기준) ──
+# ── 전략 상태 레지스트리 (Hard Gate 기준, v2 승격 규칙 적용) ──
 STRATEGY_STATUS: dict[str, dict] = {
-    "scoring":            {"status": "experimental",  "allowed_modes": ["backtest", "paper"]},
-    "mean_reversion":     {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "10종목 평균 Sharpe -2.50, OOS Sharpe -3.20"},
-    "trend_following":    {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "미검증"},
-    "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest"],          "reason": "C-3A 구조 재설계 검증 중"},
-    "fundamental_factor": {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "yfinance debtToEquity 한국 기준 불일치, WF 미실행"},
-    "fundamental_first":  {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "fundamental_factor 종속, WF 미실행"},
-    "momentum_factor":    {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "WF 미실행"},
-    "ensemble":           {"status": "disabled",      "allowed_modes": ["backtest"],          "reason": "구성 전략 모두 미승인"},
-    "breakout_volume":    {"status": "experimental",  "allowed_modes": ["backtest"],          "reason": "C-4 MVP, coarse sweep 검증 중"},
-    "relative_strength_rotation": {"status": "experimental", "allowed_modes": ["backtest"], "reason": "C-5 MVP, sleeve 결합 검증 중"},
-    "trend_pullback":     {"status": "experimental",  "allowed_modes": ["backtest", "paper"], "reason": "C-1 MVP, WF 미실행"},
+    # ── provisional paper candidate (자동 판정: ret>0, PF≥1.0, WF P≥50%, WF Sh+≥50%, MDD>-20%) ──
+    "relative_strength_rotation": {
+        "status": "provisional_paper_candidate",
+        "allowed_modes": ["backtest", "paper"],
+        "reason": (
+            "debiased +18.09%, PF 1.62, WF 6/6 positive, 5/6 Sharpe>0. MDD -5.66%. "
+            "provisional: 내부 연구 우선순위. 경제적 alpha 미확인 (same-universe excess 미검증)."
+        ),
+    },
+
+    "scoring": {
+        "status": "provisional_paper_candidate",
+        "allowed_modes": ["backtest", "paper"],
+        "reason": (
+            "debiased +11.22%, PF 1.07, WF 5/6 positive, 3/6 Sharpe>0 (50% 경계 통과). MDD -14.55%. "
+            "provisional: 가중치 미최적화, 다중공선성 미해결. 최적화 후 재평가 필요."
+        ),
+    },
+
+    # ── research only (자동 판정: ret≤0 또는 PF<1 또는 WF P<50%) ──
+    "breakout_volume": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased -13.31%, PF 0.79<1.0, WF 0/6. [운영 메모: BV50/R50 Paper Sleeve A 가동 중이나 상태와 무관]",
+    },
+    "mean_reversion": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased -8.36%, PF 0.85<1.0, WF 2/6",
+    },
+    "trend_following": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased -6.94%, PF 0.67<1.0, WF 1/6",
+    },
+    "trend_pullback": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased 미실행. WF 0 windows",
+    },
+    "fundamental_factor": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased 미실행. yfinance 불일치",
+    },
+    "fundamental_first": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased 미실행. fundamental_factor 종속",
+    },
+    "momentum_factor": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "debiased 미실행",
+    },
+    "ensemble": {
+        "status": "disabled",
+        "allowed_modes": ["backtest"],
+        "reason": "구성 전략 대부분 disabled. 독립성 부족",
+    },
 }
 
 
@@ -62,15 +115,14 @@ def is_strategy_allowed(name: str, mode: str) -> tuple[bool, str]:
     """
     st = get_strategy_status(name)
     status = st["status"]
-    allowed_modes = st.get("allowed_modes", [])
 
     if mode == "backtest":
         return True, "backtest는 모든 전략 허용"
 
     if mode in ("paper", "schedule"):
-        if status in ("experimental", "paper_candidate", "live_candidate"):
+        if status in ("paper_only", "paper_candidate", "provisional_paper_candidate", "live_candidate"):
             return True, f"status={status}, paper 허용"
-        return False, f"전략 '{name}'은 status={status}. paper 모드는 experimental 이상만 허용."
+        return False, f"전략 '{name}'은 status={status}. paper 모드는 paper_only 이상만 허용."
 
     if mode == "live":
         if status == "live_candidate":
