@@ -652,6 +652,7 @@ class StrategyValidator:
         validation["oos_profit_factor"] = oos_pf
 
     def _buy_and_hold_metrics(self, df: pd.DataFrame, initial_capital: float) -> dict:
+        """B&H 벤치마크 지표 계산 — 진입/청산 거래비용 반영 (감사 C-7 대응)."""
         if df is None or df.empty or len(df) < 2:
             return {}
 
@@ -659,8 +660,16 @@ class StrategyValidator:
         if closes.empty:
             return {}
 
-        shares = initial_capital / closes.iloc[0]
-        equity = shares * closes
+        # 거래비용 반영: 진입 시 수수료+슬리피지, 청산 시 수수료+세금+슬리피지
+        tc = self.config.risk_params.get("transaction_costs", {})
+        commission = tc.get("commission_rate", 0.00015)
+        tax = tc.get("tax_rate", 0.0020)
+        slippage = tc.get("slippage", 0.0005)
+        entry_cost = commission + slippage          # 진입 비용
+        exit_cost = commission + tax + slippage      # 청산 비용
+        adjusted_capital = initial_capital * (1 - entry_cost)
+        shares = adjusted_capital / closes.iloc[0]
+        equity = shares * closes * (1 - exit_cost)   # 청산 비용 반영
         daily_returns = equity.pct_change().dropna()
 
         if len(daily_returns) > 0 and daily_returns.std() > 0:

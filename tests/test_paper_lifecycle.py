@@ -35,10 +35,10 @@ class TestFullPaperLifecycle:
         """각 테스트 전 fresh DB — 기존 테이블 truncate."""
         from config.config_loader import Config
         Config._instance = None
-        from database.models import init_database, get_session, TradeHistory, OperationEvent, PortfolioSnapshot
+        from database.models import init_database, get_session, TradeHistory, OperationEvent, PortfolioSnapshot, Position
         init_database()
         session = get_session()
-        for model in [TradeHistory, OperationEvent, PortfolioSnapshot]:
+        for model in [TradeHistory, OperationEvent, PortfolioSnapshot, Position]:
             session.query(model).delete()
         session.commit()
         session.close()
@@ -53,18 +53,21 @@ class TestFullPaperLifecycle:
         config = Config.get()
         executor = OrderExecutor(config, account_key="test")
 
-        sig_time = datetime(2024, 6, 15, 9, 30, 0)
-        result = executor.execute_buy(
-            symbol="005930",
-            price=54200,
-            capital=10_000_000,
-            available_cash=10_000_000,
-            signal_score=2.5,
-            reason="lifecycle test BUY",
-            strategy="scoring",
-            avg_daily_volume=500_000,
-            signal_at=sig_time,
-        )
+        sig_time = datetime(2024, 6, 15, 10, 30, 0)
+
+        # 장 시간 체크를 모킹하여 테스트 실행 시각과 무관하게 동작
+        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+            result = executor.execute_buy(
+                symbol="005930",
+                price=54200,
+                capital=10_000_000,
+                available_cash=10_000_000,
+                signal_score=2.5,
+                reason="lifecycle test BUY",
+                strategy="scoring",
+                avg_daily_volume=500_000,
+                signal_at=sig_time,
+            )
 
         assert result["success"], f"BUY 실패: {result.get('reason')}"
 

@@ -47,13 +47,21 @@ CMA_ANNUAL_RATE = 0.025          # CMA/MMF 가정 연수익률 2.5%
 
 
 def run_sleeve(start, end):
-    """Run BV + Rotation sleeve and return individual + combined results."""
+    """Run BV + Rotation sleeve and return individual + combined results.
+
+    지표 lookback(Rotation 120일 등)을 위해 데이터 수집은 start보다 8개월 앞에서
+    시작하되, equity curve와 trades는 원래 start~end 구간만 반환한다.
+    """
     config = Config.get()
+
+    # 지표 warmup용 데이터 수집 시작일 (8개월 전)
+    fetch_start = (pd.Timestamp(start) - pd.DateOffset(months=8)).strftime("%Y-%m-%d")
+    report_start = pd.Timestamp(start)
 
     # BV sleeve
     pbt = PortfolioBacktester(config)
     r_bv = pbt.run(symbols=SYMBOLS, strategy_name="breakout_volume",
-                    initial_capital=BV_CAPITAL, start_date=start, end_date=end)
+                    initial_capital=BV_CAPITAL, start_date=fetch_start, end_date=end)
 
     # Rotation sleeve
     div_cfg = config.risk_params.setdefault("diversification", {})
@@ -65,15 +73,37 @@ def run_sleeve(start, end):
         div_cfg.update(ROTATION_DIV)
         pbt2 = PortfolioBacktester(config)
         r_rot = pbt2.run(symbols=SYMBOLS, strategy_name="relative_strength_rotation",
-                          initial_capital=ROT_CAPITAL, start_date=start, end_date=end)
+                          initial_capital=ROT_CAPITAL, start_date=fetch_start, end_date=end)
     finally:
         for k, v in saved.items():
             if v is not None:
                 div_cfg[k] = v
 
+    # equity curve / trades를 리포트 구간(start~end)으로 트리밍
+    def _trim(result, report_start_ts):
+        eq = result.get("equity_curve")
+        if eq is None or eq.empty:
+            return result
+        if "date" in eq.columns:
+            mask = pd.to_datetime(eq["date"]) >= report_start_ts
+        else:
+            mask = eq.index >= report_start_ts
+        eq_trimmed = eq[mask].copy()
+        trades_trimmed = [
+            t for t in result.get("trades", [])
+            if pd.Timestamp(t["date"]) >= report_start_ts
+        ]
+        trimmed = dict(result)
+        trimmed["equity_curve"] = eq_trimmed
+        trimmed["trades"] = trades_trimmed
+        return trimmed
+
+    r_bv = _trim(r_bv, report_start)
+    r_rot = _trim(r_rot, report_start)
+
     # Combine
-    eq_bv = r_bv["equity_curve"].set_index("date")
-    eq_rot = r_rot["equity_curve"].set_index("date")
+    eq_bv = r_bv["equity_curve"].set_index("date") if "date" in r_bv["equity_curve"].columns else r_bv["equity_curve"]
+    eq_rot = r_rot["equity_curve"].set_index("date") if "date" in r_rot["equity_curve"].columns else r_rot["equity_curve"]
     common = sorted(set(eq_bv.index) & set(eq_rot.index))
     rows = [{"date": d,
              "value": float(eq_bv.loc[d, "value"]) + float(eq_rot.loc[d, "value"]),
@@ -147,6 +177,18 @@ def compute_metrics(equity_df, trades, initial_capital):
     adj_ann_std = float(dr_adj.std()) * np.sqrt(252)
     sharpe_adj = (adj_ann_ret - 0.03) / adj_ann_std if adj_ann_std > 0 else 0
 
+    # signal density (투자비중)
+    signal_density = dim / max(total_days, 1) * 100
+    # turnover (연간 왕복)
+    turnover = total_trades / max(years, 0.01)
+    # profit factor
+    gp = sum(t.get("pnl", 0) for t in sell if t.get("pnl", 0) > 0)
+    gl = abs(sum(t.get("pnl", 0) for t in sell if t.get("pnl", 0) < 0))
+    profit_factor = gp / gl if gl > 0 else (99 if gp > 0 else 0)
+    # cash-adjusted return
+    cash_frac = cash_days / max(total_days, 1)
+    cash_adj_return = total_return + CMA_ANNUAL_RATE * cash_frac * 100 * years
+
     return {
         "total_return": round(total_return, 2),
         "cagr": round(cagr, 2),
@@ -154,12 +196,16 @@ def compute_metrics(equity_df, trades, initial_capital):
         "sharpe_all": round(sharpe_all, 2),
         "sharpe_pos": round(sharpe_pos, 2),
         "sharpe_adj": round(sharpe_adj, 2),
+        "profit_factor": round(profit_factor, 2),
         "total_trades": total_trades,
         "win_rate": round(win_rate, 1),
         "avg_positions": round(avg_pos, 2),
         "days_in_market": dim,
         "cash_days": cash_days,
         "total_days": total_days,
+        "signal_density": round(signal_density, 1),
+        "turnover": round(turnover, 1),
+        "cash_adj_return": round(cash_adj_return, 2),
         "top_sym_share": round(top_share, 1),
         "per_sym_pnl": per_sym,
         "ann_return": round(ann_ret * 100, 2),

@@ -22,6 +22,7 @@ from database.repositories import (
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
 from core.position_lock import PositionLock
+from core.order_state import OrderBook, OrderStatus
 
 try:
     from monitoring.paper_monitor import log_event as _log_op_event
@@ -61,6 +62,7 @@ class OrderExecutor:
         self.blackswan = BlackSwanDetector(self.config)
 
         self._sector_map: dict | None = None
+        self.order_book = OrderBook()
 
         if self.mode == "live":
             self.kis_api.authenticate()
@@ -275,71 +277,93 @@ class OrderExecutor:
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
-        # 주문 실행 (재시도 포함) — 실전은 체결가 조회 후 비용·DB 반영
+        # ── 상태기계 기반 주문 처리 ──
         expected_price = float(price)
+
+        # 1) OrderRecord 생성 (NEW)
+        order = self.order_book.create_order(
+            symbol=symbol, action="BUY", requested_qty=quantity,
+            requested_price=expected_price, strategy=strategy,
+            account_key=self.account_key, mode=self.mode,
+        )
+
+        # 2) 중복 주문 확인 (OrderBook 기반 + 기존 guard)
+        existing_open = [o for o in self.order_book.get_open_orders(symbol)
+                         if o.order_id != order.order_id]
+        if existing_open:
+            order.transition(OrderStatus.REJECTED, reason="중복 주문: 미완료 주문 존재")
+            return {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+
+        # 3) Submit → broker/simulated event → FILLED
         fill_price = expected_price
         actual_slippage_pct = None
+
         if self.mode == "live":
-            # 중복 주문 방지: ① 앱 레벨 TTL 가드 ② 해당 종목 미체결 주문 존재 여부(KIS 조회)
             ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
             if OrderGuard.has_pending(symbol):
-                reason_text = f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."
-                logger.warning(reason_text)
-                _log_op_event("DUPLICATE_BLOCKED", reason_text, severity="warning", symbol=symbol, strategy=strategy, mode=self.mode)
-                return {"success": False, "reason": reason_text}
+                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
-                reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
-                _log_op_event("DUPLICATE_BLOCKED", reason_text, severity="warning", symbol=symbol, strategy=strategy, mode=self.mode)
-                return {"success": False, "reason": reason_text}
+                order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
+                return {"success": False, "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."}
+
+            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            order.transition(OrderStatus.SUBMITTED)
+
             order_result = self._execute_with_retry(
                 self.kis_api.buy_order, symbol, quantity, int(price),
                 symbol=symbol, action="BUY", price=price, quantity=quantity,
                 strategy=strategy, signal_score=signal_score, reason=reason,
             )
             if order_result is None:
+                order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
+                OrderGuard.clear(symbol)
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
+
+            order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
             fill_price, actual_slippage_pct = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
             )
-            self._report_execution_slippage(
-                symbol, "BUY", expected_price, fill_price, actual_slippage_pct,
+            self._report_execution_slippage(symbol, "BUY", expected_price, fill_price, actual_slippage_pct)
+            # FILLED 전이 — 이 시점에서만 position/trade 반영
+            order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+            OrderGuard.clear(symbol)
+        else:
+            # Paper mode: simulated broker event
+            order.transition(OrderStatus.SUBMITTED)
+            order.transition(OrderStatus.ACKED)
+            # Paper에서는 슬리피지 적용 후 즉시 FILLED (simulated fill)
+            costs = self.risk_manager.calculate_transaction_costs(
+                expected_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
             )
-            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            fill_price = costs["execution_price"]
+            order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+
+        # 4) FILLED 상태에서만 DB 반영 (invariant: fill 전 position 없음)
+        assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
+
+        if self.mode == "live":
             costs = self.risk_manager.calculate_transaction_costs(
                 fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
             )
 
-        # DB에 매매 기록 저장 (시각·체결가 차이 포함)
         _order_at = datetime.now()
         save_trade(
-            symbol=symbol,
-            action="BUY",
-            price=fill_price,
-            quantity=quantity,
-            commission=costs["commission"],
-            tax=0,
-            slippage=costs["slippage"],
-            strategy=strategy,
-            signal_score=signal_score,
-            reason=reason,
-            mode=self.mode,
-            account_key=self.account_key,
-            signal_at=signal_at or _order_at,
-            order_at=_order_at,
+            symbol=symbol, action="BUY", price=fill_price, quantity=quantity,
+            commission=costs["commission"], tax=0, slippage=costs["slippage"],
+            strategy=strategy, signal_score=signal_score, reason=reason,
+            mode=self.mode, account_key=self.account_key,
+            signal_at=signal_at or _order_at, order_at=_order_at,
             expected_price=expected_price,
             actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
         )
-        _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원", symbol=symbol, strategy=strategy, mode=self.mode)
+        _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
+                       symbol=symbol, strategy=strategy, mode=self.mode)
 
-        # 포지션 저장
         save_position(
-            symbol=symbol,
-            avg_price=fill_price,
-            quantity=quantity,
-            stop_loss_price=stop_loss,
-            take_profit_price=tp_info["target_final"],
-            trailing_stop_price=trailing_stop,
-            strategy=strategy,
+            symbol=symbol, avg_price=fill_price, quantity=quantity,
+            stop_loss_price=stop_loss, take_profit_price=tp_info["target_final"],
+            trailing_stop_price=trailing_stop, strategy=strategy,
             account_key=self.account_key,
         )
 
@@ -433,33 +457,51 @@ class OrderExecutor:
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
-        # 주문 실행 (재시도 포함)
+        # ── 상태기계 기반 매도 처리 ──
+        order = self.order_book.create_order(
+            symbol=symbol, action="SELL", requested_qty=sell_qty,
+            requested_price=expected_price, strategy=strategy,
+            account_key=self.account_key, mode=self.mode,
+        )
+
         if self.mode == "live":
-            # 중복 주문 방지: ① 앱 레벨 TTL 가드 ② 해당 종목 미체결 주문 존재 여부(KIS 조회)
             ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
             if OrderGuard.has_pending(symbol):
-                reason_text = f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."
-                logger.warning(reason_text)
-                return {"success": False, "reason": reason_text}
+                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
-                reason_text = "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."
-                return {"success": False, "reason": reason_text}
+                order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
+                return {"success": False, "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."}
+
+            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            order.transition(OrderStatus.SUBMITTED)
+
             order_result = self._execute_with_retry(
                 self.kis_api.sell_order, symbol, sell_qty, int(price),
                 symbol=symbol, action="SELL", price=price, quantity=sell_qty,
                 strategy=strategy, signal_score=signal_score, reason=reason,
             )
             if order_result is None:
+                order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
+                OrderGuard.clear(symbol)
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
+
+            order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
             fill_price, actual_slippage_pct = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
             )
-            self._report_execution_slippage(
-                symbol, "SELL", expected_price, fill_price, actual_slippage_pct,
-            )
-            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            self._report_execution_slippage(symbol, "SELL", expected_price, fill_price, actual_slippage_pct)
+            order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
+            OrderGuard.clear(symbol)
+        else:
+            # Paper mode: simulated broker event
+            order.transition(OrderStatus.SUBMITTED)
+            order.transition(OrderStatus.ACKED)
+            order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
 
-        # 거래 비용·손익 (실전은 조회한 체결가 기준)
+        # FILLED 상태에서만 DB 반영 (invariant)
+        assert order.status == OrderStatus.FILLED, f"SELL DB 반영 시점에 FILLED가 아님: {order.status}"
+
         costs = self.risk_manager.calculate_transaction_costs(
             fill_price, sell_qty, "SELL",
             avg_daily_volume=avg_daily_volume,
@@ -469,37 +511,26 @@ class OrderExecutor:
         pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
         pnl_rate = ((fill_price / position.avg_price) - 1) * 100
 
-        # DB에 매매 기록 저장 (tax = 증권거래세 + 양도소득세)
         save_trade(
-            symbol=symbol,
-            action="SELL",
-            price=fill_price,
-            quantity=sell_qty,
-            commission=costs["commission"],
-            tax=total_tax,
-            slippage=costs["slippage"],
-            strategy=strategy,
-            signal_score=signal_score,
+            symbol=symbol, action="SELL", price=fill_price, quantity=sell_qty,
+            commission=costs["commission"], tax=total_tax, slippage=costs["slippage"],
+            strategy=strategy, signal_score=signal_score,
             reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
-            mode=self.mode,
-            account_key=self.account_key,
+            mode=self.mode, account_key=self.account_key,
             expected_price=expected_price if self.mode == "live" else None,
             actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
         )
 
-        # 전량 매도 시 포지션 삭제, 부분 매도 시 reduce_position + 손절/익절 재조정
         if sell_qty >= position.quantity:
             delete_position(symbol, account_key=self.account_key)
         else:
             remaining_pos = reduce_position(symbol, sell_qty, account_key=self.account_key)
-            # 부분 익절 후 잔여 포지션의 익절가를 최종 목표가로 승격
             if remaining_pos and reason == "TAKE_PROFIT_PARTIAL":
                 from database.repositories import update_position_targets
                 tp_config = self.risk_manager.risk_params.get("take_profit", {})
                 final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
                 update_position_targets(
-                    symbol,
-                    take_profit_price=round(final_target, 0),
+                    symbol, take_profit_price=round(final_target, 0),
                     account_key=self.account_key,
                 )
 
