@@ -292,32 +292,9 @@ class DataCollector:
             return self.fetch_us_stock(symbol, start_date, end_date)
         return self.fetch_korean_stock(symbol, start_date, end_date)
 
-    def check_source_consistency(self, reference_source: str = "FinanceDataReader") -> list[str]:
-        """
-        수집 이력에서 reference_source와 다른 소스를 사용한 종목 반환.
-        라이브 모드에서 KIS 폴백이 발생하면 에러 레벨로 기록.
-        """
-        mismatched = []
-        for symbol, src in self._source_history.items():
-            if src != reference_source:
-                mismatched.append(f"{symbol}({src})")
-        if mismatched and self._warn_on_source_mismatch:
-            # KIS 폴백이 포함된 경우 에러 레벨로 격상
-            has_kis_fallback = any("KIS" in m for m in mismatched)
-            if has_kis_fallback:
-                logger.error(
-                    "🚨 데이터 소스 불일치 (KIS 비수정주가 폴백 감지): {}. "
-                    "백테스트(수정주가)와 실전 시그널이 달라질 수 있습니다. "
-                    "pip install FinanceDataReader 후 allow_kis_fallback: false 설정 권장.",
-                    mismatched,
-                )
-            else:
-                logger.warning(
-                    "데이터 소스 불일치 감지(reference={}): {}",
-                    reference_source,
-                    mismatched,
-                )
-        return mismatched
+    def has_kis_fallback_symbols(self) -> list[str]:
+        """KIS(비수정주가) 폴백이 발생한 종목 목록 반환."""
+        return [s for s, src in self._source_history.items() if src == "KIS"]
 
     @staticmethod
     def _slice_krx_df_by_date(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
