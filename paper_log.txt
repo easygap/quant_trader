@@ -1,0 +1,93 @@
+Paper 시작일: 2026-04-01
+Frozen manifest: BV50/R50, Rot TP=7% TS=OFF
+
+=== Paper 운용 로그 ===
+
+날짜: 2026-04-01 (Day 1)
+
+[평가금액]
+BV 평가금액: 5,101,500원
+Rotation 평가금액: 4,980,723원
+합산 평가금액: 10,082,223원
+일간 수익률: +0.82%
+누적 수익률: +0.82%
+
+[보유 포지션]
+BV 보유: warmup 구간 진입분 (개별 미식별)
+Rot 보유: 3종목 보유 중 (리밸런싱 진입)
+포지션 수: 미상 (avg_positions=1.00 기준 최소 1개)
+
+[신호 vs 체결 — 누적(warmup 포함)]
+               BUY신호  SELL신호  BUY체결  SELL체결  BUY스킵
+BV:               18       50      13       13        5
+Rotation:          7       19       3        2        4
+
+[BUY fill rate — 누적]
+BV: 72% (13/18)
+Rotation: 43% (3/7)
+
+[스킵 사유]
+qty_zero: BV 5건, Rotation 4건
+no_cash / max_positions / already_in_position: 없음
+
+[당일 체결 내역]
+BUY: warmup 구간 포함 — BV 13건, Rotation 3건 진입
+SELL: BV 13건, Rotation 2건 exit (warmup 구간 체결분)
+
+[경고] 없음 — NORMAL
+
+[메모]
+- Day-1. 4/1은 월초 첫 거래일 → Rotation 리밸런싱 진입 3건 확인
+- 신호/체결 수치는 warmup 8개월 포함 누적값. 순수 당일분은 리포트 구조상 분리 불가
+- 내일부터 누적 수치 변화분(delta)으로 당일분 추정 가능
+- Sharpe 1일치라 0.00 → 의미 없음. 1주 후부터 추적
+
+참고: 현재 리포트는 warmup 구간(2025-08~)부터의 누적 수치를 포함한다.
+순수 당일분만 보려면 내일 리포트(2026-04-01 ~ 2026-04-02)와의 delta로 추출해야 한다.
+
+────────────────────────────────────────────────────────────
+
+날짜: 2026-04-02 (Day 2)
+
+[평가금액]
+BV 평가금액: 변동 없음 (days_in_market=0 유지, 무포지션)
+Rotation 평가금액: 보유 중 (days_in_market 1→2)
+합산 평가금액: 10,082,023원
+일간 수익률: ≈0.00% (평가금액 -200원, 보합)
+누적 수익률: +0.82%
+
+[Day 2 delta — 순수 당일분]
+계산식: 누적(4/1~4/2) − Day1(4/1)
+
+               BUY신호  SELL신호  BUY체결  SELL체결  BUY스킵
+BV:                0        0       0        0        0
+Rotation:          0        0       0        0        0
+
+→ 무신호일. 기존 포지션 보유만 지속.
+
+[누적 수치 (warmup 포함)]
+               BUY신호  SELL신호  BUY체결  SELL체결  BUY스킵
+BV:               18       50      13       13        5
+Rotation:          7       19       3        2        4
+
+[BUY fill rate — 누적]
+BV: 72% (13/18)   경고선 60% → 정상
+Rotation: 43% (3/7)   경고선 40% → 정상 (근접 주시)
+
+[스킵 사유 — Day 2 당일]
+발생 없음 (신호 0건)
+
+[경고] 없음 — NORMAL
+
+[메모]
+- 무신호 보유일. BV 무포지션, Rotation 기존 포지션 보유 지속
+- 평가금액 -200원 변동은 Rotation 보유 종목 시세 미세 역행
+- Rotation fill rate 42.9% → 경고선(40%) 바로 위, 내일 체결 여부 주시
+- BV 2일 연속 days_in_market=0 → 진입 조건 미충족 구간, 구조적 정상
+
+[내일(4/3) 확인 사항]
+1. Rotation fill rate 추이 — 40% 미만 진입 여부
+2. BV sleeve 진입 발생 여부 — 3일 연속 무포지션 시 패턴 확인
+3. Rotation 보유 포지션 평가손익 방향 — 역행 지속 vs 반전
+
+Day 2 운영 판정: NORMAL
