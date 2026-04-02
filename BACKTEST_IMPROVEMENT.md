@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v4.0
-> **최종 수정**: 2026-04-01
+> **문서 버전**: v4.1
+> **최종 수정**: 2026-04-02
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -91,7 +91,7 @@
 | **호가 단위 미반영** | 한국 시장 호가 단위(5원/10원/50원 등) 미적용 | 체결가 미세 차이 |
 | **장중 가격 미사용** | 일봉 기반 시뮬레이션. 장중 변동 미반영 | 손절/익절 발동 시점 차이 |
 | **단일 종목 검증 한계** | 현재 검증은 watchlist 3종목 위주. 유니버스 전체 검증 미실행 | 전략 일반화 불확실 |
-| **멀티전략 강건성** | BV50/R50 paper 후보 확정. Rotation TS OFF + TP 7% 적용 후 rolling WF 60% positive window. OOS 2.87%, MDD -1.71% | paper 운영 중 guardrail 모니터링 필요 |
+| **멀티전략 강건성** | BV50/R50 **Paper 가동 중 (2026-04-01~)**. Rotation TS OFF + TP 7%. rolling WF 60% positive window. OOS 2.87%, MDD -1.71%. Day 2 기준 +0.82%, NORMAL | guardrail 모니터링 진행 중 (`paper_log.txt`, `c5_paper_monthly_report.py`) |
 
 ---
 
@@ -113,6 +113,7 @@
 | Rotation TP sweep (8% -> 7%) | 높음 | **완료 — per-strategy TP override. DEV -0.96% -> -0.19%, OOS 4.25% -> 4.71%** |
 | Rolling walk-forward 검증 (10 windows) | 높음 | **완료 — BV50/R50 positive 60%, median +0.45%, worst -2.05%** |
 | Paper 모니터링 인프라 | 높음 | **완료 — c5_paper_monthly_report.py, signal/executed/skipped 카운터, guardrail 설정** |
+| BV50/R50 Paper Trading 60영업일 | 높음 | **진행 중 — 2026-04-01 개시, Day 2 NORMAL. paper_log.txt 일간 기록** |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 
 ---
