@@ -100,4 +100,6 @@ python main.py --mode validate --walk-forward --strategy scoring --symbol 005930
 이 문서는 `reports/backtest_scoring_*.txt` 같은 **최근 백테스트 기록**을 보고 개선할 때 참고용입니다.  
 세부 설계·검증 원칙은 `quant_trader_design.md`, 실행/설정 요약은 `docs/PROJECT_GUIDE.md`를 보세요.
 
-> **참고 (2026-04-02)**: 현재 BV50/R50 멀티전략 sleeve가 Paper Trading 가동 중입니다 (2026-04-01 개시, 목표 60영업일). 본 문서는 scoring 전략 단독 백테스트 개선 가이드이며, BV50/R50 paper 운영 상태는 `BACKTEST_IMPROVEMENT.md`(루트) 및 `paper_log.txt`를 참고하세요.
+> **참고 (v5.0)**: 전략 상태는 `core/promotion_engine.py`에서 metrics 기반으로 자동 판정됩니다.  
+> scoring은 현재 `provisional_paper_candidate` (WF Sh+ 50% 경계 통과, 가중치 미최적화).  
+> 전체 전략 평가: `python tools/evaluate_and_promote.py --canonical`
