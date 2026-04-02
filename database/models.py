@@ -259,6 +259,43 @@ class PendingOrderGuard(Base):
         return f"<PendingOrderGuard({self.symbol}, expires={self.expires_at})>"
 
 
+class OrderRecord(Base):
+    """
+    주문 상태 추적 테이블 — 브로커 기준 source of truth.
+
+    상태 전이: NEW → SUBMITTED → ACKED → FILLED / PARTIAL_FILLED / REJECTED / CANCELLED / EXPIRED → RECONCILED
+    fill 확인 전 position/cash를 반영하지 않음. (감사 C-5 대응)
+    """
+    __tablename__ = "order_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(String(64), nullable=False, unique=True, index=True)
+    account_key = Column(String(64), default="", nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    action = Column(String(10), nullable=False)           # BUY / SELL
+    status = Column(String(20), nullable=False, default="NEW", index=True)
+    broker_order_id = Column(String(64))                   # 브로커 측 주문 ID
+    requested_qty = Column(Integer, nullable=False)
+    requested_price = Column(Float, nullable=False)
+    filled_qty = Column(Integer, default=0)
+    filled_price = Column(Float, default=0.0)
+    remaining_qty = Column(Integer, default=0)
+    commission = Column(Float, default=0.0)
+    tax = Column(Float, default=0.0)
+    slippage = Column(Float, default=0.0)
+    reject_reason = Column(Text, default="")
+    strategy = Column(String(50), default="")
+    signal_score = Column(Float, default=0.0)
+    mode = Column(String(20), default="paper")
+    created_at = Column(DateTime, default=datetime.now)
+    submitted_at = Column(DateTime)
+    filled_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def __repr__(self):
+        return f"<OrderRecord({self.order_id}, {self.symbol} {self.action} {self.status}, {self.filled_qty}/{self.requested_qty})>"
+
+
 # =============================================================
 # 데이터베이스 엔진 & 세션 관리
 # =============================================================
@@ -425,6 +462,43 @@ def _migrate_trade_history_slippage_columns(engine):
                     raise
 
 
+def _migrate_trade_history_signal_columns(engine):
+    """기존 DB에 signal_at, order_at, price_gap 컬럼 추가 (감사 항목 4 대응)."""
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    cols = [
+        ("trade_history", "signal_at", "DATETIME" if dialect == "sqlite" else "TIMESTAMP"),
+        ("trade_history", "order_at", "DATETIME" if dialect == "sqlite" else "TIMESTAMP"),
+        ("trade_history", "price_gap", "REAL" if dialect == "sqlite" else "DOUBLE PRECISION"),
+        ("portfolio_snapshots", "peak_value", "REAL" if dialect == "sqlite" else "DOUBLE PRECISION"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in cols:
+            try:
+                if dialect == "sqlite":
+                    # 테이블 존재 여부 확인
+                    t_check = conn.execute(text(
+                        f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ))
+                    if not t_check.fetchone():
+                        continue  # 테이블 없으면 스킵
+                    r = conn.execute(text(f"PRAGMA table_info({table})"))
+                    if any(row[1] == col for row in r.fetchall()):
+                        continue
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                else:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+                    )
+                conn.commit()
+            except Exception as e:
+                if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                    conn.rollback()
+                else:
+                    conn.rollback()
+                    raise
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -440,6 +514,10 @@ def init_database():
         pass
     try:
         _migrate_trade_history_slippage_columns(engine)
+    except Exception:
+        pass
+    try:
+        _migrate_trade_history_signal_columns(engine)
     except Exception:
         pass
 
