@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v4.0
+> **문서 버전**: v4.1
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-01
+> **최종 수정**: 2026-04-02
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -67,8 +67,8 @@
 | **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
 | **trend_following** | `disabled` | backtest only | 미검증 |
 | **trend_pullback** | `experimental` | backtest | C-3A SMA60+RSI pullback, edge 약함 |
-| **breakout_volume** | `experimental` | backtest | C-4 전고점 돌파+거래량 급증. BV50/R50 sleeve paper 후보의 Sleeve A |
-| **relative_strength_rotation** | `paper_candidate` | backtest, paper | C-5 월간 상대강도 회전. TS OFF, TP 7%. BV50/R50 OOS 2.87%, rolling WF 60% positive. PAPER_READY_WITH_GUARDRAILS |
+| **breakout_volume** | `paper_candidate` | backtest, paper | C-4 전고점 돌파+거래량 급증. BV50/R50 sleeve Sleeve A. **Paper 가동 중 (2026-04-01~)** |
+| **relative_strength_rotation** | `paper_candidate` | backtest, paper | C-5 월간 상대강도 회전. TS OFF, TP 7%. BV50/R50 OOS 2.87%, rolling WF 60% positive. **Paper 가동 중 (2026-04-01~)** |
 
 **Live 진입 Hard Gate** (5개 조건 전부 충족 필수, `main.py:_check_live_readiness_gate`):
 1. 승인된 전략 1개 이상 (`reports/approved_strategies.json` + config hash 일치)
@@ -77,11 +77,14 @@
 4. Paper trading 60영업일 이상 (DB `portfolio_snapshots`)
 5. 데이터 소스 health check 통과
 
-**Paper 운영 현황** (v2.8):
-- scoring 전략 60영업일 paper 실험 준비 완료
+**Paper 운영 현황** (v4.1):
+- **BV50/R50 Paper 가동 중** — 2026-04-01 개시, 목표 60영업일
+- Frozen manifest: BV50/R50, Rotation TP=7%, TS=OFF
+- Day 2 (2026-04-02): 합산 평가금액 10,082,023원 (+0.82%), NORMAL 판정
 - signal-only (기본) / full paper (`QUANT_AUTO_ENTRY=true` 환경변수) 2모드 분리
 - lifecycle 테스트 하네스 4/4 PASS (signal_at/order_at/fill_at/expected_fill/price_gap)
 - 주간 리포트 자동 생성, GoLive 체크리스트 구현 완료
+- 일간 운영 로그: `paper_log.txt`, 월간 리포트: `scripts/c5_paper_monthly_report.py`
 
 **실전 투입 전 반드시 완료해야 할 승격 경로** (`reports/strategy_promotion_policy.md` 참고):
 1. `experimental → paper_candidate`: OOS Sharpe ≥ 0.5, WF 통과율 ≥ 60%, 비용 후 CAGR > 0
@@ -1330,6 +1333,14 @@ quant_trader/
 - [x] **BV50/R50 paper 후보 확정** — PAPER_READY_WITH_GUARDRAILS. guardrail 설정 완료
 - [x] **Paper 월간 리포트** — `scripts/c5_paper_monthly_report.py`
 
+### v4.1 Paper 가동 (BV50/R50 Paper Trading 개시)
+
+- [x] **BV50/R50 Paper Trading 개시** — 2026-04-01 시작. 목표 60영업일
+- [x] **Frozen manifest** — BV50/R50, Rotation TP=7%, TS=OFF. 파라미터 동결
+- [x] **일간 운영 로그** — `paper_log.txt`에 Day별 delta 기록 (평가금액, 신호/체결/스킵, fill rate, 경고 판정)
+- [x] **breakout_volume 상태 승격** — `experimental` → `paper_candidate` (BV50/R50 composite paper의 Sleeve A)
+- [x] **Day 2 (2026-04-02)** — 합산 10,082,023원(+0.82%), 무신호 보유일, NORMAL 판정
+
 ### 단기 개선 (1~2개월 내)
 
 | # | 액션 | 상세 | 참고 |
@@ -1404,4 +1415,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-01 (v4.0: C-5 Rotation exit 최적화 — TS OFF·TP 7%·per-strategy override, entry filter 탐색(시장 필터·abs momentum·cooling → 모두 불채택), rolling WF 검증, BV50/R50 paper 후보 확정(PAPER_READY_WITH_GUARDRAILS), paper 모니터링 인프라)
+> **최종 수정**: 2026-04-02 (v4.1: BV50/R50 Paper Trading 개시(2026-04-01~), breakout_volume paper_candidate 승격, 일간 운영 로그 paper_log.txt 추가)
