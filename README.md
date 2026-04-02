@@ -6,8 +6,12 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-04-02)**: BV50/R50 멀티전략 sleeve(거래량 돌파 + 상대강도 회전) Paper Trading 가동 중 (2026-04-01 개시, 목표 60영업일).  
-> 인프라는 프로덕션 수준에 가깝고, Paper 운영 결과에 따라 실전 전환 여부를 판단할 예정입니다.
+> **현재 상태 (2026-04-02)**:  
+> - 승격 규칙 v3: metrics 기반 자동 판정 (`core/promotion_engine.py`) + artifact-driven (`tools/evaluate_and_promote.py`)  
+> - rotation, scoring: **provisional_paper_candidate** (debiased WF 통과, 경제적 alpha 미확인)  
+> - BV50/R50 Paper 실험 가동 중 (2026-04-01~, 60영업일). BV sleeve는 merit 기준 research_only  
+> - 주문 상태기계 도입: OrderStatus 9개 상태, FILLED 전 position 반영 없음  
+> - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
 
@@ -70,8 +74,8 @@ python main.py --mode paper --strategy scoring
 # 모의 스케줄 루프
 python main.py --mode schedule --strategy scoring
 
-# 실전 매매
-python main.py --mode live --strategy scoring --confirm-live
+# 실전 매매 (현재 모든 전략이 live 차단 상태 — live_candidate 승격 전까지 실행 불가)
+# python main.py --mode live --strategy scoring --confirm-live
 
 # 전략 검증
 python main.py --mode validate --strategy scoring --symbol 005930 --validation-years 5
@@ -92,7 +96,9 @@ python main.py --mode dashboard
 python main.py --update-holidays
 ```
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` 설정과 `--confirm-live` 옵션이 함께 필요합니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + Hard Gate 5개 조건 전부 충족이 필요합니다.  
+현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
+`--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다.
 
 ## 리스크 관리
 
@@ -139,7 +145,20 @@ pytest tests/ -q
 | [`BACKTEST_IMPROVEMENT.md`](BACKTEST_IMPROVEMENT.md) | 백테스트 신뢰성 개선 내역, 알려진 한계, 추가 과제 |
 | [`deploy/README.md`](deploy/README.md) | Oracle Cloud Free Tier ARM 배포·systemd 상시 구동 가이드 |
 
+## 전략 상태
+
+승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현.
+
+| 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% |
+|------|------|------|-----|-------|---------|
+| relative_strength_rotation | **provisional_paper_candidate** | +18.09 | 1.62 | 100 | 83.3 |
+| scoring | **provisional_paper_candidate** | +11.22 | 1.07 | 83.3 | 50.0 |
+| breakout_volume | disabled (research_only) | -13.31 | 0.79 | 0 | 0 |
+| mean_reversion | disabled (research_only) | -8.36 | 0.85 | 33.3 | 0 |
+| trend_following | disabled (research_only) | -6.94 | 0.67 | 16.7 | 0 |
+| ensemble | disabled (research_only) | — | — | 0 | 0 |
+
 ## 주의
 
 실전 투입 전에는 백테스트, 검증, 모의투자를 충분히 거친 뒤 사용하는 것을 권장합니다.  
-현재 BV50/R50 Paper Trading이 가동 중이며 (2026-04-01~, 목표 60영업일), 일간 운영 로그(`paper_log.txt`)와 guardrail 모니터링으로 전략 유효성을 검증하고 있습니다.
+현재 BV50/R50 Paper Trading이 가동 중이며 (2026-04-01~, 목표 60영업일), 일간 운영 로그(`paper_log.txt`)와 Paper Evidence 체계(`core/paper_evidence.py`)로 승격/강등 근거를 자동 수집합니다.
