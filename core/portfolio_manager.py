@@ -7,6 +7,7 @@
 from loguru import logger
 
 from config.config_loader import Config
+from core.position_lock import PositionLock
 from database.repositories import (
     get_all_positions,
     get_trade_cash_summary,
@@ -259,6 +260,7 @@ class PortfolioManager:
         """
         KIS 실제 잔고와 DB 포지션을 대조하여 불일치 시 로깅 및 알림.
         auto_correct=True 시 DB를 증권사 기준으로 자동 보정합니다.
+        PositionLock으로 보호하여 주문 실행과 동시 접근을 방지합니다. (감사 H-2 대응)
 
         Args:
             auto_correct: True면 DB를 증권사 기준으로 보정.
@@ -270,6 +272,11 @@ class PortfolioManager:
         if auto_correct is None:
             auto_correct = self.config.trading.get("position_mismatch_auto_correct", False)
 
+        with PositionLock():
+            return self._sync_with_broker_impl(auto_correct)
+
+    def _sync_with_broker_impl(self, auto_correct: bool) -> dict:
+        """sync_with_broker의 실제 구현 (PositionLock 내부에서 실행)."""
         try:
             from api.kis_api import KISApi
             account_no = self.config.get_account_no(self.account_key)

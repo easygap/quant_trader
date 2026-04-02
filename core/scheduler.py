@@ -339,15 +339,21 @@ class Scheduler:
             )
             self._log_rate_limit_stats("장전 분석")
 
-            mismatched = collector.check_source_consistency()
-            if mismatched:
+            source_warnings = collector.check_source_consistency(
+                mode=getattr(self, "_trading_mode", "paper")
+            )
+            kis_symbols = collector.has_kis_fallback_symbols()
+            if kis_symbols:
                 msg = (
-                    f"⚠️ 데이터 소스 불일치 감지: {mismatched}. "
-                    "백테스트(수정주가)와 다른 소스(비수정주가 가능)를 사용 중. "
-                    "지표·신호가 달라질 수 있습니다. pip install FinanceDataReader 권장."
+                    f"🚨 KIS 비수정주가 폴백 감지: {kis_symbols}. "
+                    "이 종목들의 신호는 백테스트(수정주가)와 다른 기준으로 계산되었습니다. "
+                    "pip install FinanceDataReader 후 allow_kis_fallback: false 설정 권장."
                 )
-                logger.warning(msg)
+                logger.error(msg)
                 self.discord.send_message(msg, critical=True)
+            elif source_warnings:
+                for w in source_warnings:
+                    logger.warning(w)
 
             self._run_basket_rebalance_check()
 
