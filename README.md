@@ -6,15 +6,20 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> 현재는 자동매매 인프라를 정리해가는 단계에 가깝습니다.  
-> 실전 운영보다는 백테스트와 모의투자를 통해 전략을 검증하고 개선하는 용도로 보는 편이 맞습니다.
+> **현재 상태 (2026-04-02)**:  
+> - 승격 규칙 v3: metrics 기반 자동 판정 (`core/promotion_engine.py`) + artifact-driven (`tools/evaluate_and_promote.py`)  
+> - rotation, scoring: **provisional_paper_candidate** (debiased WF 통과, 경제적 alpha 미확인)  
+> - BV50/R50 Paper 실험 가동 중 (2026-04-01~, 60영업일). BV sleeve는 merit 기준 research_only  
+> - 주문 상태기계 도입: OrderStatus 9개 상태, FILLED 전 position 반영 없음  
+> - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
 
-- 백테스트 / 포트폴리오 백테스트
+- 백테스트 / 포트폴리오 백테스트 / 멀티전략 sleeve 비교
 - 모의투자 / 실전 매매
 - 전략 검증 / 성과 비교 / 파라미터 최적화
 - 스코어링 / 평균회귀 / 추세추종 / 펀더멘털 / 앙상블 전략
+- 거래량 돌파(C-4) / 상대강도 회전(C-5) / 2-sleeve 포트폴리오 (BV50/R50 **Paper 가동 중**)
 - 리스크 관리, 알림, 바스켓 리밸런싱, 웹 대시보드
 
 ## 사용 환경
@@ -51,14 +56,26 @@ python main.py --mode backtest --strategy scoring --symbol 005930
 # 포트폴리오 백테스트
 python main.py --mode portfolio_backtest --strategy scoring --symbols 005930,000660 --start 2023-01-01 --end 2024-12-31
 
+# 거래량 돌파 전략 (C-4) 포트폴리오 백테스트
+python main.py --mode portfolio_backtest --strategy breakout_volume --symbols 005930,000660,035720,051910 --start 2024-01-01 --end 2025-12-31
+
+# 멀티전략 sleeve 비중 스윕 (C-5)
+python scripts/c5_weight_sweep.py
+
+# paper trading 월간 리포트 (BV50/R50 guardrail 모니터링)
+python scripts/c5_paper_monthly_report.py
+
+# paper trading 특정 기간 리포트
+python scripts/c5_paper_monthly_report.py 2026-04-01 2026-04-02
+
 # 모의투자
 python main.py --mode paper --strategy scoring
 
 # 모의 스케줄 루프
 python main.py --mode schedule --strategy scoring
 
-# 실전 매매
-python main.py --mode live --strategy scoring --confirm-live
+# 실전 매매 (현재 모든 전략이 live 차단 상태 — live_candidate 승격 전까지 실행 불가)
+# python main.py --mode live --strategy scoring --confirm-live
 
 # 전략 검증
 python main.py --mode validate --strategy scoring --symbol 005930 --validation-years 5
@@ -79,7 +96,9 @@ python main.py --mode dashboard
 python main.py --update-holidays
 ```
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` 설정과 `--confirm-live` 옵션이 함께 필요합니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + Hard Gate 5개 조건 전부 충족이 필요합니다.  
+현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
+`--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다.
 
 ## 리스크 관리
 
@@ -107,7 +126,8 @@ pytest tests/ -q
 
 * `config/` — 설정
 * `core/` — 데이터, 지표, 신호, 리스크, 주문, 스케줄러, 알림
-* `strategies/` — 전략
+* `strategies/` — 전략 (scoring, breakout_volume, relative_strength_rotation 등)
+* `scripts/` — 검증 스크립트 (C-4 OOS, C-5 sleeve 비교/비중 스윕/필터 테스트/rolling WF/paper 리포트)
 * `api/` — KIS REST·웹소켓
 * `backtest/` — 백테스트, 검증, 최적화, 비교
 * `database/` — 모델·백업
@@ -122,10 +142,23 @@ pytest tests/ -q
 |------|------|
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
-| [`docs/BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 손익 개선 포인트(손익비·상승장·손절/익절·가중치 파이프라인) |
+| [`BACKTEST_IMPROVEMENT.md`](BACKTEST_IMPROVEMENT.md) | 백테스트 신뢰성 개선 내역, 알려진 한계, 추가 과제 |
 | [`deploy/README.md`](deploy/README.md) | Oracle Cloud Free Tier ARM 배포·systemd 상시 구동 가이드 |
+
+## 전략 상태
+
+승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현.
+
+| 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% |
+|------|------|------|-----|-------|---------|
+| relative_strength_rotation | **provisional_paper_candidate** | +18.09 | 1.62 | 100 | 83.3 |
+| scoring | **provisional_paper_candidate** | +11.22 | 1.07 | 83.3 | 50.0 |
+| breakout_volume | disabled (research_only) | -13.31 | 0.79 | 0 | 0 |
+| mean_reversion | disabled (research_only) | -8.36 | 0.85 | 33.3 | 0 |
+| trend_following | disabled (research_only) | -6.94 | 0.67 | 16.7 | 0 |
+| ensemble | disabled (research_only) | — | — | 0 | 0 |
 
 ## 주의
 
 실전 투입 전에는 백테스트, 검증, 모의투자를 충분히 거친 뒤 사용하는 것을 권장합니다.  
-현재 단계에서는 운영 안정성보다 전략 자체의 검증이 더 중요합니다.
+현재 BV50/R50 Paper Trading이 가동 중이며 (2026-04-01~, 목표 60영업일), 일간 운영 로그(`paper_log.txt`)와 Paper Evidence 체계(`core/paper_evidence.py`)로 승격/강등 근거를 자동 수집합니다.

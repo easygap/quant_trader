@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v2.8
+> **문서 버전**: v5.0
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-03-27
+> **최종 수정**: 2026-04-02
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -50,40 +50,44 @@
 | **수익 목표** | 검증된 전략으로 벤치마크(코스피 지수) 대비 초과 수익 달성. **가중치 최적화·워크포워드 검증·paper 1개월 운영을 모두 통과한 후에만 기대할 수 있는 목표**이며, 검증 없이 "연 20%" 같은 수치를 설정하는 것은 위험 |
 | **대응 속도** | 실시간 시세 반영 (1초 이내 분석·주문) |
 
-### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v2.8 업데이트)
+### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v5.0 업데이트)
 
-> **핵심 판단: 시스템은 research-only 상태이며, live 자동매매는 코드 레벨 hard gate로 차단되어 있습니다.**
+> **핵심 판단: live 자동매매는 코드 레벨 hard gate로 차단. `--force-live` 제거됨. 주문 상태기계 도입.**
 
-인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OperationEvent 기록, 주문 lifecycle 추적)는 프로덕션 수준에 가깝게 완성되었습니다. 그러나 **전략 신호의 실전 유효성이 검증되지 않았으므로** live 전환은 불가합니다.
+인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OrderRecord 상태기계, Paper Evidence 수집)는 프로덕션 수준입니다. **전략 신호는 debiased 평가에서 same-universe B&H 대비 음수 excess이므로** live 전환 불가.
 
-**전략 상태 레지스트리** (v2.8 현재):
+**전략 상태 레지스트리** (v5.0 — `core/promotion_engine.py`에서 metrics 기반 자동 판정):
 
-| 전략 | 상태 | 허용 모드 | 사유 |
-|------|------|-----------|------|
-| **scoring** | `experimental` | backtest, paper | OOS Sharpe 0.84, WF 미통과 |
-| **mean_reversion** | `disabled` | backtest only | Sharpe -2.50, 구조적 한계 |
-| **fundamental_factor** | `disabled` | backtest only | yfinance 부채비율 한국 기준 불일치, WF 미실행 |
-| **fundamental_first** | `disabled` | backtest only | fundamental_factor 종속, WF 미실행 |
-| **ensemble** | `disabled` | backtest only | 구성 전략 모두 미승인 |
-| **trend_following** | `disabled` | backtest only | 미검증 |
+| 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | 사유 |
+|------|------|-----------|------|-----|-----------|------|
+| **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | debiased WF 통과. 경제적 alpha 미확인 |
+| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | WF Sh+ 경계 통과. 가중치 미최적화 |
+| **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | PF<1. BV50/R50 Paper Sleeve A (운영 사실, merit와 무관) |
+| **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | 유니버스 의존적 |
+| **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | PF<1. 한국 시장 구조적 비유효 |
+| **ensemble** | `disabled` | backtest only | — | — | 0/0 | 구성 전략 disabled + 독립성 부족 |
 
-**Live 진입 Hard Gate** (5개 조건 전부 충족 필수, `main.py:_check_live_readiness_gate`):
-1. 승인된 전략 1개 이상 (`reports/approved_strategies.json` + config hash 일치)
-2. 최근 Walk-Forward 통과 (`reports/validation_walkforward_*.json`)
-3. 비용 반영 후 벤치마크 대비 초과수익 ≥ 0 (`reports/benchmark_comparison.json`)
-4. Paper trading 60영업일 이상 (DB `portfolio_snapshots`)
-5. 데이터 소스 health check 통과
+**승격 규칙 v3** (`core/promotion_engine.py`):
+- `research_only` → `paper_only` → `provisional_paper_candidate` → `live_candidate`
+- 각 단계 정량 기준: ret>0, PF≥1.0, WF P≥50%, WF Sh+≥50%, MDD>-20%, Paper 60일, excess≥0
+- metrics 기반 자동 판정. 수동 override 불가. CI 테스트로 registry-engine 일치 강제
 
-**Paper 운영 현황** (v2.8):
-- scoring 전략 60영업일 paper 실험 준비 완료
-- signal-only (기본) / full paper (`QUANT_AUTO_ENTRY=true` 환경변수) 2모드 분리
-- lifecycle 테스트 하네스 4/4 PASS (signal_at/order_at/fill_at/expected_fill/price_gap)
-- 주간 리포트 자동 생성, GoLive 체크리스트 구현 완료
+**Live 진입 Hard Gate** (5개 조건, 우회 불가 — `--force-live` 제거됨):
+1. 승인된 전략 (`reports/approved_strategies.json` + config hash + auto_generated 검증)
+2. WF 통과 (`reports/validation_walkforward_*.json`)
+3. 벤치마크 초과수익 ≥ 0 (`reports/benchmark_comparison.json`)
+4. Paper 60영업일 (DB `portfolio_snapshots`)
+5. 데이터 소스 health check
 
-**실전 투입 전 반드시 완료해야 할 승격 경로** (`reports/strategy_promotion_policy.md` 참고):
-1. `experimental → paper_candidate`: OOS Sharpe ≥ 0.5, WF 통과율 ≥ 60%, 비용 후 CAGR > 0
-2. `paper_candidate → live_candidate`: Paper 60영업일, 승률 ≥ 40%, MDD > -20%, Sharpe ≥ 0.3
-3. hard gate 5개 조건 충족 → `--mode live --confirm-live` 가능
+**주문 상태기계** (v5.0, `core/order_state.py`):
+- 9개 상태: NEW → SUBMITTED → ACKED → FILLED / PARTIAL_FILLED / REJECTED / CANCELLED / EXPIRED → RECONCILED
+- **FILLED assert 통과 후에만** position/trade DB 반영 (phantom position 방지)
+- Paper: simulated broker event로 동일 전이. Live: broker callback + reconcile
+
+**Paper 운영 현황** (v5.0):
+- BV50/R50 Paper 가동 중 (2026-04-01~, 60영업일)
+- Paper Evidence 수집 체계 (`core/paper_evidence.py`): 일별 22개 지표 + 6개 anomaly rule + 9개 approval gate
+- 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
 **지속적 손실이 발생할 수 있는 구체적 시나리오** (§4.6 참고):
 - **시나리오 A**: 과매매로 인한 수수료 손실 (월 10회 왕복 시 수수료만 2.3%)
@@ -448,6 +452,101 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
   - `independence_threshold: 0.6` — 상관계수 기준
 - **권고**: **0.6 이상**인 쌍이 있으면 다수결만으로는 독립성이 보장되지 않습니다. conservative 전환은 응급 조치이며, **근본적으로는 전략 구성을 재검토**하세요.
 
+### 4.4b 거래량 동반 돌파 전략 — breakout_volume (C-4)
+
+**가설**: 전고점 돌파 + 거래량 급증이 동반되면 한국 대형주에서 유효한 모멘텀 시그널.
+
+**Entry** (edge-trigger, long only):
+1. `breakout_ref = rolling_max(high, breakout_period).shift(1)` — 현재 봉 제외
+2. `avg_vol_ref = rolling_mean(volume, breakout_period).shift(1)` — 현재 봉 제외
+3. `close > breakout_ref AND volume > avg_vol_ref * surge_ratio AND ADX > adx_min`
+4. 전일 조건 미충족 → 당일 충족 시에만 BUY (edge-trigger)
+
+**Exit**: `close < breakout_ref` (최소 실패 신호). 나머지 손절/트레일링은 ATR 2.5 risk layer 위임.
+
+**Frozen params**: `breakout_period=10, surge_ratio=1.5, adx_min=20`
+
+| 검증 | 유니버스 | 기간 | return | Sharpe | MDD |
+|------|----------|------|--------|--------|-----|
+| OOS 포트폴리오 | 005930,000660,035720,051910 | 2024-2025 | +2.70% | -0.70 | -2.07% |
+| DEV 포트폴리오 | 〃 | 2021-2023 | -2.94% | -2.83 | -4.65% |
+
+**병목**: SIGNAL_SPARSE — 486일 중 BUY 있는 날 53일(11%). 동시 BUY 충돌 2년간 2회.
+
+**구현**: `strategies/breakout_volume.py`, `config/strategies.yaml:breakout_volume`
+
+### 4.4c 상대강도 회전 전략 — relative_strength_rotation (C-5)
+
+**목표**: breakout_volume의 SIGNAL_SPARSE 구간을 보완하는 높은 days_in_market 확보.
+
+**랭킹**: `composite = 0.6 × ret_60d + 0.4 × ret_120d`
+**추세 필터**: `close > SMA(60)`
+**리밸런싱**: 월간 (매월 첫 거래일). max_positions=2.
+**Exit**: 리밸런싱일 모멘텀 음수/SMA 하회, 비리밸런싱일 SMA60 하향 이탈 edge-trigger.
+
+#### Exit 최적화 (v4.0)
+
+**Trailing stop 제거**: 승률 18-29%, negative EV → `disable_trailing_stop: true`
+- DEV return: -4.99% → -0.96%, OOS: 6.18% → 4.25%
+- Capture rate: 71% → 79% (DEV), 78% → 83% (OOS)
+
+**TP 8% → 7%**: per-strategy override (`strategies.yaml: take_profit_rate: 0.07`)
+- DEV: -0.96% → -0.19%, OOS: 4.25% → 4.71%
+
+**per-strategy TP override**: `portfolio_backtester.py`에 `tp_rate_override` 파라미터 추가.
+
+#### Entry filter 탐색 (v4.0, 모두 불채택)
+
+| 필터 | 결과 | 판정 |
+|------|------|------|
+| KS11 SMA200 시장 필터 (`market_filter_sma200`) | 개선 미미 | NO_MEANINGFUL_IMPROVEMENT |
+| ret_120d > 0 절대 모멘텀 (`abs_momentum_filter`) | 개선 미미 | NO_MEANINGFUL_IMPROVEMENT |
+| ret_60d > 0 AND ret_120d > 0 | 개선 미미 | NO_MEANINGFUL_IMPROVEMENT |
+| min_hold_days=5 냉각 기간 | 성과 악화 | ADVERSE_EFFECT (0으로 복원) |
+
+#### 인프라 추가 (v4.0)
+
+- `min_hold_days` 파라미터 (테스트 후 0 유지)
+- `market_filter_sma200` 코드 (false로 비활성)
+- `abs_momentum_filter` 코드 (none으로 비활성)
+- signal/executed/skipped 카운터 (`portfolio_backtester.py`)
+
+#### 검증 결과 (TS OFF, TP 7%)
+
+| 검증 | 유니버스 | 기간 | return | MDD |
+|------|----------|------|--------|-----|
+| OOS 단독 | 005930,000660,035720,051910 | 2024-2025 | +4.71% | -3.06% |
+| DEV 단독 | 〃 | 2021-2023 | -0.19% | -7.90% |
+
+**2-sleeve 비중 스윕 결과** (TS OFF, TP 7%):
+
+| 비중 (BV/R) | OOS return | OOS MDD | concentration |
+|-------------|-----------|---------|---------------|
+| BV50/R50 | +2.87% | -1.71% | 46.7% |
+| BV75/R25 | +3.11% | -1.37% | 53.0% |
+| BV100 | +2.70% | -2.07% | -- |
+
+**Rolling walk-forward** (10 windows × 12mo, 6mo step):
+
+| 비중 | positive window | median ret | worst |
+|------|----------------|------------|-------|
+| BV50/R50 | 60% | +0.45% | -2.05% |
+| BV75/R25 | 50% | +0.07% | -1.87% |
+| BV100 | 30% | -- | -2.14% |
+
+**Sharpe sanity check** (BV50/R50):
+- Full period all-days Sharpe: -1.43 (64% cash days drag)
+- Position-only Sharpe: +0.07
+- CMA-adjusted Sharpe (2.5% cash return assumed): +0.87
+
+**판정**: PAPER_READY_WITH_GUARDRAILS — BV50/R50, Rotation TP=7%, TS=OFF.
+
+**Guardrails**: monthly -3% warn, MDD -5% warn, MDD -8% halt, 3-month consecutive loss → downgrade.
+**Monthly report**: `scripts/c5_paper_monthly_report.py`
+**Fill rate monitoring**: signal/executed/skipped counts.
+
+**구현**: `strategies/relative_strength_rotation.py`, `scripts/c5_sleeve_backtest.py`, `scripts/c5_weight_sweep.py`, `scripts/c5_rotation_no_ts_test.py`, `scripts/c5_rotation_tp_sweep.py`, `scripts/c5_sleeve_sweep_nots.py`, `scripts/c5_rolling_walkforward.py`, `scripts/c5_rotation_filter_test.py`, `scripts/c5_rotation_absmom_test.py`, `scripts/c5_rotation_trade_diagnostic.py`, `scripts/c5_rotation_cooling_test.py`, `scripts/c5_tp_override_verify.py`, `scripts/c5_paper_monthly_report.py`
+
 ### 4.5 전략별 수익 가능성 진단
 
 > **이 섹션은 각 전략이 실제로 수익을 낼 수 있는지에 대한 솔직한 평가입니다.**
@@ -701,7 +800,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 
 - **문제**: 매수 후 즉시 매도 신호가 나오면 왕복 수수료만 소모합니다.
 - **구현**: 매수 후 최소 N일은 보유하도록 강제. 손절·블랙스완·트레일링 스탑은 예외.
-  - 현재 설정: `min_holding_days: 3` (매수 후 3일 미만이면 일반 매도 차단)
+  - 현재 설정: `min_holding_days: 5` (매수 후 5일 미만이면 일반 매도 차단, 3→5일 강화)
 - **효과**: 단타 왕복을 줄이고, 전략이 의도한 보유 기간을 확보.
 - **설정**: `risk_params.yaml` → `position_limits.min_holding_days` (현재 3, 0 = 비활성)
 - **구현 위치**: `core/order_executor.py` → `_execute_sell_impl()` (실전), `backtest/backtester.py` → `_simulate()` (백테스트) 양쪽 모두 적용.
@@ -1049,6 +1148,18 @@ quant_trader/
 - **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계.
 - **활용**: 유니버스 후보 종목 묶음에 대한 **동시 보유 시나리오** 검증, 단일 종목 백테스트와의 성과 비교.
 
+### 8.6 멀티전략 2-Sleeve 포트폴리오 검증 — v4.0
+
+- **목적**: 서로 다른 전략을 **독립 sleeve**로 운용하여 자본을 고정 비율로 분리하고, 각 sleeve의 기여를 독립 측정.
+- **구조**: Sleeve A(breakout_volume) + Sleeve B(relative_strength_rotation, TS OFF, TP 7%). 전략 간 total_score 직접 비교 금지, 자본 배분만 고정.
+- **검증 스크립트**: `scripts/c5_sleeve_backtest.py`, `scripts/c5_weight_sweep.py`, `scripts/c5_sleeve_sweep_nots.py`, `scripts/c5_rolling_walkforward.py`
+- **Exit 최적화**: Rotation trailing stop 제거 + TP 8%→7% per-strategy override. capture rate 71%→79%(DEV), 78%→83%(OOS).
+- **Entry filter 탐색**: KS11 SMA200, abs momentum, min_hold_days → 모두 불채택 (NO_MEANINGFUL_IMPROVEMENT / ADVERSE_EFFECT).
+- **결과**: §4.4c 참고. BV50/R50 OOS 2.87%, MDD -1.71%. Rolling WF 60% positive window, median +0.45%.
+- **판정**: PAPER_READY_WITH_GUARDRAILS.
+- **Guardrails**: monthly -3% warn, MDD -5% warn, MDD -8% halt, 3-month consecutive loss → downgrade.
+- **Paper monitoring**: `scripts/c5_paper_monthly_report.py`, signal/executed/skipped 카운터.
+
 ---
 
 ## 9. 예외 처리 및 안정성
@@ -1178,7 +1289,7 @@ quant_trader/
 
 - [x] 포지션 불일치 자동 보정 — KIS↔DB 불일치 시 KIS 기준 DB 자동 동기화 (§9.1)
 - [x] 신호 히스터리시스 — BUY↔HOLD↔SELL 순차 전환 강제, 직접 전환 차단 (§5.13)
-- [x] 최소 보유 기간 3일 — 매수 후 3일 미만 매도 차단, 손절·블랙스완 예외 (§5.14)
+- [x] 최소 보유 기간 5일 — 매수 후 5일 미만 매도 차단, 손절·블랙스완 예외 (§5.14, 3→5일 강화)
 - [x] 휴장일 자동 갱신 — Scheduler에서 90일 경과 또는 연초 자동 호출 (§9.1)
 - [x] 시스템 헬스체크 자동화 — 10분 주기 DB·API·디스크·메모리 점검 (§9.1)
 - [x] 10분 루프 모니터링 — LoopMetrics 추적, 연속 스킵 경고, 장마감 리포트 포함 (§9.1)
@@ -1206,6 +1317,44 @@ quant_trader/
 - [x] **스케줄러 장중** — 동적 손절 래칟 갱신(`update_stop_loss_price`), `auto_entry` 시 신호 재스캔
 - [x] **CLI** — `--mode portfolio_backtest`, `--symbols`
 - [x] **백테스트 메트릭 확장** — 소르티노, VaR/CVaR, MDD 회복일, 최대 연속 손실일
+
+### v4.0 구현 완료 (C-5 Rotation 최적화 + Paper 후보 확정)
+
+- [x] **Rotation trailing stop 제거** — 승률 18-29%, negative EV → `disable_trailing_stop: true`. DEV -4.99%→-0.96%, capture rate 71%→79%
+- [x] **Rotation TP 8%→7%** — per-strategy override (`strategies.yaml: take_profit_rate: 0.07`). DEV -0.96%→-0.19%, OOS 4.25%→4.71%
+- [x] **per-strategy TP override** — `portfolio_backtester.py`에 `tp_rate_override` 파라미터 추가
+- [x] **min_hold_days 인프라** — 코드 추가, 테스트 후 ADVERSE_EFFECT → 0 유지
+- [x] **KS11 SMA200 시장 필터** — 코드 추가(`market_filter_sma200`), 테스트 후 NO_MEANINGFUL_IMPROVEMENT → false 유지
+- [x] **절대 모멘텀 필터** — 코드 추가(`abs_momentum_filter`), 테스트 후 NO_MEANINGFUL_IMPROVEMENT → none 유지
+- [x] **signal/executed/skipped 카운터** — `portfolio_backtester.py`에 모니터링 카운터 추가
+- [x] **Rolling walk-forward** — 10 windows × 12mo, 6mo step. BV50/R50 positive 60%, median +0.45%
+- [x] **BV50/R50 paper 후보 확정** — PAPER_READY_WITH_GUARDRAILS. guardrail 설정 완료
+- [x] **Paper 월간 리포트** — `scripts/c5_paper_monthly_report.py`
+
+### v4.1 Paper 가동 (BV50/R50 Paper Trading 개시)
+
+- [x] **BV50/R50 Paper Trading 개시** — 2026-04-01 시작. 목표 60영업일
+- [x] **Frozen manifest** — BV50/R50, Rotation TP=7%, TS=OFF. 파라미터 동결
+- [x] **일간 운영 로그** — `paper_log.txt`에 Day별 delta 기록 (평가금액, 신호/체결/스킵, fill rate, 경고 판정)
+- [x] **breakout_volume 상태 승격** — `experimental` → `paper_candidate` (BV50/R50 composite paper의 Sleeve A)
+- [x] **Day 2 (2026-04-02)** — 합산 10,082,023원(+0.82%), 무신호 보유일, NORMAL 판정
+
+### v5.0 운영 안정성 + 전략 재평가 (코드 감사 대응)
+
+- [x] **`--force-live` 제거** — hard gate 우회 불가. approved_strategies.json 미존재 시 즉시 에러
+- [x] **OrderGuard 수정** — mark_pending을 API 호출 이전으로, 체결/실패 후 clear() 호출
+- [x] **sync_with_broker PositionLock** — 동기화 중 position 동시 접근 방지
+- [x] **signal_at/order_at/price_gap/peak_value 마이그레이션** — 기존 DB 자동 컬럼 추가
+- [x] **벤치마크 거래비용 반영** — `_buy_and_hold_metrics`에 commission/tax/slippage 적용
+- [x] **WF 0-windows 수정** — validator flat key 구조 확인, 6 windows 정상 생성
+- [x] **주문 상태기계** — `core/order_state.py` (OrderStatus 9개 상태, OrderBook, OrderRecord)
+- [x] **OrderExecutor 이관** — 상태기계 기반 주문 처리, FILLED assert 후에만 DB 반영
+- [x] **OrderRecord DB 테이블** — `database/models.py`에 order_records 추가
+- [x] **debiased 전략 평가** — 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows
+- [x] **승격 규칙 v3** — `core/promotion_engine.py` metrics 기반 자동 판정 + artifact-driven
+- [x] **Paper Evidence 체계** — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate
+- [x] **전략 분류 확정** — rotation/scoring: provisional. BV/MR/TF/ensemble: disabled (research_only)
+- [x] **테스트 226건 전체 green** — 기존 7 fail 해소 + 신규 83건 추가
 
 ### 단기 개선 (1~2개월 내)
 
@@ -1243,7 +1392,7 @@ quant_trader/
 ### ⚠️ 경고
 
 - **소액 시작**: 페이퍼 1개월 이상 → 소액 실전(운용 예정 금액의 10% 이하) → 점진적 증액. 모든 검증을 통과한 후에만.
-- **수수료·과매매**: 왕복 약 0.23%(수수료 0.015%×2 + 거래세 0.20%, 2026년 기준). 히스터리시스(§5.13)와 최소 보유 기간 3일(§5.14)이 기본 활성화되어 과매매를 구조적으로 억제하지만, 직관값 가중치 상태에서는 여전히 위험 존재. §8.3의 구체적 수치 예시 참고.
+- **수수료·과매매**: 왕복 약 0.23%(수수료 0.015%×2 + 거래세 0.20%, 2026년 기준). 히스터리시스(§5.13)와 최소 보유 기간 5일(§5.14)이 기본 활성화되어 과매매를 구조적으로 억제하지만, 직관값 가중치 상태에서는 여전히 위험 존재. §8.3의 구체적 수치 예시 참고.
 - **생존자 편향**: `backtest_universe.mode: historical` 필수. `current` 상태에서 백테스트 수익률은 허구일 수 있음. §8.2.1 참고.
 - **한국 시장 특성**: 현재 전략 파라미터(200일선, ADX 25 등)는 미국 시장 기준. 한국 시장(박스권, 빠른 추세 전환)에서 동일하게 유효하다는 근거 부족. §4.5, §4.7.1 참고.
 - **앙상블 독립성**: technical과 momentum_factor가 실질적으로 같은 정보 사용. 진정한 다각화를 위해 펀더멘털/뉴스 신호 추가 필요. §4.5.4 참고.
@@ -1281,4 +1430,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-03-27 (v2.8: `backtest_momentum_top` 모드·`momentum_top_portfolio.py`, `momentum_factor` CLI 등록, `strategy_diagnostics.py`, `dashboard_runtime_state.py`, `BACKTEST_IMPROVEMENT.md` 반영, 디렉터리/CLI 표 갱신; §6.2 strategies.yaml `fundamental_factor` 반영, deploy/ 구성 명시, 문서 간 양식·교차 참조 통일)
+> **최종 수정**: 2026-04-02 (v5.0: 코드 감사 대응 — --force-live 제거, 주문 상태기계, debiased 전략 재평가, 승격 규칙 v3 artifact-driven, Paper Evidence 체계, 테스트 226건 green)
