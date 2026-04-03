@@ -833,8 +833,10 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
                 s["name"] for s in approved_data.get("strategies", [])
                 if s.get("status") == "approved"
             ]
-        except Exception:
-            pass
+        except Exception as e:
+            issues.append(f"승인 파일 파싱 오류: {e}")
+    else:
+        issues.append("승인 파일 없음: reports/approved_strategies.json")
     if not approved_strategies:
         issues.append(
             "승인된 전략 없음. python main.py --mode validate --walk-forward 실행 후 "
@@ -942,19 +944,17 @@ def run_live_trading(args):
 
     config = Config.get()
 
-    # ── 라이브 전 필수 검증 게이트 ──
-    force_live = getattr(args, "force_live", False)
-    if not force_live:
-        gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
-        if gate_issues:
-            logger.error("=" * 50)
-            logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
-            for issue in gate_issues:
-                logger.error("  - {}", issue)
-            logger.error("강제 진행: --force-live 플래그 추가")
-            logger.error("=" * 50)
-            sys.exit(1)
-        logger.info("✅ 라이브 전 검증 게이트 통과")
+    # ── 라이브 전 필수 검증 게이트 (우회 불가) ──
+    gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
+    if gate_issues:
+        logger.error("=" * 50)
+        logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
+        for issue in gate_issues:
+            logger.error("  - {}", issue)
+        logger.error("이 게이트는 우회할 수 없습니다. 모든 조건을 충족한 뒤 재시도하세요.")
+        logger.error("=" * 50)
+        sys.exit(1)
+    logger.info("✅ 라이브 전 검증 게이트 통과")
 
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
@@ -1310,10 +1310,7 @@ def main():
         "--confirm-live", action="store_true",
         help="실전 모드 진입 시 필수. 미지정 시 live 모드 진입 거부.",
     )
-    parser.add_argument(
-        "--force-live", action="store_true",
-        help="라이브 검증 게이트 강제 통과. 검증 미완료 상태에서 실전 진입 시 사용.",
-    )
+    # --force-live 제거됨 (감사 C-1 대응): hard gate는 우회 불가
     parser.add_argument(
         "--output-dir", type=str, default="reports",
         help="백테스트 리포트 저장 디렉토리 (기본: reports)",
