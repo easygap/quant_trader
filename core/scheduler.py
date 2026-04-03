@@ -145,9 +145,16 @@ class Scheduler:
         """
         비정상 종료 후 재시작 시: Dead-letter 미처리 건 알림, KIS 미체결 확인, 잔고↔DB 동기화.
         장중이면 `_last_monitor_time`을 비워 첫 장중 루프에서 곧바로 모니터링이 돌도록 한다.
+        완료 후 STARTUP_RECOVERY 이벤트를 OperationEvent에 기록한다.
         """
+        recovery_start = datetime.now()
+        pending_count = 0
+        open_order_count = 0
+        sync_ok = False
+
         try:
             pending_orders = get_pending_failed_orders()
+            pending_count = len(pending_orders) if pending_orders else 0
             if pending_orders:
                 logger.warning("[복구] 미처리 실패 주문 {}건 발견", len(pending_orders))
                 lines = []
@@ -170,6 +177,7 @@ class Scheduler:
 
                 executor = OrderExecutor(self.config, account_key=self.strategy_name)
                 open_orders = executor.reconcile_open_orders_after_crash()
+                open_order_count = len(open_orders) if open_orders else 0
                 if open_orders:
                     logger.warning("[복구] KIS 미체결 주문 {}건: {}", len(open_orders), open_orders)
                     parts = [
@@ -188,18 +196,41 @@ class Scheduler:
 
                 try:
                     self.portfolio.sync_with_broker(auto_correct=True)
+                    sync_ok = True
                 except Exception as e:
                     logger.warning("[복구] KIS 잔고↔DB 동기화 실패: {}", e)
             else:
                 logger.info("[복구] paper 모드 — KIS 미체결·잔고 동기화 생략")
+                sync_ok = True  # paper에서는 동기화 불필요
 
             if self.trading_hours.is_market_open():
                 self._last_monitor_time = None
                 logger.info("[복구] 장중 재시작 — 모니터링 주기 타이머 초기화(다음 루프에서 즉시 실행 가능)")
             else:
                 logger.info("[복구] 비장중 재시작 — 다음 거래일·장 개시까지 기존 스케줄로 대기")
+
         except Exception as e:
             logger.error("[복구] startup_recovery 처리 중 오류: {}", e)
+        finally:
+            # STARTUP_RECOVERY 이벤트 기록 (evidence 집계용)
+            elapsed_s = (datetime.now() - recovery_start).total_seconds()
+            try:
+                import json as _json
+                _log_op(
+                    "STARTUP_RECOVERY",
+                    f"startup recovery 완료: pending={pending_count}, open_orders={open_order_count}, sync={'ok' if sync_ok else 'fail'}, elapsed={elapsed_s:.1f}s",
+                    severity="info",
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    detail={
+                        "pending_failed_orders": pending_count,
+                        "open_order_count": open_order_count,
+                        "broker_sync_ok": sync_ok,
+                        "elapsed_seconds": round(elapsed_s, 1),
+                    },
+                )
+            except Exception:
+                pass
 
     def run(self):
         """메인 루프 — 무한 반복으로 장 시간에 맞춰 자동 실행."""
@@ -266,6 +297,27 @@ class Scheduler:
         logger.info("=" * 50)
         logger.info("📋 장전 준비 시작 ({})", datetime.now().strftime("%H:%M:%S"))
         logger.info("=" * 50)
+
+        # 전일 provisional evidence finalize (장전에 benchmark 종가 확정)
+        if self._mode == "paper":
+            try:
+                from core.paper_evidence import finalize_daily_evidence
+                yesterday = datetime.now() - timedelta(days=1)
+                # 주말이면 금요일로
+                while yesterday.weekday() >= 5:
+                    yesterday -= timedelta(days=1)
+                watchlist = WatchlistManager(self.config).resolve()
+                result = finalize_daily_evidence(
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    account_key=self.strategy_name,
+                    date=yesterday,
+                    watchlist_symbols=watchlist,
+                )
+                if result:
+                    logger.info("전일 evidence finalized: {} bench={}", yesterday.strftime("%Y-%m-%d"), result.benchmark_status)
+            except Exception as fin_err:
+                logger.warning("전일 evidence finalize 실패: {}", fin_err)
 
         try:
             from core.data_collector import DataCollector
@@ -861,6 +913,24 @@ class Scheduler:
                         logger.info("📊 주간 paper 리포트 자동 생성 완료")
                     except Exception as wr_err:
                         logger.warning("주간 리포트 생성 실패: {}", wr_err)
+
+                # Paper evidence 수집 (DailyEvidence JSONL 누적 + anomaly 기록)
+                try:
+                    from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
+                    watchlist = WatchlistManager(self.config).resolve()
+                    collect_daily_evidence(
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                        account_key=self.strategy_name,
+                        date=datetime.now(),
+                        watchlist_symbols=watchlist,
+                    )
+                    logger.info("Paper evidence 기록 완료 (전략: {})", self.strategy_name)
+                    # 금요일이면 evidence 기반 주간 요약도 생성
+                    if datetime.now().weekday() == 4:
+                        generate_weekly_summary(self.strategy_name)
+                except Exception as ev_err:
+                    logger.warning("Paper evidence 기록 실패: {}", ev_err)
 
             # 일일 루프 모니터링 지표 기록
             metrics = self._loop_metrics.summary()
