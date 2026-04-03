@@ -854,8 +854,25 @@ class Scheduler:
             except Exception as backup_err:
                 logger.warning("DB 백업 스킵/실패: {}", backup_err)
 
-            # paper 모드: 장마감 시 실전 전환 준비 자동 평가 + 주간 리포트 (금요일)
+            # paper 모드: 장마감 시 Paper Evidence 수집 + 실전 전환 준비 자동 평가 + 주간 리포트
             if self._mode == "paper":
+                # Paper Evidence 자동 수집
+                try:
+                    from core.evidence_collector import collect_daily_evidence
+                    executor = getattr(self, "_order_executor", None)
+                    ob = executor.order_book if executor else None
+                    collect_daily_evidence(
+                        strategy=self.strategy_name,
+                        portfolio_summary=summary,
+                        trade_summary=trade_summary,
+                        order_book=ob,
+                        initial_capital=self.config.risk_params.get(
+                            "position_sizing", {}
+                        ).get("initial_capital", 10_000_000),
+                    )
+                except Exception as ev_err:
+                    logger.warning("Paper Evidence 수집 실패: {}", ev_err)
+
                 self._check_live_readiness()
                 # 금요일이면 주간 리포트 자동 생성
                 if datetime.now().weekday() == 4:
