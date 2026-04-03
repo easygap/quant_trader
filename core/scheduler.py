@@ -391,15 +391,21 @@ class Scheduler:
             )
             self._log_rate_limit_stats("장전 분석")
 
-            mismatched = collector.check_source_consistency()
-            if mismatched:
+            source_warnings = collector.check_source_consistency(
+                mode=getattr(self, "_trading_mode", "paper")
+            )
+            kis_symbols = collector.has_kis_fallback_symbols()
+            if kis_symbols:
                 msg = (
-                    f"⚠️ 데이터 소스 불일치 감지: {mismatched}. "
-                    "백테스트(수정주가)와 다른 소스(비수정주가 가능)를 사용 중. "
-                    "지표·신호가 달라질 수 있습니다. pip install FinanceDataReader 권장."
+                    f"🚨 KIS 비수정주가 폴백 감지: {kis_symbols}. "
+                    "이 종목들의 신호는 백테스트(수정주가)와 다른 기준으로 계산되었습니다. "
+                    "pip install FinanceDataReader 후 allow_kis_fallback: false 설정 권장."
                 )
-                logger.warning(msg)
+                logger.error(msg)
                 self.discord.send_message(msg, critical=True)
+            elif source_warnings:
+                for w in source_warnings:
+                    logger.warning(w)
 
             self._run_basket_rebalance_check()
 
@@ -900,8 +906,25 @@ class Scheduler:
             except Exception as backup_err:
                 logger.warning("DB 백업 스킵/실패: {}", backup_err)
 
-            # paper 모드: 장마감 시 실전 전환 준비 자동 평가 + 주간 리포트 (금요일)
+            # paper 모드: 장마감 시 Paper Evidence 수집 + 실전 전환 준비 자동 평가 + 주간 리포트
             if self._mode == "paper":
+                # Paper Evidence 자동 수집
+                try:
+                    from core.evidence_collector import collect_daily_evidence
+                    executor = getattr(self, "_order_executor", None)
+                    ob = executor.order_book if executor else None
+                    collect_daily_evidence(
+                        strategy=self.strategy_name,
+                        portfolio_summary=summary,
+                        trade_summary=trade_summary,
+                        order_book=ob,
+                        initial_capital=self.config.risk_params.get(
+                            "position_sizing", {}
+                        ).get("initial_capital", 10_000_000),
+                    )
+                except Exception as ev_err:
+                    logger.warning("Paper Evidence 수집 실패: {}", ev_err)
+
                 self._check_live_readiness()
                 # 금요일이면 주간 리포트 자동 생성
                 if datetime.now().weekday() == 4:

@@ -93,9 +93,18 @@ class PortfolioBacktester:
         # 시장국면 시리즈 사전 계산 (TICKET-05, backtester.py TICKET-02와 동일 로직 재사용)
         regime_series = self._precompute_regime_series(all_dates)
 
+        # 전략별 exit 파라미터 읽기
+        strat_cfg = self.config.strategies.get(strategy_name, {})
+        min_hold_days = int(strat_cfg.get("min_hold_days", 0))
+        disable_trailing_stop = bool(strat_cfg.get("disable_trailing_stop", False))
+        tp_override = strat_cfg.get("take_profit_rate")  # 전략별 TP 오버라이드
+
         result = self._simulate_portfolio(
             all_signals, all_data, all_dates, initial_capital, valid_symbols,
             regime_series=regime_series,
+            min_hold_days=min_hold_days,
+            disable_trailing_stop=disable_trailing_stop,
+            tp_rate_override=float(tp_override) if tp_override is not None else None,
         )
 
         metrics = self._calculate_portfolio_metrics(result, initial_capital)
@@ -122,6 +131,12 @@ class PortfolioBacktester:
             "avg_caution_notional": result.get("avg_caution_notional", 0),
             "regime_buy_blocks": result.get("regime_buy_blocks", 0),
             "regime_caution_buys": result.get("regime_caution_buys", 0),
+            # 신호/체결/스킵 계측
+            "signal_buy_count": result.get("signal_buy_count", 0),
+            "signal_sell_count": result.get("signal_sell_count", 0),
+            "executed_buy_count": result.get("executed_buy_count", 0),
+            "executed_sell_count": result.get("executed_sell_count", 0),
+            "skipped_reasons": result.get("skipped_reasons", {}),
         }
 
     def _precompute_regime_series(self, all_dates: list) -> pd.Series:
@@ -223,6 +238,9 @@ class PortfolioBacktester:
         initial_capital: float,
         symbols: list[str],
         regime_series: pd.Series = None,
+        min_hold_days: int = 0,
+        disable_trailing_stop: bool = False,
+        tp_rate_override: float = None,
     ) -> dict:
         cash = initial_capital
         positions = {}  # symbol -> {qty, avg_price, buy_date, high_water_mark}
@@ -240,7 +258,7 @@ class PortfolioBacktester:
         sl_type = sl_config.get("type", "fixed")
         atr_mult = sl_config.get("atr_multiplier", 2.0)
         tp_config = self.risk_params.get("take_profit", {})
-        tp_rate = tp_config.get("fixed_rate", 0.08)
+        tp_rate = tp_rate_override if tp_rate_override is not None else tp_config.get("fixed_rate", 0.08)
         ts_config = self.risk_params.get("trailing_stop", {})
         ts_enabled = ts_config.get("enabled", False)
         ts_type = ts_config.get("type", "fixed")
@@ -289,6 +307,13 @@ class PortfolioBacktester:
         bullish_buy_notionals = []
         caution_buy_notionals = []
 
+        # ── 신호/체결/스킵 계측 ──
+        signal_buy_count = 0      # 전략이 생성한 BUY 신호 총 수
+        signal_sell_count = 0     # 전략이 생성한 SELL 신호 총 수
+        executed_buy_count = 0    # 실제 체결된 BUY 수
+        executed_sell_count = 0   # 실제 체결된 SELL 수
+        skipped_reasons = {}      # 미체결 사유별 카운트
+
         for date in all_dates:
             total_pos_value = sum(
                 self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
@@ -308,24 +333,33 @@ class PortfolioBacktester:
 
                 sell_reason = None
                 row_atr = _get_atr(sig_df, date)
-                if max_holding_days > 0 and hasattr(date, "date"):
-                    hd = (date - pos["buy_date"]).days if pos["buy_date"] is not None else 0
-                    if hd >= max_holding_days:
-                        sell_reason = "MAX_HOLD"
+                hd = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
+                in_cooling = min_hold_days > 0 and hd < min_hold_days
+
+                if max_holding_days > 0 and hd >= max_holding_days:
+                    sell_reason = "MAX_HOLD"
                 if not sell_reason and close <= _stop_loss_price(pos["avg_price"], row_atr):
                     sell_reason = "STOP_LOSS"
                 if not sell_reason and close >= pos["avg_price"] * (1 + tp_rate):
                     sell_reason = "TAKE_PROFIT"
-                ts_price = _trailing_stop_price(pos["high_water_mark"], row_atr)
-                if not sell_reason and ts_price is not None and close <= ts_price:
-                    sell_reason = "TRAILING_STOP"
+                if not disable_trailing_stop:
+                    ts_price = _trailing_stop_price(pos["high_water_mark"], row_atr)
+                    if not sell_reason and ts_price is not None and close <= ts_price:
+                        if in_cooling:
+                            sell_reason = None  # 냉각기: TRAILING_STOP 억제
+                        else:
+                            sell_reason = "TRAILING_STOP"
                 if not sell_reason and row.get("signal") == "SELL":
-                    sell_reason = "SELL"
+                    if in_cooling:
+                        sell_reason = None  # 냉각기: 전략 SELL 억제
+                    else:
+                        sell_reason = "SELL"
 
                 if sell_reason:
                     to_sell.append((sym, close, sell_reason))
                     exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
 
+            executed_sell_count += len(to_sell)
             for sym, close, reason in to_sell:
                 pos = positions.pop(sym)
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -352,6 +386,19 @@ class PortfolioBacktester:
             if regime_enabled and date in regime_series.index:
                 regime_at_t = regime_series.loc[date]
 
+            # ── 신호 집계: 전략이 생성한 원본 BUY/SELL 수 ──
+            for sym in symbols:
+                sig_df = signals.get(sym)
+                if sig_df is None or date not in sig_df.index:
+                    continue
+                sig_val = sig_df.loc[date].get("signal")
+                if sig_val == "BUY":
+                    signal_buy_count += 1
+                    if sym in positions:
+                        skipped_reasons["already_in_position"] = skipped_reasons.get("already_in_position", 0) + 1
+                elif sig_val == "SELL":
+                    signal_sell_count += 1
+
             buy_candidates = []
             if regime_at_t != "bearish":
                 for sym in symbols:
@@ -374,6 +421,7 @@ class PortfolioBacktester:
                     and signals[sym].loc[date].get("signal") == "BUY"
                 )
                 regime_buy_blocks += n_blocked
+                skipped_reasons["regime_bearish"] = skipped_reasons.get("regime_bearish", 0) + n_blocked
                 if n_blocked > 0 and len(blocked_buy_examples) < 10:
                     for sym in symbols:
                         if sym not in positions and signals.get(sym) is not None and date in signals[sym].index:
@@ -389,22 +437,26 @@ class PortfolioBacktester:
 
             for sym, close, score in buy_candidates:
                 if len(positions) >= max_positions:
-                    break
+                    skipped_reasons["max_positions"] = skipped_reasons.get("max_positions", 0) + 1
+                    continue
                 total_equity_now = cash + sum(
                     self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
                     for s in positions
                 )
                 if total_equity_now <= 0:
-                    break
+                    skipped_reasons["no_equity"] = skipped_reasons.get("no_equity", 0) + 1
+                    continue
 
                 invested_now = sum(
                     self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
                     for s in positions
                 )
                 if total_equity_now > 0 and invested_now / total_equity_now >= max_investment_ratio:
-                    break
+                    skipped_reasons["max_investment_ratio"] = skipped_reasons.get("max_investment_ratio", 0) + 1
+                    continue
                 if total_equity_now > 0 and cash / total_equity_now < min_cash_ratio:
-                    break
+                    skipped_reasons["min_cash_ratio"] = skipped_reasons.get("min_cash_ratio", 0) + 1
+                    continue
 
                 max_invest = total_equity_now * max_position_ratio
                 buy_atr = _get_atr(signals.get(sym), date)
@@ -434,16 +486,22 @@ class PortfolioBacktester:
                 elif qty > 0 and regime_at_t == "bullish":
                     bullish_buy_notionals.append(close * qty)
 
-                if qty <= 0 or close * qty > cash * 0.95:
+                if qty <= 0:
+                    skipped_reasons["qty_zero"] = skipped_reasons.get("qty_zero", 0) + 1
+                    continue
+                if close * qty > cash * 0.95:
+                    skipped_reasons["no_cash"] = skipped_reasons.get("no_cash", 0) + 1
                     continue
 
                 costs = self.risk_manager.calculate_transaction_costs(close, qty, "BUY")
                 buy_price = costs["execution_price"]
                 total_cost = buy_price * qty + costs["commission"]
                 if total_cost > cash:
+                    skipped_reasons["no_cash"] = skipped_reasons.get("no_cash", 0) + 1
                     continue
 
                 cash -= total_cost
+                executed_buy_count += 1
                 # 진입 시점 개별 지표 점수 기록 (signal quality 진단용)
                 sig_row = signals[sym].loc[date]
                 entry_scores = {
@@ -498,6 +556,12 @@ class PortfolioBacktester:
             "scaled_buy_examples": scaled_buy_examples,
             "avg_bullish_notional": round(sum(bullish_buy_notionals) / len(bullish_buy_notionals), 0) if bullish_buy_notionals else 0,
             "avg_caution_notional": round(sum(caution_buy_notionals) / len(caution_buy_notionals), 0) if caution_buy_notionals else 0,
+            # ── 신호/체결/스킵 계측 ──
+            "signal_buy_count": signal_buy_count,
+            "signal_sell_count": signal_sell_count,
+            "executed_buy_count": executed_buy_count,
+            "executed_sell_count": executed_sell_count,
+            "skipped_reasons": skipped_reasons,
         }
 
     @staticmethod

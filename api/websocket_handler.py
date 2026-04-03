@@ -40,8 +40,8 @@ class WebSocketHandler:
 
     # 재연결 갭 처리 임계값
     _GAP_MINUTE_BACKFILL = timedelta(seconds=60)   # 분봉 보충·스윙 검사
-    _GAP_REST_REFRESH = timedelta(minutes=3)       # REST 현재가·일봉 → 캐시
-    _GAP_BLACKSWAN_RECHECK = timedelta(minutes=5)  # 급락 로직 즉시 1회
+    _GAP_REST_REFRESH = timedelta(minutes=2)       # REST 현재가·일봉 → 캐시 (3분→2분 강화)
+    _GAP_BLACKSWAN_RECHECK = timedelta(minutes=2)  # 급락 로직 즉시 1회 (5분→2분 강화: 감사 H-1 대응)
     _GAP_NOTIFY_MIN = timedelta(seconds=60)        # 디스코드 갭 경고(너무 짧은 끊김은 생략)
 
     def __init__(self, config: Config = None):
