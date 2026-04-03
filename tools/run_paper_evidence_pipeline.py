@@ -1,121 +1,222 @@
+#!/usr/bin/env python3
 """
-Paper Evidence Pipeline — 수동 실행 도구
+Paper Evidence Pipeline CLI
 
-사용: python tools/run_paper_evidence_pipeline.py --strategy rotation --date 2026-04-02
-      python tools/run_paper_evidence_pipeline.py --strategy rotation --weekly
-      python tools/run_paper_evidence_pipeline.py --strategy rotation --promotion-package
+Usage:
+    # 단일 일자 evidence 수집
+    python tools/run_paper_evidence_pipeline.py --strategy scoring --date 2026-04-02
 
-기능:
-1. --date: 특정 날짜의 DailyEvidence를 수동 생성 (스케줄러 밖에서 실행)
-2. --weekly: 주간 요약 마크다운 생성
-3. --promotion-package: 60일 승격 패키지 생성
-4. --status: 현재 evidence 상태 확인
+    # provisional → final benchmark 승격
+    python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --date 2026-04-02
+
+    # 최근 N영업일 backfill + discrepancy report
+    python tools/run_paper_evidence_pipeline.py --strategy scoring --backfill 20
+
+    # 주간 요약 생성
+    python tools/run_paper_evidence_pipeline.py --strategy scoring --weekly-summary --date 2026-04-02
+
+    # 60일 승격 패키지 생성
+    python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-package
+
+Note:
+    - approved_strategies.json은 절대 수정하지 않습니다.
+    - promotion package는 recommendation만 제공합니다.
 """
-import sys, os, json, argparse
-from datetime import date, datetime
+
+import argparse
+import json
+import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from loguru import logger
-logger.remove()
-logger.add(sys.stderr, level="INFO")
-
-
-def show_status(strategy: str):
-    """현재 evidence 상태 확인."""
-    from core.paper_evidence import load_all_evidence, load_anomalies, EVIDENCE_DIR
-
-    evidence = load_all_evidence(strategy)
-    anomalies = [a for a in load_anomalies() if a.get("strategy") == strategy]
-
-    print(f"\n{'='*60}")
-    print(f"  Paper Evidence 상태: {strategy}")
-    print(f"{'='*60}")
-    print(f"  기록 일수: {len(evidence)}")
-    if evidence:
-        first = evidence[0]
-        last = evidence[-1]
-        print(f"  첫 기록: {first['date']} (Day {first['day_number']})")
-        print(f"  마지막: {last['date']} (Day {last['day_number']})")
-        print(f"  누적 수익: {last['cumulative_return']:.2f}%")
-        print(f"  포트폴리오: {last['portfolio_value']:,.0f}원")
-        print(f"  MDD: {last['drawdown']:.2f}%")
-    print(f"  Anomaly 총 건수: {len(anomalies)}")
-    critical = sum(1 for a in anomalies if a.get("severity") == "critical")
-    print(f"  Critical anomaly: {critical}건")
-    print(f"  파일: {EVIDENCE_DIR / f'daily_evidence_{strategy}.jsonl'}")
-    print(f"{'='*60}\n")
-
-
-def generate_weekly_summary(strategy: str):
-    """주간 요약 마크다운 생성."""
-    from core.paper_evidence import load_all_evidence, load_anomalies, EVIDENCE_DIR
-
-    evidence = load_all_evidence(strategy)
-    if not evidence:
-        print("Evidence 데이터 없음")
-        return
-
-    # 최근 5일
-    recent = evidence[-5:] if len(evidence) >= 5 else evidence
-    anomalies = [a for a in load_anomalies() if a.get("strategy") == strategy]
-
-    md = f"# Paper Weekly Summary — {strategy}\n\n"
-    md += f"**기간**: {recent[0]['date']} ~ {recent[-1]['date']} (Day {recent[0]['day_number']}~{recent[-1]['day_number']})\n\n"
-
-    md += "## 일별 요약\n\n"
-    md += "| Day | Date | Return% | Cum% | MDD% | Positions | Value |\n"
-    md += "|-----|------|---------|------|------|-----------|-------|\n"
-    for e in recent:
-        md += f"| {e['day_number']} | {e['date']} | {e['absolute_return']:.2f} | {e['cumulative_return']:.2f} | {e['drawdown']:.2f} | {e['n_positions']} | {e['portfolio_value']:,.0f} |\n"
-
-    md += f"\n## Anomalies ({len(anomalies)}건)\n\n"
-    if anomalies:
-        for a in anomalies[-5:]:
-            md += f"- [{a['severity']}] {a['rule']}: {a['detail']}\n"
-    else:
-        md += "없음\n"
-
-    # 저장
-    out_path = EVIDENCE_DIR / f"weekly_summary_{strategy}_{date.today().isoformat()}.md"
-    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(md, encoding="utf-8")
-    print(f"주간 요약 생성: {out_path}")
-    print(md)
-
-
-def generate_promotion(strategy: str):
-    """60일 승격 패키지 생성."""
-    from core.paper_evidence import generate_promotion_package
-
-    pkg = generate_promotion_package(strategy)
-    print(json.dumps(pkg, indent=2, ensure_ascii=False, default=str))
-
-    if pkg.get("all_gates_passed"):
-        print("\n  추천: promote_to_live_candidate")
-    else:
-        failed = [g["name"] for g in pkg.get("approval_gates", []) if not g["passed"]]
-        print(f"\n  미통과 게이트: {failed}")
-        print(f"  추천: maintain_provisional")
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Paper Evidence Pipeline")
-    parser.add_argument("--strategy", required=True, help="전략명 (rotation, scoring)")
-    parser.add_argument("--status", action="store_true", help="현재 상태 확인")
-    parser.add_argument("--weekly", action="store_true", help="주간 요약 생성")
-    parser.add_argument("--promotion-package", action="store_true", help="승격 패키지 생성")
+    parser = argparse.ArgumentParser(
+        description="Paper Evidence Pipeline"
+    )
+    parser.add_argument("--strategy", required=True)
+    parser.add_argument("--date", help="YYYY-MM-DD")
+    parser.add_argument("--finalize", action="store_true", help="provisional→final benchmark 승격")
+    parser.add_argument("--backfill", type=int, metavar="N", help="최근 N영업일 backfill + discrepancy report")
+    parser.add_argument("--weekly-summary", action="store_true")
+    parser.add_argument("--generate-package", action="store_true")
     args = parser.parse_args()
 
-    if args.status:
-        show_status(args.strategy)
-    elif args.weekly:
-        generate_weekly_summary(args.strategy)
-    elif args.promotion_package:
-        generate_promotion(args.strategy)
-    else:
+    from database.models import init_database
+    init_database()
+
+    ran = False
+
+    if args.backfill:
+        run_backfill(args.strategy, args.backfill)
+        ran = True
+
+    if args.date and args.finalize:
+        run_finalize(args.strategy, args.date)
+        ran = True
+    elif args.date:
+        run_single_day(args.strategy, args.date)
+        ran = True
+
+    if args.weekly_summary:
+        run_weekly_summary(args.strategy, args.date)
+        ran = True
+
+    if args.generate_package:
+        run_promotion_package(args.strategy)
+        ran = True
+
+    if not ran:
         parser.print_help()
+        sys.exit(1)
+
+
+def _get_watchlist():
+    try:
+        from config.config_loader import Config
+        from core.watchlist_manager import WatchlistManager
+        return WatchlistManager(Config.get()).resolve()
+    except Exception as e:
+        print("WARNING: watchlist fail, empty: %s" % e)
+        return []
+
+
+def run_single_day(strategy: str, date_str: str):
+    from core.paper_evidence import collect_daily_evidence
+
+    try:
+        date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        print("ERROR: bad date format: %s" % date_str)
+        sys.exit(1)
+
+    result = collect_daily_evidence(
+        strategy=strategy, mode="paper", account_key=strategy,
+        date=date, watchlist_symbols=_get_watchlist(),
+    )
+    if result is None:
+        print("SKIP: %s already recorded" % date_str)
+    else:
+        print("OK: %s day=%d bench=%s status=%s" % (date_str, result.day_number, result.benchmark_status, result.status))
+        for a in result.anomalies:
+            print("  ANOMALY [%s] %s: %s" % (a["severity"], a["type"], a.get("detail", "")))
+        if result.cross_validation_warnings:
+            for w in result.cross_validation_warnings:
+                print("  XV-WARN: %s" % w)
+
+
+def run_finalize(strategy: str, date_str: str):
+    from core.paper_evidence import finalize_daily_evidence
+
+    try:
+        date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        print("ERROR: bad date format: %s" % date_str)
+        sys.exit(1)
+
+    result = finalize_daily_evidence(
+        strategy=strategy, mode="paper", account_key=strategy,
+        date=date, watchlist_symbols=_get_watchlist(),
+    )
+    if result is None:
+        print("SKIP: %s already final or no record" % date_str)
+    else:
+        print("OK: finalized %s bench=%s v%d" % (date_str, result.benchmark_status, result.record_version))
+
+
+def run_backfill(strategy: str, n_days: int):
+    """최근 N영업일 backfill + finalize + discrepancy report."""
+    from core.paper_evidence import collect_daily_evidence, finalize_daily_evidence, get_canonical_records
+
+    watchlist = _get_watchlist()
+    today = datetime.now()
+    dates = []
+    d = today
+    while len(dates) < n_days:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:  # skip weekends
+            dates.append(d)
+
+    dates.reverse()
+    stats = {"total": 0, "new": 0, "finalized": 0, "skipped": 0, "anomalies": 0, "xv_warnings": 0}
+
+    for date in dates:
+        stats["total"] += 1
+        # collect (idempotent)
+        r = collect_daily_evidence(
+            strategy=strategy, mode="paper", account_key=strategy,
+            date=date, watchlist_symbols=watchlist,
+        )
+        if r:
+            stats["new"] += 1
+            stats["anomalies"] += len(r.anomalies)
+            stats["xv_warnings"] += len(r.cross_validation_warnings)
+        # try finalize
+        f = finalize_daily_evidence(
+            strategy=strategy, mode="paper", account_key=strategy,
+            date=date, watchlist_symbols=watchlist,
+        )
+        if f and f.record_version > 1:
+            stats["finalized"] += 1
+        if r is None and f is None:
+            stats["skipped"] += 1
+
+    # generate discrepancy report
+    records = get_canonical_records(strategy)
+    bench_final = sum(1 for r in records if r.get("benchmark_status") == "final")
+    bench_prov = sum(1 for r in records if r.get("benchmark_status") == "provisional")
+    bench_fail = sum(1 for r in records if r.get("benchmark_status") == "failed")
+    total_rec = len(records)
+
+    print("\n=== Backfill Summary: %s (last %d bdays) ===" % (strategy, n_days))
+    print("  Processed: %d days" % stats["total"])
+    print("  New records: %d" % stats["new"])
+    print("  Finalized: %d" % stats["finalized"])
+    print("  Skipped (existing): %d" % stats["skipped"])
+    print("  Anomalies: %d" % stats["anomalies"])
+    print("  Cross-validation warnings: %d" % stats["xv_warnings"])
+    print("\n  Total canonical records: %d" % total_rec)
+    print("  Benchmark: final=%d, provisional=%d, failed=%d" % (bench_final, bench_prov, bench_fail))
+    if total_rec > 0:
+        print("  Benchmark final ratio: %.1f%%" % (bench_final / total_rec * 100))
+
+    # restart recovery count
+    recovery_days = sum(1 for r in records if r.get("restart_recovery_count", 0) > 0)
+    print("  Days with restart recovery: %d" % recovery_days)
+
+
+def run_weekly_summary(strategy: str, date_str):
+    from core.paper_evidence import generate_weekly_summary
+    path = generate_weekly_summary(strategy, week_end_date=date_str)
+    if path:
+        print("OK: weekly summary -> %s" % path)
+    else:
+        print("SKIP: no evidence data")
+
+
+def run_promotion_package(strategy: str):
+    from core.paper_evidence import generate_promotion_package
+    pkg_path, cl_path = generate_promotion_package(strategy)
+    if pkg_path:
+        print("OK: promotion evidence -> %s" % pkg_path)
+        print("OK: approval checklist -> %s" % cl_path)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        print("\n  Recommendation: %s" % pkg["recommendation"])
+        print("  Period: %s" % pkg["period"])
+        print("  Days: %d" % pkg["total_days"])
+        print("  Benchmark: final=%d prov=%d fail=%d (%.0f%%)" % (
+            pkg.get("benchmark_final_days", 0),
+            pkg.get("benchmark_provisional_days", 0),
+            pkg.get("benchmark_failed_days", 0),
+            pkg.get("benchmark_final_ratio", 0) * 100,
+        ))
+        if pkg.get("block_reasons"):
+            print("  Block reasons: %s" % ", ".join(pkg["block_reasons"]))
+    else:
+        print("SKIP: no evidence data")
 
 
 if __name__ == "__main__":
