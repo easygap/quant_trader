@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v4.0
-> **최종 수정**: 2026-04-02
+> **문서 버전**: v5.0
+> **최종 수정**: 2026-04-09
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -115,8 +115,25 @@ quant_trader/
 │   ├── data_validator.py        # OHLCV 정합성 검사 (Null, NaN, 음수 주가, 타임스탬프 역전)
 │   ├── notifier.py              # 통합 알림 이중화 (1차 디스코드 → 2차 텔레그램 → 3차 이메일, critical 전채널 동시)
 │   ├── strategy_diagnostics.py  # 전략 진단 보조: DiagnosticLine — 전략별 신호·점수 진단 라인 생성
+│   ├── paper_evidence.py        # Paper Evidence 수집 (일별 22개 지표, benchmark excess, anomaly detection)
+│   ├── paper_runtime.py         # Paper Runtime State Machine (5개 상태, schema quarantine, allowed_actions)
+│   ├── paper_pilot.py           # Paper Pilot Authorization (launch readiness + pilot auth + 리스크 캡)
+│   ├── paper_preflight.py       # Paper Preflight Check (운영 준비 상태 점검)
+│   ├── strategy_universe.py     # Paper 대상 전략 canonical 목록
+│   ├── evidence_collector.py    # 일일 실적 증거 자동 누적 (장마감 후 scheduler 호출)
+│   ├── promotion_engine.py      # metrics 기반 전략 승격 판정 (research→paper→live)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
 │   └── order_guard.py           # 동일 종목 TTL(기본 600초) 동안 중복 주문 차단
+├── tools/
+│   ├── run_paper_evidence_pipeline.py  # Paper Evidence 파이프라인 (backfill/finalize/package/quality-report)
+│   ├── paper_pilot_control.py          # Paper Pilot 활성화/비활성화/상태 확인 CLI
+│   ├── paper_bootstrap.py              # Paper 초기화 (runtime state 셋업)
+│   ├── paper_preflight.py              # Paper 세션 전 체크리스트 CLI
+│   ├── paper_launch_readiness.py       # Paper 진입 준비 상태 확인 CLI
+│   ├── paper_runtime_status.py         # Paper 실행 상태 모니터링 CLI
+│   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정
+│   ├── rebuild_paper_runtime.py        # Paper 런타임 재구성
+│   └── quarantine_test_artifacts.py    # 테스트 artifact 격리
 ├── strategies/
 │   ├── __init__.py              # 전략 레지스트리(플러그인형): create_strategy(name), get_strategy_names(), register_strategy()
 │   ├── base_strategy.py         # 추상 클래스: analyze(df), generate_signal(df, **kwargs)
@@ -182,7 +199,16 @@ quant_trader/
 ├── docs/
 │   ├── PROJECT_GUIDE.md         # 본 문서
 │   └── BACKTEST_IMPROVEMENT.md  # 백테스트 손익 개선 포인트
-└── reports/                     # 백테스트 txt/html 출력 (.gitignore)
+└── reports/                     # 백테스트 txt/html + Paper 운영 산출물
+    ├── paper_evidence/          # Paper Evidence JSONL (append-only) + promotion package
+    │   ├── daily_evidence_{strategy}.jsonl  # 일별 22개 지표
+    │   ├── anomalies.jsonl                  # 이상 탐지 로그
+    │   └── promotion_evidence_{strategy}.json
+    ├── paper_runtime/           # Paper Runtime 상태
+    │   ├── {strategy}_pilot_launch_readiness.json/md
+    │   ├── pilot_authorizations.jsonl
+    │   └── notifier_health.json
+    └── promotion/               # Promotion 판정 결과
 ```
 
 ---
@@ -244,6 +270,13 @@ quant_trader/
 | **data_validator.py** | OHLCV Null·NaN·음수 주가·거래량·타임스탬프 역전 등 검사. |
 | **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 텔레그램 Bot API → 3차 이메일(SMTP). `critical=True` 시 모든 채널 동시 발송. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
 | **strategy_diagnostics.py** | `DiagnosticLine` — 전략별 신호·점수 진단 라인 생성. 스케줄러·대시보드에서 전략 실행 현황 요약 시 사용. |
+| **paper_evidence.py** | Paper Evidence 런타임 수집. `DailyEvidence` 데이터클래스, `collect_daily_evidence()`, `finalize_daily_evidence()`, `generate_promotion_package()`, 3종 benchmark excess (same_universe/exposure_matched/cash_adjusted), 6 anomaly rule (repeated_reject, phantom_position, stale_pending, duplicate_flood, reconcile, deep_drawdown), cash-only carry-forward (zero-return semantics). |
+| **paper_runtime.py** | Paper Runtime State Machine. 5개 상태 (research_disabled/normal/degraded/frozen/blocked_insufficient_evidence), schema quarantine (legacy record 제외), allowed_actions (모든 상태에서 exit/cancel/reconcile/finalize/evidence/reporting 허용). `get_paper_runtime_state()`, `filter_runtime_eligible()`. |
+| **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. |
+| **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
+| **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
+| **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
+| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + MDD 기준. `tools/evaluate_and_promote.py --canonical`으로 실행. |
 
 ### 3.4 strategies/
 
@@ -318,6 +351,15 @@ quant_trader/
 | **test_strategy_validator.py** | 전략 검증(validate) 로직. |
 | **test_trading_hours.py** | 장 시간·휴장일. |
 | **test_paper_lifecycle.py** | Full paper lifecycle (BUY/SELL/Snapshot, 격리 DB truncate, 4/4 PASS). |
+| **test_paper_evidence.py** | Paper Evidence 수집/검증 (51건): JSONL I/O, anomaly detection, benchmark missing, E2E replay 7일, cash-only zero-return deadlock regression, shadow evidence 분리. |
+| **test_paper_runtime.py** | Paper Runtime State Machine (45건): 상태 전이, schema quarantine, allowed_actions, auto-unfreeze. |
+| **test_paper_pilot.py** | Paper Pilot Authorization (29건): pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites. |
+| **test_paper_preflight.py** | Paper Preflight Check: 운영 준비 상태 점검 시나리오. |
+| **test_promotion_engine.py** | Promotion 규칙: metrics 기반 자동 판정, threshold 경계. |
+| **test_order_state_machine.py** | 주문 상태기계: 9개 상태 전이, assert invariant. |
+| **test_order_lifecycle_integration.py** | E2E 주문 흐름 통합 테스트. |
+| **test_audit_safety.py** | 안전성 감시: live gate, force-live 제거 검증. |
+| **test_positive_path.py** | 성공 경로 (happy path) 검증. |
 | **test_watchlist_manager.py** | watchlist 모드별 resolve. |
 | **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행). |
 | **test_us_market_support.py** | `fetch_stock` 미국 라우팅, 미국 장/휴장일 관련 `TradingHours` 동작. |
@@ -511,16 +553,16 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
-### 전략 상태 레지스트리 (v5.0 — `core/promotion_engine.py` 자동 판정)
+### 전략 상태 레지스트리 (v5.1 — `core/promotion_engine.py` 자동 판정)
 
-| 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% |
-|------|------|-----------|------|-----|-----------|
-| **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 |
-| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 |
-| **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 |
-| **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 |
-| **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 |
-| **ensemble** | `disabled` | backtest only | — | — | 0/0 |
+| 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | Paper Status |
+|------|------|-----------|------|-----|-----------|--------------|
+| **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | — |
+| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | clean_days=3, infra_ready |
+| **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | — |
+| **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | — |
+| **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | — |
+| **ensemble** | `disabled` | backtest only | — | — | 0/0 | — |
 
 승격 규칙: `research_only → paper_only → provisional_paper_candidate → live_candidate`  
 판정: `python tools/evaluate_and_promote.py --canonical` → artifact → engine → registry CI 검증
@@ -620,6 +662,13 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **벤치마크 거래비용** | `_buy_and_hold_metrics`에 commission/tax/slippage 반영 |
 | ✅ **debiased 전략 재평가** | 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows |
 | ✅ **테스트 226건 green** | 기존 7 fail 해소 + 신규 83건 추가 |
+| ✅ **Paper Runtime State Machine** | `core/paper_runtime.py` — 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine |
+| ✅ **Paper Pilot Authorization** | `core/paper_pilot.py` — launch readiness + pilot auth + 리스크 캡 |
+| ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
+| ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
+| ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
+| ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
+| ✅ **scoring infra_ready** | clean_final_days=3, notifier configured, benchmark_ready (2026-04-09) |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
@@ -726,5 +775,5 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 ---
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
-> **문서 버전**: v4.0
-> **최종 수정**: 2026-04-02 (deploy/ 파일 구조 상세화, 문서 간 양식·교차 참조 통일)
+> **문서 버전**: v5.0
+> **최종 수정**: 2026-04-09 (Paper Runtime 모듈 추가: paper_evidence/runtime/pilot/preflight/strategy_universe, tools/ 디렉토리, 테스트 확장, zero-return semantics 수정)
