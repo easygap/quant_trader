@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.0
-> **최종 수정**: 2026-04-02
+> **문서 버전**: v5.1
+> **최종 수정**: 2026-04-09
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -91,7 +91,8 @@
 | **호가 단위 미반영** | 한국 시장 호가 단위(5원/10원/50원 등) 미적용 | 체결가 미세 차이 |
 | **장중 가격 미사용** | 일봉 기반 시뮬레이션. 장중 변동 미반영 | 손절/익절 발동 시점 차이 |
 | **단일 종목 검증 한계** | 현재 검증은 watchlist 3종목 위주. 유니버스 전체 검증 미실행 | 전략 일반화 불확실 |
-| **멀티전략 강건성** | BV50/R50 Paper 가동 중 (2026-04-01~). **debiased 재평가**: Rotation 단독 +18.09%/PF 1.62/WF 100%, BV 단독 -13.31%/PF 0.79. BV sleeve merit=research_only | Paper Evidence 체계 (`core/paper_evidence.py`) + 승격 규칙 v3 자동 판정 |
+| **멀티전략 강건성** | BV50/R50 Paper 가동 중 (2026-04-01~). **debiased 재평가**: Rotation 단독 +18.09%/PF 1.62/WF 100%, BV 단독 -13.31%/PF 0.79. BV sleeve merit=research_only | Paper Evidence 체계 (`core/paper_evidence.py`) + 승격 규칙 v3 자동 판정. scoring: clean_final_days=3 달성 (2026-04-09) |
+| **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크 미포함. paper/live에만 존재 | 백테스트-live 성과 차이 원인. 문서화됨 |
 
@@ -121,6 +122,12 @@
 | 주문 상태기계 | 높음 | **완료 — OrderStatus 9개 상태, FILLED 전 position 반영 없음, 테스트 226건 green** |
 | 벤치마크 거래비용 반영 | 높음 | **완료 — `_buy_and_hold_metrics`에 commission/tax/slippage 적용** |
 | Paper Evidence 수집 체계 | 높음 | **완료 — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate** |
+| Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
+| Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡** |
+| Paper Preflight Check | 높음 | **완료 — `core/paper_preflight.py` 운영 준비 상태 점검** |
+| Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
+| Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
+| Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 
 ---
@@ -134,6 +141,10 @@
 | `reports/live_gate_policy.md` | Live 진입 5개 조건 |
 | `reports/paper_experiment_manifest.json` | 60영업일 paper 실험 설정 |
 | `reports/full_paper_lifecycle_test.json` | Lifecycle 테스트 4/4 PASS 결과 |
+| `reports/paper_evidence/` | Paper Evidence JSONL + promotion package |
+| `reports/paper_runtime/` | Runtime state + launch readiness artifact |
+| `reports/promotion/` | Promotion 판정 결과 |
+| `reports/paper_runbook.md` | Paper Trading 운영 가이드 |
 | `scripts/c5_rotation_filter_test.py` | KS11 SMA200 시장 필터 비교 테스트 |
 | `scripts/c5_rotation_absmom_test.py` | 절대 모멘텀 필터 비교 테스트 |
 | `scripts/c5_rotation_trade_diagnostic.py` | 거래 단위 진단 분석 |
