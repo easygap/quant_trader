@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v5.0
+> **문서 버전**: v5.1
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-02
+> **최종 수정**: 2026-04-09
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -84,9 +84,15 @@
 - **FILLED assert 통과 후에만** position/trade DB 반영 (phantom position 방지)
 - Paper: simulated broker event로 동일 전이. Live: broker callback + reconcile
 
-**Paper 운영 현황** (v5.0):
+**Paper 운영 현황** (v5.1):
 - BV50/R50 Paper 가동 중 (2026-04-01~, 60영업일)
 - Paper Evidence 수집 체계 (`core/paper_evidence.py`): 일별 22개 지표 + 6개 anomaly rule + 9개 approval gate
+- Paper Runtime State Machine (`core/paper_runtime.py`): 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine, allowed_actions 제어
+- Paper Pilot Authorization (`core/paper_pilot.py`): launch readiness 판정 + pilot auth + 리스크 캡. scoring: clean_final_days=3 달성, infra_ready=true (2026-04-09)
+- Paper Preflight (`core/paper_preflight.py`): 세션 전 운영 준비 상태 점검
+- Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
+- Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
+- Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_pilot_control.py` (pilot 관리)
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
 **지속적 손실이 발생할 수 있는 구체적 시나리오** (§4.6 참고):
@@ -1356,6 +1362,19 @@ quant_trader/
 - [x] **전략 분류 확정** — rotation/scoring: provisional. BV/MR/TF/ensemble: disabled (research_only)
 - [x] **테스트 226건 전체 green** — 기존 7 fail 해소 + 신규 83건 추가
 
+### v5.1 Paper Runtime 완성 (2026-04-09)
+
+- [x] **Paper Runtime State Machine** — `core/paper_runtime.py` 5개 상태, schema quarantine, allowed_actions
+- [x] **Paper Pilot Authorization** — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡
+- [x] **Paper Preflight** — `core/paper_preflight.py` 세션 전 운영 준비 상태 점검
+- [x] **Strategy Universe** — `core/strategy_universe.py` paper 대상 전략 canonical 목록
+- [x] **Paper Evidence E2E** — scheduler → evidence_collector → benchmark finalization → JSONL 자동 누적
+- [x] **Paper 운영 도구** — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI (`tools/`)
+- [x] **Notifier Health Check** — Discord webhook 설정 확인, launch readiness 연동
+- [x] **Zero-return Semantics** — cash-only/no-position day deadlock 해소 (daily_return=0.0 추론)
+- [x] **scoring clean_final_days=3** — infra_ready=true 달성 (pilot auth 대기)
+- [x] **테스트 확장** — paper_evidence/runtime/pilot/preflight 전용 테스트 127건 추가
+
 ### 단기 개선 (1~2개월 내)
 
 | # | 액션 | 상세 | 참고 |
@@ -1430,4 +1449,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-02 (v5.0: 코드 감사 대응 — --force-live 제거, 주문 상태기계, debiased 전략 재평가, 승격 규칙 v3 artifact-driven, Paper Evidence 체계, 테스트 226건 green)
+> **최종 수정**: 2026-04-09 (v5.1: Paper Runtime 완성 — runtime state machine, pilot authorization, preflight, launch readiness, zero-return semantics deadlock 해소, paper 운영 도구 CLI)
