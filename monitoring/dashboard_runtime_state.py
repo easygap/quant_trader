@@ -60,6 +60,19 @@ def merge_runtime(updates: Dict[str, Any]) -> None:
         _write_unlocked(cur)
 
 
+_MAX_GAP_EVENTS = 20
+
+
+def merge_ws_gap(gap_snapshot: Dict[str, Any]) -> None:
+    """WebSocketHandler.gap_snapshot() 결과를 런타임 상태 파일에 병합."""
+    if not gap_snapshot:
+        return
+    with _lock:
+        cur = _read_unlocked()
+        cur["ws_gap"] = gap_snapshot
+        _write_unlocked(cur)
+
+
 def append_signal(
     symbol: str,
     signal: str,
