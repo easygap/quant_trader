@@ -79,6 +79,7 @@ def get_runtime_json() -> dict:
         "kis_stats_source": None,
         "blackswan": None,
         "loop_metrics": None,
+        "ws_gap": None,
         "runtime_file_updated_at": None,
     }
 
@@ -107,6 +108,7 @@ def get_runtime_json() -> dict:
         out["strategy"] = st.get("strategy")
         out["loop_metrics"] = st.get("loop_metrics")
         out["blackswan"] = st.get("blackswan")
+        out["ws_gap"] = st.get("ws_gap")
         if st.get("kis_stats") is not None:
             out["kis_stats"] = st.get("kis_stats")
             out["kis_stats_source"] = "scheduler_file"
@@ -169,6 +171,19 @@ def _html_page() -> str:
     <h2>시장 국면 · 리스크 · API · 루프</h2>
     <div class="grid" id="runtimeOps"></div>
     <p class="meta" id="runtimeMeta"></p>
+  </section>
+
+  <section>
+    <h2>웹소켓 갭 모니터링</h2>
+    <div class="grid" id="wsGapSummary"></div>
+    <div id="wsGapTableWrap" style="display:none;">
+      <table>
+        <thead><tr><th>끊김 시각</th><th>재연결 시각</th><th class="num">갭(초)</th><th>영향 종목</th><th>REST 보충</th><th>관측 변동률</th><th>블랙스완 쿨다운</th></tr></thead>
+        <tbody id="wsGapRows"></tbody>
+      </table>
+    </div>
+    <p id="wsGapEmpty" class="meta" style="display:none;">갭 이벤트 없음</p>
+    <p id="wsGapNA" class="meta" style="display:none;">웹소켓 정보 없음 (N/A)</p>
   </section>
 
   <section>
@@ -285,6 +300,51 @@ def _html_page() -> str:
       }).join('');
     }
 
+    const wsGapSummary = document.getElementById('wsGapSummary');
+    const wsGapRows = document.getElementById('wsGapRows');
+    const wsGapTableWrap = document.getElementById('wsGapTableWrap');
+    const wsGapEmpty = document.getElementById('wsGapEmpty');
+    const wsGapNA = document.getElementById('wsGapNA');
+
+    function renderWsGap(rt) {
+      const g = rt && rt.ws_gap;
+      if (!g || !g.available) {
+        wsGapSummary.innerHTML = card('웹소켓 상태', '<span class="muted">N/A</span>', '');
+        wsGapTableWrap.style.display = 'none';
+        wsGapEmpty.style.display = 'none';
+        wsGapNA.style.display = 'block';
+        return;
+      }
+      wsGapNA.style.display = 'none';
+      const connTxt = g.is_connected ? '연결됨' : '끊김';
+      const connCls = g.is_connected ? 'positive' : 'negative';
+      const gapSince = g.current_gap_since ? new Date(g.current_gap_since).toLocaleString('ko-KR') : '-';
+      wsGapSummary.innerHTML =
+        card('웹소켓 상태', escHtml(connTxt), connCls) +
+        card('총 갭 횟수', String(g.total_gap_count || 0), g.total_gap_count > 0 ? 'negative' : '') +
+        card('진행 중 갭 시작', g.current_gap_since ? escHtml(gapSince) : '-', g.current_gap_since ? 'negative' : '');
+
+      const gaps = g.recent_gaps || [];
+      if (gaps.length === 0) {
+        wsGapTableWrap.style.display = 'none';
+        wsGapEmpty.style.display = 'block';
+        return;
+      }
+      wsGapEmpty.style.display = 'none';
+      wsGapTableWrap.style.display = 'block';
+      wsGapRows.innerHTML = gaps.slice().reverse().map(function(ev) {
+        const dAt = ev.disconnect_at ? new Date(ev.disconnect_at).toLocaleString('ko-KR') : '-';
+        const rAt = ev.reconnect_at ? new Date(ev.reconnect_at).toLocaleString('ko-KR') : '-';
+        const syms = (ev.affected_symbols || []).join(', ') || '-';
+        const rest = ev.rest_backfill_performed ? (ev.rest_backfill_count + '건 조회') : '미수행';
+        const vol = ev.observed_volatility && Object.keys(ev.observed_volatility).length
+          ? Object.entries(ev.observed_volatility).map(function(e) { return e[0] + ': ' + e[1] + '%'; }).join(', ')
+          : '-';
+        const bsCool = ev.blackswan_cooldown_triggered ? '<span class="negative">발동</span>' : (ev.blackswan_checked ? '정상' : '-');
+        return '<tr><td>' + escHtml(dAt) + '</td><td>' + escHtml(rAt) + '</td><td class="num">' + escHtml(String(ev.gap_seconds)) + '</td><td>' + escHtml(syms) + '</td><td>' + escHtml(rest) + '</td><td>' + escHtml(vol) + '</td><td>' + bsCool + '</td></tr>';
+      }).join('');
+    }
+
     function renderSummary(data) {
       const items = [
         { label: '총 평가금', value: fmtNum(data.total_value) + '원', cls: '' },
@@ -372,10 +432,10 @@ def _html_page() -> str:
       } catch (e) { /* 차트만 스킵 */ }
       try {
         const rtRes = await fetch('/api/runtime');
-        if (rtRes.ok) renderRuntime(await rtRes.json());
-        else renderRuntime(null);
+        if (rtRes.ok) { const rtData = await rtRes.json(); renderRuntime(rtData); renderWsGap(rtData); }
+        else { renderRuntime(null); renderWsGap(null); }
       } catch (e) {
-        renderRuntime(null);
+        renderRuntime(null); renderWsGap(null);
       }
       lastUpdate.textContent = ts;
     }
