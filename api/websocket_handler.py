@@ -18,7 +18,12 @@ from loguru import logger
 import websockets
 import websockets.exceptions
 
+from collections import deque
+
 from config.config_loader import Config
+
+# gap event ring buffer 최대 크기
+_GAP_HISTORY_MAX = 50
 
 
 class WebSocketHandler:
@@ -40,8 +45,8 @@ class WebSocketHandler:
 
     # 재연결 갭 처리 임계값
     _GAP_MINUTE_BACKFILL = timedelta(seconds=60)   # 분봉 보충·스윙 검사
-    _GAP_REST_REFRESH = timedelta(minutes=3)       # REST 현재가·일봉 → 캐시
-    _GAP_BLACKSWAN_RECHECK = timedelta(minutes=5)  # 급락 로직 즉시 1회
+    _GAP_REST_REFRESH = timedelta(minutes=2)       # REST 현재가·일봉 → 캐시 (3분→2분 강화)
+    _GAP_BLACKSWAN_RECHECK = timedelta(minutes=2)  # 급락 로직 즉시 1회 (5분→2분 강화: 감사 H-1 대응)
     _GAP_NOTIFY_MIN = timedelta(seconds=60)        # 디스코드 갭 경고(너무 짧은 끊김은 생략)
 
     def __init__(self, config: Config = None):
@@ -73,6 +78,11 @@ class WebSocketHandler:
         self._disconnect_time: Optional[datetime] = None
         # 웹소켓·REST 갱신 가격 스냅샷 (symbol → dict)
         self._price_cache: Dict[str, Dict[str, Any]] = {}
+
+        # gap observability: 최근 gap event 히스토리 (ring buffer)
+        self._gap_history: deque[Dict[str, Any]] = deque(maxlen=_GAP_HISTORY_MAX)
+        # 현재 진행 중인 disconnect 정보 (connected 상태면 None)
+        self._current_gap_start: Optional[datetime] = None
 
         logger.info(
             "WebSocketHandler 초기화 (모드: {})",
@@ -126,6 +136,30 @@ class WebSocketHandler:
     def get_cached_price(self, symbol: str) -> Optional[Dict[str, Any]]:
         """내부 가격 캐시 조회 (웹소켓 또는 갭 복구 REST로 갱신된 값)."""
         return self._price_cache.get(symbol)
+
+    def gap_snapshot(self) -> Dict[str, Any]:
+        """
+        대시보드/런타임 상태 노출용 웹소켓 갭 스냅샷.
+
+        Returns:
+            {
+                "available": True,
+                "is_connected": bool,
+                "current_gap_since": ISO8601 | None,
+                "total_gap_count": int,
+                "recent_gaps": [최근 gap event list (최대 10개)],
+            }
+        """
+        recent = list(self._gap_history)[-10:]
+        return {
+            "available": True,
+            "is_connected": self._is_connected,
+            "current_gap_since": (
+                self._current_gap_start.isoformat() if self._current_gap_start else None
+            ),
+            "total_gap_count": len(self._gap_history),
+            "recent_gaps": recent,
+        }
 
     def _update_price_cache_from_ws(self, price_data: dict) -> None:
         sym = price_data.get("symbol")
@@ -300,6 +334,20 @@ class WebSocketHandler:
                 gap_sec / 60.0,
             )
 
+        # gap event 기록 초기화 (아래에서 결과 채움)
+        gap_event: Dict[str, Any] = {
+            "disconnect_at": disc.isoformat() if disc else None,
+            "reconnect_at": reconnect_time.isoformat(),
+            "gap_seconds": round(gap_sec, 1),
+            "affected_symbols": list(symbols),
+            "rest_backfill_performed": False,
+            "rest_backfill_count": 0,
+            "blackswan_checked": False,
+            "blackswan_cooldown_triggered": False,
+            "minute_bar_backfill_count": 0,
+            "observed_volatility": {},
+        }
+
         api = None
 
         async def _ensure_api():
@@ -334,19 +382,53 @@ class WebSocketHandler:
         kis = await _ensure_api() if needs_kis else None
 
         if gap_td >= self._GAP_REST_REFRESH and kis:
-            await self._rest_refresh_price_cache(symbols, kis)
+            n_ok = await self._rest_refresh_price_cache(symbols, kis)
+            gap_event["rest_backfill_performed"] = True
+            gap_event["rest_backfill_count"] = n_ok
 
         if gap_td >= self._GAP_BLACKSWAN_RECHECK and kis:
-            await self._run_blackswan_gap_check(symbols, _detector(), kis)
+            det = _detector()
+            was_on_cooldown = det.is_on_cooldown()
+            await self._run_blackswan_gap_check(symbols, det, kis)
+            gap_event["blackswan_checked"] = True
+            gap_event["blackswan_cooldown_triggered"] = (
+                not was_on_cooldown and det.is_on_cooldown()
+            )
 
         n_backfill = 0
         if gap_td > self._GAP_MINUTE_BACKFILL and kis:
             n_backfill = await self._minute_bar_gap_backfill(
                 symbols, gap_td, kis, _detector()
             )
+        gap_event["minute_bar_backfill_count"] = n_backfill
+
+        # 갭 구간 관측 변동률 수집 (price_cache에서 추출)
+        for sym in symbols:
+            entry = self._price_cache.get(sym)
+            if entry and isinstance(entry, dict):
+                q = entry.get("quote")
+                if q and q.get("change_rate") is not None:
+                    gap_event["observed_volatility"][sym] = round(
+                        abs(float(q["change_rate"])), 2
+                    )
 
         if disc is not None and gap_td >= self._GAP_NOTIFY_MIN:
             self._notify_websocket_gap_discord(disc, reconnect_time, gap_td)
+
+        # ring buffer에 기록
+        if disc is not None and gap_sec > 0:
+            self._gap_history.append(gap_event)
+
+        # 현재 gap 해소
+        self._current_gap_start = None
+
+        # 대시보드 런타임 상태에 gap 스냅샷 즉시 반영
+        try:
+            from monitoring.dashboard_runtime_state import merge_ws_gap
+
+            merge_ws_gap(self.gap_snapshot())
+        except Exception as e:
+            logger.debug("[WebSocket] 갭 스냅샷 대시보드 반영 실패: {}", e)
 
         logger.info(
             "[WebSocket] 갭 후속 처리 완료 (분봉 보충 시도 종목 수: {})",
@@ -435,7 +517,15 @@ class WebSocketHandler:
 
             if self._should_reconnect:
                 if was_live:
-                    self._disconnect_time = datetime.now()
+                    now = datetime.now()
+                    self._disconnect_time = now
+                    self._current_gap_start = now
+                    try:
+                        from monitoring.dashboard_runtime_state import merge_ws_gap
+
+                        merge_ws_gap(self.gap_snapshot())
+                    except Exception:
+                        pass
                 retry_count += 1
                 wait_time = min(60, 2 ** min(retry_count, 6))
                 logger.warning("웹소켓 끊김 — {}초 후 재연결 시도", wait_time)
