@@ -6,14 +6,15 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-04-09)**:  
+> **현재 상태 (2026-04-15)**:  
 > - Paper Evidence 런타임 완성: 일별 자동 수집 → benchmark finalization → promotion package → launch readiness  
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked 상태 자동 전환 + allowed_actions 제어  
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡)  
 > - Zero-return semantics 수정: cash-only/no-position day에서 clean day deadlock 해소  
 > - scoring: clean_final_days=3 달성, infra_ready=true (pilot auth 대기)  
 > - rotation, scoring: **provisional_paper_candidate** (debiased WF 통과, 경제적 alpha 미확인)  
-> - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
+> - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가  
+> - Paper scheduler hotfix(2026-04-15): `_run_monitoring` import regression 복구(`update_stop_loss_price` compat shim), 04-13/04-14 evidence 백필, 15:35 post_market 훅 자동 finalize 확인
 
 ## 주요 기능
 
