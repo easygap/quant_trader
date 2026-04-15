@@ -2,7 +2,7 @@
 
 > **문서 버전**: v5.1
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-09
+> **최종 수정**: 2026-04-15
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -828,7 +828,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 
 ### 5.17 스케줄러 장중 — 동적 손절 갱신·신호 재스캔 — v3.0
 
-- **동적 손절**: `_update_dynamic_stop_losses()` — 보유 종목별 최신 일봉·ATR로 손절가 재계산. **기존보다 손절가만 높아지는(래칟) 방향**만 DB 반영 (`database.repositories.update_stop_loss_price`).
+- **동적 손절**: `_update_dynamic_stop_losses()` — 보유 종목별 최신 일봉·ATR로 손절가 재계산. **기존보다 손절가만 높아지는(래칟) 방향**만 DB 반영 (`database.repositories.update_stop_loss_price` — 2026-04-15 현재 `update_position_targets(stop_loss_price=...)`에 위임하는 compat shim).
 - **장중 재스캔**: `auto_entry` 가 켜진 경우 `_rescan_for_new_entries()` — 워치리스트에서 미보유 종목을 다시 분석해 BUY 신호 시 `_entry_candidates`에 추가(시장 국면 bearish면 스킵).
 - **위치**: `core/scheduler.py` → `_run_monitoring()` 내부, 손절/익절 체크 후 실행.
 
@@ -936,7 +936,7 @@ quant_trader/
 ├── database/
 │   ├── __init__.py
 │   ├── models.py                # ORM 모델 6종(StockPrice, TradeHistory, Position, PortfolioSnapshot, DailyReport, FailedOrder). SQLite WAL/PostgreSQL 지원, scoped_session, @with_retry, db_session()
-│   ├── repositories.py          # CRUD, **update_stop_loss_price**(래칟 손절 갱신), Dead-letter, 스냅샷 등
+│   ├── repositories.py          # CRUD, **update_stop_loss_price**(래칟 손절 갱신 — `update_position_targets`에 위임하는 compat shim), Dead-letter, 스냅샷 등
 │   └── backup.py                # SQLite Online Backup API로 WAL 안전 백업 (실패 시 shutil 폴백 + -wal/-shm 포함), 보관 일수 자동 삭제
 ├── monitoring/
 │   ├── __init__.py
@@ -1374,6 +1374,12 @@ quant_trader/
 - [x] **Zero-return Semantics** — cash-only/no-position day deadlock 해소 (daily_return=0.0 추론)
 - [x] **scoring clean_final_days=3** — infra_ready=true 달성 (pilot auth 대기)
 - [x] **테스트 확장** — paper_evidence/runtime/pilot/preflight 전용 테스트 127건 추가
+
+### v5.1 hotfix (2026-04-15 Paper scheduler 운영 안정화)
+
+- [x] **scheduler `_run_monitoring` import regression 복구** — `database.repositories`에서 삭제된 `update_stop_loss_price`를 compat shim으로 복구(`update_position_targets(stop_loss_price=...)`에 위임). 매 사이클 ImportError로 장중 entry/exit/dynamic stop 전체가 skip되던 상태를 정상화. regression test 4건 추가(`tests/test_update_stop_loss_price_shim.py`)
+- [x] **2026-04-13 / 04-14 세션 미실행 백필** — scheduler 프로세스 미기동이 root cause였음을 사후검증(dashboard_runtime_state / daily_evidence / DB row 3개 아티팩트 교차 확인). `tools/run_paper_evidence_pipeline.py --finalize --generate-package`로 두 날짜 evidence 라인 보강
+- [x] **2026-04-15 `_run_post_market()` 자동 finalize 확인** — patch 반영된 스케줄러 재기동 후 15:35 훅이 스스로 `daily_evidence_scoring.jsonl`에 04-15 라인을 final로 기록(이후 수동 backfill 호출은 `Evidence already final`로 no-op 확인)
 
 ### 단기 개선 (1~2개월 내)
 
