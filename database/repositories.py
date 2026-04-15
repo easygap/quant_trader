@@ -552,6 +552,13 @@ def update_position_targets(
         session.close()
 
 
+def update_stop_loss_price(symbol: str, stop_loss_price: float, account_key: str = ""):
+    # 래칟 손절 갱신: Position.stop_loss_price 한 필드만 update_position_targets로 위임.
+    update_position_targets(
+        symbol, stop_loss_price=stop_loss_price, account_key=account_key
+    )
+
+
 # =============================================================
 # 포트폴리오 스냅샷 관련
 # =============================================================
