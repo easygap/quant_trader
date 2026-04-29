@@ -95,7 +95,7 @@
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
 - Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`
-- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 후보 랭킹과 decision action을 생성하고 benchmark excess 음수 후보를 상위 alpha 후보에서 배제
+- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout 후보 랭킹과 decision action을 생성하고 benchmark excess 음수 후보를 상위 alpha 후보에서 배제
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1369,7 +1369,7 @@ quant_trader/
 - [x] **승격 규칙 v3** — `core/promotion_engine.py` metrics 기반 자동 판정 + artifact-driven
 - [x] **Paper Evidence 체계** — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate
 - [x] **전략 분류 확정** — rotation: provisional, scoring: paper_only. BV/MR/TF/ensemble: disabled (research_only)
-- [x] **테스트 296건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
+- [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
 

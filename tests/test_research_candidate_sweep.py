@@ -14,6 +14,7 @@ def _minimal_bundle(candidates=None):
         "eval_start": "2023-01-01",
         "eval_end": "2025-12-31",
         "initial_capital": 10_000_000,
+        "candidate_family": "rotation",
         "universe": ["005930", "000660"],
         "benchmark": {"ew_bh_return": 10.0, "ew_bh_sharpe": 0.5},
         "walk_forward": {"enabled": False, "windows": []},
@@ -45,6 +46,31 @@ def test_parse_symbols_restores_numeric_codes_losing_leading_zeroes():
     from tools.research_candidate_sweep import parse_symbols
 
     assert parse_symbols("5930,660,035720") == ["005930", "000660", "035720"]
+
+
+def test_build_candidate_specs_supports_all_families():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    specs = build_candidate_specs("all")
+    ids = {spec.candidate_id for spec in specs}
+    strategies = {spec.strategy for spec in specs}
+
+    assert "rotation_base" in ids
+    assert "momentum_factor_60d" in ids
+    assert "breakout_volume_strict" in ids
+    assert strategies == {
+        "relative_strength_rotation",
+        "momentum_factor",
+        "breakout_volume",
+    }
+
+
+def test_build_candidate_specs_rejects_unknown_family():
+    import pytest
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    with pytest.raises(ValueError, match="candidate_family"):
+        build_candidate_specs("unknown")
 
 
 def test_buy_and_hold_benchmark_tolerates_failed_symbol_fetch(monkeypatch):

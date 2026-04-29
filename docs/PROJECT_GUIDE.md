@@ -319,7 +319,7 @@ quant_trader/
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
 | **momentum_top_portfolio.py** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. `run_momentum_top_portfolio_backtest()`: WatchlistManager(momentum_top) → 종목별 데이터 수집 → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성 → 시장 국면 필터·포트폴리오 스탑 적용. `print_momentum_top_portfolio_report()`. `--mode backtest_momentum_top`에서 사용. |
 | **param_optimizer.py** | Grid Search / Bayesian(scikit-optimize). train_ratio·OOS 보고. `--include-weights` 시 **스코어링 가중치 대칭 Grid Search + OOS 샤프≥1.0 게이트**. `--auto-correlation`: 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화. `--disable-weights w_rsi,w_ma` 등으로 수동 지정도 가능. `Backtester.run(..., param_overrides=)`. |
-| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. rotation 변형을 포트폴리오 단위로 평가하고 benchmark excess, EV, CAGR, turnover, WF 안정성으로 랭킹하며 decision action을 포함해 `reports/research_sweeps/`에 저장. |
+| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|all` 후보를 포트폴리오 단위로 평가하고 benchmark excess, EV, CAGR, turnover, WF 안정성으로 랭킹하며 decision action을 포함해 `reports/research_sweeps/`에 저장. |
 
 ### 3.7 database/
 
@@ -678,13 +678,13 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **`--force-live` 제거** | canonical bundle + paper evidence hard gate 우회 불가 |
 | ✅ **벤치마크 거래비용** | `_buy_and_hold_metrics`에 commission/tax/slippage 반영 |
 | ✅ **debiased 전략 재평가** | 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows |
-| ✅ **테스트 296건 green** | live/paper/promotion/research sweep 회귀 묶음 기준 |
+| ✅ **테스트 298건 green** | live/paper/promotion/research sweep 회귀 묶음 기준 |
 | ✅ **Paper Runtime State Machine** | `core/paper_runtime.py` — 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine |
 | ✅ **Paper Pilot Authorization** | `core/paper_pilot.py` — launch readiness + pilot auth + 리스크 캡 |
 | ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
-| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation 변형을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
+| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
