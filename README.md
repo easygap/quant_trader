@@ -173,7 +173,7 @@ pytest tests/ -q
 ## 전략 상태
 
 승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현.  
-Research candidate sweep — `tools/research_candidate_sweep.py --quick`로 promotion과 분리된 후보 랭킹 artifact를 생성.
+Research candidate sweep — `tools/research_candidate_sweep.py --quick --candidate-family all`로 promotion과 분리된 rotation/momentum/breakout 후보 랭킹 artifact를 생성.
 Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
