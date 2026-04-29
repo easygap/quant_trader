@@ -1,8 +1,8 @@
 # 🏗️ QUANT TRADER - 자동 주식 매매 시스템 설계서
 
-> **문서 버전**: v5.1
+> **문서 버전**: v5.2
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-15
+> **최종 수정**: 2026-04-29
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -50,18 +50,18 @@
 | **수익 목표** | 검증된 전략으로 벤치마크(코스피 지수) 대비 초과 수익 달성. **가중치 최적화·워크포워드 검증·paper 1개월 운영을 모두 통과한 후에만 기대할 수 있는 목표**이며, 검증 없이 "연 20%" 같은 수치를 설정하는 것은 위험 |
 | **대응 속도** | 실시간 시세 반영 (1초 이내 분석·주문) |
 
-### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v5.0 업데이트)
+### 1.3 현재 시스템 상태 진단 — 반드시 읽으세요 (v5.2 업데이트)
 
 > **핵심 판단: live 자동매매는 코드 레벨 hard gate로 차단. `--force-live` 제거됨. 주문 상태기계 도입.**
 
 인프라(리스크 관리, 장애 복구, 로깅, 알림 이중화, 블랙스완 대응, OrderRecord 상태기계, Paper Evidence 수집)는 프로덕션 수준입니다. **전략 신호는 debiased 평가에서 same-universe B&H 대비 음수 excess이므로** live 전환 불가.
 
-**전략 상태 레지스트리** (v5.0 — `core/promotion_engine.py`에서 metrics 기반 자동 판정):
+**전략 상태 레지스트리** (v5.2 — `core/promotion_engine.py`에서 metrics 기반 자동 판정):
 
 | 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | 사유 |
 |------|------|-----------|------|-----|-----------|------|
 | **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | debiased WF 통과. 경제적 alpha 미확인 |
-| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | WF Sh+ 경계 통과. 가중치 미최적화 |
+| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | WF Sh+ 경계 통과. 60영업일 freeze pack 관측 중 |
 | **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | PF<1. BV50/R50 Paper Sleeve A (운영 사실, merit와 무관) |
 | **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | 유니버스 의존적 |
 | **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | PF<1. 한국 시장 구조적 비유효 |
@@ -84,15 +84,17 @@
 - **FILLED assert 통과 후에만** position/trade DB 반영 (phantom position 방지)
 - Paper: simulated broker event로 동일 전이. Live: broker callback + reconcile
 
-**Paper 운영 현황** (v5.1):
-- BV50/R50 Paper 가동 중 (2026-04-01~, 60영업일)
+**Paper 운영 현황** (v5.2):
+- scoring 60영업일 Paper 실험 freeze pack: 2026-03-27 ~ 2026-06-19, `reports/experiment_freeze_pack.md`와 `reports/paper_experiment_manifest.json` 기준
+- YAML hash와 resolved hash를 분리해 파일 변경과 환경변수 변경(`QUANT_AUTO_ENTRY`)을 별도로 감지
 - Paper Evidence 수집 체계 (`core/paper_evidence.py`): 일별 22개 지표 + 6개 anomaly rule + 9개 approval gate
-- Paper Runtime State Machine (`core/paper_runtime.py`): 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine, allowed_actions 제어
+- Paper Runtime State Machine (`core/paper_runtime.py`): 5개 상태(normal/degraded/frozen/blocked_insufficient_evidence/research_disabled), schema quarantine, allowed_actions 제어
 - Paper Pilot Authorization (`core/paper_pilot.py`): launch readiness 판정 + pilot auth + 리스크 캡. scoring: clean_final_days=3 달성, infra_ready=true (2026-04-09)
 - Paper Preflight (`core/paper_preflight.py`): 세션 전 운영 준비 상태 점검
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
-- Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_pilot_control.py` (pilot 관리)
+- Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`
+- 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
 **지속적 손실이 발생할 수 있는 구체적 시나리오** (§4.6 참고):
@@ -1009,7 +1011,7 @@ quant_trader/
 | **backtest_momentum_top** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. 리밸런싱·시장 국면 필터·포트폴리오 스탑 지원 | `run_backtest_momentum_top()` → momentum_top_portfolio.run_momentum_top_portfolio_backtest() |
 | **validate** | 전략 검증 (3~5년, 샤프·MDD·벤치마크·in/out-of-sample). `--walk-forward` 시 워크포워드 | `run_strategy_validation()` → StrategyValidator.run / run_walk_forward |
 | **paper** | 모의투자 1회 순회 (워치리스트 종료 후 프로세스 종료) | `run_paper_trading()` → WatchlistManager, 전략.generate_signal, OrderExecutor(paper) |
-| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). 기본=signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. `trading.mode=live`이면 거부 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
+| **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). 기본=signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. `trading.mode=live`이면 거부. runtime state가 entry만 막아도 exit/finalize/evidence는 계속 허용 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
 | **live** | 실전 매매. **4중 보안**: ① `is_strategy_allowed(live)` ② `ENABLE_LIVE_TRADING=true` ③ `--confirm-live` ④ `_check_live_readiness_gate()` 5개 조건 | `run_live_trading()` → hard gate → KIS 인증 → Scheduler.run() |
 | **liquidate** | 긴급 전 종목 매도 | `run_emergency_liquidate()` → DB 포지션 조회 → 종목별 매도 |
 | **compare** | 모의투자 vs 백테스트 비교 + **실전 전환 준비 평가** | `run_compare_paper_backtest()` → paper_compare.run_compare + check_live_readiness |
@@ -1018,6 +1020,11 @@ quant_trader/
 | **check_correlation** | 스코어링 지표 간 상관계수·독립성 검증 (0.7 이상 쌍 제거/가중치 축소 권고) | `run_check_indicator_correlation()` → core.indicator_correlation |
 | **check_ensemble_correlation** | 앙상블 전략 신호 상관계수 + BUY 동시 발생률 검증. 0.6 이상이면 conservative 전환 또는 재구성 권고 | `run_check_ensemble_correlation()` → core.ensemble_correlation |
 | **rebalance** | 바스켓 포트폴리오 리밸런싱. `--basket`으로 대상 지정, `--dry-run`으로 미리보기. 미지정 시 enabled=true인 모든 바스켓 실행 | `run_rebalance()` → BasketRebalancer |
+
+**Paper schedule 운영 원칙**:
+- `python main.py --mode schedule --strategy scoring`은 기본 signal-only이며, 신호/evidence/finalize를 수집하되 신규 주문은 내지 않는다.
+- `QUANT_AUTO_ENTRY=true python main.py --mode schedule --strategy scoring`만 full paper로 동작한다. YAML 원본은 유지하고 resolved hash가 달라지는 방식으로 실험 drift를 추적한다.
+- live 모드는 `QUANT_AUTO_ENTRY`로 열리지 않는다. live 진입은 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, 전략 상태, 5개 hard gate를 모두 통과해야 한다.
 
 **기타 CLI 옵션**:
 - `--update-holidays` → 휴장일 YAML 갱신 후 종료
@@ -1381,6 +1388,14 @@ quant_trader/
 - [x] **2026-04-13 / 04-14 세션 미실행 백필** — scheduler 프로세스 미기동이 root cause였음을 사후검증(dashboard_runtime_state / daily_evidence / DB row 3개 아티팩트 교차 확인). `tools/run_paper_evidence_pipeline.py --finalize --generate-package`로 두 날짜 evidence 라인 보강
 - [x] **2026-04-15 `_run_post_market()` 자동 finalize 확인** — patch 반영된 스케줄러 재기동 후 15:35 훅이 스스로 `daily_evidence_scoring.jsonl`에 04-15 라인을 final로 기록(이후 수동 backfill 호출은 `Evidence already final`로 no-op 확인)
 
+### v5.2 Freeze Pack + 운영 문서 최신화 (2026-04-29)
+
+- [x] **GitHub 원격 브랜치 정리** — 병합 완료 브랜치 삭제, 원격은 `main` 단일 브랜치 운영
+- [x] **60영업일 experiment freeze pack 병합** — `reports/experiment_freeze_pack.md`, `daily_ops_checklist.md`, `weekly_ops_checklist.md`, `experiment_stop_conditions.md`
+- [x] **`QUANT_AUTO_ENTRY` 해석 단일화** — ENV > YAML > default(false), live 모드 ENV override 무시
+- [x] **YAML/resolved hash 분리** — YAML 원본 동결과 실행 설정 drift를 별도 감지
+- [x] **Paper manifest 충돌 해결** — 기존 scheduled run 정책과 freeze-pack metadata를 통합한 `reports/paper_experiment_manifest.json`
+
 ### 단기 개선 (1~2개월 내)
 
 | # | 액션 | 상세 | 참고 |
@@ -1455,4 +1470,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-09 (v5.1: Paper Runtime 완성 — runtime state machine, pilot authorization, preflight, launch readiness, zero-return semantics deadlock 해소, paper 운영 도구 CLI)
+> **최종 수정**: 2026-04-29 (v5.2: freeze pack, auto-entry 해석 단일화, YAML/resolved hash, 운영 체크리스트 반영)

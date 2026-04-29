@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--backfill", type=int, metavar="N", help="최근 N영업일 backfill + discrepancy report")
     parser.add_argument("--weekly-summary", action="store_true")
     parser.add_argument("--generate-package", action="store_true")
+    parser.add_argument("--quality-report", action="store_true", help="evidence 품질 report 생성")
     args = parser.parse_args()
 
     from database.models import init_database
@@ -67,6 +68,10 @@ def main():
 
     if args.generate_package:
         run_promotion_package(args.strategy)
+        ran = True
+
+    if getattr(args, 'quality_report', False):
+        run_quality_report(args.strategy)
         ran = True
 
     if not ran:
@@ -215,6 +220,32 @@ def run_promotion_package(strategy: str):
         ))
         if pkg.get("block_reasons"):
             print("  Block reasons: %s" % ", ".join(pkg["block_reasons"]))
+    else:
+        print("SKIP: no evidence data")
+
+
+def run_quality_report(strategy: str):
+    from core.paper_evidence import generate_evidence_quality_report
+    report, path = generate_evidence_quality_report(strategy)
+    if path:
+        print("OK: evidence quality report -> %s" % path)
+        print("\n  Period: %s" % report["period"])
+        print("  Total days: %d" % report["total_days"])
+        print("  Benchmark non-null ratio: %.1f%%" % (report["benchmark_non_null_ratio"] * 100))
+        conv = report["provisional_to_final_conversion"]
+        print("  Provisional→Final conversion: %.1f%% (final=%d, prov=%d, fail=%d)" % (
+            conv["conversion_ratio"] * 100, conv["final_days"],
+            conv["provisional_days"], conv["failed_days"],
+        ))
+        cdist = report["final_completeness_distribution"]
+        print("  Final completeness: min=%.2f, max=%.2f, avg=%.2f (n=%d)" % (
+            cdist["min"] or 0, cdist["max"] or 0, cdist["avg"] or 0, cdist["count"],
+        ))
+        print("  Cross-validation mismatches: %d" % report["cross_validation_mismatch_count"])
+        print("  Restart recovery count: %d" % report["restart_recovery_count"])
+        print("  Anomaly rate: %.1f%%" % (report["anomaly_rate"] * 100))
+        if report["anomaly_type_breakdown"]:
+            print("  Anomaly breakdown: %s" % json.dumps(report["anomaly_type_breakdown"], ensure_ascii=False))
     else:
         print("SKIP: no evidence data")
 

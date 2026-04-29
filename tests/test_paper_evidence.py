@@ -538,6 +538,56 @@ class TestEndToEndReplay:
         assert "approved_strategies.json" in checklist
         assert "수동 승인" in checklist or "수동" in checklist
 
+    def test_negative_alpha_blocks_promotion_even_with_60_days(self, evidence_dir):
+        """60일/benchmark final이 충족돼도 음수 alpha와 손실이면 승격 불가."""
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        jsonl_path = evidence_dir / "daily_evidence_negative_alpha.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": "negative_alpha",
+                "total_value": 10_000_000 - (i * 10_000),
+                "cash": 3_000_000,
+                "invested": 7_000_000,
+                "daily_return": -0.05,
+                "cumulative_return": -3.0,
+                "mdd": -4.0,
+                "position_count": 2,
+                "total_trades": 2,
+                "buy_count": 1,
+                "sell_count": 1,
+                "winning_trades": 1 if i % 2 == 0 else 0,
+                "losing_trades": 0 if i % 2 == 0 else 1,
+                "same_universe_excess": -0.02,
+                "exposure_matched_excess": -0.01,
+                "cash_adjusted_excess": -0.01,
+                "benchmark_status": "final",
+                "benchmark_meta": {"completeness": 1.0},
+                "raw_fill_rate": 1.0,
+                "reject_count": 0,
+                "phantom_position_count": 0,
+                "stale_pending_count": 0,
+                "duplicate_blocked_count": 0,
+                "restart_recovery_count": 0,
+                "anomalies": [],
+                "cross_validation_warnings": [],
+                "status": "normal",
+                "record_version": 1,
+                "schema_version": 2,
+                "diagnostics": [],
+            })
+
+        pkg_path, _ = generate_promotion_package("negative_alpha")
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        assert pkg["recommendation"] == "BLOCKED"
+        block_str = str(pkg["block_reasons"])
+        assert "non_positive_same_universe_excess" in block_str
+        assert "non_positive_cash_adjusted_excess" in block_str
+        assert "non_positive_cumulative_return" in block_str
+
     @patch("core.paper_evidence._compute_benchmark_excess")
     @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
     def test_promotion_never_modifies_approved_strategies(self, mock_diag, mock_bench, evidence_dir):
@@ -899,3 +949,257 @@ class TestPromotionBenchmarkIncomplete:
         pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
         assert pkg["recommendation"] == "BLOCKED"
         assert any("benchmark_incomplete" in r for r in pkg["block_reasons"])
+
+
+# ═══════════════════════════════════════════════════════════════
+# Clean Day Deadlock Regression Tests
+# ═══════════════════════════════════════════════════════════════
+
+class TestCashOnlyPortfolioMetrics:
+    """cash-only / no-trade day에서 daily_return=0.0 추론 테스트.
+
+    Regression: 2026-04-08 scoring deadlock
+      - blocked 상태 → scheduler 미실행 → 당일 PortfolioSnapshot 없음
+      - 직전 snapshot 존재 + 거래 0건 → daily_return=0.0 이어야 함
+      - 기존 코드는 daily_return=None, benchmark_status=failed 반환
+    """
+
+    def test_cash_only_no_snapshot_infers_zero_return(self, fresh_db):
+        """당일 snapshot 없고 직전 snapshot 존재 + 거래 0건 → daily_return=0.0."""
+        from database.models import PortfolioSnapshot, get_session
+        from core.paper_evidence import _collect_portfolio_metrics
+
+        session = get_session()
+        # 직전 snapshot (04-06)
+        session.add(PortfolioSnapshot(
+            account_key="scoring",
+            date=datetime(2026, 4, 6, 15, 35),
+            total_value=10_000_000.0,
+            cash=10_000_000.0,
+            invested=0,
+            daily_return=0.0,
+            cumulative_return=0.0,
+            mdd=0.0,
+            position_count=0,
+        ))
+        session.commit()
+        session.close()
+
+        # 04-08 조회 (당일 snapshot 없음, 거래 없음)
+        result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+
+        assert result != {}, "should not return empty dict"
+        assert result["daily_return"] == 0.0, f"expected 0.0, got {result['daily_return']}"
+        assert result["total_value"] == 10_000_000.0
+        assert result["cash"] == 10_000_000.0
+        assert result.get("_inferred_from_previous") is True
+
+    def test_truly_missing_returns_empty(self, fresh_db):
+        """snapshot이 한 번도 없으면 {} 반환 (진짜 데이터 부재)."""
+        from core.paper_evidence import _collect_portfolio_metrics
+
+        result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert result == {}
+
+    def test_trades_exist_blocks_inference(self, fresh_db):
+        """직전 snapshot 이후 거래가 있으면 추론하지 않음 → {} 반환."""
+        from database.models import PortfolioSnapshot, TradeHistory, get_session
+        from core.paper_evidence import _collect_portfolio_metrics
+
+        session = get_session()
+        session.add(PortfolioSnapshot(
+            account_key="scoring",
+            date=datetime(2026, 4, 6, 15, 35),
+            total_value=10_000_000.0,
+            cash=10_000_000.0,
+            invested=0,
+            daily_return=0.0,
+            cumulative_return=0.0,
+            mdd=0.0,
+            position_count=0,
+        ))
+        session.add(TradeHistory(
+            account_key="scoring",
+            symbol="005930", action="BUY", price=60000, quantity=10,
+            total_amount=600000, mode="paper",
+            executed_at=datetime(2026, 4, 7, 10, 0),
+        ))
+        session.commit()
+        session.close()
+
+        result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert result == {}, "trades exist → should not infer"
+
+    def test_same_day_snapshot_takes_priority(self, fresh_db):
+        """당일 snapshot이 있으면 fallback 안 쓰고 그대로 반환."""
+        from database.models import PortfolioSnapshot, get_session
+        from core.paper_evidence import _collect_portfolio_metrics
+
+        session = get_session()
+        session.add(PortfolioSnapshot(
+            account_key="scoring",
+            date=datetime(2026, 4, 8, 15, 35),
+            total_value=10_100_000.0,
+            cash=9_500_000.0,
+            invested=600_000.0,
+            daily_return=1.0,
+            cumulative_return=1.0,
+            mdd=-0.5,
+            position_count=1,
+        ))
+        session.commit()
+        session.close()
+
+        result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert result["daily_return"] == 1.0
+        assert "_inferred_from_previous" not in result
+
+
+class TestZeroReturnBenchmark:
+    """daily_return=0.0이면 benchmark가 final 계산 가능해야 함."""
+
+    def test_zero_return_is_not_null(self):
+        """daily_return=0.0 → benchmark_status != 'failed' (null early return 안 탐)."""
+        from core.paper_evidence import _compute_benchmark_excess
+
+        result = _compute_benchmark_excess(
+            date=datetime(2026, 4, 8),
+            daily_return=0.0,
+            cash_ratio=1.0,
+            watchlist_symbols=[],  # empty watchlist → still fails, but NOT because of null
+        )
+        # empty watchlist이면 warning="empty watchlist"이지만
+        # "daily_return is null" warning은 없어야 함
+        assert "daily_return is null" not in result["benchmark_meta"].get("warning", "")
+
+    def test_null_return_gives_failed(self):
+        """daily_return=None → benchmark_status='failed' with null warning."""
+        from core.paper_evidence import _compute_benchmark_excess
+
+        result = _compute_benchmark_excess(
+            date=datetime(2026, 4, 8),
+            daily_return=None,
+            cash_ratio=1.0,
+            watchlist_symbols=["005930"],
+        )
+        assert result["benchmark_status"] == "failed"
+        assert "daily_return is null" in result["benchmark_meta"].get("warning", "")
+
+
+class TestCleanDayAccumulation:
+    """blocked strategy에서도 evidence-only path로 clean day 누적 가능."""
+
+    def test_trailing_clean_final_counts(self):
+        from core.paper_pilot import _count_trailing_clean_final
+
+        records = [
+            {"status": "normal", "benchmark_status": "failed", "anomalies": []},   # day 1: NOT clean
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},    # day 2: clean
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},    # day 3: clean
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},    # day 4: clean
+        ]
+        assert _count_trailing_clean_final(records) == 3
+
+    def test_failed_benchmark_resets_count(self):
+        from core.paper_pilot import _count_trailing_clean_final
+
+        records = [
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},    # clean
+            {"status": "normal", "benchmark_status": "failed", "anomalies": []},   # NOT clean → reset
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},    # clean
+        ]
+        assert _count_trailing_clean_final(records) == 1
+
+    def test_anomaly_resets_count(self):
+        from core.paper_pilot import _count_trailing_clean_final
+
+        records = [
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},
+            {"status": "normal", "benchmark_status": "final",
+             "anomalies": [{"type": "x", "severity": "warning"}]},  # anomaly → reset
+            {"status": "normal", "benchmark_status": "final", "anomalies": []},
+        ]
+        assert _count_trailing_clean_final(records) == 1
+
+    def test_blocked_strategy_can_accumulate_clean_days(self, fresh_db):
+        """blocked 상태에서 cash-only evidence가 clean final로 누적되는 E2E 시나리오.
+
+        Regression: 2026-04-06 (clean) → 04-08 (was failed, now should be clean)
+        """
+        from database.models import PortfolioSnapshot, get_session
+        from core.paper_evidence import _collect_portfolio_metrics, _compute_benchmark_excess
+
+        session = get_session()
+        # 04-06: scheduler가 실행해서 snapshot 존재
+        session.add(PortfolioSnapshot(
+            account_key="scoring",
+            date=datetime(2026, 4, 6, 15, 35),
+            total_value=10_000_000.0,
+            cash=10_000_000.0,
+            invested=0,
+            daily_return=0.0,
+            cumulative_return=0.0,
+            mdd=0.0,
+            position_count=0,
+        ))
+        session.commit()
+        session.close()
+
+        # 04-08: blocked → snapshot 없음 → fallback 추론
+        portfolio_08 = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert portfolio_08["daily_return"] == 0.0, "cash-only carry-forward should give 0.0"
+
+        # 04-09: 여전히 blocked → snapshot 없음 → fallback 추론
+        portfolio_09 = _collect_portfolio_metrics("scoring", datetime(2026, 4, 9, 15, 35))
+        assert portfolio_09["daily_return"] == 0.0, "second consecutive day should also give 0.0"
+
+        # 04-08의 benchmark가 final이 될 수 있는지 확인
+        # (benchmark excess 계산은 watchlist 데이터 의존이므로 mock)
+        bench = _compute_benchmark_excess(
+            date=datetime(2026, 4, 8),
+            daily_return=portfolio_08["daily_return"],
+            cash_ratio=1.0,
+            watchlist_symbols=[],  # empty → not final but NOT "daily_return is null"
+        )
+        assert "daily_return is null" not in bench["benchmark_meta"].get("warning", "")
+
+
+class TestShadowEvidenceNotPromotable:
+    """shadow evidence는 promotable real paper day를 오염시키지 않아야 함."""
+
+    def test_shadow_excluded_from_promotion(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        jsonl_path = evidence_dir / "daily_evidence_test_shadow.jsonl"
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # real paper evidence
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "test_shadow",
+            "execution_backed": True,
+            "evidence_mode": "real_paper",
+            "daily_return": 0.0,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+        # shadow evidence
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-07",
+            "strategy": "test_shadow",
+            "execution_backed": False,
+            "evidence_mode": "shadow_bootstrap",
+            "daily_return": 0.0,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+        records = get_canonical_records("test_shadow")
+        real_records = [r for r in records if r.get("execution_backed", True)]
+        shadow_records = [r for r in records if not r.get("execution_backed", True)]
+
+        assert len(real_records) == 1
+        assert len(shadow_records) == 1
+        assert real_records[0]["date"] == "2026-04-06"

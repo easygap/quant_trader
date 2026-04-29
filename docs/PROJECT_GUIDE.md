@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v5.0
-> **최종 수정**: 2026-04-09
+> **문서 버전**: v5.2
+> **최종 수정**: 2026-04-29
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -36,7 +36,7 @@
    워치리스트 **1회 순회** 후 프로세스 종료. `WatchlistManager`로 관심 종목 확정 → 종목마다 `DataCollector.fetch_stock` 수집 → 전략 `generate_signal(df, symbol=symbol)` → BUY 시 **시장 국면 필터** 적용 후 `OrderExecutor`가 **DB에만 기록** + 알림. 실제 주문 없음.
 
 4. **스케줄 루프 (schedule)**  
-   **모의 전용 무한 루프**. `config.trading.mode`가 `live`이면 거부(실전은 `--mode live --confirm-live`). `core/runtime_lock.py`로 `data/.scheduler.lock` 파일 락을 잡은 뒤 `Scheduler.run()` — 장전/장중/장마감 루프가 paper와 동일하게 동작하며 프로세스를 유지(systemd 상시 구동용).
+   **모의 전용 무한 루프**. `config.trading.mode`가 `live`이면 거부(실전은 `--mode live --confirm-live`). `core/runtime_lock.py`로 `data/.scheduler.lock` 파일 락을 잡은 뒤 `Scheduler.run()` — 장전/장중/장마감 루프가 paper와 동일하게 동작하며 프로세스를 유지(systemd 상시 구동용). 기본은 signal-only이며, full paper는 `QUANT_AUTO_ENTRY=true`로만 켠다.
 
 5. **실전 (live)**  
    `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. KIS API 인증 → `PortfolioManager.sync_with_broker()` → `Scheduler` 무한 루프.  
@@ -55,7 +55,7 @@
 | **backtest_momentum_top** | `run_backtest_momentum_top(args)` | momentum_top_portfolio.run_momentum_top_portfolio_backtest() — 다종목 동일비중 모멘텀 포트폴리오, 리밸런싱·시장 국면·포트폴리오 스탑 |
 | **validate** | `run_strategy_validation(args)` | backtest.strategy_validator (3~5년, 샤프·MDD·벤치마크 KS11·코스피 상위 50 동일비중, in/out-of-sample, **손익비 자동 경고+디스코드**). `--no-benchmark-top50` 으로 Top50 비활성화 |
 | **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
-| **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용). 기본 signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper |
+| **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용). 기본 signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. runtime state가 entry만 차단해도 exit/finalize/evidence는 유지 |
 | **live** | `run_live_trading(args)` | 4중 보안(전략 상태·환경변수·CLI 플래그·hard gate 5조건) → KISApi, PortfolioManager(sync), Scheduler |
 | **liquidate** | `run_emergency_liquidate(args)` | DB 포지션 조회 → 종목별 매도(KIS 현재가 주문) |
 | **compare** | `run_compare_paper_backtest(args)` | backtest.paper_compare (run_compare + **check_live_readiness**), divergence 경고 + **실전 전환 준비 자동 평가·디스코드 알림** |
@@ -81,7 +81,7 @@ quant_trader/
 ├── quant_trader_design.md       # 전체 아키텍처·전략·리스크 설계서
 ├── config/
 │   ├── __init__.py
-│   ├── config_loader.py         # YAML 통합 로더, .env 덮어쓰기, Config.get() 싱글톤
+│   ├── config_loader.py         # YAML 통합 로더, .env 덮어쓰기, QUANT_AUTO_ENTRY 해석, YAML/resolved hash, Config.get() 싱글톤
 │   ├── settings.yaml.example    # 설정 예시 (settings.yaml은 .gitignore)
 │   ├── settings.yaml            # KIS API, database, data_source, trading, discord, telegram, dashboard, watchlist
 │   ├── strategies.yaml          # indicators, scoring, mean_reversion, trend_following, fundamental_factor, momentum_factor, volatility_condition, ensemble(components)
@@ -208,6 +208,12 @@ quant_trader/
     │   ├── {strategy}_pilot_launch_readiness.json/md
     │   ├── pilot_authorizations.jsonl
     │   └── notifier_health.json
+    ├── experiment_freeze_pack.md        # 60영업일 실험 동결 기준, hash, 실행 모드
+    ├── daily_ops_checklist.md           # 일일 운영 체크리스트
+    ├── weekly_ops_checklist.md          # 주간 운영 체크리스트
+    ├── experiment_stop_conditions.md    # 중단/동결/재개 기준
+    ├── paper_modes_explained.md         # signal-only/full paper 모드 차이
+    ├── paper_runbook.md                 # Paper 운영 기본 명령
     └── promotion/               # Promotion 판정 결과
 ```
 
@@ -219,7 +225,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (13종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
+| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / **portfolio_backtest** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (14종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
 | **test_integration.py** | 설정·DB·지표·신호·리스크·백테스트·리포트·디스코드 등 전체 파이프라인 일괄 검증(14단계). 단일 실행 스크립트 (pytest 아님). |
 | **pyproject.toml** | 프로젝트 메타데이터: name=`quant_trader`, version=`0.1.0`, Python `>=3.11,<3.13`, 패키지 구성, pytest 설정 (`tests/` 대상, pandas 경고 필터). |
 | **requirements.txt** | pip 의존성 목록. pandas, numpy, scipy, pandas-ta, pykrx, finance-datareader, yfinance, requests, aiohttp, websockets, sqlalchemy, pyyaml, loguru, click, pytest 등. |
@@ -232,7 +238,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **config_loader.py** | `load_settings()`, `load_strategies()`, `load_risk_params()`, `load_all_config()`. `.env`로 KIS 키·계좌·디스코드·**DART_API_KEY** 등 덮어씀. 다중 계좌: `kis_api.accounts`, `Config.get_account_no(strategy)`. `Config.dart` 속성. `Config.get()` 싱글톤. `ConfigOverlay`로 YAML 설정과 .env 병합. |
+| **config_loader.py** | `load_settings()`, `load_strategies()`, `load_risk_params()`, `load_all_config()`. `.env`로 KIS 키·계좌·디스코드·**DART_API_KEY** 등 덮어씀. `QUANT_AUTO_ENTRY`는 ENV > YAML > default(false) 순서로 해석하고 live 모드에서는 ENV override를 무시. `Config.yaml_hash`(YAML 원본)와 `Config.resolved_hash`(환경변수 반영 실행 설정)를 분리해 freeze-pack drift를 감지. 다중 계좌: `kis_api.accounts`, `Config.get_account_no(strategy)`. `Config.dart` 속성. `Config.get()` 싱글톤. |
 | **settings.yaml.example** | 설정 예시. 복사해 `settings.yaml`로 사용. (`settings.yaml`은 .gitignore에 포함) |
 | **strategies.yaml** | `active_strategy`, `indicators`, `scoring`, `mean_reversion`, `trend_following`, **`fundamental_factor`**, `momentum_factor`, `volatility_condition`, **`ensemble`**(`components`로 technical·momentum_factor·volatility_condition·fundamental_factor on/off·가중치, `mode`, `auto_downgrade`, `independence_threshold`). |
 | **risk_params.yaml** | **backtest_universe**(mode: current/historical/kospi200, exclude_administrative), **liquidity_filter**(20일 평균 거래대금 하한, strict, check_on_entry), position_sizing(1% 룰, initial_capital), stop_loss, take_profit(부분 익절), trailing_stop, diversification(max_sector_ratio 포함), position_limits, drawdown, performance_degradation, paper_backtest_compare(live_readiness), transaction_costs(commission, tax, slippage, dynamic_slippage). |
@@ -553,12 +559,12 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > **중요**: 현재 시스템의 신호 품질이 검증되지 않은 상태입니다. 아래 체크리스트를 모두 통과하기 전까지 실전 투입은 금지입니다. 상세 진단은 `quant_trader_design.md` §1.3 참고.
 
-### 전략 상태 레지스트리 (v5.1 — `core/promotion_engine.py` 자동 판정)
+### 전략 상태 레지스트리 (v5.2 — `core/promotion_engine.py` 자동 판정)
 
 | 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | Paper Status |
 |------|------|-----------|------|-----|-----------|--------------|
 | **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | — |
-| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | clean_days=3, infra_ready |
+| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | clean_days=3, infra_ready, 60영업일 freeze pack |
 | **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | — |
 | **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | — |
 | **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | — |
@@ -578,8 +584,10 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 | 모드 | 설정 | 동작 |
 |------|------|------|
-| **signal-only** (기본) | auto_entry 미설정 | 신호 분석만, 주문 없음 |
-| **full paper** | `QUANT_AUTO_ENTRY=true` 환경변수 | BUY/SELL 자동 실행 (paper DB만 기록) |
+| **signal-only** (기본) | YAML `trading.auto_entry=false`, `QUANT_AUTO_ENTRY` 미설정 | 신호 분석·evidence/finalize만, 신규 주문 없음 |
+| **full paper** | `QUANT_AUTO_ENTRY=true` 환경변수 | BUY/SELL 자동 실행 (paper DB만 기록). YAML 원본은 유지하고 resolved hash만 달라짐 |
+
+60영업일 실험은 `reports/experiment_freeze_pack.md`와 `reports/paper_experiment_manifest.json`을 기준으로 동결한다. 실행 전 `Config.yaml_hash`, `Config.resolved_hash`, `Config.auto_entry_source`를 확인해 파일 변경과 환경변수 변경을 분리해서 기록한다.
 
 ### 현재 시스템의 핵심 한계
 
@@ -655,7 +663,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ Entry filter 탐색 | KS11 SMA200, abs momentum, min_hold_days 테스트 — 모두 불채택 |
 | ✅ Rolling walk-forward | 10 windows x 12mo, 6mo step. BV50/R50 positive 60%, median +0.45% |
 | ✅ Paper 모니터링 | `c5_paper_monthly_report.py`, signal/executed/skipped 카운터, guardrail 설정 |
-| ✅ **BV50/R50 Paper 가동** | 2026-04-01 개시, 목표 60영업일. Paper Evidence 체계 (`core/paper_evidence.py`) |
+| ✅ **Paper 실험 freeze pack** | scoring 2026-03-27~2026-06-19 60영업일 관측 기준 동결. BV50/R50 paper 운영 산출물은 legacy/비교 자료로 보존 |
 | ✅ **주문 상태기계** | `core/order_state.py` — OrderStatus 9개 상태, FILLED 전 position 없음 invariant |
 | ✅ **승격 규칙 v3** | `core/promotion_engine.py` — metrics 기반 자동 판정 + artifact-driven |
 | ✅ **`--force-live` 제거** | hard gate 우회 불가. approved_strategies.json 미존재 시 에러 |
@@ -734,6 +742,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | `KIS_ACCOUNT_NO` | ✅ | KIS 계좌번호 |
 | `DART_API_KEY` | 선택 | 전자공시 API — 실적일 DART 폴백 (`settings.dart.enabled`와 함께) |
 | `DISCORD_WEBHOOK_URL` | 권장 | 디스코드 알림 웹훅 URL |
+| `QUANT_AUTO_ENTRY` | full paper 시 | schedule 모드에서 DB 모의 주문을 켬. 허용값: true/false/1/0/on/off/yes/no. live 모드에서는 ENV override 무시 |
 | `ENABLE_LIVE_TRADING` | live 시 | `true` 설정 + `--confirm-live` 필수 |
 | `MAX_CALLS_PER_SEC` | 선택 | KIS API 초당 호출 제한 (기본 10) |
 | `MAX_CALLS_PER_MIN` | 선택 | KIS API 분당 호출 제한 (기본 300) |
@@ -775,5 +784,5 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 ---
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
-> **문서 버전**: v5.0
-> **최종 수정**: 2026-04-09 (Paper Runtime 모듈 추가: paper_evidence/runtime/pilot/preflight/strategy_universe, tools/ 디렉토리, 테스트 확장, zero-return semantics 수정)
+> **문서 버전**: v5.2
+> **최종 수정**: 2026-04-29 (60영업일 freeze pack, QUANT_AUTO_ENTRY 해석 단일화, YAML/resolved hash, Paper 운영 checklist 반영)
