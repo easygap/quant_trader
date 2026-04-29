@@ -32,6 +32,23 @@ _DUPLICATE_THRESHOLD = 5
 _DEEP_DD_MDD = -15.0
 _DEEP_DD_DAILY = -5.0
 
+# Benchmark completeness thresholds (per excess type)
+# same_universe_excess: 종목 universe 전체 대비이므로 높은 completeness 필요
+# exposure_matched / cash_adjusted: 투자비중 가중이므로 같은 기준 적용
+# 근거: completeness 50%는 5종목 universe에서 3개만 있어도 final이 됨.
+#   50%면 universe 대표성이 편향될 수 있으나, 소형 watchlist(5~10)에서는
+#   1~2개 누락이 흔하고, KOSPI fallback 대비 universe 일부가 더 정확하므로 유지.
+#   promotion에서 benchmark_final_ratio >= 80%로 장기 데이터 품질을 별도 관리.
+BENCHMARK_COMPLETENESS_FINAL = 0.5  # >= 50% → final (유지, 아래 근거 참조)
+
+# Promotion guard: positive evidence thresholds
+PROMOTION_MIN_EXCESS_DAYS = 0.6   # non-null excess 비율 >= 60%
+PROMOTION_FINAL_RATIO_MIN = 0.8   # benchmark final ratio >= 80%
+PROMOTION_MIN_AVG_EXCESS = 0.0    # benchmark 대비 평균 excess는 양수여야 함
+PROMOTION_MIN_CUMULATIVE_RETURN = 0.0
+PROMOTION_MIN_SELL_TRADES = 5
+PROMOTION_MIN_WIN_RATE = 45.0
+
 
 # ─── 데이터 구조 ────────────────────────────────────────────
 
@@ -91,6 +108,29 @@ class DailyEvidence:
 
     # record version: incremented on finalize
     record_version: int = 1
+
+    # schema version: pipeline epoch 식별 (v1=evidence_collector, v2=paper_evidence)
+    schema_version: int = 2
+
+    # provenance: evidence 출처 구분
+    # real_paper: 실제 scheduler paper run (주문 제출 가능 세션)
+    # shadow_bootstrap: 주문 없이 signal/benchmark/evidence만 수집
+    # replay: seeded replay (golden test 등)
+    # backfill: 과거 날짜 보충 수집
+    # test: 테스트 환경
+    evidence_mode: str = "real_paper"
+    execution_backed: bool = True  # 실제 주문 제출이 가능한 세션에서 수집됐는지
+    order_submit_count: int = 0
+    fill_count: int = 0
+
+    # session_mode: 세션 유형 (pilot provenance 분리)
+    # normal_paper: 일반 real paper 세션
+    # pilot_paper: pilot authorization 하 제한 entry 세션
+    # shadow_bootstrap: shadow evidence only 세션
+    # replay / test: 비운영 세션
+    session_mode: str = "normal_paper"
+    pilot_authorized: bool = False
+    pilot_caps_snapshot: dict = field(default_factory=dict)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -198,32 +238,85 @@ def get_canonical_records(strategy: str) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════
 
 def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
-    from database.models import PortfolioSnapshot, get_session
+    """포트폴리오 메트릭 수집.
+
+    당일 PortfolioSnapshot이 없으면 직전 snapshot을 조회하여
+    cash-only / no-trade day를 추론한다:
+      - 직전 snapshot이 존재하고
+      - 그 이후 거래가 없으면 (TradeHistory 0건)
+      → 포트폴리오 가치 불변, daily_return=0.0 으로 처리
+    이를 통해 blocked 상태에서도 valid evidence를 생성할 수 있다.
+
+    진짜 데이터 부재(snapshot 자체가 한 번도 없음)면 {} 반환.
+    """
+    from database.models import PortfolioSnapshot, TradeHistory, get_session
 
     session = get_session()
     try:
+        ak = account_key or ""
         day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + timedelta(days=1)
+
+        # 1) 당일 snapshot 조회
         snap = (
             session.query(PortfolioSnapshot)
             .filter(
-                PortfolioSnapshot.account_key == (account_key or ""),
+                PortfolioSnapshot.account_key == ak,
                 PortfolioSnapshot.date >= day_start,
                 PortfolioSnapshot.date < day_end,
             )
             .order_by(PortfolioSnapshot.date.desc())
             .first()
         )
-        if not snap:
+        if snap:
+            return {
+                "total_value": snap.total_value or 0,
+                "cash": snap.cash or 0,
+                "invested": snap.invested or 0,
+                "daily_return": snap.daily_return,
+                "cumulative_return": snap.cumulative_return,
+                "mdd": snap.mdd,
+                "position_count": snap.position_count or 0,
+            }
+
+        # 2) 당일 snapshot 없음 → 직전 snapshot fallback
+        prev_snap = (
+            session.query(PortfolioSnapshot)
+            .filter(
+                PortfolioSnapshot.account_key == ak,
+                PortfolioSnapshot.date < day_start,
+            )
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        if not prev_snap:
+            return {}  # 진짜 데이터 부재
+
+        # 3) 직전 snapshot 이후 ~ 당일까지 거래 유무 확인
+        trades_since = (
+            session.query(TradeHistory)
+            .filter(
+                TradeHistory.account_key == ak,
+                TradeHistory.executed_at >= prev_snap.date,
+                TradeHistory.executed_at < day_end,
+            )
+            .count()
+        )
+        if trades_since > 0:
+            # 거래가 있었는데 snapshot이 없음 → 진짜 missing data
             return {}
+
+        # 4) 거래 없음 + 직전 snapshot 존재 → cash-only carry-forward
+        #    포트폴리오 가치 불변이므로 daily_return=0.0
         return {
-            "total_value": snap.total_value or 0,
-            "cash": snap.cash or 0,
-            "invested": snap.invested or 0,
-            "daily_return": snap.daily_return,
-            "cumulative_return": snap.cumulative_return,
-            "mdd": snap.mdd,
-            "position_count": snap.position_count or 0,
+            "total_value": prev_snap.total_value or 0,
+            "cash": prev_snap.cash or 0,
+            "invested": prev_snap.invested or 0,
+            "daily_return": 0.0,  # 가치 불변 = 수익률 0%
+            "cumulative_return": prev_snap.cumulative_return,
+            "mdd": prev_snap.mdd,
+            "position_count": prev_snap.position_count or 0,
+            "_inferred_from_previous": True,  # 추론 출처 표시
         }
     finally:
         session.close()
@@ -495,8 +588,8 @@ def _compute_benchmark_excess(
             daily_return - (universe_return * invested_ratio + rf_daily * cash_ratio), 4
         )
 
-        # completeness >= 0.5 이면 final, 아니면 provisional
-        if completeness >= 0.5:
+        # completeness >= BENCHMARK_COMPLETENESS_FINAL 이면 final, 아니면 provisional
+        if completeness >= BENCHMARK_COMPLETENESS_FINAL:
             result["benchmark_status"] = "final"
         else:
             result["benchmark_status"] = "provisional"
@@ -635,6 +728,20 @@ def _cross_validate(portfolio: dict, trades: dict, account_key: str, date: datet
     return warnings
 
 
+def _derive_session_mode(evidence_mode: str, pilot_authorized: bool) -> str:
+    """evidence_mode + pilot flag에서 session_mode를 결정."""
+    if evidence_mode == "pilot_paper":
+        return "pilot_paper"
+    if evidence_mode == "shadow_bootstrap":
+        return "shadow_bootstrap"
+    if evidence_mode in ("replay", "test", "backfill"):
+        return evidence_mode
+    # real_paper: pilot auth 여부로 분기
+    if pilot_authorized:
+        return "pilot_paper"
+    return "normal_paper"
+
+
 # ═══════════════════════════════════════════════════════════════
 # 메인 진입점
 # ═══════════════════════════════════════════════════════════════
@@ -645,6 +752,9 @@ def collect_daily_evidence(
     account_key: str = "",
     date: datetime | None = None,
     watchlist_symbols: list[str] | None = None,
+    evidence_mode: str = "real_paper",
+    pilot_authorized: bool = False,
+    pilot_caps_snapshot: dict | None = None,
 ) -> DailyEvidence | None:
     """
     장마감 후 호출. DailyEvidence를 수집하여 JSONL에 append한다.
@@ -680,6 +790,10 @@ def collect_daily_evidence(
         cash_ratio=cash_ratio,
         watchlist_symbols=watchlist_symbols or [],
     )
+
+    # portfolio fallback 출처를 benchmark_meta에 기록
+    if portfolio.get("_inferred_from_previous"):
+        benchmark.setdefault("benchmark_meta", {})["portfolio_source"] = "inferred_carry_forward"
 
     # diagnostics
     diag_list = []
@@ -741,6 +855,15 @@ def collect_daily_evidence(
         anomalies=anomalies,
         status=status,
         record_version=1,
+        # provenance
+        evidence_mode=evidence_mode,
+        execution_backed=evidence_mode in ("real_paper", "pilot_paper"),
+        order_submit_count=trades.get("buy_count", 0) + trades.get("sell_count", 0),
+        fill_count=trades.get("total_trades", 0),
+        # pilot provenance
+        session_mode=_derive_session_mode(evidence_mode, pilot_authorized),
+        pilot_authorized=pilot_authorized,
+        pilot_caps_snapshot=pilot_caps_snapshot or {},
     )
 
     _append_jsonl(jsonl_path, asdict(ev))
@@ -815,7 +938,7 @@ def finalize_daily_evidence(
     new_bench_status = benchmark.get("benchmark_status", "failed")
     old_version = existing.get("record_version", 1)
 
-    # 기존 record 복사 후 benchmark 필드만 업데이트
+    # 기존 record 복사 후 benchmark 필드 업데이트
     updated = dict(existing)
     updated["same_universe_excess"] = benchmark["same_universe_excess"]
     updated["exposure_matched_excess"] = benchmark["exposure_matched_excess"]
@@ -823,6 +946,17 @@ def finalize_daily_evidence(
     updated["benchmark_meta"] = benchmark["benchmark_meta"]
     updated["benchmark_status"] = new_bench_status
     updated["record_version"] = old_version + 1
+
+    # portfolio fallback: 기존 record에서 daily_return/portfolio가 null이었는데
+    # 이제 추론할 수 있으면 portfolio 필드도 갱신 (zero-return semantics 수정)
+    if existing.get("daily_return") is None and portfolio.get("daily_return") is not None:
+        updated["daily_return"] = portfolio["daily_return"]
+        updated["total_value"] = portfolio.get("total_value", 0)
+        updated["cash"] = portfolio.get("cash", 0)
+        updated["invested"] = portfolio.get("invested", 0)
+        updated["cumulative_return"] = portfolio.get("cumulative_return")
+        updated["mdd"] = portfolio.get("mdd")
+        updated["position_count"] = portfolio.get("position_count", 0)
 
     _append_jsonl(jsonl_path, updated)
     logger.info(
@@ -933,14 +1067,24 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     Returns (package_path, checklist_path) or (None, None).
     approved_strategies.json은 절대 수정하지 않는다.
     """
-    records = get_canonical_records(strategy)
-    if not records:
+    all_records = get_canonical_records(strategy)
+    if not all_records:
         logger.warning("Promotion package: no evidence for {}", strategy)
         return None, None
 
+    # provenance 분리: execution_backed=True만 승격 카운트
+    records = [r for r in all_records if r.get("execution_backed", True)]
+    shadow_records = [r for r in all_records if not r.get("execution_backed", True)]
     total_days = len(records)
+    shadow_days = len(shadow_records)
 
-    # aggregate metrics
+    if total_days == 0:
+        logger.warning("Promotion package: no execution-backed evidence for {}", strategy)
+        # shadow만 있는 경우: blocked package 생성
+        records = all_records  # fallback for package generation
+        total_days = len(records)
+
+    # aggregate metrics (execution-backed records 기준)
     daily_returns = [r.get("daily_return") for r in records if r.get("daily_return") is not None]
     avg_daily_return = sum(daily_returns) / len(daily_returns) if daily_returns else 0
     cumulative = records[-1].get("cumulative_return", 0)
@@ -980,6 +1124,12 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     benchmark_failed_days = sum(1 for r in records if r.get("benchmark_status") == "failed")
     benchmark_final_ratio = benchmark_final_days / total_days if total_days > 0 else 0
 
+    # positive evidence 지표
+    excess_non_null_days = sum(
+        1 for r in records if r.get("same_universe_excess") is not None
+    )
+    excess_non_null_ratio = excess_non_null_days / total_days if total_days > 0 else 0
+
     # recommendation
     blocked = False
     block_reasons = []
@@ -992,12 +1142,44 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     if max_mdd < -20:
         blocked = True
         block_reasons.append("max_mdd=%.1f%%" % max_mdd)
-    if benchmark_final_ratio < 0.8:
+    if benchmark_final_ratio < PROMOTION_FINAL_RATIO_MIN:
         blocked = True
         block_reasons.append(
             "benchmark_incomplete: final=%d/provisional=%d/failed=%d (%.0f%% < 80%%)" %
             (benchmark_final_days, benchmark_provisional_days, benchmark_failed_days,
              benchmark_final_ratio * 100)
+        )
+    # insufficient positive evidence: 데이터 없음 vs 성과 부진 구분
+    if excess_non_null_ratio < PROMOTION_MIN_EXCESS_DAYS:
+        blocked = True
+        block_reasons.append(
+            "insufficient_evidence: excess_non_null=%d/%d (%.0f%% < %.0f%%)" %
+            (excess_non_null_days, total_days,
+             excess_non_null_ratio * 100, PROMOTION_MIN_EXCESS_DAYS * 100)
+        )
+    if avg_same_excess is not None and avg_same_excess <= PROMOTION_MIN_AVG_EXCESS:
+        blocked = True
+        block_reasons.append("non_positive_same_universe_excess=%.4f" % avg_same_excess)
+    if avg_exp_excess is not None and avg_exp_excess <= PROMOTION_MIN_AVG_EXCESS:
+        blocked = True
+        block_reasons.append("non_positive_exposure_matched_excess=%.4f" % avg_exp_excess)
+    if avg_cash_excess is not None and avg_cash_excess <= PROMOTION_MIN_AVG_EXCESS:
+        blocked = True
+        block_reasons.append("non_positive_cash_adjusted_excess=%.4f" % avg_cash_excess)
+    if (cumulative or 0) <= PROMOTION_MIN_CUMULATIVE_RETURN:
+        blocked = True
+        block_reasons.append("non_positive_cumulative_return=%.2f%%" % (cumulative or 0))
+
+    sell_count = sum(r.get("sell_count", 0) for r in records)
+    if sell_count < PROMOTION_MIN_SELL_TRADES:
+        blocked = True
+        block_reasons.append(
+            "insufficient_sell_trades=%d/%d" % (sell_count, PROMOTION_MIN_SELL_TRADES)
+        )
+    if total_sells > 0 and win_rate < PROMOTION_MIN_WIN_RATE:
+        blocked = True
+        block_reasons.append(
+            "low_win_rate=%.1f%% < %.1f%%" % (win_rate, PROMOTION_MIN_WIN_RATE)
         )
 
     package = {
@@ -1010,6 +1192,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "max_mdd": round(max_mdd, 2),
         "win_rate": round(win_rate, 1),
         "total_trades": sum(r.get("total_trades", 0) for r in records),
+        "sell_count": sell_count,
         "avg_same_universe_excess": round(avg_same_excess, 4) if avg_same_excess is not None else None,
         "avg_exposure_matched_excess": round(avg_exp_excess, 4) if avg_exp_excess is not None else None,
         "avg_cash_adjusted_excess": round(avg_cash_excess, 4) if avg_cash_excess is not None else None,
@@ -1023,6 +1206,27 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "benchmark_provisional_days": benchmark_provisional_days,
         "benchmark_failed_days": benchmark_failed_days,
         "benchmark_final_ratio": round(benchmark_final_ratio, 4),
+        "excess_non_null_days": excess_non_null_days,
+        "excess_non_null_ratio": round(excess_non_null_ratio, 4),
+        # provenance 분리 (pilot / non-pilot / shadow)
+        "real_paper_days_total": sum(1 for r in all_records if r.get("execution_backed", True)),
+        "pilot_real_paper_days": sum(
+            1 for r in all_records
+            if r.get("execution_backed", True)
+            and (r.get("evidence_mode") == "pilot_paper"
+                 or r.get("session_mode") == "pilot_paper")
+        ),
+        "non_pilot_real_paper_days": sum(
+            1 for r in all_records
+            if r.get("execution_backed", True)
+            and r.get("evidence_mode") != "pilot_paper"
+            and r.get("session_mode", "normal_paper") != "pilot_paper"
+        ),
+        "shadow_days": shadow_days,
+        # backward compat aliases
+        "real_paper_days": sum(1 for r in all_records if r.get("execution_backed", True)),
+        "promotable_evidence_days": sum(1 for r in all_records if r.get("execution_backed", True)),
+        "non_promotable_shadow_days": shadow_days,
         "recommendation": "BLOCKED" if blocked else "ELIGIBLE",
         "block_reasons": block_reasons if blocked else [],
     }
@@ -1069,6 +1273,10 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("## Performance Summary")
     lines.append("- Period: " + package["period"])
     lines.append("- Total Days: " + str(package["total_days"]))
+    lines.append("- Real Paper Days (total): " + str(package.get("real_paper_days_total", "N/A")))
+    lines.append("  - Pilot Real Paper Days: " + str(package.get("pilot_real_paper_days", 0)))
+    lines.append("  - Non-Pilot Real Paper Days: " + str(package.get("non_pilot_real_paper_days", 0)))
+    lines.append("- Shadow Days: " + str(package.get("shadow_days", 0)))
     lines.append("- Cumulative Return: %+.2f%%" % cum_ret)
     lines.append("- Max MDD: %.2f%%" % max_mdd_val)
     lines.append("- Win Rate: %.1f%%" % win_rate_val)
@@ -1103,3 +1311,98 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     cl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     logger.info("Approval checklist 생성: {}", cl_path)
     return cl_path
+
+
+# ═══════════════════════════════════════════════════════════════
+# Evidence Quality Report
+# ═══════════════════════════════════════════════════════════════
+
+def generate_evidence_quality_report(strategy: str) -> tuple[dict, Path | None]:
+    """
+    전략별 evidence 품질 요약 report 생성.
+    60일 promotion package의 입력으로 재사용 가능.
+
+    Returns: (report_dict, report_path) or ({}, None)
+    """
+    records = get_canonical_records(strategy)
+    if not records:
+        logger.warning("Evidence quality report: no data for {}", strategy)
+        return {}, None
+
+    total = len(records)
+
+    # benchmark non-null ratio
+    bench_non_null = sum(
+        1 for r in records if r.get("same_universe_excess") is not None
+    )
+    bench_non_null_ratio = bench_non_null / total if total > 0 else 0
+
+    # provisional → final conversion ratio
+    final_days = sum(1 for r in records if r.get("benchmark_status") == "final")
+    provisional_days = sum(1 for r in records if r.get("benchmark_status") == "provisional")
+    failed_days = sum(1 for r in records if r.get("benchmark_status") == "failed")
+    final_conversion_ratio = final_days / total if total > 0 else 0
+
+    # final benchmark completeness 분포
+    completeness_values = []
+    for r in records:
+        meta = r.get("benchmark_meta", {})
+        c = meta.get("completeness")
+        if c is not None and r.get("benchmark_status") == "final":
+            completeness_values.append(c)
+    completeness_min = min(completeness_values) if completeness_values else None
+    completeness_max = max(completeness_values) if completeness_values else None
+    completeness_avg = (
+        sum(completeness_values) / len(completeness_values) if completeness_values else None
+    )
+
+    # cross-validation mismatch count
+    xv_mismatch = sum(
+        1 for r in records
+        if any(a.get("type") == "cross_validation_mismatch" for a in r.get("anomalies", []))
+    )
+
+    # restart_recovery_count
+    total_recovery = sum(r.get("restart_recovery_count", 0) for r in records)
+
+    # anomaly rate
+    days_with_anomaly = sum(1 for r in records if r.get("anomalies"))
+    anomaly_rate = days_with_anomaly / total if total > 0 else 0
+
+    # anomaly type breakdown
+    anomaly_types: dict[str, int] = {}
+    for r in records:
+        for a in r.get("anomalies", []):
+            t = a.get("type", "unknown")
+            anomaly_types[t] = anomaly_types.get(t, 0) + 1
+
+    report = {
+        "strategy": strategy,
+        "generated_at": datetime.now().isoformat(),
+        "total_days": total,
+        "period": f"{records[0]['date']} ~ {records[-1]['date']}",
+        "benchmark_non_null_days": bench_non_null,
+        "benchmark_non_null_ratio": round(bench_non_null_ratio, 4),
+        "provisional_to_final_conversion": {
+            "final_days": final_days,
+            "provisional_days": provisional_days,
+            "failed_days": failed_days,
+            "conversion_ratio": round(final_conversion_ratio, 4),
+        },
+        "final_completeness_distribution": {
+            "min": round(completeness_min, 4) if completeness_min is not None else None,
+            "max": round(completeness_max, 4) if completeness_max is not None else None,
+            "avg": round(completeness_avg, 4) if completeness_avg is not None else None,
+            "count": len(completeness_values),
+        },
+        "cross_validation_mismatch_count": xv_mismatch,
+        "restart_recovery_count": total_recovery,
+        "anomaly_rate": round(anomaly_rate, 4),
+        "anomaly_type_breakdown": anomaly_types,
+    }
+
+    out_path = EVIDENCE_DIR / f"evidence_quality_{strategy}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Evidence quality report 생성: {}", out_path)
+    return report, out_path

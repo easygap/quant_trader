@@ -230,6 +230,37 @@ class OrderBook:
                         oid for oid in self._by_symbol[o.symbol] if oid != o.order_id
                     ]
 
+    def get_stats(self) -> dict:
+        """당일 주문 통계 집계 — evidence_collector에 전달."""
+        stats = {
+            "total": 0, "filled": 0, "rejected": 0,
+            "cancelled": 0, "expired": 0, "partial": 0,
+        }
+        for o in self._orders.values():
+            stats["total"] += 1
+            if o.status == OrderStatus.FILLED:
+                stats["filled"] += 1
+            elif o.status == OrderStatus.REJECTED:
+                stats["rejected"] += 1
+            elif o.status == OrderStatus.CANCELLED:
+                stats["cancelled"] += 1
+            elif o.status == OrderStatus.EXPIRED:
+                stats["expired"] += 1
+            elif o.status == OrderStatus.PARTIAL_FILLED:
+                stats["partial"] += 1
+
+        dup = sum(
+            1 for o in self._orders.values()
+            if o.status == OrderStatus.REJECTED and "중복" in (o.reject_reason or "")
+        )
+        stats["duplicate_rejected"] = dup
+        submitted = stats["total"]
+        stats["raw_fill_rate"] = (stats["filled"] / max(submitted, 1)) * 100
+        stats["effective_fill_rate"] = (
+            stats["filled"] / max(submitted - dup, 1) * 100
+        )
+        return stats
+
     def restore_from_records(self, records: list[dict]):
         """프로세스 재시작 시 DB에서 open orders 복구."""
         for rec in records:
