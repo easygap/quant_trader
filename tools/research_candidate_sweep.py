@@ -32,6 +32,7 @@ DEFAULT_START = "2023-01-01"
 DEFAULT_END = "2025-12-31"
 DEFAULT_INITIAL_CAPITAL = 10_000_000
 DEFAULT_TOP_N = 20
+DEFAULT_CANDIDATE_FAMILY = "rotation"
 DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
 ROTATION_DIVERSIFICATION = {
     "max_positions": 2,
@@ -132,6 +133,109 @@ def build_rotation_candidate_specs() -> list[CandidateSpec]:
             description="allows new entries only when KS11 is above SMA200",
         ),
     ]
+
+
+def build_momentum_candidate_specs() -> list[CandidateSpec]:
+    """Simple momentum-factor variants for research-only discovery."""
+    return [
+        CandidateSpec(
+            candidate_id="momentum_factor_base",
+            strategy="momentum_factor",
+            params={},
+            description="current config baseline",
+        ),
+        CandidateSpec(
+            candidate_id="momentum_factor_40d",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 40,
+                "buy_threshold_pct": 4.0,
+                "sell_threshold_pct": -3.0,
+            },
+            description="medium-term price momentum",
+        ),
+        CandidateSpec(
+            candidate_id="momentum_factor_60d",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 60,
+                "buy_threshold_pct": 6.0,
+                "sell_threshold_pct": -4.0,
+            },
+            description="slower, stronger price momentum",
+        ),
+        CandidateSpec(
+            candidate_id="momentum_factor_120d",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 120,
+                "buy_threshold_pct": 10.0,
+                "sell_threshold_pct": -6.0,
+            },
+            description="longer horizon trend persistence",
+        ),
+    ]
+
+
+def build_breakout_candidate_specs() -> list[CandidateSpec]:
+    """Breakout-volume variants kept separate from promotion artifacts."""
+    return [
+        CandidateSpec(
+            candidate_id="breakout_volume_base",
+            strategy="breakout_volume",
+            params={},
+            description="current config baseline",
+        ),
+        CandidateSpec(
+            candidate_id="breakout_volume_fast",
+            strategy="breakout_volume",
+            params={
+                "breakout_period": 10,
+                "surge_ratio": 1.3,
+                "adx_min": 18,
+            },
+            description="faster breakout with looser volume/trend filters",
+        ),
+        CandidateSpec(
+            candidate_id="breakout_volume_balanced",
+            strategy="breakout_volume",
+            params={
+                "breakout_period": 20,
+                "surge_ratio": 1.6,
+                "adx_min": 20,
+            },
+            description="balanced breakout and volume confirmation",
+        ),
+        CandidateSpec(
+            candidate_id="breakout_volume_strict",
+            strategy="breakout_volume",
+            params={
+                "breakout_period": 40,
+                "surge_ratio": 2.0,
+                "adx_min": 22,
+            },
+            description="slower breakout with stricter confirmation",
+        ),
+    ]
+
+
+def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
+    family = candidate_family.lower().strip()
+    if family in ("rotation", "relative_strength_rotation"):
+        return build_rotation_candidate_specs()
+    if family in ("momentum", "momentum_factor"):
+        return build_momentum_candidate_specs()
+    if family in ("breakout", "breakout_volume"):
+        return build_breakout_candidate_specs()
+    if family == "all":
+        return [
+            *build_rotation_candidate_specs(),
+            *build_momentum_candidate_specs(),
+            *build_breakout_candidate_specs(),
+        ]
+    raise ValueError(
+        "candidate_family must be one of: rotation, momentum, breakout, all"
+    )
 
 
 def make_windows(start: str, end: str, window_months: int = 12, step_months: int = 6) -> list[tuple[str, str]]:
@@ -566,6 +670,7 @@ def run_candidate_sweep(
     end: str = DEFAULT_END,
     capital: float = DEFAULT_INITIAL_CAPITAL,
     include_walk_forward: bool = True,
+    candidate_family: str = DEFAULT_CANDIDATE_FAMILY,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -575,7 +680,8 @@ def run_candidate_sweep(
     windows = make_windows(start, end) if include_walk_forward else []
     records = []
 
-    for spec in build_rotation_candidate_specs():
+    specs = build_candidate_specs(candidate_family)
+    for spec in specs:
         logger.info("Evaluating {}", spec.candidate_id)
         metrics = evaluate_candidate(spec, symbols, start, end, capital)
         if include_walk_forward:
@@ -593,7 +699,8 @@ def run_candidate_sweep(
         records.append(build_candidate_record(spec, metrics, benchmark))
 
     ranked = sort_candidate_records(records)
-    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_relative_strength_rotation"
+    family_slug = candidate_family.lower().strip()
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{family_slug}"
     eligible = [
         r for r in ranked
         if r.get("alpha_pass") and r.get("promotion", {}).get("status") == "provisional_paper_candidate"
@@ -614,6 +721,7 @@ def run_candidate_sweep(
         "eval_start": start,
         "eval_end": end,
         "initial_capital": capital,
+        "candidate_family": candidate_family,
         "universe": symbols,
         "benchmark": benchmark,
         "walk_forward": {
@@ -679,6 +787,7 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         "# Research Candidate Sweep",
         f"Generated: {bundle.get('generated_at', '')[:19]}",
         f"Period: {bundle.get('eval_start')} ~ {bundle.get('eval_end')}",
+        f"Candidate family: {bundle.get('candidate_family', 'rotation')}",
         f"Universe size: {len(bundle.get('universe', []))}",
         "",
         "## Benchmark",
@@ -732,6 +841,12 @@ def main() -> None:
     parser.add_argument("--start", default=DEFAULT_START)
     parser.add_argument("--end", default=DEFAULT_END)
     parser.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
+    parser.add_argument(
+        "--candidate-family",
+        default=DEFAULT_CANDIDATE_FAMILY,
+        choices=["rotation", "momentum", "breakout", "all"],
+        help="Research candidate family to evaluate.",
+    )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
@@ -743,6 +858,7 @@ def main() -> None:
         end=args.end,
         capital=args.capital,
         include_walk_forward=not args.quick,
+        candidate_family=args.candidate_family,
     )
     json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
     print(f"Wrote {json_path}")
