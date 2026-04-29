@@ -6,13 +6,14 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-04-29)**:
-> - GitHub 원격 브랜치 정리 완료: `main` 단일 브랜치 운영
+> **현재 상태 (2026-04-30)**:
+> - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
 > - Paper Evidence 런타임: 일별 자동 수집 → benchmark finalization → promotion package → launch readiness
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡)
 > - `QUANT_AUTO_ENTRY` 해석 단일화: YAML hash와 resolved hash를 분리해 실험 설정 drift 감지
+> - Research sweep: top-20 all-family 후보 14개 재검증도 `NO_ALPHA_CANDIDATE`; 다음 연구는 새 alpha 후보군 설계 우선
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
@@ -177,6 +178,8 @@ Research candidate sweep — `tools/research_candidate_sweep.py --quick --candid
 Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정.
 
 2026-04-29 all-family quick sweep: 5종목(`005930,000660,035720,051910,068270`)에서 rotation/momentum/breakout 후보 14개를 비교했지만 모두 benchmark excess return/Sharpe를 통과하지 못해 `NO_ALPHA_CANDIDATE`로 판정. 이 결과만으로 canonical promotion이나 paper/live 승격은 진행하지 않습니다.
+
+2026-04-30 top-20 all-family quick sweep: canonical liquidity universe 20종목에서 동일 후보 14개를 재검증했지만 `NO_ALPHA_CANDIDATE` 유지. best=`momentum_factor_120d`는 return +118.56%, Sharpe 0.79였으나 benchmark excess=-30.83%p, MDD=-40.08%로 승격 불가. 다음 연구는 단순 후보 확장이 아니라 benchmark를 이기는 새로운 alpha 후보군 설계로 전환합니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|

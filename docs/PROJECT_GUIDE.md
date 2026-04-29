@@ -2,7 +2,7 @@
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-29
+> **최종 수정**: 2026-04-30
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -686,16 +686,17 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
 | ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
 | ✅ **2026-04-29 all-family quick sweep** | 5종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`rotation_slow_momentum`이나 excess=-165.22%p / excess Sharpe=-1.07 |
+| ✅ **2026-04-30 top-20 all-family quick sweep** | canonical liquidity universe 20종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`, return=+118.56%, excess=-30.83%p, MDD=-40.08% |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
-### 다음 연구 방향 — 2026-04-29 기준
+### 다음 연구 방향 — 2026-04-30 기준
 
 | 항목 | 결정 |
 |------|------|
-| 즉시 canonical promotion | 진행하지 않음. all-family quick sweep에서 benchmark excess gate 미달 |
+| 즉시 canonical promotion | 진행하지 않음. 2026-04-29/30 all-family quick sweep 모두 benchmark excess gate 미달 |
 | 현재 후보군 | rotation/momentum/breakout 14개 모두 research_only 유지 |
-| 다음 후보 탐색 | 유니버스 확장 또는 새 후보군 설계. benchmark 대비 초과수익/초과 Sharpe를 1차 통과 조건으로 유지 |
+| 다음 후보 탐색 | 단순 유니버스 확장보다 benchmark를 이기는 새 alpha 후보군 설계 우선. benchmark 대비 초과수익/초과 Sharpe를 1차 통과 조건으로 유지 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
@@ -805,4 +806,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-29 (60영업일 freeze pack, QUANT_AUTO_ENTRY 해석 단일화, YAML/resolved hash, Paper 운영 checklist 반영)
+> **최종 수정**: 2026-04-30 (top-20 all-family quick sweep 결과와 다음 연구 방향 반영)
