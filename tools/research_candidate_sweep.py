@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""
+Research candidate sweep for portfolio-level strategy variants.
+
+This is intentionally a research artifact, not a live/paper promotion path.
+It ranks candidate variants, records benchmark excess metrics, and lets the
+existing promotion engine label whether a candidate is even worth capped paper
+study.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+DEFAULT_START = "2023-01-01"
+DEFAULT_END = "2025-12-31"
+DEFAULT_INITIAL_CAPITAL = 10_000_000
+DEFAULT_TOP_N = 20
+DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
+ROTATION_DIVERSIFICATION = {
+    "max_positions": 2,
+    "max_position_ratio": 0.45,
+    "max_investment_ratio": 0.85,
+    "min_cash_ratio": 0.10,
+}
+
+
+@dataclass(frozen=True)
+class CandidateSpec:
+    candidate_id: str
+    strategy: str
+    params: dict[str, Any]
+    description: str
+
+
+def get_git_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def build_rotation_candidate_specs() -> list[CandidateSpec]:
+    """Small, interpretable rotation variants for the first candidate factory."""
+    return [
+        CandidateSpec(
+            candidate_id="rotation_base",
+            strategy="relative_strength_rotation",
+            params={},
+            description="current config baseline",
+        ),
+        CandidateSpec(
+            candidate_id="rotation_fast_momentum",
+            strategy="relative_strength_rotation",
+            params={
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "sma_period": 50,
+                "short_weight": 0.7,
+            },
+            description="faster momentum and trend response",
+        ),
+        CandidateSpec(
+            candidate_id="rotation_slow_momentum",
+            strategy="relative_strength_rotation",
+            params={
+                "short_lookback": 80,
+                "long_lookback": 160,
+                "sma_period": 80,
+                "short_weight": 0.5,
+            },
+            description="slower, lower-turnover momentum response",
+        ),
+        CandidateSpec(
+            candidate_id="rotation_abs_momentum_a",
+            strategy="relative_strength_rotation",
+            params={"abs_momentum_filter": "A"},
+            description="requires previous 120d absolute momentum > 0",
+        ),
+        CandidateSpec(
+            candidate_id="rotation_abs_momentum_b",
+            strategy="relative_strength_rotation",
+            params={"abs_momentum_filter": "B"},
+            description="requires previous 60d and 120d absolute momentum > 0",
+        ),
+        CandidateSpec(
+            candidate_id="rotation_market_filter",
+            strategy="relative_strength_rotation",
+            params={"market_filter_sma200": True},
+            description="allows new entries only when KS11 is above SMA200",
+        ),
+    ]
+
+
+def make_windows(start: str, end: str, window_months: int = 12, step_months: int = 6) -> list[tuple[str, str]]:
+    windows: list[tuple[str, str]] = []
+    cursor = pd.Timestamp(start)
+    max_end = pd.Timestamp(end)
+    while True:
+        window_end = cursor + pd.DateOffset(months=window_months) - pd.Timedelta(days=1)
+        if window_end > max_end:
+            window_end = max_end
+        if cursor >= max_end or (window_end - cursor).days < 60:
+            break
+        windows.append((cursor.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")))
+        cursor += pd.DateOffset(months=step_months)
+    return windows
+
+
+@contextmanager
+def temporary_diversification(config, overrides: dict[str, Any] | None):
+    if not overrides:
+        yield
+        return
+
+    div = config.risk_params.setdefault("diversification", {})
+    saved = {key: div.get(key) for key in overrides}
+    div.update(overrides)
+    try:
+        yield
+    finally:
+        for key in overrides:
+            if saved[key] is None:
+                div.pop(key, None)
+            else:
+                div[key] = saved[key]
+
+
+def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
+    """Use the same liquidity proxy as canonical promotion evaluation."""
+    from core.data_collector import DataCollector
+    import FinanceDataReader as fdr
+
+    dc = DataCollector()
+    dc.quiet_ohlcv_log = True
+    stocks = fdr.StockListing("KOSPI")
+    common = stocks[~stocks["Code"].str.match(r"^\d{5}[5-9KL]$")]
+    if "Marcap" in common.columns:
+        common = common[common["Marcap"] > 1e11]
+
+    amounts: dict[str, float] = {}
+    for sym in common["Code"].tolist()[:100]:
+        try:
+            df = dc.fetch_korean_stock(sym, "2022-10-01", "2022-12-31")
+            if df is not None and not df.empty:
+                if "date" in df.columns:
+                    df = df.set_index("date")
+                amounts[sym] = float((df["close"].astype(float) * df["volume"].astype(float)).mean())
+        except Exception:
+            continue
+
+    return sorted(amounts, key=amounts.get, reverse=True)[:top_n]
+
+
+def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: float) -> dict[str, Any]:
+    from core.data_collector import DataCollector
+
+    if not symbols:
+        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0}
+
+    dc = DataCollector()
+    dc.quiet_ohlcv_log = True
+    per_symbol_capital = capital / len(symbols)
+    parts = []
+    for sym in symbols:
+        df = dc.fetch_korean_stock(sym, start, end)
+        if df is None or df.empty:
+            continue
+        if "date" in df.columns:
+            df = df.set_index("date")
+        df = df[df.index >= pd.Timestamp(start)]
+        if len(df) < 2:
+            continue
+        parts.append(per_symbol_capital / float(df["close"].iloc[0]) * df["close"].astype(float))
+
+    combined = pd.concat(parts, axis=1).sum(axis=1).dropna() if parts else pd.Series(dtype=float)
+    if len(combined) <= 1:
+        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": len(symbols)}
+
+    total_return = (float(combined.iloc[-1]) / capital - 1) * 100
+    daily_returns = combined.pct_change().dropna()
+    std = float(daily_returns.std()) if len(daily_returns) > 1 else 0
+    sharpe = (float(daily_returns.mean()) * 252 - 0.03) / (std * np.sqrt(252)) if std > 0 else 0
+    return {
+        "ew_bh_return": round(total_return, 2),
+        "ew_bh_sharpe": round(sharpe, 2),
+        "universe_size": len(symbols),
+    }
+
+
+def calculate_research_metrics(result: dict, capital: float) -> dict[str, Any]:
+    eq = result.get("equity_curve")
+    trades = result.get("trades", [])
+    if eq is None or eq.empty:
+        return {
+            "total_return": 0,
+            "sharpe": 0,
+            "profit_factor": 0,
+            "mdd": 0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "signal_density": 0,
+            "ev_per_trade": 0,
+            "cost_adjusted_cagr": -100,
+            "turnover_per_year": 0,
+        }
+
+    eq = eq.copy()
+    if "date" in eq.columns:
+        eq = eq.set_index("date")
+
+    final = float(eq["value"].iloc[-1])
+    total_return = (final / capital - 1) * 100
+    years = max(len(eq) / 252, 1 / 252)
+    daily_returns = eq["value"].pct_change().dropna()
+    std = float(daily_returns.std()) if len(daily_returns) > 1 else 0
+    sharpe = (float(daily_returns.mean()) * 252 - 0.03) / (std * np.sqrt(252)) if std > 0 else 0
+    peak = eq["value"].cummax()
+    mdd = float(((eq["value"] - peak) / peak).min() * 100)
+
+    sells = [t for t in trades if t.get("action") != "BUY"]
+    wins = sum(1 for t in sells if t.get("pnl", 0) > 0)
+    gross_profit = sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) > 0)
+    gross_loss = abs(sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (99 if gross_profit > 0 else 0)
+    n_positions = eq.get("n_positions", pd.Series(0, index=eq.index))
+    realized_pnl = sum(t.get("pnl", 0) for t in sells)
+    notional = sum(
+        abs(float(t.get("price", 0) or 0) * float(t.get("quantity", 0) or 0))
+        for t in trades
+    )
+
+    return {
+        "total_return": round(total_return, 2),
+        "sharpe": round(sharpe, 2),
+        "profit_factor": round(profit_factor, 2),
+        "mdd": round(mdd, 2),
+        "win_rate": round(wins / len(sells) * 100, 1) if sells else 0,
+        "total_trades": len(sells),
+        "signal_density": round(float((n_positions > 0).sum()) / max(len(eq), 1) * 100, 1),
+        "ev_per_trade": round(realized_pnl / len(sells), 0) if sells else 0,
+        "cost_adjusted_cagr": round(((final / capital) ** (1 / years) - 1) * 100, 2)
+        if final > 0 and capital > 0
+        else -100,
+        "turnover_per_year": round(notional / capital / years * 100, 1) if capital > 0 else 0,
+    }
+
+
+def rank_score(metrics: dict[str, Any]) -> float:
+    """Research ranking score. Promotion status remains the hard gate."""
+    excess_return = float(metrics.get("benchmark_excess_return", 0) or 0)
+    excess_sharpe = float(metrics.get("benchmark_excess_sharpe", 0) or 0)
+    sharpe = float(metrics.get("sharpe", 0) or 0)
+    profit_factor = min(float(metrics.get("profit_factor", 0) or 0), 5.0)
+    mdd = float(metrics.get("mdd", 0) or 0)
+    trades = int(metrics.get("total_trades", 0) or 0)
+    turnover = float(metrics.get("turnover_per_year", 0) or 0)
+
+    score = excess_return + excess_sharpe * 10 + sharpe * 5 + profit_factor * 2 + mdd * 0.2
+    if trades < 30:
+        score -= 25
+    if turnover >= 1000:
+        score -= 20
+    return round(score, 2)
+
+
+def promotion_status(candidate_id: str, metrics: dict[str, Any]) -> dict[str, Any]:
+    from core.promotion_engine import promote
+
+    result = promote(candidate_to_strategy_metrics(candidate_id, metrics))
+    return {
+        "status": result.status,
+        "allowed_modes": result.allowed_modes,
+        "reason": result.reason,
+    }
+
+
+def candidate_to_strategy_metrics(candidate_id: str, metrics: dict[str, Any]):
+    """Map a research candidate metrics dict to the promotion engine input type."""
+    from core.promotion_engine import StrategyMetrics
+
+    return StrategyMetrics(
+        name=candidate_id,
+        total_return=metrics.get("total_return", 0),
+        profit_factor=metrics.get("profit_factor", 0),
+        mdd=metrics.get("mdd", 0),
+        wf_positive_rate=metrics.get("wf_positive_rate", 0),
+        wf_sharpe_positive_rate=metrics.get("wf_sharpe_positive_rate", 0),
+        wf_windows=metrics.get("wf_windows", 0),
+        wf_total_trades=metrics.get("wf_total_trades", 0),
+        sharpe=metrics.get("sharpe", 0),
+        benchmark_excess_return=metrics.get("benchmark_excess_return"),
+        benchmark_excess_sharpe=metrics.get("benchmark_excess_sharpe"),
+        ev_per_trade=metrics.get("ev_per_trade"),
+        cost_adjusted_cagr=metrics.get("cost_adjusted_cagr"),
+        turnover_per_year=metrics.get("turnover_per_year"),
+    )
+
+
+def build_candidate_record(
+    spec: CandidateSpec,
+    metrics: dict[str, Any],
+    benchmark: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = dict(metrics)
+    metrics["benchmark_excess_return"] = round(
+        float(metrics.get("total_return", 0)) - float(benchmark.get("ew_bh_return", 0)),
+        2,
+    )
+    metrics["benchmark_excess_sharpe"] = round(
+        float(metrics.get("sharpe", 0)) - float(benchmark.get("ew_bh_sharpe", 0)),
+        2,
+    )
+    promotion = promotion_status(spec.candidate_id, metrics)
+    return {
+        "candidate_id": spec.candidate_id,
+        "strategy": spec.strategy,
+        "params": spec.params,
+        "description": spec.description,
+        "alpha_pass": (
+            metrics.get("benchmark_excess_return", 0) > 0
+            and metrics.get("benchmark_excess_sharpe", 0) > 0
+        ),
+        "rank_score": rank_score(metrics),
+        "promotion": promotion,
+        "rejection_reasons": candidate_rejection_reasons(metrics, promotion),
+        "metrics": metrics,
+    }
+
+
+def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if metrics.get("benchmark_excess_return", 0) <= 0:
+        reasons.append("benchmark_excess_return <= 0")
+    if metrics.get("benchmark_excess_sharpe", 0) <= 0:
+        reasons.append("benchmark_excess_sharpe <= 0")
+    if promotion.get("status") != "provisional_paper_candidate":
+        reasons.append(f"promotion_status={promotion.get('status')}")
+    if metrics.get("total_trades", 0) < 30:
+        reasons.append("total_trades < 30")
+    if metrics.get("ev_per_trade") is not None and metrics.get("ev_per_trade", 0) <= 0:
+        reasons.append("ev_per_trade <= 0")
+    if metrics.get("turnover_per_year") is not None and metrics.get("turnover_per_year", 0) >= 1000:
+        reasons.append("turnover_per_year >= 1000")
+    return reasons
+
+
+def sort_candidate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda r: (
+            bool(r.get("alpha_pass", False)),
+            r.get("promotion", {}).get("status") == "live_candidate",
+            r.get("promotion", {}).get("status") == "provisional_paper_candidate",
+            r.get("rank_score", float("-inf")),
+            r.get("metrics", {}).get("benchmark_excess_return", float("-inf")),
+        ),
+        reverse=True,
+    )
+
+
+def evaluate_candidate(
+    spec: CandidateSpec,
+    symbols: list[str],
+    start: str,
+    end: str,
+    capital: float,
+) -> dict[str, Any]:
+    from backtest.portfolio_backtester import PortfolioBacktester
+    from config.config_loader import Config
+
+    config = Config.get()
+    fetch_start = (pd.Timestamp(start) - pd.DateOffset(months=14)).strftime("%Y-%m-%d")
+    with temporary_diversification(config, ROTATION_DIVERSIFICATION):
+        pbt = PortfolioBacktester(config)
+        result = pbt.run(
+            symbols=symbols,
+            strategy_name=spec.strategy,
+            initial_capital=capital,
+            start_date=fetch_start,
+            end_date=end,
+            trade_start_date=start,
+            param_overrides={spec.strategy: spec.params},
+        )
+
+    if result.get("equity_curve") is not None and not result["equity_curve"].empty:
+        eq = result["equity_curve"]
+        result["equity_curve"] = eq[pd.to_datetime(eq["date"]) >= pd.Timestamp(start)].copy()
+    result["trades"] = [
+        t
+        for t in result.get("trades", [])
+        if pd.Timestamp(t.get("date", t.get("entry_date", "2020-01-01"))) >= pd.Timestamp(start)
+    ]
+    return calculate_research_metrics(result, capital)
+
+
+def attach_walk_forward_metrics(
+    spec: CandidateSpec,
+    metrics: dict[str, Any],
+    symbols: list[str],
+    windows: list[tuple[str, str]],
+    capital: float,
+) -> dict[str, Any]:
+    wf_metrics = []
+    for start, end in windows:
+        try:
+            wf_metrics.append(evaluate_candidate(spec, symbols, start, end, capital))
+        except Exception as e:
+            logger.warning("{} WF {}~{} failed: {}", spec.candidate_id, start, end, e)
+            wf_metrics.append({"total_return": 0, "sharpe": 0, "total_trades": 0})
+
+    n_windows = len(wf_metrics)
+    metrics = dict(metrics)
+    metrics["wf_windows"] = n_windows
+    metrics["wf_positive_rate"] = round(
+        sum(1 for m in wf_metrics if m.get("total_return", 0) > 0) / max(n_windows, 1),
+        3,
+    )
+    metrics["wf_sharpe_positive_rate"] = round(
+        sum(1 for m in wf_metrics if m.get("sharpe", 0) > 0) / max(n_windows, 1),
+        3,
+    )
+    metrics["wf_total_trades"] = sum(int(m.get("total_trades", 0) or 0) for m in wf_metrics)
+    metrics["wf_details"] = [
+        {"return": m.get("total_return", 0), "sharpe": m.get("sharpe", 0)}
+        for m in wf_metrics
+    ]
+    return metrics
+
+
+def run_candidate_sweep(
+    *,
+    symbols: list[str] | None = None,
+    top_n: int = DEFAULT_TOP_N,
+    start: str = DEFAULT_START,
+    end: str = DEFAULT_END,
+    capital: float = DEFAULT_INITIAL_CAPITAL,
+    include_walk_forward: bool = True,
+) -> dict[str, Any]:
+    from config.config_loader import Config
+
+    config = Config.get()
+    symbols = symbols or select_canonical_universe(top_n)
+    benchmark = buy_and_hold_benchmark(symbols, start, end, capital)
+    windows = make_windows(start, end) if include_walk_forward else []
+    records = []
+
+    for spec in build_rotation_candidate_specs():
+        logger.info("Evaluating {}", spec.candidate_id)
+        metrics = evaluate_candidate(spec, symbols, start, end, capital)
+        if include_walk_forward:
+            metrics = attach_walk_forward_metrics(spec, metrics, symbols, windows, capital)
+        else:
+            metrics.update(
+                {
+                    "wf_windows": 0,
+                    "wf_positive_rate": 0,
+                    "wf_sharpe_positive_rate": 0,
+                    "wf_total_trades": 0,
+                    "wf_details": [],
+                }
+            )
+        records.append(build_candidate_record(spec, metrics, benchmark))
+
+    ranked = sort_candidate_records(records)
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_relative_strength_rotation"
+    eligible = [
+        r for r in ranked
+        if r.get("alpha_pass") and r.get("promotion", {}).get("status") == "provisional_paper_candidate"
+    ]
+    return {
+        "schema_version": 1,
+        "artifact_type": "research_candidate_sweep_bundle",
+        "run_id": run_id,
+        "generated_at": datetime.now().isoformat(),
+        "commit_hash": get_git_hash(),
+        "config_yaml_hash": config.yaml_hash,
+        "config_resolved_hash": config.resolved_hash,
+        "eval_start": start,
+        "eval_end": end,
+        "initial_capital": capital,
+        "universe": symbols,
+        "benchmark": benchmark,
+        "walk_forward": {
+            "enabled": include_walk_forward,
+            "windows": [{"start": s, "end": e} for s, e in windows],
+        },
+        "ranking_rule": (
+            "rank_score + promotion status; live/paper promotion remains controlled "
+            "by canonical promotion and evidence gates"
+        ),
+        "candidates": ranked,
+        "summary": {
+            "evaluated": len(ranked),
+            "eligible_for_canonical_eval": len(eligible),
+            "best_candidate_id": ranked[0]["candidate_id"] if ranked else None,
+        },
+    }
+
+
+def validate_sweep_artifact(payload: dict[str, Any]) -> tuple[bool, str]:
+    """Lightweight schema validation for research candidate artifacts."""
+    required = {
+        "schema_version",
+        "artifact_type",
+        "run_id",
+        "generated_at",
+        "commit_hash",
+        "universe",
+        "benchmark",
+        "candidates",
+        "summary",
+    }
+    missing = sorted(required - set(payload))
+    if missing:
+        return False, f"missing fields: {', '.join(missing)}"
+    if payload.get("schema_version") != 1:
+        return False, "schema_version must be 1"
+    if payload.get("artifact_type") != "research_candidate_sweep_bundle":
+        return False, "artifact_type must be research_candidate_sweep_bundle"
+    if not isinstance(payload.get("candidates"), list):
+        return False, "candidates must be a list"
+    return True, "ok"
+
+
+def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT_OUTPUT_DIR) -> tuple[Path, Path]:
+    ok, reason = validate_sweep_artifact(bundle)
+    if not ok:
+        raise ValueError(f"invalid research sweep artifact: {reason}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = str(bundle.get("run_id") or datetime.now().strftime("%Y%m%d_%H%M%S"))
+    json_path = output_dir / f"candidate_sweep_{stamp}.json"
+    md_path = output_dir / f"candidate_sweep_{stamp}.md"
+
+    json_path.write_text(
+        json.dumps(bundle, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    lines = [
+        "# Research Candidate Sweep",
+        f"Generated: {bundle.get('generated_at', '')[:19]}",
+        f"Period: {bundle.get('eval_start')} ~ {bundle.get('eval_end')}",
+        f"Universe size: {len(bundle.get('universe', []))}",
+        "",
+        "## Benchmark",
+        f"- EW B&H return: {bundle.get('benchmark', {}).get('ew_bh_return', 0):.2f}%",
+        f"- EW B&H Sharpe: {bundle.get('benchmark', {}).get('ew_bh_sharpe', 0):.2f}",
+        "",
+        "## Ranking",
+        "| Rank | Candidate | Status | Score | Return | Excess | Sharpe | PF | MDD | Trades |",
+        "|------|-----------|--------|-------|--------|--------|--------|----|-----|--------|",
+    ]
+    for i, rec in enumerate(bundle.get("candidates", []), start=1):
+        m = rec.get("metrics", {})
+        lines.append(
+            f"| {i} | {rec.get('candidate_id')} | {rec.get('promotion', {}).get('status')} | "
+            f"{rec.get('rank_score', 0):.2f} | {m.get('total_return', 0):.2f}% | "
+            f"{m.get('benchmark_excess_return', 0):.2f}%p | {m.get('sharpe', 0):.2f} | "
+            f"{m.get('profit_factor', 0):.2f} | {m.get('mdd', 0):.2f}% | {m.get('total_trades', 0)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Guardrail",
+            "This report is research-only. Live promotion still requires the canonical promotion bundle, eligible paper evidence, positive benchmark excess, and the live hard gate.",
+        ]
+    )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path, md_path
+
+
+def parse_symbols(value: str | None) -> list[str] | None:
+    if not value:
+        return None
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Research candidate sweep")
+    parser.add_argument("--symbols", help="Comma-separated symbols. Omit to use canonical liquidity universe.")
+    parser.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
+    parser.add_argument("--start", default=DEFAULT_START)
+    parser.add_argument("--end", default=DEFAULT_END)
+    parser.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
+    parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    args = parser.parse_args()
+
+    bundle = run_candidate_sweep(
+        symbols=parse_symbols(args.symbols),
+        top_n=args.top_n,
+        start=args.start,
+        end=args.end,
+        capital=args.capital,
+        include_walk_forward=not args.quick,
+    )
+    json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
+    print(f"Wrote {json_path}")
+    print(f"Wrote {md_path}")
+    for i, rec in enumerate(bundle.get("candidates", [])[:5], start=1):
+        m = rec.get("metrics", {})
+        print(
+            f"{i}. {rec['candidate_id']}: {rec['promotion']['status']} "
+            f"ret={m.get('total_return', 0):.2f}% "
+            f"excess={m.get('benchmark_excess_return', 0):.2f}%p "
+            f"sharpe={m.get('sharpe', 0):.2f}"
+        )
+
+
+if __name__ == "__main__":
+    main()

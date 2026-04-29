@@ -36,6 +36,8 @@ class PortfolioBacktester:
         initial_capital: float = None,
         start_date: str = None,
         end_date: str = None,
+        trade_start_date: str = None,
+        param_overrides: dict = None,
     ) -> dict:
         """
         멀티종목 포트폴리오 백테스트 실행.
@@ -46,6 +48,9 @@ class PortfolioBacktester:
             initial_capital: 초기 투자금
             start_date: 시작일
             end_date: 종료일
+            trade_start_date: 데이터 warmup과 별도로 실제 거래/평가를 시작할 날짜
+            param_overrides: 전략 파라미터 덮어쓰기. 예:
+                {"relative_strength_rotation": {"short_lookback": 40}}
 
         Returns:
             포트폴리오 수준 백테스트 결과
@@ -59,7 +64,8 @@ class PortfolioBacktester:
             ).get("initial_capital", 10000000)
 
         collector = DataCollector()
-        strategy = create_strategy(strategy_name, self.config)
+        strategy_config = self._strategy_config_for_run(strategy_name, param_overrides)
+        strategy = create_strategy(strategy_name, strategy_config)
 
         all_data = {}
         all_signals = {}
@@ -89,12 +95,16 @@ class PortfolioBacktester:
         logger.info("유효 종목 {}개: {}", len(valid_symbols), valid_symbols)
 
         all_dates = sorted(set().union(*(s.index for s in all_signals.values())))
+        all_dates = self._filter_trade_dates(all_dates, trade_start_date)
+        if not all_dates:
+            logger.error("거래 시작일 이후 유효한 날짜가 없습니다.")
+            return {}
 
         # 시장국면 시리즈 사전 계산 (TICKET-05, backtester.py TICKET-02와 동일 로직 재사용)
         regime_series = self._precompute_regime_series(all_dates)
 
         # 전략별 exit 파라미터 읽기
-        strat_cfg = self.config.strategies.get(strategy_name, {})
+        strat_cfg = strategy_config.strategies.get(strategy_name, {})
         min_hold_days = int(strat_cfg.get("min_hold_days", 0))
         disable_trailing_stop = bool(strat_cfg.get("disable_trailing_stop", False))
         tp_override = strat_cfg.get("take_profit_rate")  # 전략별 TP 오버라이드
@@ -138,6 +148,21 @@ class PortfolioBacktester:
             "executed_sell_count": result.get("executed_sell_count", 0),
             "skipped_reasons": result.get("skipped_reasons", {}),
         }
+
+    def _strategy_config_for_run(self, strategy_name: str, param_overrides: dict | None = None):
+        """param_overrides가 있으면 해당 전략만 덮어쓴 Config를 반환."""
+        overrides = param_overrides or {}
+        if strategy_name in overrides:
+            return self.config.with_strategy_overrides(strategy_name, overrides[strategy_name])
+        return self.config
+
+    @staticmethod
+    def _filter_trade_dates(all_dates: list, trade_start_date: str | None = None) -> list:
+        """warmup 데이터는 유지하되 시뮬레이션 날짜만 거래 시작일 이후로 제한."""
+        if not trade_start_date:
+            return all_dates
+        cutoff = pd.Timestamp(trade_start_date)
+        return [date for date in all_dates if pd.Timestamp(date) >= cutoff]
 
     def _precompute_regime_series(self, all_dates: list) -> pd.Series:
         """
