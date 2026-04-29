@@ -41,6 +41,30 @@ def test_validate_sweep_artifact_rejects_wrong_artifact_type():
     assert "artifact_type" in reason
 
 
+def test_parse_symbols_restores_numeric_codes_losing_leading_zeroes():
+    from tools.research_candidate_sweep import parse_symbols
+
+    assert parse_symbols("5930,660,035720") == ["005930", "000660", "035720"]
+
+
+def test_buy_and_hold_benchmark_tolerates_failed_symbol_fetch(monkeypatch):
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import buy_and_hold_benchmark
+
+    class FailingCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            raise RuntimeError(f"missing {symbol}")
+
+    monkeypatch.setattr(data_collector, "DataCollector", FailingCollector)
+
+    benchmark = buy_and_hold_benchmark(["5930"], "2024-01-01", "2024-12-31", 10_000_000)
+
+    assert benchmark["universe_size"] == 0
+    assert benchmark["benchmark_symbols"] == []
+
+
 def test_candidate_to_strategy_metrics_maps_research_fields():
     from tools.research_candidate_sweep import candidate_to_strategy_metrics
 
@@ -89,6 +113,44 @@ def test_sort_candidates_prefers_alpha_pass_over_high_non_alpha_score():
 
     ranked = sort_candidate_records([non_alpha, alpha])
     assert ranked[0]["candidate_id"] == "lower_score_positive_alpha"
+
+
+def test_decision_summary_blocks_no_alpha_candidate():
+    from tools.research_candidate_sweep import build_decision_summary
+
+    decision = build_decision_summary(
+        [
+            {
+                "candidate_id": "weak",
+                "alpha_pass": False,
+                "promotion": {"status": "paper_only"},
+            }
+        ],
+        walk_forward_enabled=False,
+        benchmark={"universe_size": 3},
+    )
+
+    assert decision["action"] == "NO_ALPHA_CANDIDATE"
+    assert decision["eligible_candidate_ids"] == []
+
+
+def test_decision_summary_sends_quick_alpha_to_full_walk_forward():
+    from tools.research_candidate_sweep import build_decision_summary
+
+    decision = build_decision_summary(
+        [
+            {
+                "candidate_id": "quick_alpha",
+                "alpha_pass": True,
+                "promotion": {"status": "paper_only"},
+            }
+        ],
+        walk_forward_enabled=False,
+        benchmark={"universe_size": 3},
+    )
+
+    assert decision["action"] == "RUN_FULL_WALK_FORWARD"
+    assert decision["alpha_candidate_ids"] == ["quick_alpha"]
 
 
 def test_build_candidate_record_keeps_rejection_reason_for_weak_candidate():

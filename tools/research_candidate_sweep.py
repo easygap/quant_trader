@@ -41,6 +41,29 @@ ROTATION_DIVERSIFICATION = {
 }
 
 
+def normalize_symbol(value: Any) -> str:
+    """Normalize KR numeric codes that may lose leading zeroes in shells."""
+    symbol = str(value).strip()
+    if symbol.upper() == "KS11":
+        return "KS11"
+    if symbol.upper().endswith(".KS") and symbol[:-3].isdigit():
+        return f"{symbol[:-3].zfill(6)}.KS"
+    if symbol.isdigit() and len(symbol) <= 6:
+        return symbol.zfill(6)
+    return symbol
+
+
+def normalize_symbols(symbols: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    seen = set()
+    for symbol in symbols:
+        code = normalize_symbol(symbol)
+        if code and code not in seen:
+            normalized.append(code)
+            seen.add(code)
+    return normalized
+
+
 @dataclass(frozen=True)
 class CandidateSpec:
     candidate_id: str
@@ -168,21 +191,26 @@ def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
         except Exception:
             continue
 
-    return sorted(amounts, key=amounts.get, reverse=True)[:top_n]
+    return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:top_n])
 
 
 def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: float) -> dict[str, Any]:
     from core.data_collector import DataCollector
 
     if not symbols:
-        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0}
+        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []}
 
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
     per_symbol_capital = capital / len(symbols)
     parts = []
+    benchmark_symbols = []
     for sym in symbols:
-        df = dc.fetch_korean_stock(sym, start, end)
+        try:
+            df = dc.fetch_korean_stock(normalize_symbol(sym), start, end)
+        except Exception as e:
+            logger.warning("benchmark fetch failed for {}: {}", sym, e)
+            continue
         if df is None or df.empty:
             continue
         if "date" in df.columns:
@@ -191,10 +219,11 @@ def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: fl
         if len(df) < 2:
             continue
         parts.append(per_symbol_capital / float(df["close"].iloc[0]) * df["close"].astype(float))
+        benchmark_symbols.append(normalize_symbol(sym))
 
     combined = pd.concat(parts, axis=1).sum(axis=1).dropna() if parts else pd.Series(dtype=float)
     if len(combined) <= 1:
-        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": len(symbols)}
+        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []}
 
     total_return = (float(combined.iloc[-1]) / capital - 1) * 100
     daily_returns = combined.pct_change().dropna()
@@ -203,7 +232,8 @@ def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: fl
     return {
         "ew_bh_return": round(total_return, 2),
         "ew_bh_sharpe": round(sharpe, 2),
-        "universe_size": len(symbols),
+        "universe_size": len(benchmark_symbols),
+        "benchmark_symbols": benchmark_symbols,
     }
 
 
@@ -378,6 +408,87 @@ def sort_candidate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]
     )
 
 
+def build_decision_summary(
+    candidates: list[dict[str, Any]],
+    *,
+    walk_forward_enabled: bool,
+    benchmark: dict[str, Any],
+) -> dict[str, Any]:
+    eligible = [
+        r for r in candidates
+        if r.get("alpha_pass") and r.get("promotion", {}).get("status") == "provisional_paper_candidate"
+    ]
+    alpha_candidates = [r for r in candidates if r.get("alpha_pass")]
+    best_id = candidates[0]["candidate_id"] if candidates else None
+
+    if int(benchmark.get("universe_size", 0) or 0) <= 0:
+        return {
+            "action": "INSUFFICIENT_BENCHMARK_DATA",
+            "reason": "Benchmark data was unavailable, so excess-return gates cannot be trusted.",
+            "best_candidate_id": best_id,
+            "eligible_candidate_ids": [],
+            "alpha_candidate_ids": [],
+            "next_actions": [
+                "Fix benchmark/universe data coverage before interpreting this sweep.",
+                "Do not run canonical promotion from this artifact.",
+            ],
+        }
+
+    if eligible:
+        ids = [r["candidate_id"] for r in eligible]
+        return {
+            "action": "RUN_CANONICAL_EVALUATION",
+            "reason": "At least one candidate has positive benchmark excess and provisional paper status.",
+            "best_candidate_id": best_id,
+            "eligible_candidate_ids": ids,
+            "alpha_candidate_ids": [r["candidate_id"] for r in alpha_candidates],
+            "next_actions": [
+                f"Run canonical promotion evaluation for: {', '.join(ids)}.",
+                "Keep paper/live gates unchanged; this artifact is research-only.",
+            ],
+        }
+
+    if alpha_candidates and not walk_forward_enabled:
+        ids = [r["candidate_id"] for r in alpha_candidates]
+        return {
+            "action": "RUN_FULL_WALK_FORWARD",
+            "reason": "Quick sweep found benchmark-positive candidates, but walk-forward was skipped.",
+            "best_candidate_id": best_id,
+            "eligible_candidate_ids": [],
+            "alpha_candidate_ids": ids,
+            "next_actions": [
+                f"Re-run without --quick for: {', '.join(ids)}.",
+                "Promote nothing until walk-forward stability and canonical gates pass.",
+            ],
+        }
+
+    if alpha_candidates:
+        ids = [r["candidate_id"] for r in alpha_candidates]
+        return {
+            "action": "KEEP_RESEARCH_ONLY",
+            "reason": "Benchmark-positive candidates failed promotion quality gates.",
+            "best_candidate_id": best_id,
+            "eligible_candidate_ids": [],
+            "alpha_candidate_ids": ids,
+            "next_actions": [
+                "Keep these candidates research-only.",
+                "Inspect rejection_reasons before expanding the search space.",
+            ],
+        }
+
+    return {
+        "action": "NO_ALPHA_CANDIDATE",
+        "reason": "No candidate produced both positive benchmark excess return and positive excess Sharpe.",
+        "best_candidate_id": best_id,
+        "eligible_candidate_ids": [],
+        "alpha_candidate_ids": [],
+        "next_actions": [
+            "Do not run canonical promotion from this sweep.",
+            "Design a new candidate family or expand the universe before another promotion attempt.",
+        ],
+    }
+
+
 def evaluate_candidate(
     spec: CandidateSpec,
     symbols: list[str],
@@ -459,7 +570,7 @@ def run_candidate_sweep(
     from config.config_loader import Config
 
     config = Config.get()
-    symbols = symbols or select_canonical_universe(top_n)
+    symbols = normalize_symbols(symbols or select_canonical_universe(top_n))
     benchmark = buy_and_hold_benchmark(symbols, start, end, capital)
     windows = make_windows(start, end) if include_walk_forward else []
     records = []
@@ -487,6 +598,11 @@ def run_candidate_sweep(
         r for r in ranked
         if r.get("alpha_pass") and r.get("promotion", {}).get("status") == "provisional_paper_candidate"
     ]
+    decision = build_decision_summary(
+        ranked,
+        walk_forward_enabled=include_walk_forward,
+        benchmark=benchmark,
+    )
     return {
         "schema_version": 1,
         "artifact_type": "research_candidate_sweep_bundle",
@@ -508,11 +624,13 @@ def run_candidate_sweep(
             "rank_score + promotion status; live/paper promotion remains controlled "
             "by canonical promotion and evidence gates"
         ),
+        "decision": decision,
         "candidates": ranked,
         "summary": {
             "evaluated": len(ranked),
             "eligible_for_canonical_eval": len(eligible),
             "best_candidate_id": ranked[0]["candidate_id"] if ranked else None,
+            "decision_action": decision["action"],
         },
     }
 
@@ -567,10 +685,21 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         f"- EW B&H return: {bundle.get('benchmark', {}).get('ew_bh_return', 0):.2f}%",
         f"- EW B&H Sharpe: {bundle.get('benchmark', {}).get('ew_bh_sharpe', 0):.2f}",
         "",
+        "## Decision",
+        f"- Action: {bundle.get('decision', {}).get('action', 'UNKNOWN')}",
+        f"- Reason: {bundle.get('decision', {}).get('reason', '')}",
+        f"- Best candidate: {bundle.get('decision', {}).get('best_candidate_id')}",
+        "",
+        "## Next Actions",
+    ]
+    for action in bundle.get("decision", {}).get("next_actions", []):
+        lines.append(f"- {action}")
+    lines.extend([
+        "",
         "## Ranking",
         "| Rank | Candidate | Status | Score | Return | Excess | Sharpe | PF | MDD | Trades |",
         "|------|-----------|--------|-------|--------|--------|--------|----|-----|--------|",
-    ]
+    ])
     for i, rec in enumerate(bundle.get("candidates", []), start=1):
         m = rec.get("metrics", {})
         lines.append(
@@ -593,7 +722,7 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
 def parse_symbols(value: str | None) -> list[str] | None:
     if not value:
         return None
-    return [s.strip() for s in value.split(",") if s.strip()]
+    return normalize_symbols([s.strip() for s in value.split(",") if s.strip()])
 
 
 def main() -> None:
@@ -618,6 +747,8 @@ def main() -> None:
     json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
     print(f"Wrote {json_path}")
     print(f"Wrote {md_path}")
+    decision = bundle.get("decision", {})
+    print(f"Decision: {decision.get('action', 'UNKNOWN')} - {decision.get('reason', '')}")
     for i, rec in enumerate(bundle.get("candidates", [])[:5], start=1):
         m = rec.get("metrics", {})
         print(
