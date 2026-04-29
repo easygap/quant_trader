@@ -685,8 +685,18 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
 | ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
+| ✅ **2026-04-29 all-family quick sweep** | 5종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`rotation_slow_momentum`이나 excess=-165.22%p / excess Sharpe=-1.07 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
+
+### 다음 연구 방향 — 2026-04-29 기준
+
+| 항목 | 결정 |
+|------|------|
+| 즉시 canonical promotion | 진행하지 않음. all-family quick sweep에서 benchmark excess gate 미달 |
+| 현재 후보군 | rotation/momentum/breakout 14개 모두 research_only 유지 |
+| 다음 후보 탐색 | 유니버스 확장 또는 새 후보군 설계. benchmark 대비 초과수익/초과 Sharpe를 1차 통과 조건으로 유지 |
+| 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
