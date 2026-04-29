@@ -213,6 +213,15 @@ def run_canonical():
                          "details": [{"return": wm["total_return"], "sharpe": wm["sharpe"]} for wm in w_metrics]}
         print(f"ret={m['total_return']}%")
 
+    benchmark["strategy_excess_return_pct"] = {
+        name: round(float(m.get("total_return", 0)) - bh_ret, 2)
+        for name, m in metrics_all.items()
+    }
+    benchmark["strategy_excess_sharpe"] = {
+        name: round(float(m.get("sharpe", 0)) - bh_sharpe, 2)
+        for name, m in metrics_all.items()
+    }
+
     # ── Promotion 계산 ──
     from core.promotion_engine import StrategyMetrics, promote
 
@@ -241,6 +250,8 @@ def run_canonical():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = {
+        "schema_version": 1,
+        "artifact_type": "canonical_promotion_bundle",
         "eval_start": EVAL_START,
         "eval_end": EVAL_END,
         "universe_rule": "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20",
@@ -250,6 +261,8 @@ def run_canonical():
         "wf_n_windows": len(windows),
         "initial_capital": INITIAL_CAPITAL,
         "commit_hash": get_git_hash(),
+        "config_yaml_hash": Config.get().yaml_hash,
+        "config_resolved_hash": Config.get().resolved_hash,
         "generated_at": datetime.now().isoformat(),
     }
 

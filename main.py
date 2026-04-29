@@ -788,105 +788,22 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
     라이브 전 필수 검증 게이트 (Hard Gate).
     하나라도 실패하면 live 진입 불가. 실패 항목 리스트를 반환 (빈 리스트 = 통과).
 
-    5개 필수 조건:
-    1) 승인된 전략 1개 이상 (reports/approved_strategies.json)
-    2) 해당 전략의 최근 WF 통과 (reports/validation_walkforward_*.json)
-    3) 벤치마크 대비 초과수익 검증 (reports/benchmark_comparison.json)
-    4) Paper trading 60영업일 이상 (DB portfolio_snapshots)
-    5) 데이터 소스 health check (PER 수신 가능)
+    필수 조건:
+    1) 현재 commit/config와 일치하는 canonical promotion bundle
+    2) live_candidate 승격 결과
+    3) 60영업일 execution-backed paper evidence package
+    4) 벤치마크 대비 양의 초과수익
+    5) 데이터 소스 health check
+
+    레거시 호환: "승인 파일 없음", "승인 파일 파싱 오류" 문자열은 기존 감사 테스트가 확인한다.
     """
-    from pathlib import Path
-    import json
+    from core.live_gate import validate_live_readiness
 
-    issues = []
-    reports_dir = Path("reports")
+    issues = validate_live_readiness(config, strategy_name)
+    if issues:
+        return issues
 
-    # ── 조건 1: 승인된 전략 존재 (자동 생성 파일 + 해시 검증) ──
-    import hashlib
-    approved_path = reports_dir / "approved_strategies.json"
-    approved_strategies = []
-    if approved_path.exists():
-        try:
-            approved_data = json.loads(approved_path.read_text(encoding="utf-8"))
-            # 해시 검증: 승인 시점의 config 해시와 현재가 일치해야 함
-            saved_config_hash = approved_data.get("config_hash", "")
-            current_config_hash = _compute_config_hash()
-            if saved_config_hash and saved_config_hash != current_config_hash:
-                issues.append(
-                    f"승인 파일의 config_hash({saved_config_hash[:12]}...)가 현재({current_config_hash[:12]}...)와 불일치. "
-                    "설정 변경 후 재검증이 필요합니다. python main.py --mode validate --walk-forward 실행."
-                )
-            # 자동 생성 여부 확인 (수동 편집 방지)
-            if not approved_data.get("auto_generated"):
-                issues.append(
-                    "승인 파일이 검증 파이프라인이 아닌 수동으로 생성됨. "
-                    "python main.py --mode validate --walk-forward 로 자동 생성하세요."
-                )
-            approved_strategies = [
-                s["name"] for s in approved_data.get("strategies", [])
-                if s.get("status") == "approved"
-            ]
-        except Exception as e:
-            issues.append(f"승인 파일 파싱 오류: {e}")
-    else:
-        issues.append("승인 파일 없음: reports/approved_strategies.json")
-    if not approved_strategies:
-        issues.append(
-            "승인된 전략 없음. python main.py --mode validate --walk-forward 실행 후 "
-            "WF 통과 전략이 자동으로 approved_strategies.json에 기록됩니다."
-        )
-    elif strategy_name not in approved_strategies:
-        issues.append(
-            f"전략 '{strategy_name}'이 승인 목록에 없음. 승인된 전략: {approved_strategies}"
-        )
-
-    # ── 조건 2: WF 통과 기록 ──
-    wf_passed = False
-    for wf_file in sorted(reports_dir.glob("validation_walkforward_*.json"), reverse=True):
-        try:
-            wf_data = json.loads(wf_file.read_text(encoding="utf-8"))
-            if wf_data.get("strategy") == strategy_name and wf_data.get("wf_passed"):
-                wf_passed = True
-                break
-        except Exception:
-            continue
-    if not wf_passed:
-        issues.append(
-            f"전략 '{strategy_name}'의 Walk-Forward 통과 기록 없음. "
-            "python main.py --mode validate --walk-forward --strategy <name> 실행 필요."
-        )
-
-    # ── 조건 3: 벤치마크 초과수익 검증 ──
-    bench_path = reports_dir / "benchmark_comparison.json"
-    if bench_path.exists():
-        try:
-            bench = json.loads(bench_path.read_text(encoding="utf-8"))
-            excess_key = f"{strategy_name}_excess_return_pct"
-            excess = bench.get(excess_key)
-            if excess is not None and excess < 0:
-                issues.append(
-                    f"전략 '{strategy_name}' 벤치마크 대비 초과수익 {excess:+.1f}% (음수). "
-                    "벤치마크를 이기지 못하는 전략은 live 불가."
-                )
-        except Exception:
-            pass
-    else:
-        issues.append("벤치마크 비교 파일 없음 (reports/benchmark_comparison.json).")
-
-    # ── 조건 4: Paper 60영업일 이상 ──
-    try:
-        from database.repositories import get_portfolio_snapshots
-        snapshots = get_portfolio_snapshots(days=120)
-        paper_days = len(snapshots) if not snapshots.empty else 0
-        if paper_days < 60:
-            issues.append(
-                f"Paper 운영 {paper_days}일 (최소 60영업일 필요). "
-                "python main.py --mode schedule 로 paper 운영을 계속하세요."
-            )
-    except Exception:
-        issues.append("Paper 운영 기록 조회 실패 — DB 확인 필요.")
-
-    # ── 조건 5: 데이터 소스 health check ──
+    # ── 데이터 소스 health check ──
     try:
         from core.data_collector import DataCollector
         dc = DataCollector()
