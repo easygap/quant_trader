@@ -9,8 +9,8 @@
   paper_candidate:  paper 60영업일 실험 대상. paper_only + WF Sharpe>0≥50%,
                     exposure-matched excess > -100%p, MDD > -20%.
                     (provisional) 표기 시 일부 기준 경계 미달.
-  live_candidate:   live 전환 대기. paper_candidate + paper 60일 완주,
-                    paper Sharpe≥0.3, same-universe excess≥0.
+  live_candidate:   live 전환 대기. paper_candidate + ELIGIBLE paper evidence package
+                    (60영업일 execution-backed, 양의 excess, frozen day 0).
 
 승격 경로: research_only → paper_only → paper_candidate → live_candidate
 강등: 어느 단계에서든 기준 미달 시 즉시 하위 단계로 강등.

@@ -6,7 +6,7 @@
   paper_only:                 backtest + paper. 절대수익>0, PF≥1.0, WF positive≥50%.
   provisional_paper_candidate: paper 60일 실험 대상. paper_only + WF Sharpe>0≥50%, MDD>-20%.
                                "내부 연구 우선순위"를 의미. 경제적 alpha 미확인.
-  live_candidate:             live 전환 가능. provisional + Paper 60일 완주, Sharpe≥0.3, excess≥0.
+  live_candidate:             live 전환 가능. provisional + eligible paper evidence package.
                                "경제적으로 유의미한 후보"를 의미.
 
 핵심 원칙:
@@ -17,6 +17,8 @@
 from dataclasses import dataclass
 from typing import Optional
 from loguru import logger
+
+from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
 
 
 @dataclass
@@ -35,6 +37,12 @@ class StrategyMetrics:
     paper_days: Optional[int] = None
     paper_sharpe: Optional[float] = None
     paper_excess: Optional[float] = None  # same-universe excess return
+    paper_evidence_recommendation: Optional[str] = None
+    paper_benchmark_final_ratio: Optional[float] = None
+    paper_sell_count: Optional[int] = None
+    paper_win_rate: Optional[float] = None
+    paper_frozen_days: Optional[int] = None
+    paper_cumulative_return: Optional[float] = None
 
 
 @dataclass
@@ -84,7 +92,7 @@ def _check_provisional_candidate(m: StrategyMetrics) -> tuple[bool, str]:
 
 
 def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
-    """live_candidate 조건: provisional + Paper 60일, Sharpe≥0.3, excess≥0."""
+    """live_candidate 조건: provisional + eligible paper evidence package."""
     ok, reason = _check_provisional_candidate(m)
     if not ok:
         return False, reason
@@ -96,6 +104,20 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"paper Sharpe {m.paper_sharpe or 0} < 0.3")
     if m.paper_excess is None or m.paper_excess < 0:
         fails.append(f"paper excess {m.paper_excess or 0} < 0")
+    if m.paper_evidence_recommendation != "ELIGIBLE":
+        fails.append(f"paper evidence recommendation {m.paper_evidence_recommendation or 'missing'} != ELIGIBLE")
+    if m.paper_benchmark_final_ratio is None or m.paper_benchmark_final_ratio < 0.8:
+        fails.append(f"paper benchmark_final_ratio {m.paper_benchmark_final_ratio or 0} < 0.8")
+    if m.paper_sell_count is None or m.paper_sell_count < 5:
+        fails.append(f"paper sell_count {m.paper_sell_count or 0} < 5")
+    if m.paper_win_rate is None or m.paper_win_rate < 45:
+        fails.append(f"paper win_rate {m.paper_win_rate or 0} < 45")
+    if m.paper_frozen_days is None:
+        fails.append("paper frozen_days missing")
+    elif m.paper_frozen_days > 0:
+        fails.append(f"paper frozen_days {m.paper_frozen_days} > 0")
+    if m.paper_cumulative_return is None or m.paper_cumulative_return <= 0:
+        fails.append(f"paper cumulative_return {m.paper_cumulative_return or 0} <= 0")
     if fails:
         return False, "live 미달: " + ", ".join(fails)
     return True, "live_candidate 충족"
@@ -145,6 +167,7 @@ ARTIFACT_DIR = "reports/promotion"
 REQUIRED_ARTIFACTS = [
     "metrics_summary.json",
     "walk_forward_summary.json",
+    "benchmark_comparison.json",
     "promotion_result.json",
     "run_metadata.json",
 ]
@@ -166,9 +189,22 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
     try:
         promotion = json.loads((base / "promotion_result.json").read_text(encoding="utf-8"))
         metadata = json.loads((base / "run_metadata.json").read_text(encoding="utf-8"))
+        benchmark = json.loads((base / "benchmark_comparison.json").read_text(encoding="utf-8"))
         # schema 검증
         if not isinstance(promotion, dict):
             logger.error("promotion_result.json이 dict가 아님")
+            return None
+        if metadata.get("schema_version") != LIVE_GATE_SCHEMA_VERSION:
+            logger.error("run_metadata.json schema_version 오류: {}", metadata.get("schema_version"))
+            return None
+        if metadata.get("artifact_type") != LIVE_GATE_ARTIFACT_TYPE:
+            logger.error("run_metadata.json artifact_type 오류: {}", metadata.get("artifact_type"))
+            return None
+        if not isinstance(benchmark.get("strategy_excess_return_pct"), dict):
+            logger.error("benchmark_comparison.json strategy_excess_return_pct 누락")
+            return None
+        if not isinstance(benchmark.get("strategy_excess_sharpe"), dict):
+            logger.error("benchmark_comparison.json strategy_excess_sharpe 누락")
             return None
         for name, p in promotion.items():
             if "status" not in p or "allowed_modes" not in p:

@@ -100,7 +100,13 @@ class TestPromotionRules:
         m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
                             wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
                             wf_windows=6, wf_total_trades=100, sharpe=0.5,
-                            paper_days=60, paper_sharpe=0.5, paper_excess=1.0)
+                            paper_days=60, paper_sharpe=0.5, paper_excess=1.0,
+                            paper_evidence_recommendation="ELIGIBLE",
+                            paper_benchmark_final_ratio=0.9,
+                            paper_sell_count=6,
+                            paper_win_rate=50.0,
+                            paper_frozen_days=0,
+                            paper_cumulative_return=2.0)
         r = promote(m)
         assert r.status == "live_candidate"
         assert "live" in r.allowed_modes
@@ -111,6 +117,23 @@ class TestPromotionRules:
                             wf_windows=6, wf_total_trades=100, sharpe=0.5)
         r = promote(m)
         assert r.status != "live_candidate"
+
+    def test_live_candidate_requires_eligible_paper_package(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            paper_days=60, paper_sharpe=0.5, paper_excess=1.0,
+                            paper_evidence_recommendation="BLOCKED",
+                            paper_benchmark_final_ratio=0.9,
+                            paper_sell_count=6,
+                            paper_win_rate=50.0,
+                            paper_frozen_days=0,
+                            paper_cumulative_return=2.0)
+        r = promote(m)
+        assert r.status != "live_candidate"
+        ok, reason = _check_live_candidate(m)
+        assert ok is False
+        assert "paper evidence recommendation" in reason
 
     def test_experiment_note_does_not_affect_status(self):
         m = StrategyMetrics("test", total_return=-5, profit_factor=0.8, mdd=-10,
@@ -283,11 +306,26 @@ class TestArtifactLoading:
         """artifact가 있으면 promotion 결과를 반환."""
         import tempfile, json
         from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             (base / "metrics_summary.json").write_text("{}", encoding="utf-8")
             (base / "walk_forward_summary.json").write_text("{}", encoding="utf-8")
-            (base / "run_metadata.json").write_text('{"commit_hash": "abc"}', encoding="utf-8")
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": 1.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                }),
+                encoding="utf-8",
+            )
             (base / "promotion_result.json").write_text(
                 json.dumps({"scoring": {"status": "paper_only", "allowed_modes": ["backtest", "paper"], "reason": "test"}}),
                 encoding="utf-8",
@@ -305,6 +343,13 @@ class TestArtifactLoading:
             base = Path(tmpdir)
             (base / "metrics_summary.json").write_text("{}", encoding="utf-8")
             (base / "walk_forward_summary.json").write_text("{}", encoding="utf-8")
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": 1.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
             (base / "run_metadata.json").write_text("{}", encoding="utf-8")
             # schema 오류: status 키 없음
             (base / "promotion_result.json").write_text(
