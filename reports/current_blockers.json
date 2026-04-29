@@ -1,25 +1,28 @@
 {
-  "timestamp": "2026-03-26T15:24:44.098532",
+  "timestamp": "2026-04-29T00:00:00",
   "go_live": false,
-  "verdict": "NO-GO research-only",
+  "verdict": "NO-GO: no live_candidate with current canonical and paper evidence",
   "hard_blockers": [
     {
-      "desc": "승인전략 0개"
+      "desc": "canonical promotion artifact is stale or old schema"
     },
     {
-      "desc": "Paper 0일"
+      "desc": "no strategy has live_candidate status"
     },
     {
-      "desc": "벤치마크 초과수익 음수"
+      "desc": "benchmark excess return and excess Sharpe are not proven positive"
+    },
+    {
+      "desc": "eligible 60-business-day execution-backed paper evidence package is missing"
     }
   ],
   "soft_blockers": [
     {
-      "desc": "pykrx 전면불가"
+      "desc": "scoring downgraded to paper_only due Sharpe/PF/WF stability weakness"
     },
     {
-      "desc": "yfinance debtToEquity 불일치 (600%완화)"
+      "desc": "relative_strength_rotation remains the only provisional paper priority, but live alpha is unproven"
     }
   ],
-  "default_strategy": "scoring (experimental, paper only)"
+  "default_strategy": "relative_strength_rotation for capped paper research priority; scoring observation only"
 }

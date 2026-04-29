@@ -10,7 +10,7 @@ Requirements covered:
   4. Anomaly detection + protection (degraded/frozen)
   5. Reporting/package generation
   7. End-to-end replay test
-  8. Promotion separation (approved_strategies.json 미수정)
+  8. Promotion separation (legacy approval file 미수정)
 """
 
 import json
@@ -533,10 +533,10 @@ class TestEndToEndReplay:
         assert "insufficient_days" in str(pkg["block_reasons"])
         assert pkg["total_days"] == 7
 
-        # checklist contains manual approval warning
+        # checklist contains live-gate warning
         checklist = cl_path.read_text(encoding="utf-8")
-        assert "approved_strategies.json" in checklist
-        assert "수동 승인" in checklist or "수동" in checklist
+        assert "canonical promotion bundle" in checklist
+        assert "hard gate" in checklist
 
     def test_negative_alpha_blocks_promotion_even_with_60_days(self, evidence_dir):
         """60일/benchmark final이 충족돼도 음수 alpha와 손실이면 승격 불가."""
@@ -591,7 +591,7 @@ class TestEndToEndReplay:
     @patch("core.paper_evidence._compute_benchmark_excess")
     @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
     def test_promotion_never_modifies_approved_strategies(self, mock_diag, mock_bench, evidence_dir):
-        """approved_strategies.json이 존재하든 아니든 절대 수정 안 됨."""
+        """legacy approved_strategies.json이 존재하든 아니든 절대 수정 안 됨."""
         mock_bench.return_value = {
             "same_universe_excess": 0.05, "exposure_matched_excess": 0.03,
             "cash_adjusted_excess": 0.02, "benchmark_status": "final",

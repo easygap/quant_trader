@@ -150,7 +150,7 @@ def run_canonical():
         final = float(eq["value"].iloc[-1])
         ret = (final / capital - 1) * 100
         nd = len(eq)
-        years = nd / 252
+        years = max(nd / 252, 1 / 252)
         dr = eq["value"].pct_change().dropna()
         dm = float(dr.mean()) if len(dr) > 0 else 0
         ds = float(dr.std()) if len(dr) > 1 else 0
@@ -166,10 +166,24 @@ def run_canonical():
         pf = gp / gl if gl > 0 else (99 if gp > 0 else 0)
         npos = eq.get("n_positions", pd.Series(0, index=eq.index))
         density = float((npos > 0).sum()) / max(nd, 1) * 100
+        realized_pnl = sum(t.get("pnl", 0) for t in sells)
+        ev_per_trade = realized_pnl / nt if nt else 0
+        trade_notional = sum(
+            abs(float(t.get("price", 0) or 0) * float(t.get("quantity", 0) or 0))
+            for t in trades
+        )
+        turnover_per_year = (trade_notional / capital / years * 100) if capital > 0 else 0
+        if final > 0 and capital > 0:
+            cost_adjusted_cagr = ((final / capital) ** (1 / years) - 1) * 100
+        else:
+            cost_adjusted_cagr = -100
         return {"total_return": round(ret, 2), "sharpe": round(sharpe, 2),
                 "profit_factor": round(pf, 2), "mdd": round(mdd, 2),
                 "win_rate": round(wr, 1), "total_trades": nt,
-                "signal_density": round(density, 1)}
+                "signal_density": round(density, 1),
+                "ev_per_trade": round(ev_per_trade, 0),
+                "cost_adjusted_cagr": round(cost_adjusted_cagr, 2),
+                "turnover_per_year": round(turnover_per_year, 1)}
 
     metrics_all = {}
     wf_all = {}
@@ -221,6 +235,9 @@ def run_canonical():
         name: round(float(m.get("sharpe", 0)) - bh_sharpe, 2)
         for name, m in metrics_all.items()
     }
+    for name, m in metrics_all.items():
+        m["benchmark_excess_return"] = benchmark["strategy_excess_return_pct"].get(name)
+        m["benchmark_excess_sharpe"] = benchmark["strategy_excess_sharpe"].get(name)
 
     # ── Promotion 계산 ──
     from core.promotion_engine import StrategyMetrics, promote
@@ -237,6 +254,11 @@ def run_canonical():
             wf_windows=m.get("wf_windows", 0),
             wf_total_trades=m.get("wf_total_trades", 0),
             sharpe=m.get("sharpe", 0),
+            benchmark_excess_return=m.get("benchmark_excess_return"),
+            benchmark_excess_sharpe=m.get("benchmark_excess_sharpe"),
+            ev_per_trade=m.get("ev_per_trade"),
+            cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
+            turnover_per_year=m.get("turnover_per_year"),
         )
         result = promote(sm)
         promotions[name] = {

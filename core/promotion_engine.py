@@ -3,9 +3,9 @@
 
 상태 정의:
   research_only:              backtest만 허용. 기본 상태.
-  paper_only:                 backtest + paper. 절대수익>0, PF≥1.0, WF positive≥50%.
-  provisional_paper_candidate: paper 60일 실험 대상. paper_only + WF Sharpe>0≥50%, MDD>-20%.
-                               "내부 연구 우선순위"를 의미. 경제적 alpha 미확인.
+  paper_only:                 backtest + paper 관찰. 절대수익>0, PF≥1.0, WF positive≥50%.
+  provisional_paper_candidate: paper 60일 우선 실험 대상. paper_only + Sharpe/PF/WF 안정성 충족.
+                               "제한된 운영 우선순위"를 의미. live alpha는 별도 검증 필요.
   live_candidate:             live 전환 가능. provisional + eligible paper evidence package.
                                "경제적으로 유의미한 후보"를 의미.
 
@@ -21,6 +21,15 @@ from loguru import logger
 from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
 
 
+# Canonical metrics are rounded to 2 decimals, so 0.45 keeps near-0.5 candidates
+# available for capped paper study while still demoting clearly weak strategies.
+MIN_PROVISIONAL_SHARPE = 0.45
+MIN_PROVISIONAL_PROFIT_FACTOR = 1.2
+MIN_PROVISIONAL_WF_POSITIVE_RATE = 0.6
+MIN_PROVISIONAL_WF_SHARPE_RATE = 0.6
+MAX_PROVISIONAL_TURNOVER_PCT = 1000.0
+
+
 @dataclass
 class StrategyMetrics:
     """전략 평가 지표 — debiased 평가 결과를 입력."""
@@ -33,6 +42,11 @@ class StrategyMetrics:
     wf_windows: int               # walk-forward window 수
     wf_total_trades: int          # WF 전체 거래 수
     sharpe: float                 # full-period Sharpe ratio
+    benchmark_excess_return: Optional[float] = None  # %p, same-universe EW B&H 대비
+    benchmark_excess_sharpe: Optional[float] = None
+    ev_per_trade: Optional[float] = None              # 원/trade
+    cost_adjusted_cagr: Optional[float] = None        # %
+    turnover_per_year: Optional[float] = None         # %/year
     # paper 실적 (live_candidate 판정용, 없으면 None)
     paper_days: Optional[int] = None
     paper_sharpe: Optional[float] = None
@@ -72,20 +86,36 @@ def _check_paper_only(m: StrategyMetrics) -> tuple[bool, str]:
 
 
 def _check_provisional_candidate(m: StrategyMetrics) -> tuple[bool, str]:
-    """provisional_paper_candidate 조건: paper_only + WF Sharpe>0≥50%, MDD>-20%."""
+    """provisional_paper_candidate 조건: paper_only + risk-adjusted 품질."""
     ok, reason = _check_paper_only(m)
     if not ok:
         return False, reason
 
     fails = []
-    if m.wf_sharpe_positive_rate < 0.5:
-        fails.append(f"WF Sharpe>0 {m.wf_sharpe_positive_rate*100:.0f}% < 50%")
+    if m.sharpe < MIN_PROVISIONAL_SHARPE:
+        fails.append(f"Sharpe {m.sharpe} < {MIN_PROVISIONAL_SHARPE}")
+    if m.profit_factor < MIN_PROVISIONAL_PROFIT_FACTOR:
+        fails.append(f"PF {m.profit_factor} < {MIN_PROVISIONAL_PROFIT_FACTOR}")
+    if m.wf_positive_rate < MIN_PROVISIONAL_WF_POSITIVE_RATE:
+        fails.append(
+            f"WF positive {m.wf_positive_rate*100:.0f}% < {MIN_PROVISIONAL_WF_POSITIVE_RATE*100:.0f}%"
+        )
+    if m.wf_sharpe_positive_rate < MIN_PROVISIONAL_WF_SHARPE_RATE:
+        fails.append(
+            f"WF Sharpe>0 {m.wf_sharpe_positive_rate*100:.0f}% < {MIN_PROVISIONAL_WF_SHARPE_RATE*100:.0f}%"
+        )
     if m.mdd < -20:
         fails.append(f"MDD {m.mdd}% < -20%")
     if m.wf_windows < 3:
         fails.append(f"WF windows {m.wf_windows} < 3")
     if m.wf_total_trades < 30:
         fails.append(f"WF trades {m.wf_total_trades} < 30")
+    if m.ev_per_trade is not None and m.ev_per_trade <= 0:
+        fails.append(f"EV/trade {m.ev_per_trade} <= 0")
+    if m.cost_adjusted_cagr is not None and m.cost_adjusted_cagr <= 0:
+        fails.append(f"cost_adjusted_cagr {m.cost_adjusted_cagr}% <= 0")
+    if m.turnover_per_year is not None and m.turnover_per_year >= MAX_PROVISIONAL_TURNOVER_PCT:
+        fails.append(f"turnover {m.turnover_per_year}%/y >= {MAX_PROVISIONAL_TURNOVER_PCT}%/y")
     if fails:
         return False, "provisional 미달: " + ", ".join(fails)
     return True, "provisional_paper_candidate 충족"
@@ -225,11 +255,14 @@ def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "S
     try:
         metrics_raw = json.loads((base / "metrics_summary.json").read_text(encoding="utf-8"))
         wf_raw = json.loads((base / "walk_forward_summary.json").read_text(encoding="utf-8"))
+        benchmark_raw = json.loads((base / "benchmark_comparison.json").read_text(encoding="utf-8"))
     except Exception as e:
         logger.error("Artifact 로드 실패: {}", e)
         return {}
 
     result = {}
+    excess_return = benchmark_raw.get("strategy_excess_return_pct", {})
+    excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
         wf = wf_raw.get(name, {})
         result[name] = StrategyMetrics(
@@ -242,6 +275,11 @@ def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "S
             wf_windows=m.get("wf_windows", 0),
             wf_total_trades=m.get("wf_total_trades", wf.get("total_trades", 0)),
             sharpe=m.get("sharpe", 0),
+            benchmark_excess_return=m.get("benchmark_excess_return", excess_return.get(name)),
+            benchmark_excess_sharpe=m.get("benchmark_excess_sharpe", excess_sharpe.get(name)),
+            ev_per_trade=m.get("ev_per_trade"),
+            cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
+            turnover_per_year=m.get("turnover_per_year"),
         )
     return result
 

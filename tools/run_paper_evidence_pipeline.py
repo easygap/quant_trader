@@ -19,7 +19,7 @@ Usage:
     python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-package
 
 Note:
-    - approved_strategies.json은 절대 수정하지 않습니다.
+    - canonical promotion bundle / live eligibility는 절대 수정하지 않습니다.
     - promotion package는 recommendation만 제공합니다.
 """
 

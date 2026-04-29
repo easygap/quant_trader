@@ -4,11 +4,10 @@
 전략 상태 (Strategy Status) — 승격 규칙 v2 (2026-04-02 debiased 평가 기준):
 
   research_only:    backtest만 허용. 절대수익 음수 또는 PF<1.0.
-  paper_only:       backtest + paper. 절대수익>0, PF≥1.0, WF positive≥50%.
-                    벤치마크 초과수익 불요구. opportunity cost 기준 음수 허용.
-  paper_candidate:  paper 60영업일 실험 대상. paper_only + WF Sharpe>0≥50%,
-                    exposure-matched excess > -100%p, MDD > -20%.
-                    (provisional) 표기 시 일부 기준 경계 미달.
+  paper_only:       backtest + paper 관찰 가능. 절대수익>0, PF≥1.0, WF positive≥50%.
+                    경제적 alpha 미확인. pilot/live 우선순위 아님.
+  paper_candidate:  paper 60영업일 우선 실험 대상. paper_only + Sharpe/PF/WF 안정성,
+                    MDD > -20%, 과매매 방어 지표 충족.
   live_candidate:   live 전환 대기. paper_candidate + ELIGIBLE paper evidence package
                     (60영업일 execution-backed, 양의 excess, frozen day 0).
 
@@ -35,7 +34,7 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str]] = {
 
 # ── 전략 상태 레지스트리 (Hard Gate 기준, v2 승격 규칙 적용) ──
 STRATEGY_STATUS: dict[str, dict] = {
-    # ── provisional paper candidate (자동 판정: ret>0, PF≥1.0, WF P≥50%, WF Sh+≥50%, MDD>-20%) ──
+    # ── provisional paper candidate (자동 판정: ret>0, PF≥1.2, Sharpe≥0.45, WF P/Sh+≥60%, MDD>-20%) ──
     "relative_strength_rotation": {
         "status": "provisional_paper_candidate",
         "allowed_modes": ["backtest", "paper"],
@@ -46,11 +45,11 @@ STRATEGY_STATUS: dict[str, dict] = {
     },
 
     "scoring": {
-        "status": "provisional_paper_candidate",
+        "status": "paper_only",
         "allowed_modes": ["backtest", "paper"],
         "reason": (
-            "debiased +11.22%, PF 1.07, WF 5/6 positive, 3/6 Sharpe>0 (50% 경계 통과). MDD -14.55%. "
-            "provisional: 가중치 미최적화, 다중공선성 미해결. 최적화 후 재평가 필요."
+            "debiased +11.22%, PF 1.07, Sharpe -0.02, WF 5/6 positive, 3/6 Sharpe>0. MDD -14.55%. "
+            "paper_only: 관찰은 가능하지만 risk-adjusted alpha 미달. 가중치 최적화 후 재평가 필요."
         ),
     },
 
