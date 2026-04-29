@@ -1203,3 +1203,69 @@ class TestShadowEvidenceNotPromotable:
         assert len(real_records) == 1
         assert len(shadow_records) == 1
         assert real_records[0]["date"] == "2026-04-06"
+
+    def test_shadow_only_promotion_package_is_blocked(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        jsonl_path = evidence_dir / "daily_evidence_shadow_only.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": "shadow_only",
+                "execution_backed": False,
+                "evidence_mode": "shadow_bootstrap",
+                "daily_return": 0.1,
+                "cumulative_return": 6.0,
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.04,
+                "cash_adjusted_excess": 0.03,
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            })
+
+        pkg_path, _ = generate_promotion_package("shadow_only")
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 0
+        assert "no_execution_backed_evidence" in pkg["block_reasons"]
+        assert "insufficient_days=0/60" in pkg["block_reasons"]
+
+    def test_shadow_same_date_cannot_replace_real_paper_record(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        jsonl_path = evidence_dir / "daily_evidence_shadow_collision.jsonl"
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "shadow_collision",
+            "execution_backed": True,
+            "evidence_mode": "real_paper",
+            "daily_return": 0.2,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "shadow_collision",
+            "execution_backed": False,
+            "evidence_mode": "shadow_bootstrap",
+            "daily_return": 9.9,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+        records = get_canonical_records("shadow_collision")
+
+        assert len(records) == 1
+        assert records[0]["execution_backed"] is True
+        assert records[0]["daily_return"] == 0.2

@@ -578,7 +578,14 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 1. `strategies/__init__.py:is_strategy_allowed(strategy, "live")` — live_candidate만 허용
 2. 환경변수 `ENABLE_LIVE_TRADING=true`
 3. CLI 플래그 `--confirm-live`
-4. `main.py:_check_live_readiness_gate()` — 5개 조건 (승인 파일·WF·벤치마크·paper 60일·데이터), silent skip 불가
+4. `main.py:_check_live_readiness_gate()` → `core/live_gate.py:validate_live_readiness()`
+5. `reports/promotion/` canonical bundle이 현재 git commit, `Config.yaml_hash`, `Config.resolved_hash`와 일치해야 함
+6. `promotion_result.json`의 해당 전략 status가 `live_candidate`이고 `allowed_modes`에 `live`가 있어야 함
+7. `benchmark_comparison.json`에 전략별 양의 excess return과 excess Sharpe가 있어야 함
+8. `reports/paper_evidence/promotion_evidence_{strategy}.json` recommendation이 `ELIGIBLE`이어야 하며, 60영업일 execution-backed evidence, benchmark_final_ratio 80% 이상, 양의 excess/cumulative return, 최소 sell 5건, win_rate 45% 이상, frozen day 0을 만족해야 함
+9. canonical/evidence gate 통과 후 데이터 소스 health check를 수행
+
+레거시 `reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json`은 live 근거로 사용하지 않는다. 이 파일들이 남아 있어도 canonical bundle과 paper evidence가 현재 코드·설정과 맞지 않으면 live는 차단된다.
 
 ### Paper 모드 2가지
 
