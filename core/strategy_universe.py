@@ -5,8 +5,8 @@ operator-facing 전략 목록의 single source of truth.
 
 Source priority:
   1. strategies/__init__.py STRATEGY_STATUS (code registry — hard gate)
-  2. approved_strategies.json (promotion status)
-  3. runtime state (paper_runtime)
+  2. runtime state (paper_runtime)
+  3. legacy approved_strategies.json only for backward-compatible disabled flags
 
 규칙:
   - paper 대상 = STRATEGY_STATUS에서 allowed_modes에 "paper" 포함

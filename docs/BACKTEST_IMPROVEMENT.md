@@ -119,7 +119,7 @@
 | BV50/R50 Paper Trading 60영업일 | 높음 | **진행 중 — 2026-04-01 개시. Paper Evidence 체계 도입** |
 | Debiased 전략 재평가 | 높음 | **완료 — 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows** |
 | 승격 규칙 v3 자동 판정 | 높음 | **완료 — `core/promotion_engine.py` + `tools/evaluate_and_promote.py` artifact-driven** |
-| 주문 상태기계 | 높음 | **완료 — OrderStatus 9개 상태, FILLED 전 position 반영 없음, 테스트 226건 green** |
+| 주문 상태기계 | 높음 | **완료 — OrderStatus 9개 상태, FILLED 전 position 반영 없음, live/paper 회귀 테스트 green** |
 | 벤치마크 거래비용 반영 | 높음 | **완료 — `_buy_and_hold_metrics`에 commission/tax/slippage 적용** |
 | Paper Evidence 수집 체계 | 높음 | **완료 — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate** |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
@@ -138,7 +138,7 @@
 |------|------|
 | `quant_trader_design.md` §8 | 백테스팅 & 검증 전체 아키텍처 |
 | `reports/strategy_promotion_policy.md` | 전략 승격 정량 기준표 |
-| `reports/live_gate_policy.md` | Live 진입 5개 조건 |
+| `reports/live_gate_policy.md` | Live 진입 canonical/evidence hard gate |
 | `reports/paper_experiment_manifest.json` | 60영업일 paper 실험 설정 |
 | `reports/full_paper_lifecycle_test.json` | Lifecycle 테스트 4/4 PASS 결과 |
 | `reports/paper_evidence/` | Paper Evidence JSONL + promotion package |
