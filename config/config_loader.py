@@ -2,8 +2,11 @@
 설정 로더 모듈
 - YAML 설정 파일을 로드하여 딕셔너리로 반환
 - settings.yaml, strategies.yaml, risk_params.yaml 통합 관리
+- 환경변수 오버라이드: YAML 기본값 위에 환경변수가 우선
 """
 
+import hashlib
+import logging
 import os
 import yaml
 from pathlib import Path
@@ -68,14 +71,93 @@ def _override_with_env(settings: dict) -> dict:
     if "DART_API_KEY" in os.environ:
         dart["api_key"] = os.environ["DART_API_KEY"].strip()
 
-    # Paper 전용 프로필: QUANT_AUTO_ENTRY=true 환경변수로만 auto_entry 활성화.
-    # 기본 config(settings.yaml)는 auto_entry 미설정 = False 유지.
-    # live 모드에서는 auto_entry와 무관하게 hard gate가 차단.
+    return settings
+
+
+_BOOL_TRUE = frozenset({"true", "1", "on", "yes"})
+_BOOL_FALSE = frozenset({"false", "0", "off", "no"})
+
+
+def _resolve_auto_entry(settings: dict) -> dict:
+    """
+    QUANT_AUTO_ENTRY 환경변수로 trading.auto_entry를 오버라이드.
+
+    Precedence: ENV > YAML > default(false)
+    허용값: true/false/1/0/on/off/yes/no (대소문자 무시)
+    live 모드에서는 무시 + 경고 로그.
+    """
+    _log = logging.getLogger("config_loader")
     trading = settings.setdefault("trading", {})
-    if os.environ.get("QUANT_AUTO_ENTRY", "").lower() == "true":
-        trading["auto_entry"] = True
+    yaml_value = trading.get("auto_entry", False)
+    mode = trading.get("mode", "paper")
+
+    env_raw = os.environ.get("QUANT_AUTO_ENTRY")
+
+    if env_raw is not None:
+        normalized = env_raw.strip().lower()
+        if normalized in _BOOL_TRUE:
+            resolved = True
+        elif normalized in _BOOL_FALSE:
+            resolved = False
+        else:
+            raise ValueError(
+                f"QUANT_AUTO_ENTRY 환경변수 값이 유효하지 않습니다: {env_raw!r}. "
+                f"허용값: true/false/1/0/on/off/yes/no"
+            )
+        source = "ENV"
+    else:
+        resolved = bool(yaml_value)
+        source = "YAML"
+
+    # live 모드에서는 환경변수 오버라이드 무시
+    if mode == "live" and resolved and source == "ENV":
+        _log.warning(
+            "QUANT_AUTO_ENTRY=true 이지만 live 모드에서는 무시됩니다. "
+            "live 모드의 auto_entry는 YAML 설정(%s)을 따릅니다.", yaml_value,
+        )
+        resolved = bool(yaml_value)
+        source = "YAML (live override)"
+
+    trading["auto_entry"] = resolved
+    trading["_auto_entry_source"] = source
+
+    _log.info(
+        "auto_entry resolved: %s (source=%s, yaml=%s, env=%s, mode=%s)",
+        resolved, source, yaml_value, env_raw, mode,
+    )
 
     return settings
+
+
+def compute_yaml_hash() -> str:
+    """YAML 파일 원본의 SHA-256 해시 (파일 동결 확인용)."""
+    h = hashlib.sha256()
+    for fname in sorted([
+        "strategies.yaml", "risk_params.yaml",
+        "settings.yaml", "settings.yaml.example", "baskets.yaml",
+    ]):
+        fpath = CONFIG_DIR / fname
+        if fpath.exists():
+            h.update(fpath.read_bytes())
+    return h.hexdigest()
+
+
+def compute_resolved_hash(settings: dict, strategies: dict, risk_params: dict) -> str:
+    """환경변수 오버라이드 반영 후 실제 실행 설정의 SHA-256 해시."""
+    import json
+    # 해시에 포함할 키만 선별 (민감 정보 제외, 실행 동작에 영향 주는 설정만)
+    trading_keys = {
+        k: v for k, v in settings.get("trading", {}).items()
+        if not k.startswith("_")  # _auto_entry_source 같은 메타 필드 제외
+    }
+    watchlist_keys = settings.get("watchlist", {})
+    payload = json.dumps(
+        {"trading": trading_keys, "watchlist": watchlist_keys,
+         "strategies": strategies, "risk_params": risk_params},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
 
 def load_settings() -> dict:
     """전체 설정 로드. settings.yaml 없으면 기본 dict 사용(키는 환경변수 전용)."""
@@ -91,7 +173,9 @@ def load_settings() -> dict:
             "watchlist": {},
             "dart": {},
         }
-    return _override_with_env(settings)
+    settings = _override_with_env(settings)
+    settings = _resolve_auto_entry(settings)
+    return settings
 
 
 def load_strategies() -> dict:
@@ -137,6 +221,10 @@ class Config:
         self._settings = load_settings()
         self._strategies = load_strategies()
         self._risk_params = load_risk_params()
+        self._yaml_hash = compute_yaml_hash()
+        self._resolved_hash = compute_resolved_hash(
+            self._settings, self._strategies, self._risk_params,
+        )
         self._validate_critical_params()
 
     def _validate_critical_params(self):
@@ -284,6 +372,26 @@ class Config:
     def transaction_costs(self) -> dict:
         """거래 비용 설정"""
         return self._risk_params.get("transaction_costs", {})
+
+    @property
+    def auto_entry(self) -> bool:
+        """resolved auto_entry 값 (ENV > YAML > default)."""
+        return self.trading.get("auto_entry", False)
+
+    @property
+    def auto_entry_source(self) -> str:
+        """auto_entry 값의 출처: 'ENV', 'YAML', 'YAML (live override)'."""
+        return self.trading.get("_auto_entry_source", "YAML")
+
+    @property
+    def yaml_hash(self) -> str:
+        """YAML 파일 원본 해시 (동결 확인용)."""
+        return self._yaml_hash
+
+    @property
+    def resolved_hash(self) -> str:
+        """환경변수 반영 후 실행 설정 해시."""
+        return self._resolved_hash
 
     def get_account_no(self, strategy: str = "") -> str:
         """
