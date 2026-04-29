@@ -224,12 +224,20 @@ def get_canonical_records(strategy: str) -> list[dict]:
     """
     Canonical view: 같은 date에 여러 record(provisional → final)가 있을 때 최신만 반환.
     JSONL은 append-only이므로 같은 date의 뒤쪽 record가 최신.
+    단, execution-backed real paper 기록은 shadow 기록으로 덮어쓰지 않는다.
     """
     jsonl_path = _evidence_path(strategy)
     all_records = _read_all_evidence(jsonl_path)
     by_date: dict[str, dict] = {}
     for r in all_records:
-        by_date[r["date"]] = r  # later entry wins
+        date = r["date"]
+        prev = by_date.get(date)
+        if prev is not None:
+            prev_exec = prev.get("execution_backed", True)
+            curr_exec = r.get("execution_backed", True)
+            if prev_exec and not curr_exec:
+                continue
+        by_date[date] = r  # later entry wins unless it would downgrade real paper to shadow
     return list(by_date.values())
 
 
@@ -1076,13 +1084,16 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     records = [r for r in all_records if r.get("execution_backed", True)]
     shadow_records = [r for r in all_records if not r.get("execution_backed", True)]
     total_days = len(records)
+    promotable_days = total_days
     shadow_days = len(shadow_records)
+    shadow_only_fallback = False
 
     if total_days == 0:
         logger.warning("Promotion package: no execution-backed evidence for {}", strategy)
         # shadow만 있는 경우: blocked package 생성
         records = all_records  # fallback for package generation
         total_days = len(records)
+        shadow_only_fallback = True
 
     # aggregate metrics (execution-backed records 기준)
     daily_returns = [r.get("daily_return") for r in records if r.get("daily_return") is not None]
@@ -1133,12 +1144,15 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     # recommendation
     blocked = False
     block_reasons = []
+    if shadow_only_fallback:
+        blocked = True
+        block_reasons.append("no_execution_backed_evidence")
     if frozen_days > 0:
         blocked = True
         block_reasons.append("frozen_days=%d" % frozen_days)
-    if total_days < 60:
+    if promotable_days < 60:
         blocked = True
-        block_reasons.append("insufficient_days=%d/60" % total_days)
+        block_reasons.append("insufficient_days=%d/60" % promotable_days)
     if max_mdd < -20:
         blocked = True
         block_reasons.append("max_mdd=%.1f%%" % max_mdd)
@@ -1209,7 +1223,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "excess_non_null_days": excess_non_null_days,
         "excess_non_null_ratio": round(excess_non_null_ratio, 4),
         # provenance 분리 (pilot / non-pilot / shadow)
-        "real_paper_days_total": sum(1 for r in all_records if r.get("execution_backed", True)),
+        "real_paper_days_total": promotable_days,
         "pilot_real_paper_days": sum(
             1 for r in all_records
             if r.get("execution_backed", True)
@@ -1224,8 +1238,8 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         ),
         "shadow_days": shadow_days,
         # backward compat aliases
-        "real_paper_days": sum(1 for r in all_records if r.get("execution_backed", True)),
-        "promotable_evidence_days": sum(1 for r in all_records if r.get("execution_backed", True)),
+        "real_paper_days": promotable_days,
+        "promotable_evidence_days": promotable_days,
         "non_promotable_shadow_days": shadow_days,
         "recommendation": "BLOCKED" if blocked else "ELIGIBLE",
         "block_reasons": block_reasons if blocked else [],
