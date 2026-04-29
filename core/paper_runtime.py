@@ -20,7 +20,7 @@ Legacy Evidence:
   schema_version이 없거나 < CURRENT_SCHEMA_VERSION인 record는
   runtime state 계산의 분모에서 제외(quarantine)한다.
 
-approved_strategies.json / live eligibility는 절대 자동 변경하지 않는다.
+canonical promotion bundle / live eligibility는 절대 자동 변경하지 않는다.
 """
 
 from __future__ import annotations
@@ -528,7 +528,7 @@ def generate_runtime_audit(strategy: str) -> Path | None:
         reasons = "; ".join(d.get("reasons", [])) or d.get("reason", "")
         lines.append(f"| {at} | {action} | {st} | {reasons} |")
 
-    lines.extend(["", "---", "approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다."])
+    lines.extend(["", "---", "canonical promotion bundle / live eligibility는 이 도구로 자동 수정되지 않습니다."])
 
     path = RUNTIME_DIR / f"runtime_audit_{strategy}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -653,7 +653,7 @@ def generate_rebuild_report(strategy: str, history: list[dict]) -> Path:
 # ═══════════════════════════════════════════════════════════════
 
 def _is_strategy_registered(strategy: str) -> bool:
-    """approved_strategies.json 또는 config에서 전략 등록 여부 확인.
+    """legacy approved_strategies.json 또는 config에서 전략 등록 여부 확인.
     없으면 True (paper 모드에서는 기본 허용 — research_disabled는 명시적 비활성만)."""
     try:
         approved_path = Path("reports/approved_strategies.json")

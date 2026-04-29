@@ -5,14 +5,18 @@
 - FULL Sharpe > -1.0
 - FULL MDD > -30%
 
-## experimental -> paper_candidate
-- OOS Sharpe >= 0.5
-- WF 통과율 >= 60%
-- EV/trade > 0
-- 비용반영후 CAGR > 0%
-- 벤치마크 초과수익 > 0%
-- Turnover < 1000%/y
-- MDD > -25%
+## paper_only -> provisional_paper_candidate
+- Full-period Sharpe >= 0.45
+- Profit Factor >= 1.20
+- WF positive window >= 60%
+- WF Sharpe>0 window >= 60%
+- WF windows >= 3
+- WF trades >= 30
+- EV/trade > 0 when available
+- 비용반영후 CAGR > 0% when available
+- Turnover < 1000%/y when available
+- MDD > -20%
+- 벤치마크 초과수익은 artifact에 기록하고 live gate에서 양수 필수
 
 ## paper_candidate -> live_candidate
 - Paper >= 60영업일
