@@ -198,7 +198,7 @@ def _check_runtime_state(strategy, date, result, checks, actions):
         elif state.state == "research_disabled":
             checks.append(PreflightCheck("runtime_state", "fail",
                           "strategy disabled in registry"))
-            actions.append("approved_strategies.json에서 전략 활성화 필요")
+            actions.append("strategy registry에서 전략 상태 재검토 필요")
     except Exception as e:
         checks.append(PreflightCheck("runtime_state", "fail", f"exception: {e}"))
 
@@ -449,7 +449,7 @@ def _save_session_bootstrap(date: str, strategies: list[PreflightResult]):
                 lines.append(f"  - {a}")
             lines.append("")
     lines.append("---")
-    lines.append("approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다.")
+    lines.append("canonical promotion bundle / live eligibility는 이 도구로 자동 수정되지 않습니다.")
 
     path = RUNTIME_DIR / f"session_bootstrap_{date}.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

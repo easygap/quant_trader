@@ -8,7 +8,7 @@ pilot에서 생성된 evidence는 execution_backed=True, evidence_mode="pilot_pa
 promotable evidence로 카운트된다.
 
 pilot authorization은 promotion/live 승격과 별개인 운영 override다.
-approved_strategies.json / live eligibility는 절대 자동 변경하지 않는다.
+canonical promotion bundle / live eligibility는 절대 자동 변경하지 않는다.
 """
 
 from __future__ import annotations
@@ -461,7 +461,7 @@ def save_pilot_session_artifact(strategy: str, date: str,
         ])
 
     md_lines.extend(["", "---",
-                      "approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다."])
+                      "canonical promotion bundle / live eligibility는 이 도구로 자동 수정되지 않습니다."])
 
     md_path = RUNTIME_DIR / f"pilot_session_{strategy}_{date}.md"
     md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
@@ -709,7 +709,7 @@ def generate_launch_readiness_artifact(strategy: str) -> tuple[Path, Path]:
         md.extend(["", "## All pre-conditions met."])
 
     md.extend(["", "---",
-               "approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다."])
+               "canonical promotion bundle / live eligibility는 이 도구로 자동 수정되지 않습니다."])
 
     md_path = RUNTIME_DIR / f"{strategy}_pilot_launch_readiness.md"
     md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
@@ -806,7 +806,7 @@ def generate_pilot_runbook(strategy: str) -> Path:
         "- operator 판단 → disable 명령으로 즉시 중단",
         "",
         "---",
-        "approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다.",
+        "canonical promotion bundle / live eligibility는 이 도구로 자동 수정되지 않습니다.",
         "pilot_real_paper_days는 promotion 카운트에 포함되지만, live 승격은 별도 수동 승인 필요.",
     ])
 

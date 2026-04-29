@@ -282,7 +282,7 @@ quant_trader/
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
 | **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
-| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + MDD 기준. `tools/evaluate_and_promote.py --canonical`으로 실행. |
+| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행. |
 
 ### 3.4 strategies/
 
@@ -564,7 +564,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | Paper Status |
 |------|------|-----------|------|-----|-----------|--------------|
 | **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | — |
-| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | clean_days=3, infra_ready, 60영업일 freeze pack |
+| **scoring** | `paper_only` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | risk-adjusted alpha 미달 |
 | **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | — |
 | **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | — |
 | **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | — |
@@ -673,17 +673,17 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Paper 실험 freeze pack** | scoring 2026-03-27~2026-06-19 60영업일 관측 기준 동결. BV50/R50 paper 운영 산출물은 legacy/비교 자료로 보존 |
 | ✅ **주문 상태기계** | `core/order_state.py` — OrderStatus 9개 상태, FILLED 전 position 없음 invariant |
 | ✅ **승격 규칙 v3** | `core/promotion_engine.py` — metrics 기반 자동 판정 + artifact-driven |
-| ✅ **`--force-live` 제거** | hard gate 우회 불가. approved_strategies.json 미존재 시 에러 |
+| ✅ **`--force-live` 제거** | canonical bundle + paper evidence hard gate 우회 불가 |
 | ✅ **벤치마크 거래비용** | `_buy_and_hold_metrics`에 commission/tax/slippage 반영 |
 | ✅ **debiased 전략 재평가** | 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows |
-| ✅ **테스트 226건 green** | 기존 7 fail 해소 + 신규 83건 추가 |
+| ✅ **테스트 282건 green** | live/paper/promotion 회귀 묶음 기준 |
 | ✅ **Paper Runtime State Machine** | `core/paper_runtime.py` — 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine |
 | ✅ **Paper Pilot Authorization** | `core/paper_pilot.py` — launch readiness + pilot auth + 리스크 캡 |
 | ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
-| ✅ **scoring infra_ready** | clean_final_days=3, notifier configured, benchmark_ready (2026-04-09) |
+| ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 

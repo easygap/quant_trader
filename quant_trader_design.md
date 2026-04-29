@@ -61,7 +61,7 @@
 | 전략 | 상태 | 허용 모드 | Ret% | PF | WF P%/Sh+% | 사유 |
 |------|------|-----------|------|-----|-----------|------|
 | **relative_strength_rotation** | `provisional_paper_candidate` | backtest, paper | +18.09 | 1.62 | 100/83.3 | debiased WF 통과. 경제적 alpha 미확인 |
-| **scoring** | `provisional_paper_candidate` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | WF Sh+ 경계 통과. 60영업일 freeze pack 관측 중 |
+| **scoring** | `paper_only` | backtest, paper | +11.22 | 1.07 | 83.3/50.0 | Sharpe -0.02, PF 1.07로 risk-adjusted 후보 기준 미달 |
 | **breakout_volume** | `disabled` | backtest only | -13.31 | 0.79 | 0/0 | PF<1. BV50/R50 Paper Sleeve A (운영 사실, merit와 무관) |
 | **mean_reversion** | `disabled` | backtest only | -8.36 | 0.85 | 33.3/0 | 유니버스 의존적 |
 | **trend_following** | `disabled` | backtest only | -6.94 | 0.67 | 16.7/0 | PF<1. 한국 시장 구조적 비유효 |
@@ -69,15 +69,16 @@
 
 **승격 규칙 v3** (`core/promotion_engine.py`):
 - `research_only` → `paper_only` → `provisional_paper_candidate` → `live_candidate`
-- 각 단계 정량 기준: ret>0, PF≥1.0, WF P≥50%, WF Sh+≥50%, MDD>-20%, Paper 60일, excess≥0
+- 각 단계 정량 기준: ret>0, PF≥1.0, WF P≥50%, provisional은 Sharpe≥0.45, PF≥1.2, WF P/Sh+≥60%, MDD>-20%, live는 Paper 60일 + eligible evidence + benchmark excess>0
 - metrics 기반 자동 판정. 수동 override 불가. CI 테스트로 registry-engine 일치 강제
 
-**Live 진입 Hard Gate** (5개 조건, 우회 불가 — `--force-live` 제거됨):
-1. 승인된 전략 (`reports/approved_strategies.json` + config hash + auto_generated 검증)
-2. WF 통과 (`reports/validation_walkforward_*.json`)
-3. 벤치마크 초과수익 ≥ 0 (`reports/benchmark_comparison.json`)
-4. Paper 60영업일 (DB `portfolio_snapshots`)
-5. 데이터 소스 health check
+**Live 진입 Hard Gate** (우회 불가 — `--force-live` 제거됨):
+1. 현재 commit/config와 일치하는 `reports/promotion/` canonical bundle
+2. `promotion_result.json`에서 해당 전략이 `live_candidate`
+3. 전략별 benchmark excess return/Sharpe 모두 양수
+4. `promotion_evidence_{strategy}.json` recommendation `ELIGIBLE`
+5. execution-backed Paper 60영업일, benchmark_final_ratio 80% 이상, frozen day 0
+6. 데이터 소스 health check
 
 **주문 상태기계** (v5.0, `core/order_state.py`):
 - 9개 상태: NEW → SUBMITTED → ACKED → FILLED / PARTIAL_FILLED / REJECTED / CANCELLED / EXPIRED → RECONCILED
@@ -1012,7 +1013,7 @@ quant_trader/
 | **validate** | 전략 검증 (3~5년, 샤프·MDD·벤치마크·in/out-of-sample). `--walk-forward` 시 워크포워드 | `run_strategy_validation()` → StrategyValidator.run / run_walk_forward |
 | **paper** | 모의투자 1회 순회 (워치리스트 종료 후 프로세스 종료) | `run_paper_trading()` → WatchlistManager, 전략.generate_signal, OrderExecutor(paper) |
 | **schedule** | 모의용 무한 스케줄 루프 (systemd 상시 구동용). 기본=signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. `trading.mode=live`이면 거부. runtime state가 entry만 막아도 exit/finalize/evidence는 계속 허용 | `run_scheduler_loop()` → `runtime_lock` + `Scheduler.run()` |
-| **live** | 실전 매매. **4중 보안**: ① `is_strategy_allowed(live)` ② `ENABLE_LIVE_TRADING=true` ③ `--confirm-live` ④ `_check_live_readiness_gate()` 5개 조건 | `run_live_trading()` → hard gate → KIS 인증 → Scheduler.run() |
+| **live** | 실전 매매. **4중 보안**: ① `is_strategy_allowed(live)` ② `ENABLE_LIVE_TRADING=true` ③ `--confirm-live` ④ canonical bundle + paper evidence hard gate | `run_live_trading()` → hard gate → KIS 인증 → Scheduler.run() |
 | **liquidate** | 긴급 전 종목 매도 | `run_emergency_liquidate()` → DB 포지션 조회 → 종목별 매도 |
 | **compare** | 모의투자 vs 백테스트 비교 + **실전 전환 준비 평가** | `run_compare_paper_backtest()` → paper_compare.run_compare + check_live_readiness |
 | **optimize** | 전략 파라미터 최적화 (grid / bayesian / 가중치 대칭 Grid) | `run_param_optimize()` → param_optimizer, train_ratio·OOS |
@@ -1354,7 +1355,7 @@ quant_trader/
 
 ### v5.0 운영 안정성 + 전략 재평가 (코드 감사 대응)
 
-- [x] **`--force-live` 제거** — hard gate 우회 불가. approved_strategies.json 미존재 시 즉시 에러
+- [x] **`--force-live` 제거** — canonical bundle + paper evidence hard gate 우회 불가
 - [x] **OrderGuard 수정** — mark_pending을 API 호출 이전으로, 체결/실패 후 clear() 호출
 - [x] **sync_with_broker PositionLock** — 동기화 중 position 동시 접근 방지
 - [x] **signal_at/order_at/price_gap/peak_value 마이그레이션** — 기존 DB 자동 컬럼 추가
@@ -1366,8 +1367,8 @@ quant_trader/
 - [x] **debiased 전략 평가** — 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows
 - [x] **승격 규칙 v3** — `core/promotion_engine.py` metrics 기반 자동 판정 + artifact-driven
 - [x] **Paper Evidence 체계** — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate
-- [x] **전략 분류 확정** — rotation/scoring: provisional. BV/MR/TF/ensemble: disabled (research_only)
-- [x] **테스트 226건 전체 green** — 기존 7 fail 해소 + 신규 83건 추가
+- [x] **전략 분류 확정** — rotation: provisional, scoring: paper_only. BV/MR/TF/ensemble: disabled (research_only)
+- [x] **테스트 282건 회귀 green** — live/paper/promotion 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
 

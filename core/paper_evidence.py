@@ -8,7 +8,8 @@ Paper Evidence 런타임 수집 모듈
 또한 주간 markdown 요약, 60일 promotion evidence package,
 approval_checklist.md 를 생성하는 함수를 제공한다.
 
-Live eligibility(approved_strategies.json)는 절대 자동 수정하지 않는다.
+Live eligibility는 canonical promotion bundle과 registry review에서만 결정한다.
+이 모듈은 evidence와 checklist만 생성하고 live 상태는 자동 수정하지 않는다.
 """
 
 from __future__ import annotations
@@ -1073,7 +1074,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     """
     60일 누적 evidence에서 promotion package + approval checklist 생성.
     Returns (package_path, checklist_path) or (None, None).
-    approved_strategies.json은 절대 수정하지 않는다.
+    live eligibility는 절대 수정하지 않는다.
     """
     all_records = get_canonical_records(strategy)
     if not all_records:
@@ -1263,8 +1264,8 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
         f"Generated: {package['generated_at']}",
         "",
         "## WARNING",
-        "> approved_strategies.json은 이 도구로 절대 자동 수정되지 않습니다.",
-        "> live 전환은 반드시 수동 승인 후 approved_strategies.json을 직접 업데이트하세요.",
+        "> 이 도구는 live eligibility를 자동 수정하지 않습니다.",
+        "> live 전환은 canonical promotion bundle + registry review + hard gate 통과가 필요합니다.",
         "",
         f"## Recommendation: **{rec}**",
     ]
@@ -1315,7 +1316,7 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("- [ ] Anomaly history 검토 완료")
     lines.append("- [ ] 운영 메트릭 (fill rate, reject rate) 정상 범위 확인")
     lines.append("- [ ] config_hash 변경 여부 확인")
-    lines.append("- [ ] approved_strategies.json 수동 업데이트 완료")
+    lines.append("- [ ] strategy registry / promotion artifact review 완료")
     lines.append("- [ ] 승인자 서명: _______________")
     lines.append("")
     lines.append("---")

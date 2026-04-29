@@ -19,7 +19,7 @@ Usage:
     python tools/paper_runtime_status.py --strategy scoring --audit
 
 Note:
-    approved_strategies.json은 절대 수정하지 않습니다.
+    canonical promotion bundle / live eligibility는 절대 수정하지 않습니다.
 """
 
 import argparse

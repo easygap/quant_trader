@@ -332,7 +332,8 @@ class TestFreezeUnfreeze:
         content = path.read_text(encoding="utf-8")
         assert "Runtime Audit" in content
         assert "manual_freeze" in content
-        assert "approved_strategies.json" in content
+        assert "canonical promotion bundle" in content
+        assert "live eligibility" in content
 
 
 # ═══════════════════════════════════════════════════════════════

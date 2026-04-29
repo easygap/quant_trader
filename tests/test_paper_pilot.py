@@ -22,6 +22,10 @@ from dataclasses import asdict
 import pytest
 
 
+PILOT_STRATEGY = "relative_strength_rotation"
+OBSERVATION_STRATEGY = "scoring"
+
+
 @pytest.fixture(autouse=True)
 def _isolate_dirs(monkeypatch, tmp_path):
     import core.paper_evidence as pe
@@ -114,7 +118,7 @@ class TestPilotBasic:
 
     def test_valid_pilot_entry_allowed(self, evidence_dir, runtime_dir, fresh_db):
         """blocked + valid pilot + caps OK → entry allowed."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-03", "same_universe_excess": None, "benchmark_status": "failed"},
             {"date": "2026-04-06", "same_universe_excess": -1.75, "benchmark_status": "final"},
         ])
@@ -126,17 +130,17 @@ class TestPilotBasic:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30",
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30",
                      max_orders=2, max_notional=1_000_000, reason="test pilot")
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-08")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-08")
         assert result.allowed is True
         assert result.remaining_orders is not None
         assert result.remaining_orders > 0
 
     def test_cap_hit_blocks_entry(self, evidence_dir, runtime_dir, fresh_db):
         """max_orders_per_day 초과 → entry blocked."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -146,27 +150,27 @@ class TestPilotBasic:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30", max_orders=1)
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30", max_orders=1)
 
         # 오늘 주문 1건 삽입
         from database.models import get_session, TradeHistory
         session = get_session()
         session.add(TradeHistory(
-            account_key="scoring", symbol="005930", action="BUY",
+            account_key=PILOT_STRATEGY, symbol="005930", action="BUY",
             price=60000, quantity=10, total_amount=600000,
-            mode="paper", strategy="scoring",
+            mode="paper", strategy=PILOT_STRATEGY,
             executed_at=datetime(2026, 4, 7, 10, 0),
         ))
         session.commit()
         session.close()
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-07")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert result.allowed is False
         assert "max_orders_per_day" in result.reason
 
     def test_pilot_expired_blocks(self, evidence_dir, runtime_dir, fresh_db):
         """pilot 기간 만료 → blocked."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -176,14 +180,14 @@ class TestPilotBasic:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-03-01", "2026-03-31")  # 이미 만료
+        enable_pilot(PILOT_STRATEGY, "2026-03-01", "2026-03-31")  # 이미 만료
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-07")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert result.allowed is False
 
     def test_notifier_unhealthy_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """notifier unconfigured → pilot entry blocked."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -193,9 +197,9 @@ class TestPilotBasic:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": False}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-07")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert result.allowed is False
         assert "notifier" in result.reason.lower()
 
@@ -208,6 +212,13 @@ class TestPilotEligibility:
 
         with pytest.raises(ValueError, match="not paper-eligible"):
             enable_pilot("breakout_volume", "2026-04-01", "2026-04-30")
+
+    def test_paper_only_strategy_pilot_rejected(self, evidence_dir, runtime_dir, fresh_db):
+        """paper_only 관찰 전략은 pilot authorization 대상이 아니다."""
+        from core.paper_pilot import enable_pilot
+
+        with pytest.raises(ValueError, match="pilot requires provisional_paper_candidate"):
+            enable_pilot(OBSERVATION_STRATEGY, "2026-04-01", "2026-04-30")
 
     def test_rotation_no_prerequisites(self, evidence_dir, runtime_dir, fresh_db):
         """rotation no evidence → prerequisites not met."""
@@ -237,7 +248,7 @@ class TestPilotSchedulerIntegration:
         """blocked + pilot auth → scheduler execute 통과."""
         latest = datetime.now() - timedelta(days=1)
         earlier = latest - timedelta(days=3)
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": earlier.strftime("%Y-%m-%d"), "same_universe_excess": None, "benchmark_status": "failed"},
             {"date": latest.strftime("%Y-%m-%d"), "same_universe_excess": -1.75, "benchmark_status": "final"},
         ])
@@ -250,14 +261,14 @@ class TestPilotSchedulerIntegration:
 
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         valid_to = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-        enable_pilot("scoring", valid_from, valid_to, max_orders=5)
+        enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
 
         # scheduler shadow
         from core.scheduler import Scheduler
         sched = object.__new__(Scheduler)
         sched.config = MagicMock()
         sched.config.trading = {"mode": "paper"}
-        sched.strategy_name = "scoring"
+        sched.strategy_name = PILOT_STRATEGY
         sched._mode = "paper"
         sched.discord = MagicMock()
         sched.discord.send_message = MagicMock(return_value=True)
@@ -299,14 +310,14 @@ class TestPilotSchedulerIntegration:
         session = get_session()
         block_events = session.query(OperationEvent).filter(
             OperationEvent.event_type == "RUNTIME_BLOCK",
-            OperationEvent.strategy == "scoring",
+            OperationEvent.strategy == PILOT_STRATEGY,
         ).all()
         session.close()
         assert len(block_events) == 0
 
     def test_preflight_shows_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """preflight에 pilot authorization 표시."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -315,10 +326,10 @@ class TestPilotSchedulerIntegration:
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
         from core.paper_pilot import enable_pilot
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
         from core.paper_preflight import run_preflight
-        r = run_preflight("scoring", "2026-04-06")
+        r = run_preflight(PILOT_STRATEGY, "2026-04-06")
         assert r.pilot_authorized is True
         assert r.entry_allowed is True  # pilot override
 
@@ -422,15 +433,14 @@ class TestPilotSchedulerIntegration:
         assert r["pilot_authorized"] is True
 
     def test_approved_strategies_not_changed(self, evidence_dir, runtime_dir, fresh_db):
-        """approved_strategies.json / live eligibility 자동 변경 없음."""
-        import shutil
+        """legacy approved_strategies.json / live eligibility 자동 변경 없음."""
         approved_path = Path("reports/approved_strategies.json")
         if approved_path.exists():
             original = approved_path.read_text(encoding="utf-8")
         else:
             original = None
 
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -439,8 +449,8 @@ class TestPilotSchedulerIntegration:
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
         from core.paper_pilot import enable_pilot, disable_pilot
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
-        disable_pilot("scoring", "test cleanup")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+        disable_pilot(PILOT_STRATEGY, "test cleanup")
 
         # approved_strategies.json 변경 없음
         if original is not None:
@@ -451,7 +461,7 @@ class TestPilotEvidenceFreshness:
 
     def test_stale_evidence_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """evidence가 너무 오래됨 → pilot entry blocked."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-03-20", "benchmark_status": "final"},
         ])
 
@@ -461,15 +471,15 @@ class TestPilotEvidenceFreshness:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-08")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-08")
         assert result.allowed is False
         assert "stale" in result.reason.lower()
 
     def test_benchmark_final_ratio_low_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """benchmark final ratio 낮음 → pilot blocked."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-03", "benchmark_status": "failed"},
             {"date": "2026-04-04", "benchmark_status": "failed"},
             {"date": "2026-04-05", "benchmark_status": "failed"},
@@ -483,9 +493,9 @@ class TestPilotEvidenceFreshness:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
-        result = check_pilot_entry("scoring", as_of_date="2026-04-08")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-08")
         assert result.allowed is False
         assert "benchmark" in result.reason.lower()
 
@@ -526,7 +536,7 @@ class TestPilotSessionE2E:
         """pilot entry 허용 시 _pilot_session이 자동 설정된다."""
         latest = datetime.now() - timedelta(days=1)
         earlier = latest - timedelta(days=3)
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": earlier.strftime("%Y-%m-%d"), "same_universe_excess": None, "benchmark_status": "failed"},
             {"date": latest.strftime("%Y-%m-%d"), "same_universe_excess": 0.05, "benchmark_status": "final"},
         ])
@@ -538,9 +548,9 @@ class TestPilotSessionE2E:
         from core.paper_pilot import enable_pilot
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         valid_to = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-        enable_pilot("scoring", valid_from, valid_to, max_orders=5)
+        enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
 
-        sched = self._make_scheduler("scoring", evidence_dir, runtime_dir)
+        sched = self._make_scheduler(PILOT_STRATEGY, evidence_dir, runtime_dir)
         sched._entry_candidates = [
             {"symbol": "005930", "price": 62000, "atr": 1200, "score": 0.8,
              "reason": "test", "timestamp": datetime.now()},
@@ -707,7 +717,7 @@ class TestPilotSessionE2E:
 
     def test_pilot_session_artifact_saved(self, evidence_dir, runtime_dir, fresh_db):
         """pilot session artifact가 정상 저장되는지."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
@@ -717,22 +727,22 @@ class TestPilotSessionE2E:
         (runtime_dir / "notifier_health.json").write_text(
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
         pilot_session = {
             "active": True, "pilot_authorized": True,
             "pilot_caps_snapshot": {"max_orders_per_day": 2},
             "session_mode": "pilot_paper", "evidence_mode": "pilot_paper",
         }
-        json_path = save_pilot_session_artifact("scoring", "2026-04-07", pilot_session)
+        json_path = save_pilot_session_artifact(PILOT_STRATEGY, "2026-04-07", pilot_session)
 
         assert json_path.exists()
         artifact = json.loads(json_path.read_text(encoding="utf-8"))
-        assert artifact["strategy"] == "scoring"
+        assert artifact["strategy"] == PILOT_STRATEGY
         assert artifact["pilot_session"]["active"] is True
         assert artifact["evidence_snapshot"] is not None
 
-        md_path = runtime_dir / "pilot_session_scoring_2026-04-07.md"
+        md_path = runtime_dir / f"pilot_session_{PILOT_STRATEGY}_2026-04-07.md"
         assert md_path.exists()
 
 
@@ -752,9 +762,9 @@ class TestLaunchReadiness:
         assert lr["remaining_clean_days"] == 2
         assert any("clean_final_days" in b for b in lr["blocking_requirements"])
 
-    def test_scoring_clean3_notifier_pilot_ready(self, evidence_dir, runtime_dir, fresh_db):
-        """scoring clean_final_days=3 + notifier + pilot auth → launch_ready=true."""
-        _seed_v2(evidence_dir, "scoring", [
+    def test_rotation_clean3_notifier_pilot_ready(self, evidence_dir, runtime_dir, fresh_db):
+        """rotation clean_final_days=3 + notifier + pilot auth → launch_ready=true."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-03", "benchmark_status": "final"},
             {"date": "2026-04-04", "benchmark_status": "final"},
             {"date": "2026-04-06", "benchmark_status": "final"},
@@ -765,9 +775,9 @@ class TestLaunchReadiness:
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
         from core.paper_pilot import enable_pilot, compute_launch_readiness
-        enable_pilot("scoring", "2026-04-01", "2026-04-30")
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
-        lr = compute_launch_readiness("scoring", as_of_date="2026-04-07")
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert lr["clean_final_days_current"] == 3
         assert lr["remaining_clean_days"] == 0
         assert lr["notifier_ready"] is True
@@ -778,7 +788,7 @@ class TestLaunchReadiness:
 
     def test_infra_ready_but_no_pilot_auth(self, evidence_dir, runtime_dir, fresh_db):
         """모든 인프라 조건 충족, pilot auth만 없음 → infra_ready=true, launch_ready=false."""
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-03", "benchmark_status": "final"},
             {"date": "2026-04-04", "benchmark_status": "final"},
             {"date": "2026-04-06", "benchmark_status": "final"},
@@ -789,7 +799,7 @@ class TestLaunchReadiness:
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
         from core.paper_pilot import compute_launch_readiness
-        lr = compute_launch_readiness("scoring", as_of_date="2026-04-07")
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert lr["infra_ready"] is True
         assert lr["launch_ready"] is False
         assert lr["pilot_authorization_present"] is False
@@ -799,7 +809,7 @@ class TestLaunchReadiness:
         from core.paper_evidence import _append_jsonl
 
         # v1 legacy record
-        jsonl_path = evidence_dir / "daily_evidence_scoring.jsonl"
+        jsonl_path = evidence_dir / f"daily_evidence_{PILOT_STRATEGY}.jsonl"
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         _append_jsonl(jsonl_path, {
             "date": "2026-03-30", "portfolio_value": 10_000_000,
@@ -807,7 +817,7 @@ class TestLaunchReadiness:
         })
 
         # v2 clean records
-        _seed_v2(evidence_dir, "scoring", [
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
             {"date": "2026-04-04", "benchmark_status": "final"},
             {"date": "2026-04-05", "benchmark_status": "final"},
             {"date": "2026-04-06", "benchmark_status": "final"},
@@ -818,7 +828,7 @@ class TestLaunchReadiness:
             json.dumps({"discord_configured": True}), encoding="utf-8")
 
         from core.paper_pilot import compute_launch_readiness
-        lr = compute_launch_readiness("scoring", as_of_date="2026-04-07")
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert lr["quarantined_records"] >= 1
         assert lr["clean_final_days_current"] == 3
         assert lr["infra_ready"] is True

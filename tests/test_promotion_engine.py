@@ -96,6 +96,36 @@ class TestPromotionRules:
         r = promote(m)
         assert r.status == "provisional_paper_candidate"
 
+    def test_provisional_requires_sharpe_floor(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.1)
+        r = promote(m)
+        assert r.status == "paper_only"
+
+    def test_provisional_requires_profit_factor_floor(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.05, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5)
+        r = promote(m)
+        assert r.status == "paper_only"
+
+    def test_provisional_requires_ev_when_present(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            ev_per_trade=-1)
+        r = promote(m)
+        assert r.status == "paper_only"
+
+    def test_provisional_blocks_extreme_turnover_when_present(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            turnover_per_year=1200)
+        r = promote(m)
+        assert r.status == "paper_only"
+
     def test_live_candidate_requires_paper(self):
         m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
                             wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
@@ -166,10 +196,10 @@ class TestDebiasedPromotions:
         r = promote(_TEST_METRICS["relative_strength_rotation"])
         assert r.status == "provisional_paper_candidate"
 
-    def test_scoring_is_provisional(self):
-        """scoring: WF Sh+ 50% ≥ 50% 경계 → provisional 통과."""
+    def test_scoring_is_paper_only(self):
+        """scoring: 절대수익은 양수지만 Sharpe/PF/WF 안정성 미달 → paper_only."""
         r = promote(_TEST_METRICS["scoring"])
-        assert r.status == "provisional_paper_candidate"
+        assert r.status == "paper_only"
 
     def test_breakout_volume_is_research_only(self):
         """BV는 return<0, PF<1 → research_only. paper_only가 되면 안 됨."""
