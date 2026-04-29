@@ -135,11 +135,44 @@ class Scheduler:
         self._loop_metrics = LoopMetrics()
         # 대시보드용: 동일 (종목, 신호, 점수) 반복 기록 방지
         self._last_signal_for_dashboard: dict[str, tuple] = {}
+        # Paper Evidence: OrderExecutor 하루 동안 유지 (order_book 누적)
+        self._order_executor = None
+        self._restart_recovery_count: int = 0
+
+        # Pilot session context — 당일 pilot entry가 허용됐으면 여기에 기록
+        # post-market evidence 수집 시 자동 전달되어 provenance 일관성 보장
+        self._pilot_session: dict = {
+            "active": False,
+            "pilot_authorized": False,
+            "pilot_caps_snapshot": {},
+            "session_mode": "normal_paper",
+            "evidence_mode": "real_paper",
+        }
+
+        # 전략 상태 체크: disabled/research_only는 paper/schedule 모드 진입 차단
+        if self._mode in ("paper", "schedule", "live"):
+            from strategies import is_strategy_allowed
+            allowed, reason = is_strategy_allowed(strategy_name, self._mode)
+            if not allowed:
+                raise ValueError(
+                    f"전략 '{strategy_name}' {self._mode} 모드 불허: {reason}"
+                )
 
         logger.info(
             "Scheduler 초기화 (전략: {}, 모니터링 간격: {}초, auto_entry: {})",
             strategy_name, self.monitor_interval, self.auto_entry,
         )
+
+    def _get_or_create_executor(self):
+        """당일 OrderExecutor를 재사용 — order_book 누적을 위해 인스턴스 유지."""
+        if self._order_executor is None:
+            from core.order_executor import OrderExecutor
+            self._order_executor = OrderExecutor(self.config, account_key=self.strategy_name)
+        return self._order_executor
+
+    def _is_paper_like_mode(self) -> bool:
+        """paper/schedule은 모두 실제 주문 전 paper runtime guard를 적용한다."""
+        return self._mode in ("paper", "schedule")
 
     def startup_recovery(self):
         """
@@ -156,6 +189,7 @@ class Scheduler:
             pending_orders = get_pending_failed_orders()
             pending_count = len(pending_orders) if pending_orders else 0
             if pending_orders:
+                self._restart_recovery_count += 1
                 logger.warning("[복구] 미처리 실패 주문 {}건 발견", len(pending_orders))
                 lines = []
                 for o in pending_orders[:15]:
@@ -253,6 +287,12 @@ class Scheduler:
                         self._entry_candidates = []
                         self._loop_metrics = LoopMetrics()
                         self._last_signal_for_dashboard = {}
+                        self._order_executor = None  # 새 거래일: fresh OrderBook
+                        self._pilot_session = {
+                            "active": False, "pilot_authorized": False,
+                            "pilot_caps_snapshot": {}, "session_mode": "normal_paper",
+                            "evidence_mode": "real_paper",
+                        }
                         logger.info("📅 새로운 거래일: {}", today)
                         self._maybe_update_holidays()
 
@@ -299,7 +339,7 @@ class Scheduler:
         logger.info("=" * 50)
 
         # 전일 provisional evidence finalize (장전에 benchmark 종가 확정)
-        if self._mode == "paper":
+        if self._is_paper_like_mode():
             try:
                 from core.paper_evidence import finalize_daily_evidence
                 yesterday = datetime.now() - timedelta(days=1)
@@ -658,7 +698,6 @@ class Scheduler:
         if not self._entry_candidates:
             return
 
-        from core.order_executor import OrderExecutor
         from core.data_collector import DataCollector
         from core.market_regime import check_market_regime
 
@@ -672,7 +711,96 @@ class Scheduler:
             return
         regime_scale = regime_result["position_scale"]
 
-        executor = OrderExecutor(self.config, account_key=self.strategy_name)
+        # Paper preflight critical fail 체크
+        if self._is_paper_like_mode():
+            try:
+                from core.paper_preflight import load_preflight_status
+                pf = load_preflight_status(self.strategy_name)
+                if pf and pf.overall == "fail" and not pf.entry_allowed:
+                    logger.warning("Preflight FAIL — 신규 진입 차단: {}", self.strategy_name)
+                    _log_op(
+                        "PREFLIGHT_BLOCK",
+                        f"entry blocked by preflight fail: {'; '.join(pf.block_reasons)}",
+                        severity="warning",
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                    )
+                    self._entry_candidates = []
+                    return
+            except Exception:
+                pass
+
+        # Paper runtime state 체크: state에 따라 주문 허용/차단
+        # pilot override: blocked_insufficient_evidence라도 pilot auth가 있으면 제한 허용
+        if self._is_paper_like_mode():
+            try:
+                from core.paper_runtime import get_paper_runtime_state, explain_paper_block_reason
+                rt_state = get_paper_runtime_state(self.strategy_name)
+                if "entry" not in rt_state.allowed_actions:
+                    # pilot override 확인
+                    pilot_allowed = False
+                    try:
+                        from core.paper_pilot import check_pilot_entry
+                        pilot_check = check_pilot_entry(self.strategy_name)
+                        if pilot_check.allowed:
+                            pilot_allowed = True
+                            # pilot session context 저장 — post-market evidence에 자동 전달
+                            self._pilot_session = {
+                                "active": True,
+                                "pilot_authorized": True,
+                                "pilot_caps_snapshot": pilot_check.caps_snapshot or {},
+                                "session_mode": "pilot_paper",
+                                "evidence_mode": "pilot_paper",
+                            }
+                            logger.info(
+                                "Paper pilot ALLOWED: {} (remaining orders={}, exposure={})",
+                                self.strategy_name,
+                                pilot_check.remaining_orders,
+                                pilot_check.remaining_exposure,
+                            )
+                            _log_op(
+                                "PILOT_ENTRY_ALLOWED",
+                                f"pilot override: {pilot_check.reason}",
+                                severity="info",
+                                strategy=self.strategy_name,
+                                mode=self._mode,
+                                detail=pilot_check.caps_snapshot,
+                            )
+                    except Exception:
+                        pass
+
+                    if not pilot_allowed:
+                        block_detail = explain_paper_block_reason(self.strategy_name)
+                        logger.warning(
+                            "Paper runtime [{}] — 신규 진입 차단: {}",
+                            rt_state.state, block_detail,
+                        )
+                        self.discord.send_message(
+                            f"🔒 **Paper {rt_state.state.upper()}** ({self.strategy_name})\n{block_detail}",
+                            critical=True,
+                        )
+                        _log_op(
+                            "RUNTIME_BLOCK",
+                            f"entry blocked: {block_detail}",
+                            severity="warning",
+                            strategy=self.strategy_name,
+                            mode=self._mode,
+                            detail={
+                                "state": rt_state.state,
+                                "strategy": self.strategy_name,
+                                "evidence_date": rt_state.evidence_date,
+                                "benchmark_final_ratio": rt_state.metrics.get("recent_final_ratio"),
+                                "anomaly_count": rt_state.metrics.get("recent_anomaly_count", 0),
+                                "allowed_actions": rt_state.allowed_actions,
+                                "reasons": rt_state.reasons,
+                            },
+                        )
+                        self._entry_candidates = []
+                        return
+            except Exception as e:
+                logger.debug("Paper runtime state 조회 실패 (무시): {}", e)
+
+        executor = self._get_or_create_executor()
         strategy = self._get_strategy()
         remaining = []
         now = datetime.now()
@@ -745,10 +873,9 @@ class Scheduler:
 
     def _check_exit_signals(self, kis=None):
         """포지션 순회: 갭다운 즉시 청산, 최대 보유 기간 초과 시 강제 정리, 블랙스완, 손절/익절/트레일링 스탑."""
-        from core.order_executor import OrderExecutor
         from api.kis_api import KISApi
 
-        executor = OrderExecutor(self.config, account_key=self.strategy_name)
+        executor = self._get_or_create_executor()
         account_no = self.config.get_account_no(self.strategy_name)
         if kis is None:
             kis = KISApi(account_no=account_no)
@@ -907,23 +1034,29 @@ class Scheduler:
                 logger.warning("DB 백업 스킵/실패: {}", backup_err)
 
             # paper 모드: 장마감 시 Paper Evidence 수집 + 실전 전환 준비 자동 평가 + 주간 리포트
-            if self._mode == "paper":
-                # Paper Evidence 자동 수집
+            if self._is_paper_like_mode():
+                # [DEPRECATED] Legacy evidence_collector (v1 schema).
+                # v1 record는 runtime/promotion 계산에서 quarantine되어 미반영됨.
+                # 현재는 하위 paper_evidence (v2) 호출이 canonical evidence를 생성함.
+                # TODO: legacy evidence_collector 완전 제거 (운영상 무해하나 중복 호출)
                 try:
                     from core.evidence_collector import collect_daily_evidence
-                    executor = getattr(self, "_order_executor", None)
-                    ob = executor.order_book if executor else None
+                    ob = self._order_executor.order_book if self._order_executor else None
+                    executor_stats = ob.get_stats() if ob else {}
+                    initial_capital = self.config.risk_params.get(
+                        "position_sizing", {}
+                    ).get("initial_capital", 10_000_000)
                     collect_daily_evidence(
                         strategy=self.strategy_name,
                         portfolio_summary=summary,
                         trade_summary=trade_summary,
                         order_book=ob,
-                        initial_capital=self.config.risk_params.get(
-                            "position_sizing", {}
-                        ).get("initial_capital", 10_000_000),
+                        initial_capital=initial_capital,
+                        executor_stats=executor_stats,
+                        restart_recovery_count=self._restart_recovery_count,
                     )
                 except Exception as ev_err:
-                    logger.warning("Paper Evidence 수집 실패: {}", ev_err)
+                    logger.warning("Paper Evidence 수집 실패 (legacy): {}", ev_err)
 
                 self._check_live_readiness()
                 # 금요일이면 주간 리포트 자동 생성
@@ -938,22 +1071,49 @@ class Scheduler:
                         logger.warning("주간 리포트 생성 실패: {}", wr_err)
 
                 # Paper evidence 수집 (DailyEvidence JSONL 누적 + anomaly 기록)
+                # pilot session이면 자동으로 pilot provenance가 전달됨
                 try:
                     from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
                     watchlist = WatchlistManager(self.config).resolve()
+                    ps = self._pilot_session
                     collect_daily_evidence(
                         strategy=self.strategy_name,
                         mode=self._mode,
                         account_key=self.strategy_name,
                         date=datetime.now(),
                         watchlist_symbols=watchlist,
+                        evidence_mode=ps.get("evidence_mode", "real_paper"),
+                        pilot_authorized=ps.get("pilot_authorized", False),
+                        pilot_caps_snapshot=ps.get("pilot_caps_snapshot"),
                     )
-                    logger.info("Paper evidence 기록 완료 (전략: {})", self.strategy_name)
+                    logger.info(
+                        "Paper evidence 기록 완료 (전략: {}, session_mode: {})",
+                        self.strategy_name, ps.get("session_mode", "normal_paper"),
+                    )
+                    # pilot session artifact 저장
+                    if ps.get("active"):
+                        try:
+                            from core.paper_pilot import save_pilot_session_artifact
+                            save_pilot_session_artifact(
+                                strategy=self.strategy_name,
+                                date=datetime.now().strftime("%Y-%m-%d"),
+                                pilot_session=ps,
+                            )
+                        except Exception:
+                            pass
                     # 금요일이면 evidence 기반 주간 요약도 생성
                     if datetime.now().weekday() == 4:
                         generate_weekly_summary(self.strategy_name)
                 except Exception as ev_err:
                     logger.warning("Paper evidence 기록 실패: {}", ev_err)
+
+                # 당일 executor + pilot session 리셋 (다음 날 fresh)
+                self._order_executor = None
+                self._pilot_session = {
+                    "active": False, "pilot_authorized": False,
+                    "pilot_caps_snapshot": {}, "session_mode": "normal_paper",
+                    "evidence_mode": "real_paper",
+                }
 
             # 일일 루프 모니터링 지표 기록
             metrics = self._loop_metrics.summary()
@@ -1290,6 +1450,41 @@ class Scheduler:
     def _rescan_for_new_entries(self):
         """장중 신호 재평가: 새로운 매수 기회를 탐색하여 진입 후보에 추가."""
         try:
+            # Paper runtime state: entry 불허 시 재스캔 생략 (pilot override 포함)
+            if self._is_paper_like_mode():
+                try:
+                    from core.paper_runtime import is_paper_trade_allowed, explain_paper_block_reason
+                    if not is_paper_trade_allowed(self.strategy_name, "entry"):
+                        # pilot override 확인
+                        pilot_ok = False
+                        try:
+                            from core.paper_pilot import check_pilot_entry
+                            rescan_pilot = check_pilot_entry(self.strategy_name)
+                            pilot_ok = rescan_pilot.allowed
+                            if pilot_ok and not self._pilot_session.get("active"):
+                                self._pilot_session = {
+                                    "active": True,
+                                    "pilot_authorized": True,
+                                    "pilot_caps_snapshot": rescan_pilot.caps_snapshot or {},
+                                    "session_mode": "pilot_paper",
+                                    "evidence_mode": "pilot_paper",
+                                }
+                        except Exception:
+                            pass
+                        if not pilot_ok:
+                            block_detail = explain_paper_block_reason(self.strategy_name)
+                            logger.debug("Paper rescan 생략: {}", block_detail)
+                            _log_op(
+                                "RUNTIME_BLOCK",
+                                f"rescan blocked: {block_detail}",
+                                severity="info",
+                                strategy=self.strategy_name,
+                                mode=self._mode,
+                            )
+                            return
+                except Exception:
+                    pass
+
             from core.data_collector import DataCollector
             from core.market_regime import check_market_regime
 

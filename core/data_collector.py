@@ -183,6 +183,51 @@ class DataCollector:
             self._preferred_source, self._allow_kis_fallback,
         )
 
+    @staticmethod
+    def fetch_benchmark_return(
+        start_date: str, end_date: str, symbol: str = "KS11"
+    ) -> Optional[float]:
+        """벤치마크 지수의 누적 수익률(%)을 반환. 실패 시 None (fail closed).
+
+        Args:
+            start_date: 시작일 YYYY-MM-DD
+            end_date: 종료일 YYYY-MM-DD
+            symbol: 벤치마크 지수 심볼 (기본 KS11=KOSPI)
+
+        Returns:
+            누적 수익률(%) 또는 None
+        """
+        try:
+            if HAS_FDR:
+                import FinanceDataReader as _fdr
+                df = _fdr.DataReader(symbol, start_date, end_date)
+            elif HAS_YF:
+                import yfinance as _yf
+                ticker = f"^{symbol}" if not symbol.startswith("^") else symbol
+                df = _yf.download(ticker, start=start_date, end=end_date, progress=False)
+            else:
+                logger.warning("벤치마크 fetch 불가: FDR/yfinance 미설치")
+                return None
+
+            if df is None or df.empty or len(df) < 2:
+                logger.warning("벤치마크 {} 데이터 부족: {}~{}", symbol, start_date, end_date)
+                return None
+
+            close_col = "Close" if "Close" in df.columns else "close"
+            if close_col not in df.columns:
+                logger.warning("벤치마크 {} Close 컬럼 없음", symbol)
+                return None
+
+            first_close = float(df[close_col].iloc[0])
+            last_close = float(df[close_col].iloc[-1])
+            if first_close <= 0:
+                return None
+
+            return (last_close / first_close - 1) * 100
+        except Exception as e:
+            logger.warning("벤치마크 {} 수익률 계산 실패: {}", symbol, e)
+            return None
+
     def clear_krx_ohlcv_range_cache(self) -> None:
         """한국 주가 구간 캐시 비우기."""
         self._krx_ohlcv_ranges.clear()
