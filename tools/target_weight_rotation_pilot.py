@@ -26,6 +26,12 @@ from core.target_weight_rotation import (
 )
 
 DEFAULT_OUTPUT_DIR = Path("reports/paper_runtime")
+DEFAULT_PILOT_PREVIEW_CAPS = {
+    "max_orders_per_day": 2,
+    "max_concurrent_positions": 2,
+    "max_notional_per_trade": 1_000_000,
+    "max_gross_exposure": 3_000_000,
+}
 
 
 def _split_symbols(raw: str | None) -> list[str] | None:
@@ -72,6 +78,39 @@ def _pilot_check_to_dict(pilot_check: Any) -> dict[str, Any]:
             "remaining_exposure": getattr(pilot_check, "remaining_exposure", None),
             "caps_snapshot": getattr(pilot_check, "caps_snapshot", None),
         }
+
+
+def build_preview_caps(
+    *,
+    max_orders: int | None = None,
+    max_positions: int | None = None,
+    max_notional: int | None = None,
+    max_exposure: int | None = None,
+) -> dict[str, int]:
+    caps = dict(DEFAULT_PILOT_PREVIEW_CAPS)
+    if max_orders is not None:
+        caps["max_orders_per_day"] = int(max_orders)
+    if max_positions is not None:
+        caps["max_concurrent_positions"] = int(max_positions)
+    if max_notional is not None:
+        caps["max_notional_per_trade"] = int(max_notional)
+    if max_exposure is not None:
+        caps["max_gross_exposure"] = int(max_exposure)
+    return caps
+
+
+def preview_plan_against_caps(plan: TargetWeightPlan, caps: dict[str, int] | None = None) -> Any:
+    from core.paper_pilot import PilotCheckResult
+
+    caps = dict(caps or DEFAULT_PILOT_PREVIEW_CAPS)
+    synthetic_check = PilotCheckResult(
+        allowed=True,
+        reason="proposed pilot caps",
+        remaining_orders=int(caps["max_orders_per_day"]),
+        remaining_exposure=int(caps["max_gross_exposure"]),
+        caps_snapshot=caps,
+    )
+    return validate_plan_against_pilot(plan, synthetic_check)
 
 
 def build_plan(
@@ -204,8 +243,10 @@ def write_session_artifact(
     plan: TargetWeightPlan,
     pilot_check: Any,
     validation: Any,
+    cap_preview: Any,
     execution: dict[str, Any],
     dry_run: bool,
+    shadow_evidence: dict[str, Any] | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +258,9 @@ def write_session_artifact(
         "plan": plan.to_dict(),
         "pilot_check": _pilot_check_to_dict(pilot_check),
         "plan_validation": asdict(validation),
+        "cap_preview": asdict(cap_preview),
         "execution": execution,
+        "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
         "live_safety": {
             "live_enabled": False,
             "note": "adapter refuses live mode; live gate remains canonical-artifact + paper-evidence driven",
@@ -228,6 +271,65 @@ def write_session_artifact(
     return path
 
 
+def _shadow_benchmark_status(plan: TargetWeightPlan) -> str:
+    if plan.score_day is None:
+        return "failed"
+    if plan.diagnostics.get("missing_symbols"):
+        return "provisional"
+    return "final"
+
+
+def record_shadow_evidence_for_plan(
+    plan: TargetWeightPlan,
+    *,
+    validation: Any,
+) -> Any:
+    """Record dry-run plan readiness without creating promotable evidence."""
+    from core.paper_evidence import append_shadow_plan_evidence
+
+    benchmark_status = _shadow_benchmark_status(plan)
+    missing_symbols = list(plan.diagnostics.get("missing_symbols", []))
+    benchmark_meta = {
+        "source": "target_weight_shadow_plan",
+        "candidate_id": plan.candidate_id,
+        "params_hash": plan.params_hash,
+        "symbol_count": len(plan.symbols),
+        "target_count": len(plan.targets),
+        "orders_planned": len(plan.orders),
+        "missing_symbols": missing_symbols,
+        "benchmark_symbol": plan.diagnostics.get("benchmark_symbol"),
+        "score_day": plan.score_day,
+        "target_exposure": plan.target_exposure,
+        "risk_off": plan.risk_off,
+        "performance_excess_computed": False,
+    }
+    diagnostics = [{
+        "ok": benchmark_status == "final",
+        "text": "target_weight_dry_run_plan",
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "score_day": plan.score_day,
+        "targets": plan.targets,
+        "orders_planned": len(plan.orders),
+        "pilot_validation_allowed": getattr(validation, "allowed", False),
+        "pilot_validation_reason": getattr(validation, "reason", ""),
+        "dry_run_only": True,
+    }]
+
+    return append_shadow_plan_evidence(
+        strategy=plan.candidate_id,
+        date=plan.trade_day,
+        total_value=plan.nav,
+        cash=plan.cash_before,
+        invested=plan.market_value_before,
+        position_count=plan.target_position_count,
+        watchlist_symbols=plan.symbols,
+        diagnostics=diagnostics,
+        benchmark_status=benchmark_status,
+        benchmark_meta=benchmark_meta,
+    )
+
+
 def run_pilot(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -236,12 +338,17 @@ def run_pilot(
     cash: float | None = None,
     execute: bool = False,
     collect_evidence: bool = False,
+    record_shadow_evidence: bool = False,
+    preview_caps: dict[str, int] | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
     from core.paper_pilot import check_pilot_entry, save_pilot_session_artifact
+
+    if execute and record_shadow_evidence:
+        raise ValueError("record_shadow_evidence is only valid for dry-run sessions")
 
     config = config or Config.get()
     plan = build_plan(
@@ -259,6 +366,7 @@ def run_pilot(
         as_of_date=as_of_date or plan.trade_day,
     )
     validation = validate_plan_against_pilot(plan, pilot_check)
+    cap_preview = preview_plan_against_caps(plan, preview_caps)
     dry_run = not execute
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
@@ -295,12 +403,26 @@ def run_pilot(
                 pilot_caps_snapshot=validation.caps_snapshot,
             )
 
+    shadow_evidence_record = None
+    shadow_evidence_summary = {"attempted": False, "recorded": False}
+    if dry_run and record_shadow_evidence:
+        shadow_evidence_record = record_shadow_evidence_for_plan(plan, validation=validation)
+        shadow_evidence_summary = {
+            "attempted": True,
+            "recorded": shadow_evidence_record is not None,
+            "date": plan.trade_day,
+            "evidence_mode": "shadow_bootstrap",
+            "reason": "recorded" if shadow_evidence_record is not None else "already recorded",
+        }
+
     artifact_path = write_session_artifact(
         plan=plan,
         pilot_check=pilot_check,
         validation=validation,
+        cap_preview=cap_preview,
         execution=execution,
         dry_run=dry_run,
+        shadow_evidence=shadow_evidence_summary,
         output_dir=output_dir,
     )
 
@@ -308,7 +430,10 @@ def run_pilot(
         "plan": plan,
         "pilot_check": pilot_check,
         "validation": validation,
+        "cap_preview": cap_preview,
         "execution": execution,
+        "shadow_evidence": shadow_evidence_record,
+        "shadow_evidence_summary": shadow_evidence_summary,
         "artifact_path": artifact_path,
     }
 
@@ -321,6 +446,15 @@ def main() -> None:
     parser.add_argument("--cash", type=float, help="Override starting cash for planning")
     parser.add_argument("--execute", action="store_true", help="Submit paper orders. Default is dry-run.")
     parser.add_argument("--collect-evidence", action="store_true", help="Collect pilot_paper evidence after execution.")
+    parser.add_argument(
+        "--record-shadow-evidence",
+        action="store_true",
+        help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
+    )
+    parser.add_argument("--preview-max-orders", type=int, help="Proposed pilot cap preview: max orders/day.")
+    parser.add_argument("--preview-max-positions", type=int, help="Proposed pilot cap preview: max concurrent positions.")
+    parser.add_argument("--preview-max-notional", type=int, help="Proposed pilot cap preview: max notional/trade.")
+    parser.add_argument("--preview-max-exposure", type=int, help="Proposed pilot cap preview: max gross exposure.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
@@ -334,17 +468,29 @@ def main() -> None:
         cash=args.cash,
         execute=args.execute,
         collect_evidence=args.collect_evidence,
+        record_shadow_evidence=args.record_shadow_evidence,
+        preview_caps=build_preview_caps(
+            max_orders=args.preview_max_orders,
+            max_positions=args.preview_max_positions,
+            max_notional=args.preview_max_notional,
+            max_exposure=args.preview_max_exposure,
+        ),
         output_dir=Path(args.output_dir),
     )
 
     plan = result["plan"]
     validation = result["validation"]
+    cap_preview = result["cap_preview"]
     print("\nTarget-weight pilot adapter")
     print(f"  candidate: {plan.candidate_id}")
     print(f"  trade_day: {plan.trade_day} score_day: {plan.score_day}")
     print(f"  targets: {', '.join(plan.targets) if plan.targets else '(none)'}")
     print(f"  orders: {len(plan.orders)} max_order={plan.max_order_notional:,.0f}")
     print(f"  pilot: {'ALLOWED' if validation.allowed else 'BLOCKED'} - {validation.reason}")
+    print(f"  cap preview: {'PASS' if cap_preview.allowed else 'BLOCKED'} - {cap_preview.reason}")
+    if result["shadow_evidence_summary"].get("attempted"):
+        status = "recorded" if result["shadow_evidence_summary"].get("recorded") else "already recorded"
+        print(f"  shadow evidence: {status}")
     print(f"  artifact: {result['artifact_path']}")
 
 
