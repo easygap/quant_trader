@@ -76,7 +76,7 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
             close_ks = ks11["close"].astype(float)
             sma = close_ks.rolling(mf_period, min_periods=mf_period).mean()
             # T-1 기준: 전일 종가 > 전일 SMA200 → 당일 신규 진입 허용
-            self._mf_series = (close_ks > sma).shift(1).fillna(True)
+            self._mf_series = (close_ks > sma).shift(1, fill_value=True).astype(bool)
         except Exception as e:
             logger.warning("market_filter: KS11 로드 실패 — 필터 비활성화: {}", e)
 
@@ -116,6 +116,7 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
 
         # Entry: 리밸런싱 + 양수 모멘텀 + 추세 유지
         entry_cond = rebalance & positive_momentum & above_trend
+        market_filter_pass = pd.Series(True, index=analyzed.index)
 
         # ── 종목 절대모멘텀 필터 (T-1 기준) ──
         abs_mom = self.params.get("abs_momentum_filter", "none")
@@ -136,14 +137,18 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         if self.params.get("market_filter_sma200", False):
             self._ensure_market_filter(analyzed.index)
             if self._mf_series is not None:
-                mf_aligned = self._mf_series.reindex(
-                    analyzed.index, method="ffill"
-                ).fillna(True)
-                entry_cond = entry_cond & mf_aligned
-                analyzed["market_filter_pass"] = mf_aligned
+                mf_aligned = self._mf_series.reindex(analyzed.index, method="ffill")
+                market_filter_pass = mf_aligned.astype("boolean").fillna(True).astype(bool)
+                entry_cond = entry_cond & market_filter_pass
+                analyzed["market_filter_pass"] = market_filter_pass
             else:
                 analyzed["market_filter_pass"] = True
-        # 기존 보유 포지션은 강제 청산하지 않음 — exit 규칙 그대로 유지
+        market_filter_exit = (
+            self.params.get("market_filter_sma200", False)
+            and self.params.get("market_filter_exit", False)
+            and ~market_filter_pass
+        )
+        analyzed["market_filter_exit"] = market_filter_exit
 
         # Exit (리밸런싱): 모멘텀 음수 또는 추세 붕괴
         exit_rebalance = rebalance & (~positive_momentum | ~above_trend)
@@ -152,7 +157,7 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         prev_above = above_trend.shift(1, fill_value=True)
         exit_trend_edge = ~rebalance & ~above_trend & prev_above
 
-        exit_cond = exit_rebalance | exit_trend_edge
+        exit_cond = exit_rebalance | exit_trend_edge | market_filter_exit
 
         # ── 디버그 컬럼 ──
         analyzed["ret_60d"] = ret_short
@@ -206,6 +211,8 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
                 "ret_120d": round(last.get("ret_120d", 0), 4),
                 "rebalance_day": bool(last.get("rebalance_day", False)),
                 "above_trend": bool(last.get("above_trend", False)),
+                "market_filter_pass": bool(last.get("market_filter_pass", True)),
+                "market_filter_exit": bool(last.get("market_filter_exit", False)),
             },
             "date": last.name if hasattr(last, "name") else None,
             "close": last.get("close", 0),
