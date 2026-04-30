@@ -9,7 +9,7 @@ import math
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,23 @@ def _split_symbols(raw: str | None) -> list[str] | None:
         return None
     symbols = [part.strip() for part in raw.replace("\n", ",").split(",")]
     return [symbol for symbol in symbols if symbol]
+
+
+def _date_range(start_date: str, end_date: str) -> list[str]:
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end < start:
+        raise ValueError("shadow end date must be on or after start date")
+
+    dates: list[str] = []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            dates.append(day.strftime("%Y-%m-%d"))
+        day += timedelta(days=1)
+    if not dates:
+        raise ValueError("shadow date range contains no weekdays")
+    return dates
 
 
 def _load_symbols(config: Any, raw_symbols: str | None) -> list[str]:
@@ -492,6 +509,185 @@ def generate_launch_artifacts(
     return result
 
 
+def write_shadow_bootstrap_artifact(
+    *,
+    candidate_id: str,
+    start_date: str,
+    end_date: str,
+    requested_dates: list[str],
+    results: list[dict[str, Any]],
+    launch_artifacts: dict[str, Any] | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "requested_dates": len(requested_dates),
+        "recorded": sum(1 for item in results if item.get("status") == "recorded"),
+        "already_recorded": sum(1 for item in results if item.get("status") == "already_recorded"),
+        "duplicate_trade_day": sum(1 for item in results if item.get("status") == "duplicate_trade_day"),
+        "failed": sum(1 for item in results if item.get("status") == "failed"),
+        "unique_trade_days": len({item.get("trade_day") for item in results if item.get("trade_day")}),
+    }
+    payload = {
+        "artifact_type": "target_weight_rotation_shadow_bootstrap",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": candidate_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "requested_dates": requested_dates,
+        "summary": summary,
+        "results": results,
+        "launch_artifacts": launch_artifacts or {"attempted": False},
+        "live_safety": {
+            "live_enabled": False,
+            "note": "shadow bootstrap records non-promotable evidence only; execution-backed pilot evidence still requires explicit pilot authorization",
+        },
+    }
+    path = output_dir / f"target_weight_shadow_bootstrap_{candidate_id}_{start_date}_{end_date}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def run_shadow_bootstrap(
+    *,
+    start_date: str,
+    end_date: str,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    raw_symbols: str | None = None,
+    cash: float | None = None,
+    preview_caps: dict[str, int] | None = None,
+    generate_readiness_artifacts: bool = True,
+    generate_runbook: bool = True,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    config: Any | None = None,
+    collector: Any | None = None,
+) -> dict[str, Any]:
+    """Record non-promotable target-weight shadow evidence over a date range."""
+    from config.config_loader import Config
+    from core.paper_evidence import get_canonical_records
+    from core.paper_pilot import check_pilot_entry
+
+    config = config or Config.get()
+    requested_dates = _date_range(start_date, end_date)
+    existing_dates_by_strategy: dict[str, set[str]] = {}
+    seen_trade_days: set[str] = set()
+    results: list[dict[str, Any]] = []
+    latest_plan: TargetWeightPlan | None = None
+    latest_cap_preview: Any | None = None
+    latest_cap_recommendation: dict[str, Any] | None = None
+
+    for as_of in requested_dates:
+        try:
+            plan = build_plan(
+                candidate_id=candidate_id,
+                raw_symbols=raw_symbols,
+                as_of_date=as_of,
+                cash=cash,
+                config=config,
+                collector=collector,
+            )
+            evidence_strategy = plan.candidate_id
+            if evidence_strategy not in existing_dates_by_strategy:
+                existing_dates_by_strategy[evidence_strategy] = {
+                    record.get("date")
+                    for record in get_canonical_records(evidence_strategy)
+                    if record.get("date")
+                }
+            existing_dates = existing_dates_by_strategy[evidence_strategy]
+
+            if plan.trade_day in seen_trade_days:
+                results.append({
+                    "as_of_date": as_of,
+                    "candidate_id": evidence_strategy,
+                    "trade_day": plan.trade_day,
+                    "status": "duplicate_trade_day",
+                    "reason": "as_of_date mapped to a trade day already processed in this batch",
+                })
+                continue
+            seen_trade_days.add(plan.trade_day)
+
+            pilot_check = check_pilot_entry(
+                candidate_id,
+                candidate_notional=plan.max_order_notional,
+                as_of_date=plan.trade_day,
+            )
+            validation = validate_plan_against_pilot(plan, pilot_check)
+            cap_preview = preview_plan_against_caps(plan, preview_caps)
+            cap_recommendation = recommend_pilot_caps(plan)
+            latest_plan = plan
+            latest_cap_preview = cap_preview
+            latest_cap_recommendation = cap_recommendation
+
+            if plan.trade_day in existing_dates:
+                status = "already_recorded"
+                recorded = False
+            else:
+                evidence = record_shadow_evidence_for_plan(plan, validation=validation)
+                recorded = evidence is not None
+                status = "recorded" if recorded else "already_recorded"
+                existing_dates.add(plan.trade_day)
+
+            results.append({
+                "as_of_date": as_of,
+                "candidate_id": evidence_strategy,
+                "trade_day": plan.trade_day,
+                "score_day": plan.score_day,
+                "status": status,
+                "recorded": recorded,
+                "targets": plan.targets,
+                "orders_planned": len(plan.orders),
+                "max_order_notional": plan.max_order_notional,
+                "gross_exposure_after": plan.gross_exposure_after,
+                "pilot_validation": asdict(validation),
+                "cap_preview": asdict(cap_preview),
+                "cap_recommendation": cap_recommendation,
+                "plan": plan.to_dict(),
+            })
+        except Exception as exc:
+            logger.exception("target-weight shadow bootstrap failed for {}", as_of)
+            results.append({
+                "as_of_date": as_of,
+                "status": "failed",
+                "error": str(exc),
+            })
+
+    launch_artifacts = {"attempted": False}
+    if generate_readiness_artifacts:
+        artifact_candidate_id = latest_plan.candidate_id if latest_plan is not None else candidate_id
+        launch_artifacts = generate_launch_artifacts(
+            artifact_candidate_id,
+            include_runbook=generate_runbook,
+            plan=latest_plan,
+            cap_preview=latest_cap_preview,
+            cap_recommendation=latest_cap_recommendation,
+        )
+
+    artifact_path = write_shadow_bootstrap_artifact(
+        candidate_id=latest_plan.candidate_id if latest_plan is not None else candidate_id,
+        start_date=start_date,
+        end_date=end_date,
+        requested_dates=requested_dates,
+        results=results,
+        launch_artifacts=launch_artifacts,
+        output_dir=output_dir,
+    )
+
+    summary = {
+        "requested_dates": len(requested_dates),
+        "recorded": sum(1 for item in results if item.get("status") == "recorded"),
+        "already_recorded": sum(1 for item in results if item.get("status") == "already_recorded"),
+        "duplicate_trade_day": sum(1 for item in results if item.get("status") == "duplicate_trade_day"),
+        "failed": sum(1 for item in results if item.get("status") == "failed"),
+    }
+    return {
+        "summary": summary,
+        "results": results,
+        "launch_artifacts": launch_artifacts,
+        "artifact_path": artifact_path,
+    }
+
+
 def run_pilot(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -631,6 +827,14 @@ def main() -> None:
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
     )
     parser.add_argument(
+        "--shadow-start-date",
+        help="Run multi-date shadow bootstrap from YYYY-MM-DD; implies dry-run shadow evidence.",
+    )
+    parser.add_argument(
+        "--shadow-end-date",
+        help="Run multi-date shadow bootstrap through YYYY-MM-DD; implies dry-run shadow evidence.",
+    )
+    parser.add_argument(
         "--skip-readiness-artifacts",
         action="store_true",
         help="Skip launch readiness JSON/MD generation when --record-shadow-evidence is used.",
@@ -650,6 +854,58 @@ def main() -> None:
     from database.models import init_database
 
     init_database()
+    preview_caps = build_preview_caps(
+        max_orders=args.preview_max_orders,
+        max_positions=args.preview_max_positions,
+        max_notional=args.preview_max_notional,
+        max_exposure=args.preview_max_exposure,
+    )
+
+    shadow_batch = args.shadow_start_date is not None or args.shadow_end_date is not None
+    if shadow_batch:
+        if args.shadow_start_date is None or args.shadow_end_date is None:
+            parser.error("--shadow-start-date and --shadow-end-date must be provided together")
+        if args.execute or args.collect_evidence:
+            parser.error("shadow bootstrap date range cannot be combined with --execute or --collect-evidence")
+        if args.as_of_date:
+            parser.error("--as-of-date is not used with --shadow-start-date/--shadow-end-date")
+
+        batch = run_shadow_bootstrap(
+            candidate_id=args.candidate_id,
+            raw_symbols=args.symbols,
+            start_date=args.shadow_start_date,
+            end_date=args.shadow_end_date,
+            cash=args.cash,
+            generate_readiness_artifacts=not args.skip_readiness_artifacts,
+            generate_runbook=not args.skip_runbook,
+            preview_caps=preview_caps,
+            output_dir=Path(args.output_dir),
+        )
+        summary = batch["summary"]
+        print("\nTarget-weight shadow bootstrap")
+        print(f"  candidate: {args.candidate_id}")
+        print(f"  range: {args.shadow_start_date} ~ {args.shadow_end_date}")
+        print(
+            "  summary: "
+            f"recorded={summary['recorded']} "
+            f"already_recorded={summary['already_recorded']} "
+            f"duplicate_trade_day={summary['duplicate_trade_day']} "
+            f"failed={summary['failed']}"
+        )
+        if batch["launch_artifacts"].get("attempted"):
+            readiness = batch["launch_artifacts"]["launch_readiness"]
+            print(
+                "  readiness: "
+                f"clean={readiness['clean_final_days_current']}/{readiness['clean_final_days_required']} "
+                f"infra={'YES' if readiness['infra_ready'] else 'NO'} "
+                f"launch={'YES' if readiness['launch_ready'] else 'NO'}"
+            )
+            print(f"  readiness artifact: {readiness['json_path']}")
+            if batch["launch_artifacts"].get("runbook_path"):
+                print(f"  runbook: {batch['launch_artifacts']['runbook_path']}")
+        print(f"  artifact: {batch['artifact_path']}")
+        return
+
     result = run_pilot(
         candidate_id=args.candidate_id,
         raw_symbols=args.symbols,
@@ -660,12 +916,7 @@ def main() -> None:
         record_shadow_evidence=args.record_shadow_evidence,
         generate_readiness_artifacts=not args.skip_readiness_artifacts,
         generate_runbook=not args.skip_runbook,
-        preview_caps=build_preview_caps(
-            max_orders=args.preview_max_orders,
-            max_positions=args.preview_max_positions,
-            max_notional=args.preview_max_notional,
-            max_exposure=args.preview_max_exposure,
-        ),
+        preview_caps=preview_caps,
         output_dir=Path(args.output_dir),
     )
 
