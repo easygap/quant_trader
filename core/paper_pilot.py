@@ -941,7 +941,7 @@ def generate_pilot_runbook(strategy: str) -> Path:
         "```bash",
         f"python tools/paper_pilot_control.py --strategy {strategy} --enable \\",
         f"  --from YYYY-MM-DD --to YYYY-MM-DD \\",
-        f"  --max-orders 2 --max-notional 1000000 --max-exposure 3000000 \\",
+        f"  --max-orders 2 --max-positions 2 --max-notional 1000000 --max-exposure 3000000 \\",
         f'  --reason "first {strategy} pilot — collect execution-backed evidence"',
         "```",
         "",

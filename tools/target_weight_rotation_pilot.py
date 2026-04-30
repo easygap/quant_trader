@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from dataclasses import asdict
@@ -32,6 +33,8 @@ DEFAULT_PILOT_PREVIEW_CAPS = {
     "max_notional_per_trade": 1_000_000,
     "max_gross_exposure": 3_000_000,
 }
+DEFAULT_CAP_BUFFER_PCT = 0.05
+DEFAULT_CAP_ROUNDING_STEP = 10_000
 
 
 def _split_symbols(raw: str | None) -> list[str] | None:
@@ -111,6 +114,70 @@ def preview_plan_against_caps(plan: TargetWeightPlan, caps: dict[str, int] | Non
         caps_snapshot=caps,
     )
     return validate_plan_against_pilot(plan, synthetic_check)
+
+
+def _round_up_to_step(value: float, *, step: int = DEFAULT_CAP_ROUNDING_STEP) -> int:
+    if value <= 0:
+        return 0
+    whole_value = int(math.ceil(value))
+    return ((whole_value + step - 1) // step) * step
+
+
+def _minimum_money_cap(value: float, *, step: int = DEFAULT_CAP_ROUNDING_STEP) -> int:
+    return max(1, _round_up_to_step(value, step=step))
+
+
+def _format_enable_command(plan: TargetWeightPlan, caps: dict[str, int]) -> str:
+    return "\n".join([
+        f"python tools/paper_pilot_control.py --strategy {plan.candidate_id} --enable \\",
+        f"  --from {plan.trade_day} --to YYYY-MM-DD \\",
+        (
+            f"  --max-orders {caps['max_orders_per_day']} "
+            f"--max-positions {caps['max_concurrent_positions']} "
+            f"--max-notional {caps['max_notional_per_trade']} "
+            f"--max-exposure {caps['max_gross_exposure']} \\"
+        ),
+        '  --reason "target-weight shadow dry-run matched suggested pilot caps"',
+    ])
+
+
+def recommend_pilot_caps(
+    plan: TargetWeightPlan,
+    *,
+    buffer_pct: float = DEFAULT_CAP_BUFFER_PCT,
+    rounding_step: int = DEFAULT_CAP_ROUNDING_STEP,
+) -> dict[str, Any]:
+    """Build plan-specific pilot caps that are tight enough for first execution."""
+    minimum_caps = {
+        "max_orders_per_day": max(1, len(plan.orders)),
+        "max_concurrent_positions": max(1, int(plan.target_position_count)),
+        "max_notional_per_trade": max(1, _round_up_to_step(plan.max_order_notional, step=rounding_step)),
+        "max_gross_exposure": max(1, _round_up_to_step(plan.gross_exposure_after, step=rounding_step)),
+    }
+    suggested_caps = {
+        "max_orders_per_day": minimum_caps["max_orders_per_day"],
+        "max_concurrent_positions": minimum_caps["max_concurrent_positions"],
+        "max_notional_per_trade": _minimum_money_cap(plan.max_order_notional * (1 + buffer_pct), step=rounding_step),
+        "max_gross_exposure": _minimum_money_cap(plan.gross_exposure_after * (1 + buffer_pct), step=rounding_step),
+    }
+    suggested_preview = preview_plan_against_caps(plan, suggested_caps)
+    return {
+        "minimum_caps": minimum_caps,
+        "suggested_caps": suggested_caps,
+        "buffer_pct": buffer_pct,
+        "rounding_step": rounding_step,
+        "planned_orders": len(plan.orders),
+        "target_position_count": int(plan.target_position_count),
+        "max_order_notional": plan.max_order_notional,
+        "gross_exposure_after": plan.gross_exposure_after,
+        "suggested_preview": asdict(suggested_preview),
+        "enable_command": _format_enable_command(plan, suggested_caps),
+        "operator_note": (
+            "Use suggested caps for the first capped paper pilot only after launch readiness "
+            "requirements and preflight checks pass. The caps are based on the dry-run plan and "
+            "do not imply live eligibility."
+        ),
+    }
 
 
 def build_plan(
@@ -244,6 +311,7 @@ def write_session_artifact(
     pilot_check: Any,
     validation: Any,
     cap_preview: Any,
+    cap_recommendation: dict[str, Any],
     execution: dict[str, Any],
     dry_run: bool,
     shadow_evidence: dict[str, Any] | None = None,
@@ -260,6 +328,7 @@ def write_session_artifact(
         "pilot_check": _pilot_check_to_dict(pilot_check),
         "plan_validation": asdict(validation),
         "cap_preview": asdict(cap_preview),
+        "cap_recommendation": cap_recommendation,
         "execution": execution,
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
         "launch_artifacts": launch_artifacts or {"attempted": False},
@@ -332,10 +401,59 @@ def record_shadow_evidence_for_plan(
     )
 
 
+def append_target_weight_cap_section(
+    runbook_path: Path,
+    *,
+    plan: TargetWeightPlan,
+    cap_preview: Any,
+    cap_recommendation: dict[str, Any],
+) -> None:
+    """Append target-weight-specific cap guidance to the generic pilot runbook."""
+    minimum = cap_recommendation["minimum_caps"]
+    suggested = cap_recommendation["suggested_caps"]
+    suggested_preview = cap_recommendation["suggested_preview"]
+    preview_status = "PASS" if getattr(cap_preview, "allowed", False) else "BLOCKED"
+    suggested_status = "PASS" if suggested_preview.get("allowed") else "BLOCKED"
+    existing = runbook_path.read_text(encoding="utf-8") if runbook_path.exists() else ""
+    section = [
+        "",
+        "## Target-weight Cap Recommendation",
+        f"- Planned orders: {len(plan.orders)}",
+        f"- Target positions after rebalance: {plan.target_position_count}",
+        f"- Max order notional: {plan.max_order_notional:,.0f}",
+        f"- Gross exposure after rebalance: {plan.gross_exposure_after:,.0f}",
+        f"- Current preview status: **{preview_status}** - {getattr(cap_preview, 'reason', '')}",
+        f"- Suggested cap preview: **{suggested_status}** - {suggested_preview.get('reason', '')}",
+        "",
+        "Minimum caps for this dry-run plan:",
+        f"- max_orders_per_day: {minimum['max_orders_per_day']}",
+        f"- max_concurrent_positions: {minimum['max_concurrent_positions']}",
+        f"- max_notional_per_trade: {minimum['max_notional_per_trade']:,}",
+        f"- max_gross_exposure: {minimum['max_gross_exposure']:,}",
+        "",
+        "Suggested first-pilot caps:",
+        f"- max_orders_per_day: {suggested['max_orders_per_day']}",
+        f"- max_concurrent_positions: {suggested['max_concurrent_positions']}",
+        f"- max_notional_per_trade: {suggested['max_notional_per_trade']:,}",
+        f"- max_gross_exposure: {suggested['max_gross_exposure']:,}",
+        "",
+        "Suggested enable command:",
+        "```bash",
+        cap_recommendation["enable_command"],
+        "```",
+        "",
+        cap_recommendation["operator_note"],
+    ]
+    runbook_path.write_text(existing.rstrip() + "\n" + "\n".join(section) + "\n", encoding="utf-8")
+
+
 def generate_launch_artifacts(
     candidate_id: str,
     *,
     include_runbook: bool = True,
+    plan: TargetWeightPlan | None = None,
+    cap_preview: Any | None = None,
+    cap_recommendation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate launch-readiness artifacts after shadow/pilot planning."""
     from core.paper_pilot import (
@@ -363,6 +481,13 @@ def generate_launch_artifacts(
     }
     if include_runbook:
         runbook_path = generate_pilot_runbook(candidate_id)
+        if plan is not None and cap_preview is not None and cap_recommendation is not None:
+            append_target_weight_cap_section(
+                runbook_path,
+                plan=plan,
+                cap_preview=cap_preview,
+                cap_recommendation=cap_recommendation,
+            )
         result["runbook_path"] = str(runbook_path)
     return result
 
@@ -406,6 +531,7 @@ def run_pilot(
     )
     validation = validate_plan_against_pilot(plan, pilot_check)
     cap_preview = preview_plan_against_caps(plan, preview_caps)
+    cap_recommendation = recommend_pilot_caps(plan)
     dry_run = not execute
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
@@ -459,6 +585,9 @@ def run_pilot(
         launch_artifacts = generate_launch_artifacts(
             plan.candidate_id,
             include_runbook=generate_runbook,
+            plan=plan,
+            cap_preview=cap_preview,
+            cap_recommendation=cap_recommendation,
         )
 
     artifact_path = write_session_artifact(
@@ -466,6 +595,7 @@ def run_pilot(
         pilot_check=pilot_check,
         validation=validation,
         cap_preview=cap_preview,
+        cap_recommendation=cap_recommendation,
         execution=execution,
         dry_run=dry_run,
         shadow_evidence=shadow_evidence_summary,
@@ -478,6 +608,7 @@ def run_pilot(
         "pilot_check": pilot_check,
         "validation": validation,
         "cap_preview": cap_preview,
+        "cap_recommendation": cap_recommendation,
         "execution": execution,
         "shadow_evidence": shadow_evidence_record,
         "shadow_evidence_summary": shadow_evidence_summary,
@@ -541,6 +672,8 @@ def main() -> None:
     plan = result["plan"]
     validation = result["validation"]
     cap_preview = result["cap_preview"]
+    cap_recommendation = result["cap_recommendation"]
+    suggested_caps = cap_recommendation["suggested_caps"]
     print("\nTarget-weight pilot adapter")
     print(f"  candidate: {plan.candidate_id}")
     print(f"  trade_day: {plan.trade_day} score_day: {plan.score_day}")
@@ -548,6 +681,13 @@ def main() -> None:
     print(f"  orders: {len(plan.orders)} max_order={plan.max_order_notional:,.0f}")
     print(f"  pilot: {'ALLOWED' if validation.allowed else 'BLOCKED'} - {validation.reason}")
     print(f"  cap preview: {'PASS' if cap_preview.allowed else 'BLOCKED'} - {cap_preview.reason}")
+    print(
+        "  suggested caps: "
+        f"orders={suggested_caps['max_orders_per_day']} "
+        f"positions={suggested_caps['max_concurrent_positions']} "
+        f"notional={suggested_caps['max_notional_per_trade']:,} "
+        f"exposure={suggested_caps['max_gross_exposure']:,}"
+    )
     if result["shadow_evidence_summary"].get("attempted"):
         status = "recorded" if result["shadow_evidence_summary"].get("recorded") else "already recorded"
         print(f"  shadow evidence: {status}")
