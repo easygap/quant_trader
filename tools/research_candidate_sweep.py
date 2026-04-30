@@ -34,7 +34,7 @@ DEFAULT_INITIAL_CAPITAL = 10_000_000
 DEFAULT_TOP_N = 20
 DEFAULT_CANDIDATE_FAMILY = "rotation"
 DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
-ROTATION_DIVERSIFICATION = {
+DEFAULT_RESEARCH_DIVERSIFICATION = {
     "max_positions": 2,
     "max_position_ratio": 0.45,
     "max_investment_ratio": 0.85,
@@ -71,6 +71,7 @@ class CandidateSpec:
     strategy: str
     params: dict[str, Any]
     description: str
+    diversification: dict[str, Any] | None = None
 
 
 def get_git_hash() -> str:
@@ -310,6 +311,81 @@ def build_benchmark_relative_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_risk_budget_candidate_specs() -> list[CandidateSpec]:
+    """Exposure-structure variants for testing whether risk budget is the bottleneck."""
+    balanced_budget = {
+        "max_positions": 4,
+        "max_position_ratio": 0.25,
+        "max_investment_ratio": 0.80,
+        "min_cash_ratio": 0.15,
+    }
+    defensive_budget = {
+        "max_positions": 3,
+        "max_position_ratio": 0.20,
+        "max_investment_ratio": 0.60,
+        "min_cash_ratio": 0.30,
+    }
+    return [
+        CandidateSpec(
+            candidate_id="risk_budget_momentum_120d_concentrated",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 120,
+                "buy_threshold_pct": 10.0,
+                "sell_threshold_pct": -6.0,
+            },
+            description="120d momentum under the current concentrated research budget",
+            diversification=DEFAULT_RESEARCH_DIVERSIFICATION,
+        ),
+        CandidateSpec(
+            candidate_id="risk_budget_momentum_120d_balanced",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 120,
+                "buy_threshold_pct": 10.0,
+                "sell_threshold_pct": -6.0,
+            },
+            description="120d momentum with more positions and lower single-name weight",
+            diversification=balanced_budget,
+        ),
+        CandidateSpec(
+            candidate_id="risk_budget_momentum_120d_defensive",
+            strategy="momentum_factor",
+            params={
+                "lookback_days": 120,
+                "buy_threshold_pct": 10.0,
+                "sell_threshold_pct": -6.0,
+            },
+            description="120d momentum with lower gross exposure and higher cash reserve",
+            diversification=defensive_budget,
+        ),
+        CandidateSpec(
+            candidate_id="risk_budget_rotation_slow_balanced",
+            strategy="relative_strength_rotation",
+            params={
+                "short_lookback": 80,
+                "long_lookback": 160,
+                "sma_period": 80,
+                "short_weight": 0.5,
+            },
+            description="slow rotation with balanced exposure instead of concentration",
+            diversification=balanced_budget,
+        ),
+        CandidateSpec(
+            candidate_id="risk_budget_rotation_slow_defensive",
+            strategy="relative_strength_rotation",
+            params={
+                "short_lookback": 80,
+                "long_lookback": 160,
+                "sma_period": 80,
+                "short_weight": 0.5,
+            },
+            description="slow rotation with lower gross exposure and higher cash reserve",
+            diversification=defensive_budget,
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -322,6 +398,8 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         return build_pullback_candidate_specs()
     if family in ("benchmark_relative", "relative_momentum", "bench_rel_momentum"):
         return build_benchmark_relative_candidate_specs()
+    if family in ("risk_budget", "exposure", "diversification"):
+        return build_risk_budget_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -329,10 +407,11 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_breakout_candidate_specs(),
             *build_pullback_candidate_specs(),
             *build_benchmark_relative_candidate_specs(),
+            *build_risk_budget_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
-        "benchmark_relative, all"
+        "benchmark_relative, risk_budget, all"
     )
 
 
@@ -548,6 +627,10 @@ def candidate_to_strategy_metrics(candidate_id: str, metrics: dict[str, Any]):
     )
 
 
+def diversification_for_spec(spec: CandidateSpec) -> dict[str, Any]:
+    return dict(spec.diversification or DEFAULT_RESEARCH_DIVERSIFICATION)
+
+
 def build_candidate_record(
     spec: CandidateSpec,
     metrics: dict[str, Any],
@@ -568,6 +651,7 @@ def build_candidate_record(
         "strategy": spec.strategy,
         "params": spec.params,
         "description": spec.description,
+        "diversification": diversification_for_spec(spec),
         "alpha_pass": (
             metrics.get("benchmark_excess_return", 0) > 0
             and metrics.get("benchmark_excess_sharpe", 0) > 0
@@ -703,7 +787,7 @@ def evaluate_candidate(
 
     config = Config.get()
     fetch_start = (pd.Timestamp(start) - pd.DateOffset(months=14)).strftime("%Y-%m-%d")
-    with temporary_diversification(config, ROTATION_DIVERSIFICATION):
+    with temporary_diversification(config, diversification_for_spec(spec)):
         pbt = PortfolioBacktester(config)
         result = pbt.run(
             symbols=symbols,
@@ -942,7 +1026,15 @@ def main() -> None:
     parser.add_argument(
         "--candidate-family",
         default=DEFAULT_CANDIDATE_FAMILY,
-        choices=["rotation", "momentum", "breakout", "pullback", "benchmark_relative", "all"],
+        choices=[
+            "rotation",
+            "momentum",
+            "breakout",
+            "pullback",
+            "benchmark_relative",
+            "risk_budget",
+            "all",
+        ],
         help="Research candidate family to evaluate.",
     )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
