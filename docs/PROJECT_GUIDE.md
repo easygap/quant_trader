@@ -120,6 +120,7 @@ quant_trader/
 │   ├── paper_pilot.py           # Paper Pilot Authorization (launch readiness + pilot auth + 리스크 캡)
 │   ├── paper_preflight.py       # Paper Preflight Check (운영 준비 상태 점검)
 │   ├── strategy_universe.py     # Paper 대상 전략 canonical 목록
+│   ├── target_weight_rotation.py # Portfolio-level target-weight plan 생성/검증
 │   ├── evidence_collector.py    # 일일 실적 증거 자동 누적 (장마감 후 scheduler 호출)
 │   ├── promotion_engine.py      # metrics 기반 전략 승격 판정 (research→paper→live)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
@@ -133,6 +134,7 @@ quant_trader/
 │   ├── paper_runtime_status.py         # Paper 실행 상태 모니터링 CLI
 │   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정(+canonicalized research candidate)
 │   ├── research_candidate_sweep.py     # Research-only 후보 sweep → benchmark-aware ranking artifact
+│   ├── target_weight_rotation_pilot.py # target-weight 후보 전용 paper/pilot adapter
 │   ├── rebuild_paper_runtime.py        # Paper 런타임 재구성
 │   └── quarantine_test_artifacts.py    # 테스트 artifact 격리
 ├── strategies/
@@ -282,6 +284,7 @@ quant_trader/
 | **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. |
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
+| **target_weight_rotation.py** | Target-weight 후보의 portfolio-level plan 생성. 직전 거래일 점수, KS11 risk overlay, 목표비중 수량 산출, pilot cap 검증을 담당. 일반 `generate_signal()` 전략으로 위장하지 않는다. |
 | **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
 | **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행하며, 현재 canonical bundle에는 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` canonicalized research candidate도 포함. |
 
@@ -361,7 +364,7 @@ quant_trader/
 | **test_paper_lifecycle.py** | Full paper lifecycle (BUY/SELL/Snapshot, 격리 DB truncate, 4/4 PASS). |
 | **test_paper_evidence.py** | Paper Evidence 수집/검증 (51건): JSONL I/O, anomaly detection, benchmark missing, E2E replay 7일, cash-only zero-return deadlock regression, shadow evidence 분리. |
 | **test_paper_runtime.py** | Paper Runtime State Machine (45건): 상태 전이, schema quarantine, allowed_actions, auto-unfreeze. |
-| **test_paper_pilot.py** | Paper Pilot Authorization (29건): pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites. |
+| **test_paper_pilot.py** | Paper Pilot Authorization: pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites, artifact-only target-weight 후보 eligibility. |
 | **test_paper_preflight.py** | Paper Preflight Check: 운영 준비 상태 점검 시나리오. |
 | **test_promotion_engine.py** | Promotion 규칙: metrics 기반 자동 판정, threshold 경계. |
 | **test_order_state_machine.py** | 주문 상태기계: 9개 상태 전이, assert invariant. |
@@ -704,6 +707,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight rank-hysteresis 후보 추가** | `hold_rank_buffer`로 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 research-only |
 | ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
 | ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
+| ✅ **target-weight paper/pilot adapter 추가** | `core/target_weight_rotation.py` + `tools/target_weight_rotation_pilot.py`로 직전 거래일 점수 기반 목표비중 plan을 만들고 pilot cap을 plan-level로 검증. `OrderExecutor.execute_buy_quantity()`로 paper-only exact quantity 매수를 지원. live 모드는 계속 거부 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -712,8 +716,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 항목 | 결정 |
 |------|------|
 | 즉시 canonical promotion | 완료. `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 canonical promotion bundle에서도 `provisional_paper_candidate`로 재현됨 |
-| 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional. 단, target-weight 후보는 아직 paper execution adapter가 없어 registry/pilot 자동운영에는 미등록 |
-| 다음 후보 탐색 | 새 알파 탐색보다 target-weight paper adapter를 추가해 동일 로직을 pilot caps와 paper evidence로 검증 |
+| 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional이며 전용 paper/pilot adapter가 준비됨. 일반 scheduler registry에는 아직 넣지 않음 |
+| 다음 후보 탐색 | 새 알파 탐색보다 target-weight pilot을 shadow/dry-run → capped paper 순서로 돌려 execution-backed evidence 품질을 검증 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
@@ -823,4 +827,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (target-weight canonical bridge 및 provisional bundle 재현 반영)
+> **최종 수정**: 2026-04-30 (target-weight paper/pilot adapter 반영)
