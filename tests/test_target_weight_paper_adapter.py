@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -122,6 +123,15 @@ def _adapter_plan():
         orders=orders,
         diagnostics={"missing_symbols": [], "benchmark_symbol": "KS11"},
     )
+
+
+def _adapter_plan_for_date(day: str):
+    score_day = {
+        "2026-04-08": "2026-04-07",
+        "2026-04-09": "2026-04-08",
+        "2026-04-10": "2026-04-09",
+    }.get(day, "2026-04-09")
+    return replace(_adapter_plan(), as_of_date=day, trade_day=day, score_day=score_day)
 
 
 def test_target_weight_plan_uses_prior_day_scores_for_targets():
@@ -455,3 +465,83 @@ def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_p
     assert result["launch_artifacts"] == {"attempted": False}
     assert not (runtime_dir / "target_weight_candidate_pilot_launch_readiness.json").exists()
     assert not (runtime_dir / "target_weight_candidate_pilot_runbook.md").exists()
+
+
+def test_run_shadow_bootstrap_records_range_and_skips_duplicates(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import core.paper_runtime as pr
+    import tools.target_weight_rotation_pilot as twp
+
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(pr, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "_check_pilot_eligibility", lambda strategy: None)
+    monkeypatch.setattr(
+        twp,
+        "build_plan",
+        lambda **kwargs: _adapter_plan_for_date(kwargs["as_of_date"]),
+    )
+
+    result = twp.run_shadow_bootstrap(
+        start_date="2026-04-08",
+        end_date="2026-04-10",
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    records = pe.get_canonical_records("target_weight_candidate")
+    readiness = result["launch_artifacts"]["launch_readiness"]
+
+    assert result["summary"]["recorded"] == 3
+    assert result["summary"]["already_recorded"] == 0
+    assert payload["summary"]["recorded"] == 3
+    assert [record["date"] for record in records] == ["2026-04-08", "2026-04-09", "2026-04-10"]
+    assert all(record["execution_backed"] is False for record in records)
+    assert readiness["clean_final_days_current"] == 3
+    assert Path(result["launch_artifacts"]["runbook_path"]).exists()
+
+    second = twp.run_shadow_bootstrap(
+        start_date="2026-04-08",
+        end_date="2026-04-10",
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert second["summary"]["recorded"] == 0
+    assert second["summary"]["already_recorded"] == 3
+    assert len(pe.get_canonical_records("target_weight_candidate")) == 3
+
+
+def test_run_shadow_bootstrap_skips_duplicate_trade_day_in_batch(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import core.paper_runtime as pr
+    import tools.target_weight_rotation_pilot as twp
+
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(pr, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "_check_pilot_eligibility", lambda strategy: None)
+    monkeypatch.setattr(
+        twp,
+        "build_plan",
+        lambda **kwargs: _adapter_plan_for_date("2026-04-10"),
+    )
+
+    result = twp.run_shadow_bootstrap(
+        start_date="2026-04-10",
+        end_date="2026-04-13",
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["summary"]["recorded"] == 1
+    assert result["summary"]["duplicate_trade_day"] == 1
+    assert len(pe.get_canonical_records("target_weight_candidate")) == 1
