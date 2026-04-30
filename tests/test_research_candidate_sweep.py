@@ -61,6 +61,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "trend_pullback_balanced" in ids
     assert "benchmark_relative_momentum_120d" in ids
     assert "risk_budget_momentum_120d_balanced" in ids
+    assert "cash_switch_rotation_sma200" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -121,6 +122,22 @@ def test_build_candidate_specs_supports_risk_budget_family_aliases():
         "max_investment_ratio": 0.80,
         "min_cash_ratio": 0.15,
     }
+
+
+def test_build_candidate_specs_supports_cash_switch_family_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("cash_switch")
+    alias = build_candidate_specs("market_exit")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "cash_switch_rotation_sma200",
+        "cash_switch_rotation_sma120",
+        "cash_switch_rotation_slow_defensive",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"relative_strength_rotation"}
+    assert all(spec.params["market_filter_exit"] is True for spec in direct)
 
 
 def test_build_candidate_specs_rejects_unknown_family():
