@@ -60,6 +60,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "breakout_volume_strict" in ids
     assert "trend_pullback_balanced" in ids
     assert "benchmark_relative_momentum_120d" in ids
+    assert "risk_budget_momentum_120d_balanced" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -98,6 +99,28 @@ def test_build_candidate_specs_supports_benchmark_relative_family_aliases():
     assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
     assert {spec.strategy for spec in direct} == {"momentum_factor"}
     assert all(spec.params["benchmark_relative"] is True for spec in direct)
+
+
+def test_build_candidate_specs_supports_risk_budget_family_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("risk_budget")
+    alias = build_candidate_specs("exposure")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "risk_budget_momentum_120d_concentrated",
+        "risk_budget_momentum_120d_balanced",
+        "risk_budget_momentum_120d_defensive",
+        "risk_budget_rotation_slow_balanced",
+        "risk_budget_rotation_slow_defensive",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert direct[1].diversification == {
+        "max_positions": 4,
+        "max_position_ratio": 0.25,
+        "max_investment_ratio": 0.80,
+        "min_cash_ratio": 0.15,
+    }
 
 
 def test_build_candidate_specs_rejects_unknown_family():
@@ -240,6 +263,43 @@ def test_build_candidate_record_keeps_rejection_reason_for_weak_candidate():
     assert rec["promotion"]["status"] == "paper_only"
     assert "benchmark_excess_return <= 0" in rec["rejection_reasons"]
     assert "ev_per_trade <= 0" in rec["rejection_reasons"]
+
+
+def test_build_candidate_record_records_diversification_budget():
+    from tools.research_candidate_sweep import CandidateSpec, build_candidate_record
+
+    rec = build_candidate_record(
+        CandidateSpec(
+            "budgeted",
+            "momentum_factor",
+            {},
+            "budgeted candidate",
+            diversification={
+                "max_positions": 3,
+                "max_position_ratio": 0.20,
+                "max_investment_ratio": 0.60,
+                "min_cash_ratio": 0.30,
+            },
+        ),
+        {
+            "total_return": 1.0,
+            "sharpe": 0.1,
+            "profit_factor": 1.01,
+            "mdd": -5.0,
+            "total_trades": 10,
+            "wf_positive_rate": 0.5,
+            "wf_sharpe_positive_rate": 0.0,
+            "wf_windows": 3,
+            "wf_total_trades": 10,
+            "ev_per_trade": 1,
+            "cost_adjusted_cagr": 0.5,
+            "turnover_per_year": 200.0,
+        },
+        {"ew_bh_return": 10.0, "ew_bh_sharpe": 0.5},
+    )
+
+    assert rec["diversification"]["max_positions"] == 3
+    assert rec["diversification"]["min_cash_ratio"] == 0.30
 
 
 def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):
