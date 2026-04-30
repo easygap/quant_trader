@@ -770,6 +770,8 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
 
     # ── 7. runtime state ──
     rt = get_paper_runtime_state(strategy, as_of_date=today)
+    real_paper_days = sum(1 for r in eligible if r.get("execution_backed", True))
+    shadow_days = sum(1 for r in eligible if not r.get("execution_backed", True))
 
     # launch_ready = 모든 전제조건 충족 (pilot auth 제외 — 마지막 수동 단계)
     infra_ready = (clean_days >= required_clean
@@ -803,8 +805,8 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
         "strategy_eligible": strategy_eligible,
         # runtime
         "runtime_state": rt.state,
-        "real_paper_days": rt.metrics.get("real_paper_days", 0),
-        "shadow_days": rt.metrics.get("shadow_days", 0),
+        "real_paper_days": real_paper_days,
+        "shadow_days": shadow_days,
         "eligible_records": len(eligible),
         "quarantined_records": len(quarantined),
         # verdict
