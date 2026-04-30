@@ -319,7 +319,7 @@ quant_trader/
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
 | **momentum_top_portfolio.py** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. `run_momentum_top_portfolio_backtest()`: WatchlistManager(momentum_top) → 종목별 데이터 수집 → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성 → 시장 국면 필터·포트폴리오 스탑 적용. `print_momentum_top_portfolio_report()`. `--mode backtest_momentum_top`에서 사용. |
 | **param_optimizer.py** | Grid Search / Bayesian(scikit-optimize). train_ratio·OOS 보고. `--include-weights` 시 **스코어링 가중치 대칭 Grid Search + OOS 샤프≥1.0 게이트**. `--auto-correlation`: 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화. `--disable-weights w_rsi,w_ma` 등으로 수동 지정도 가능. `Backtester.run(..., param_overrides=)`. |
-| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|pullback|benchmark_relative|risk_budget|cash_switch|benchmark_aware_rotation|target_weight_rotation|all` 후보를 포트폴리오 단위로 평가하고 raw EW B&H benchmark excess, exposure-matched B&H diagnostic, EV, CAGR, turnover, WF 안정성으로 랭킹/진단하며 decision action을 포함해 `reports/research_sweeps/`에 저장. target-weight 후보는 `min_score_floor_pct` score-floor와 `hold_rank_buffer` rank-hysteresis 변형을 지원. |
+| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|pullback|benchmark_relative|risk_budget|cash_switch|benchmark_aware_rotation|target_weight_rotation|all` 후보를 포트폴리오 단위로 평가하고 raw EW B&H benchmark excess, exposure-matched B&H diagnostic, EV, CAGR, turnover, WF 안정성으로 랭킹/진단하며 decision action을 포함해 `reports/research_sweeps/`에 저장. target-weight 후보는 `min_score_floor_pct` score-floor, `hold_rank_buffer` rank-hysteresis, `market_exposure_mode=benchmark_risk` SMA/낙폭/변동성 risk-off 노출 축소를 지원. |
 
 ### 3.7 database/
 
@@ -702,6 +702,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **canonical top-20 target-weight full sweep** | 20종목 기준 alpha 후보 확인. best 기존 후보=`target_weight_rotation_top3_40_100_excess`, return=+212.21%, raw excess=+62.82%p, exposure-matched excess=+83.66%p. 다만 promotion=`paper_only`, turnover/year=1412.1%라 `KEEP_RESEARCH_ONLY` |
 | ✅ **target-weight score-floor 후보 추가** | `min_score_floor_pct`로 약한 KS11 초과 모멘텀 슬롯을 현금으로 남기는 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지 |
 | ✅ **target-weight rank-hysteresis 후보 추가** | `hold_rank_buffer`로 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 research-only |
+| ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -709,9 +710,9 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 | 항목 | 결정 |
 |------|------|
-| 즉시 canonical promotion | 진행하지 않음. 2026-04-29/30 all-family quick sweep 모두 benchmark excess gate 미달 |
-| 현재 후보군 | rotation/momentum/breakout 기존 후보 모두 research_only 유지. pullback 4개, benchmark-relative 3개, risk-budget 5개, cash-switch 3개, benchmark-aware rotation 4개, target-weight rotation 13개도 research-only 유지 |
-| 다음 후보 탐색 | canonical top-20에서 target-weight alpha와 turnover 개선은 확인. 다음 병목은 MDD -20% gate이므로 drawdown-aware exposure, benchmark SMA/volatility overlay, correlation cap을 우선 |
+| 즉시 canonical promotion | 아직 자동 진행하지 않음. target-weight risk overlay 후보가 research sweep에서 provisional 조건을 처음 통과했지만, 현재 canonical 도구는 기존 등록 전략만 평가 |
+| 현재 후보군 | rotation/momentum/breakout 기존 후보는 research_only/paper_only 유지. pullback 4개, benchmark-relative 3개, risk-budget 5개, cash-switch 3개, benchmark-aware rotation 4개, target-weight rotation 19개 중 2개가 research sweep 기준 `provisional_paper_candidate` |
+| 다음 후보 탐색 | 새 알파 탐색보다 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 canonical evaluation/paper pilot 경로에 연결하고, 동일 로직을 paper evidence로 검증 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
@@ -821,4 +822,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (target-weight rank-hysteresis full sweep 및 다음 MDD 병목 반영)
+> **최종 수정**: 2026-04-30 (target-weight benchmark-risk overlay full sweep 및 provisional 후보 반영)

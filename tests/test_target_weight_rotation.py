@@ -256,6 +256,93 @@ def test_target_weight_rotation_hold_rank_buffer_reduces_symbol_churn():
     )
 
 
+def test_target_weight_rotation_benchmark_risk_overlay_reduces_exposure():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    benchmark = frames["KS11"].copy()
+    decline_mask = benchmark["date"] >= pd.Timestamp("2025-01-27")
+    benchmark.loc[decline_mask, "close"] = np.linspace(98.0, 88.0, int(decline_mask.sum()))
+    benchmark.loc[decline_mask, "open"] = benchmark.loc[decline_mask, "close"]
+    benchmark.loc[decline_mask, "high"] = benchmark.loc[decline_mask, "close"]
+    benchmark.loc[decline_mask, "low"] = benchmark.loc[decline_mask, "close"]
+    frames["KS11"] = benchmark
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-05",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "market_exposure_mode": "benchmark_risk",
+            "market_ma_period": 5,
+            "bear_target_exposure": 0.35,
+            "benchmark_drawdown_lookback": 5,
+            "benchmark_drawdown_trigger_pct": 4.0,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    first_day = result["equity_curve"].iloc[0]
+    first_exposure = 1 - first_day["cash"] / first_day["value"]
+
+    assert 0.34 <= first_exposure <= 0.36
+    assert result["target_weight_metrics"]["avg_target_exposure_pct"] == 35.0
+    assert result["target_weight_metrics"]["min_target_exposure_pct"] == 35.0
+    assert result["target_weight_metrics"]["risk_off_rebalance_count"] == 1
+    assert result["target_weight_metrics"]["risk_off_rebalance_pct"] == 100.0
+
+
+def test_target_weight_rotation_benchmark_risk_uses_prior_day_benchmark():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    benchmark = frames["KS11"].copy()
+    same_day_mask = benchmark["date"] == pd.Timestamp("2025-02-03")
+    benchmark.loc[same_day_mask, "close"] = 50.0
+    benchmark.loc[same_day_mask, "open"] = 50.0
+    benchmark.loc[same_day_mask, "high"] = 50.0
+    benchmark.loc[same_day_mask, "low"] = 50.0
+    frames["KS11"] = benchmark
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-03",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "market_exposure_mode": "benchmark_risk",
+            "market_ma_period": 5,
+            "bear_target_exposure": 0.35,
+            "benchmark_drawdown_lookback": 5,
+            "benchmark_drawdown_trigger_pct": 4.0,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    first_day = result["equity_curve"].iloc[0]
+    first_exposure = 1 - first_day["cash"] / first_day["value"]
+
+    assert 0.79 <= first_exposure <= 0.81
+    assert result["target_weight_metrics"]["risk_off_rebalance_count"] == 0
+
+
 def test_target_weight_rotation_score_floor_leaves_weak_slots_in_cash():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
