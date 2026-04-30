@@ -23,6 +23,11 @@ logger.remove()
 logger.add(sys.stderr, level="WARNING")
 
 
+CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+)
+
+
 def get_git_hash() -> str:
     try:
         return subprocess.check_output(
@@ -30,6 +35,136 @@ def get_git_hash() -> str:
         ).decode().strip()
     except Exception:
         return "unknown"
+
+
+def build_canonical_research_candidate_specs(candidate_ids=None):
+    """Return research candidates that are promoted into canonical evaluation."""
+    from tools.research_candidate_sweep import build_target_weight_rotation_candidate_specs
+
+    wanted = tuple(candidate_ids or CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS)
+    specs = {spec.candidate_id: spec for spec in build_target_weight_rotation_candidate_specs()}
+    missing = [candidate_id for candidate_id in wanted if candidate_id not in specs]
+    if missing:
+        raise ValueError(f"canonical research candidate missing: {', '.join(missing)}")
+    return [specs[candidate_id] for candidate_id in wanted]
+
+
+def canonical_research_candidate_metadata(spec):
+    params_json = json.dumps(spec.params, sort_keys=True, ensure_ascii=True, default=str)
+    return {
+        "candidate_id": spec.candidate_id,
+        "base_strategy": spec.strategy,
+        "candidate_source": "canonicalized_research_candidate",
+        "params": spec.params,
+        "params_hash": hashlib.sha256(params_json.encode("utf-8")).hexdigest(),
+        "description": spec.description,
+    }
+
+
+def run_canonical_research_candidate(spec, symbols, capital, start, end, runner=None):
+    """Run a research-only candidate inside the canonical artifact path."""
+    if spec.strategy != "target_weight_rotation":
+        raise ValueError(f"unsupported canonical research candidate strategy: {spec.strategy}")
+
+    if runner is None:
+        from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+        runner = run_target_weight_rotation_backtest
+
+    return runner(
+        symbols=symbols,
+        start=start,
+        end=end,
+        capital=capital,
+        params=spec.params,
+    )
+
+
+def calculate_canonical_metrics(result, capital):
+    eq = result.get("equity_curve")
+    trades = result.get("trades", [])
+    if eq is None or eq.empty:
+        metrics = {
+            "total_return": 0,
+            "sharpe": 0,
+            "profit_factor": 0,
+            "mdd": 0,
+            "win_rate": 0,
+            "total_trades": 0,
+            "signal_density": 0,
+            "wf_windows": 0,
+            "wf_positive_rate": 0,
+            "wf_sharpe_positive_rate": 0,
+            "wf_total_trades": 0,
+        }
+        metrics.update(result.get("target_weight_metrics", {}) or {})
+        return metrics
+    if "date" in eq.columns:
+        eq = eq.set_index("date")
+    final = float(eq["value"].iloc[-1])
+    ret = (final / capital - 1) * 100
+    nd = len(eq)
+    years = max(nd / 252, 1 / 252)
+    dr = eq["value"].pct_change().dropna()
+    dm = float(dr.mean()) if len(dr) > 0 else 0
+    ds = float(dr.std()) if len(dr) > 1 else 0
+    sharpe = (dm * 252 - 0.03) / (ds * np.sqrt(252)) if ds > 0 else 0
+    peak = eq["value"].cummax()
+    mdd = float(((eq["value"] - peak) / peak).min() * 100)
+    sells = [t for t in trades if t.get("action") != "BUY"]
+    nt = len(sells)
+    wins = sum(1 for t in sells if t.get("pnl", 0) > 0)
+    wr = (wins / nt * 100) if nt else 0
+    gp = sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) > 0)
+    gl = abs(sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) < 0))
+    pf = gp / gl if gl > 0 else (99 if gp > 0 else 0)
+    npos = eq.get("n_positions", pd.Series(0, index=eq.index))
+    density = float((npos > 0).sum()) / max(nd, 1) * 100
+    realized_pnl = sum(t.get("pnl", 0) for t in sells)
+    ev_per_trade = realized_pnl / nt if nt else 0
+    trade_notional = sum(
+        abs(float(t.get("price", 0) or 0) * float(t.get("quantity", 0) or 0))
+        for t in trades
+    )
+    turnover_per_year = (trade_notional / capital / years * 100) if capital > 0 else 0
+    if final > 0 and capital > 0:
+        cost_adjusted_cagr = ((final / capital) ** (1 / years) - 1) * 100
+    else:
+        cost_adjusted_cagr = -100
+    metrics = {
+        "total_return": round(ret, 2),
+        "sharpe": round(sharpe, 2),
+        "profit_factor": round(pf, 2),
+        "mdd": round(mdd, 2),
+        "win_rate": round(wr, 1),
+        "total_trades": nt,
+        "signal_density": round(density, 1),
+        "ev_per_trade": round(ev_per_trade, 0),
+        "cost_adjusted_cagr": round(cost_adjusted_cagr, 2),
+        "turnover_per_year": round(turnover_per_year, 1),
+    }
+    metrics.update(result.get("target_weight_metrics", {}) or {})
+    return metrics
+
+
+def attach_canonical_walk_forward_metrics(metrics, window_metrics):
+    nw = len(window_metrics)
+    npos = sum(1 for wm in window_metrics if wm["total_return"] > 0)
+    nsh = sum(1 for wm in window_metrics if wm["sharpe"] > 0)
+    tot_t = sum(wm.get("total_trades", 0) for wm in window_metrics)
+    metrics["wf_windows"] = nw
+    metrics["wf_positive_rate"] = round(npos / max(nw, 1), 3)
+    metrics["wf_sharpe_positive_rate"] = round(nsh / max(nw, 1), 3)
+    metrics["wf_total_trades"] = tot_t
+    return {
+        "windows": nw,
+        "positive": npos,
+        "sharpe_pos": nsh,
+        "total_trades": tot_t,
+        "details": [
+            {"return": wm["total_return"], "sharpe": wm["sharpe"]}
+            for wm in window_metrics
+        ],
+    }
 
 
 def run_canonical():
@@ -138,52 +273,7 @@ def run_canonical():
                        if pd.Timestamp(t.get("date", t.get("entry_date", "2020-01-01"))) >= pd.Timestamp(start)]
         return r
 
-    def calc(result, capital):
-        eq = result.get("equity_curve")
-        trades = result.get("trades", [])
-        if eq is None or eq.empty:
-            return {"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0,
-                    "win_rate": 0, "total_trades": 0, "signal_density": 0,
-                    "wf_windows": 0, "wf_positive_rate": 0, "wf_sharpe_positive_rate": 0, "wf_total_trades": 0}
-        if "date" in eq.columns:
-            eq = eq.set_index("date")
-        final = float(eq["value"].iloc[-1])
-        ret = (final / capital - 1) * 100
-        nd = len(eq)
-        years = max(nd / 252, 1 / 252)
-        dr = eq["value"].pct_change().dropna()
-        dm = float(dr.mean()) if len(dr) > 0 else 0
-        ds = float(dr.std()) if len(dr) > 1 else 0
-        sharpe = (dm * 252 - 0.03) / (ds * np.sqrt(252)) if ds > 0 else 0
-        peak = eq["value"].cummax()
-        mdd = float(((eq["value"] - peak) / peak).min() * 100)
-        sells = [t for t in trades if t.get("action") != "BUY"]
-        nt = len(sells)
-        wins = sum(1 for t in sells if t.get("pnl", 0) > 0)
-        wr = (wins / nt * 100) if nt else 0
-        gp = sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) > 0)
-        gl = abs(sum(t.get("pnl", 0) for t in sells if t.get("pnl", 0) < 0))
-        pf = gp / gl if gl > 0 else (99 if gp > 0 else 0)
-        npos = eq.get("n_positions", pd.Series(0, index=eq.index))
-        density = float((npos > 0).sum()) / max(nd, 1) * 100
-        realized_pnl = sum(t.get("pnl", 0) for t in sells)
-        ev_per_trade = realized_pnl / nt if nt else 0
-        trade_notional = sum(
-            abs(float(t.get("price", 0) or 0) * float(t.get("quantity", 0) or 0))
-            for t in trades
-        )
-        turnover_per_year = (trade_notional / capital / years * 100) if capital > 0 else 0
-        if final > 0 and capital > 0:
-            cost_adjusted_cagr = ((final / capital) ** (1 / years) - 1) * 100
-        else:
-            cost_adjusted_cagr = -100
-        return {"total_return": round(ret, 2), "sharpe": round(sharpe, 2),
-                "profit_factor": round(pf, 2), "mdd": round(mdd, 2),
-                "win_rate": round(wr, 1), "total_trades": nt,
-                "signal_density": round(density, 1),
-                "ev_per_trade": round(ev_per_trade, 0),
-                "cost_adjusted_cagr": round(cost_adjusted_cagr, 2),
-                "turnover_per_year": round(turnover_per_year, 1)}
+    calc = calculate_canonical_metrics
 
     metrics_all = {}
     wf_all = {}
@@ -211,20 +301,37 @@ def run_canonical():
             except Exception:
                 w_metrics.append({"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "total_trades": 0})
 
-        nw = len(w_metrics)
-        npos = sum(1 for wm in w_metrics if wm["total_return"] > 0)
-        nsh = sum(1 for wm in w_metrics if wm["sharpe"] > 0)
-        tot_t = sum(wm.get("total_trades", 0) for wm in w_metrics)
-
-        m["wf_windows"] = nw
-        m["wf_positive_rate"] = round(npos / max(nw, 1), 3)
-        m["wf_sharpe_positive_rate"] = round(nsh / max(nw, 1), 3)
-        m["wf_total_trades"] = tot_t
-
+        wf_summary = attach_canonical_walk_forward_metrics(m, w_metrics)
         metrics_all[strat] = m
-        wf_all[strat] = {"windows": nw, "positive": npos, "sharpe_pos": nsh,
-                         "total_trades": tot_t,
-                         "details": [{"return": wm["total_return"], "sharpe": wm["sharpe"]} for wm in w_metrics]}
+        wf_all[strat] = wf_summary
+        print(f"ret={m['total_return']}%")
+
+    research_specs = build_canonical_research_candidate_specs()
+    for spec in research_specs:
+        name = spec.candidate_id
+        print(f"  {name}...", end=" ", flush=True)
+        try:
+            r = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, EVAL_START, EVAL_END)
+            m = calc(r, INITIAL_CAPITAL)
+        except Exception as e:
+            m = {"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "error": str(e)[:60]}
+            print("ERROR")
+            metrics_all[name] = m
+            wf_all[name] = {"windows": 0, "positive": 0, "sharpe_pos": 0, "total_trades": 0, "details": []}
+            continue
+
+        w_metrics = []
+        for ws, we in windows:
+            try:
+                wr = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, ws, we)
+                wm = calc(wr, INITIAL_CAPITAL)
+                w_metrics.append(wm)
+            except Exception:
+                w_metrics.append({"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "total_trades": 0})
+
+        wf_summary = attach_canonical_walk_forward_metrics(m, w_metrics)
+        metrics_all[name] = m
+        wf_all[name] = wf_summary
         print(f"ret={m['total_return']}%")
 
     benchmark["strategy_excess_return_pct"] = {
@@ -278,6 +385,11 @@ def run_canonical():
         "eval_end": EVAL_END,
         "universe_rule": "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20",
         "universe": universe,
+        "canonical_research_candidate_ids": [spec.candidate_id for spec in research_specs],
+        "strategy_specs": [
+            canonical_research_candidate_metadata(spec)
+            for spec in research_specs
+        ],
         "wf_window_months": 12,
         "wf_step_months": 6,
         "wf_n_windows": len(windows),
@@ -305,7 +417,7 @@ def run_canonical():
     print("\n" + "=" * 80)
     print("  Promotion Result")
     print("=" * 80)
-    for name in STRATEGIES:
+    for name in [*STRATEGIES, *[spec.candidate_id for spec in research_specs]]:
         p = promotions.get(name, {})
         m = metrics_all.get(name, {})
         print(f"  {name:<28} {p.get('status','?'):<30} ret={m.get('total_return',0):>7.2f}% PF={m.get('profit_factor',0):.2f}")
