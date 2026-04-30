@@ -96,6 +96,7 @@
 | **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
 | **방어형 후보 raw benchmark 해석** | cash-switch처럼 평균 노출이 낮은 후보는 full B&H 대비 excess가 과도하게 나빠 보일 수 있음 | **진단 추가** — research sweep에 exposure-matched B&H return/sharpe/MDD/excess 기록. 단, promotion gate는 raw benchmark excess 유지 |
+| **회전 전략의 sparse signal 한계** | 월간 상대강도 후보가 BUY/SELL 신호만 내면 목표 top-N을 지속적으로 채우지 못해 평균 노출이 낮게 측정될 수 있음 | **추가 과제** — benchmark-aware rotation smoke에서 avg exposure 16.2~24.1%. 다음은 목표비중 top-N 리밸런싱 백테스터로 별도 검증 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크 미포함. paper/live에만 존재 | 백테스트-live 성과 차이 원인. 문서화됨 |
 
 ---
@@ -132,6 +133,7 @@
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 | Research sweep exposure-matched benchmark | 중간 | **완료 — 후보별 평균 노출/현금비중과 exposure-matched B&H excess 진단 추가. promotion gate는 raw benchmark 기준 유지** |
+| Target-weight top-N rotation backtester | 높음 | 신규 과제 — benchmark-aware rotation의 sparse signal 한계를 분리해, 매월 상위 N개 목표비중 보유/교체와 부분 헤지 효과를 직접 측정 |
 
 ---
 
