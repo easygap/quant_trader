@@ -349,6 +349,26 @@ def test_preview_plan_against_caps_flags_default_pilot_caps():
     assert relaxed_preview.allowed is True
 
 
+def test_recommend_pilot_caps_matches_target_weight_plan():
+    from tools.target_weight_rotation_pilot import recommend_pilot_caps
+
+    rec = recommend_pilot_caps(_adapter_plan())
+    minimum = rec["minimum_caps"]
+    suggested = rec["suggested_caps"]
+
+    assert minimum["max_orders_per_day"] == 3
+    assert minimum["max_concurrent_positions"] == 3
+    assert minimum["max_notional_per_trade"] == 1_200_000
+    assert minimum["max_gross_exposure"] == 3_200_000
+    assert suggested["max_orders_per_day"] == 3
+    assert suggested["max_concurrent_positions"] == 3
+    assert suggested["max_notional_per_trade"] == 1_260_000
+    assert suggested["max_gross_exposure"] == 3_360_000
+    assert rec["suggested_preview"]["allowed"] is True
+    assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
+    assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
+
+
 def test_record_shadow_evidence_for_plan_is_non_promotable(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import record_shadow_evidence_for_plan
@@ -400,12 +420,20 @@ def test_run_pilot_shadow_generates_readiness_and_runbook(monkeypatch, tmp_path)
     assert result["launch_artifacts"]["attempted"] is True
     assert Path(readiness["json_path"]).exists()
     assert Path(readiness["md_path"]).exists()
-    assert Path(result["launch_artifacts"]["runbook_path"]).exists()
+    runbook_path = Path(result["launch_artifacts"]["runbook_path"])
+    assert runbook_path.exists()
     assert readiness["launch_ready"] is False
     assert readiness["shadow_days"] >= 1
+    assert payload["cap_recommendation"]["suggested_caps"]["max_orders_per_day"] == 3
+    assert payload["cap_recommendation"]["suggested_caps"]["max_concurrent_positions"] == 3
+    assert payload["cap_recommendation"]["suggested_preview"]["allowed"] is True
     assert payload["launch_artifacts"]["attempted"] is True
     assert payload["launch_artifacts"]["launch_readiness"]["clean_final_days_current"] == 1
     assert "clean_final_days" in payload["launch_artifacts"]["launch_readiness"]["blocking_requirements"][0]
+    runbook_text = runbook_path.read_text(encoding="utf-8")
+    assert "## Target-weight Cap Recommendation" in runbook_text
+    assert "--max-orders 3 --max-positions 3" in runbook_text
+    assert "--max-notional 1260000 --max-exposure 3360000" in runbook_text
 
 
 def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
