@@ -1,0 +1,194 @@
+import numpy as np
+import pandas as pd
+
+
+class FakeCollector:
+    quiet_ohlcv_log = False
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def fetch_korean_stock(self, symbol, start_date=None, end_date=None):
+        df = self.frames.get(symbol)
+        if df is None:
+            return pd.DataFrame(columns=["close"])
+        return df.copy()
+
+
+class NoCostRiskManager:
+    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+        return {
+            "commission": 0.0,
+            "tax": 0.0,
+            "capital_gains_tax": 0.0,
+            "slippage": 0.0,
+            "execution_price": float(price),
+        }
+
+
+class CostRiskManager:
+    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+        if action == "BUY":
+            return {
+                "commission": 1.0,
+                "tax": 0.0,
+                "capital_gains_tax": 0.0,
+                "slippage": 0.0,
+                "execution_price": float(price) + 0.1,
+            }
+        return {
+            "commission": 1.0,
+            "tax": 1.0,
+            "capital_gains_tax": 0.0,
+            "slippage": 0.0,
+            "execution_price": max(0.0, float(price) - 0.1),
+        }
+
+
+def _ohlcv(dates, close):
+    close = np.array(close, dtype=float)
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": [1_000_000] * len(close),
+        }
+    )
+
+
+def _frames_for_rotation():
+    dates = pd.bdate_range("2025-01-01", "2025-03-10")
+    steps = np.arange(len(dates), dtype=float)
+    a = 100 + steps * 0.5
+    b = 100 + np.minimum(steps, 24) * 0.9 - np.maximum(steps - 24, 0) * 0.8
+    c = 100 + np.maximum(steps - 24, 0) * 1.4
+    benchmark = np.full(len(dates), 100.0)
+    return {
+        "AAA": _ohlcv(dates, a),
+        "BBB": _ohlcv(dates, b),
+        "CCC": _ohlcv(dates, c),
+        "KS11": _ohlcv(dates, benchmark),
+    }
+
+
+def test_target_weight_rotation_holds_top_n_with_cash_buffer():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    eq = result["equity_curve"]
+    metrics = result["target_weight_metrics"]
+
+    assert not eq.empty
+    assert int(eq.loc[eq["date"] == pd.Timestamp("2025-02-03"), "n_positions"].iloc[0]) == 2
+    assert metrics["target_top_n"] == 2
+    assert metrics["avg_slots_filled"] == 2.0
+    assert metrics["slot_fill_rate_pct"] == 100.0
+    first_exposure = 1 - (
+        eq.loc[eq["date"] == pd.Timestamp("2025-02-03"), "cash"].iloc[0]
+        / eq.loc[eq["date"] == pd.Timestamp("2025-02-03"), "value"].iloc[0]
+    )
+    assert 0.79 <= first_exposure <= 0.81
+
+
+def test_target_weight_rotation_uses_prior_day_scores_for_rebalance():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    c = frames["CCC"].copy()
+    c.loc[c["date"] == pd.Timestamp("2025-02-03"), "close"] = 500.0
+    frames["CCC"] = c
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-05",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    first_day_buys = [
+        t["symbol"]
+        for t in result["trades"]
+        if t["action"] == "BUY" and t["date"] == pd.Timestamp("2025-02-03")
+    ]
+
+    assert "CCC" not in first_day_buys
+    assert set(first_day_buys) == {"AAA", "BBB"}
+
+
+def test_target_weight_rotation_delta_rebalances_and_charges_costs():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    params = {
+        "target_top_n": 2,
+        "target_exposure": 0.80,
+        "target_tolerance_pct": 0.0,
+        "short_lookback": 2,
+        "long_lookback": 3,
+        "short_weight": 0.5,
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+    }
+    no_cost = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params=params,
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=NoCostRiskManager(),
+    )
+    with_cost = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params=params,
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=CostRiskManager(),
+    )
+
+    sell_symbols = {
+        t["symbol"]
+        for t in no_cost["trades"]
+        if t["action"] == "REBALANCE_SELL" and t["date"] >= pd.Timestamp("2025-03-03")
+    }
+    buy_symbols = {
+        t["symbol"]
+        for t in no_cost["trades"]
+        if t["action"] == "BUY" and t["date"] >= pd.Timestamp("2025-03-03")
+    }
+
+    assert "BBB" in sell_symbols
+    assert "CCC" in buy_symbols
+    assert with_cost["equity_curve"]["value"].iloc[-1] < no_cost["equity_curve"]["value"].iloc[-1]
