@@ -74,6 +74,16 @@ def _frames_for_rotation():
     }
 
 
+def _frames_for_score_floor():
+    dates = pd.bdate_range("2025-01-27", "2025-02-05")
+    return {
+        "AAA": _ohlcv(dates, [100, 101, 102, 103, 104, 105, 106, 107]),
+        "BBB": _ohlcv(dates, [100, 99, 98, 97, 96, 95, 94, 93]),
+        "CCC": _ohlcv(dates, [100, 98, 96, 94, 92, 90, 88, 86]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+
+
 def test_target_weight_rotation_holds_top_n_with_cash_buffer():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
@@ -192,3 +202,36 @@ def test_target_weight_rotation_delta_rebalances_and_charges_costs():
     assert "BBB" in sell_symbols
     assert "CCC" in buy_symbols
     assert with_cost["equity_curve"]["value"].iloc[-1] < no_cost["equity_curve"]["value"].iloc[-1]
+
+
+def test_target_weight_rotation_score_floor_leaves_weak_slots_in_cash():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-05",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "min_score_floor_pct": 0.0,
+        },
+        collector=FakeCollector(_frames_for_score_floor()),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    buys = [t["symbol"] for t in result["trades"] if t["action"] == "BUY"]
+    metrics = result["target_weight_metrics"]
+    first_day = result["equity_curve"].iloc[0]
+    first_exposure = 1 - first_day["cash"] / first_day["value"]
+
+    assert buys == ["AAA"]
+    assert metrics["avg_slots_filled"] == 1.0
+    assert metrics["slot_fill_rate_pct"] == 50.0
+    assert 0.79 <= first_exposure <= 0.81
