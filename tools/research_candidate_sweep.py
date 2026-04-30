@@ -525,11 +525,19 @@ def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
     return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:top_n])
 
 
-def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: float) -> dict[str, Any]:
+def buy_and_hold_benchmark_with_returns(
+    symbols: list[str],
+    start: str,
+    end: str,
+    capital: float,
+) -> tuple[dict[str, Any], pd.Series]:
     from core.data_collector import DataCollector
 
     if not symbols:
-        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []}
+        return (
+            {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []},
+            pd.Series(dtype=float),
+        )
 
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
@@ -554,21 +562,124 @@ def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: fl
 
     combined = pd.concat(parts, axis=1).sum(axis=1).dropna() if parts else pd.Series(dtype=float)
     if len(combined) <= 1:
-        return {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []}
+        return (
+            {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []},
+            pd.Series(dtype=float),
+        )
 
     total_return = (float(combined.iloc[-1]) / capital - 1) * 100
     daily_returns = combined.pct_change().dropna()
     std = float(daily_returns.std()) if len(daily_returns) > 1 else 0
     sharpe = (float(daily_returns.mean()) * 252 - 0.03) / (std * np.sqrt(252)) if std > 0 else 0
+    return (
+        {
+            "ew_bh_return": round(total_return, 2),
+            "ew_bh_sharpe": round(sharpe, 2),
+            "universe_size": len(benchmark_symbols),
+            "benchmark_symbols": benchmark_symbols,
+        },
+        daily_returns,
+    )
+
+
+def buy_and_hold_benchmark(symbols: list[str], start: str, end: str, capital: float) -> dict[str, Any]:
+    benchmark, _daily_returns = buy_and_hold_benchmark_with_returns(symbols, start, end, capital)
+    return benchmark
+
+
+def candidate_exposure_series(equity_curve: pd.DataFrame | None) -> tuple[pd.Series, str]:
+    if equity_curve is None or equity_curve.empty:
+        return pd.Series(dtype=float), "none"
+
+    eq = equity_curve.copy()
+    if "date" in eq.columns:
+        eq = eq.set_index("date")
+    eq.index = pd.to_datetime(eq.index)
+
+    if {"cash", "value"}.issubset(eq.columns):
+        value = eq["value"].astype(float).replace(0, np.nan)
+        cash = eq["cash"].astype(float)
+        exposure = ((value - cash) / value).replace([np.inf, -np.inf], np.nan)
+        return exposure.clip(lower=0, upper=1).fillna(0), "cash_value"
+
+    if "n_positions" in eq.columns:
+        return (eq["n_positions"].astype(float) > 0).astype(float), "position_presence"
+
+    return pd.Series(0.0, index=eq.index), "none"
+
+
+def exposure_summary(equity_curve: pd.DataFrame | None) -> dict[str, Any]:
+    exposure, source = candidate_exposure_series(equity_curve)
+    if exposure.empty:
+        return {
+            "avg_exposure_pct": 0,
+            "median_exposure_pct": 0,
+            "avg_cash_pct": 100,
+            "invested_days_pct": 0,
+            "exposure_observation_days": 0,
+            "exposure_source": source,
+        }
+
     return {
-        "ew_bh_return": round(total_return, 2),
-        "ew_bh_sharpe": round(sharpe, 2),
-        "universe_size": len(benchmark_symbols),
-        "benchmark_symbols": benchmark_symbols,
+        "avg_exposure_pct": round(float(exposure.mean()) * 100, 1),
+        "median_exposure_pct": round(float(exposure.median()) * 100, 1),
+        "avg_cash_pct": round((1 - float(exposure.mean())) * 100, 1),
+        "invested_days_pct": round(float((exposure > 0.01).sum()) / max(len(exposure), 1) * 100, 1),
+        "exposure_observation_days": int(len(exposure)),
+        "exposure_source": source,
     }
 
 
-def calculate_research_metrics(result: dict, capital: float) -> dict[str, Any]:
+def exposure_matched_benchmark_metrics(
+    equity_curve: pd.DataFrame | None,
+    benchmark_daily_returns: pd.Series | None,
+    capital: float,
+) -> dict[str, Any]:
+    if benchmark_daily_returns is None or benchmark_daily_returns.empty:
+        return {
+            "exposure_matched_bh_return": 0,
+            "exposure_matched_bh_sharpe": 0,
+            "exposure_matched_bh_mdd": 0,
+        }
+
+    exposure, _source = candidate_exposure_series(equity_curve)
+    if exposure.empty:
+        return {
+            "exposure_matched_bh_return": 0,
+            "exposure_matched_bh_sharpe": 0,
+            "exposure_matched_bh_mdd": 0,
+        }
+
+    benchmark_returns = benchmark_daily_returns.copy().astype(float)
+    benchmark_returns.index = pd.to_datetime(benchmark_returns.index)
+    exposure = exposure.sort_index().reindex(benchmark_returns.index, method="ffill")
+    exposure = exposure.shift(1).fillna(0).clip(lower=0, upper=1)
+    matched_returns = (benchmark_returns * exposure).dropna()
+    if matched_returns.empty:
+        return {
+            "exposure_matched_bh_return": 0,
+            "exposure_matched_bh_sharpe": 0,
+            "exposure_matched_bh_mdd": 0,
+        }
+
+    curve = capital * (1 + matched_returns).cumprod()
+    total_return = (float(curve.iloc[-1]) / capital - 1) * 100
+    std = float(matched_returns.std()) if len(matched_returns) > 1 else 0
+    sharpe = (float(matched_returns.mean()) * 252 - 0.03) / (std * np.sqrt(252)) if std > 0 else 0
+    peak = curve.cummax()
+    mdd = float(((curve - peak) / peak).min() * 100)
+    return {
+        "exposure_matched_bh_return": round(total_return, 2),
+        "exposure_matched_bh_sharpe": round(sharpe, 2),
+        "exposure_matched_bh_mdd": round(mdd, 2),
+    }
+
+
+def calculate_research_metrics(
+    result: dict,
+    capital: float,
+    benchmark_daily_returns: pd.Series | None = None,
+) -> dict[str, Any]:
     eq = result.get("equity_curve")
     trades = result.get("trades", [])
     if eq is None or eq.empty:
@@ -583,6 +694,8 @@ def calculate_research_metrics(result: dict, capital: float) -> dict[str, Any]:
             "ev_per_trade": 0,
             "cost_adjusted_cagr": -100,
             "turnover_per_year": 0,
+            **exposure_summary(eq),
+            **exposure_matched_benchmark_metrics(eq, benchmark_daily_returns, capital),
         }
 
     eq = eq.copy()
@@ -623,6 +736,8 @@ def calculate_research_metrics(result: dict, capital: float) -> dict[str, Any]:
         if final > 0 and capital > 0
         else -100,
         "turnover_per_year": round(notional / capital / years * 100, 1) if capital > 0 else 0,
+        **exposure_summary(eq),
+        **exposure_matched_benchmark_metrics(eq, benchmark_daily_returns, capital),
     }
 
 
@@ -693,6 +808,14 @@ def build_candidate_record(
     )
     metrics["benchmark_excess_sharpe"] = round(
         float(metrics.get("sharpe", 0)) - float(benchmark.get("ew_bh_sharpe", 0)),
+        2,
+    )
+    metrics["exposure_matched_excess_return"] = round(
+        float(metrics.get("total_return", 0)) - float(metrics.get("exposure_matched_bh_return", 0)),
+        2,
+    )
+    metrics["exposure_matched_excess_sharpe"] = round(
+        float(metrics.get("sharpe", 0)) - float(metrics.get("exposure_matched_bh_sharpe", 0)),
         2,
     )
     promotion = promotion_status(spec.candidate_id, metrics)
@@ -831,6 +954,7 @@ def evaluate_candidate(
     start: str,
     end: str,
     capital: float,
+    benchmark_daily_returns: pd.Series | None = None,
 ) -> dict[str, Any]:
     from backtest.portfolio_backtester import PortfolioBacktester
     from config.config_loader import Config
@@ -857,7 +981,7 @@ def evaluate_candidate(
         for t in result.get("trades", [])
         if pd.Timestamp(t.get("date", t.get("entry_date", "2020-01-01"))) >= pd.Timestamp(start)
     ]
-    return calculate_research_metrics(result, capital)
+    return calculate_research_metrics(result, capital, benchmark_daily_returns)
 
 
 def attach_walk_forward_metrics(
@@ -866,11 +990,18 @@ def attach_walk_forward_metrics(
     symbols: list[str],
     windows: list[tuple[str, str]],
     capital: float,
+    benchmark_daily_returns: pd.Series | None = None,
 ) -> dict[str, Any]:
     wf_metrics = []
     for start, end in windows:
         try:
-            wf_metrics.append(evaluate_candidate(spec, symbols, start, end, capital))
+            wf_benchmark_returns = benchmark_daily_returns
+            if wf_benchmark_returns is not None and not wf_benchmark_returns.empty:
+                idx = pd.to_datetime(wf_benchmark_returns.index)
+                wf_benchmark_returns = wf_benchmark_returns[
+                    (idx >= pd.Timestamp(start)) & (idx <= pd.Timestamp(end))
+                ]
+            wf_metrics.append(evaluate_candidate(spec, symbols, start, end, capital, wf_benchmark_returns))
         except Exception as e:
             logger.warning("{} WF {}~{} failed: {}", spec.candidate_id, start, end, e)
             wf_metrics.append({"total_return": 0, "sharpe": 0, "total_trades": 0})
@@ -908,16 +1039,23 @@ def run_candidate_sweep(
 
     config = Config.get()
     symbols = normalize_symbols(symbols or select_canonical_universe(top_n))
-    benchmark = buy_and_hold_benchmark(symbols, start, end, capital)
+    benchmark, benchmark_daily_returns = buy_and_hold_benchmark_with_returns(symbols, start, end, capital)
     windows = make_windows(start, end) if include_walk_forward else []
     records = []
 
     specs = build_candidate_specs(candidate_family)
     for spec in specs:
         logger.info("Evaluating {}", spec.candidate_id)
-        metrics = evaluate_candidate(spec, symbols, start, end, capital)
+        metrics = evaluate_candidate(spec, symbols, start, end, capital, benchmark_daily_returns)
         if include_walk_forward:
-            metrics = attach_walk_forward_metrics(spec, metrics, symbols, windows, capital)
+            metrics = attach_walk_forward_metrics(
+                spec,
+                metrics,
+                symbols,
+                windows,
+                capital,
+                benchmark_daily_returns,
+            )
         else:
             metrics.update(
                 {
@@ -1038,15 +1176,17 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
     lines.extend([
         "",
         "## Ranking",
-        "| Rank | Candidate | Status | Score | Return | Excess | Sharpe | PF | MDD | Trades |",
-        "|------|-----------|--------|-------|--------|--------|--------|----|-----|--------|",
+        "| Rank | Candidate | Status | Score | Return | Excess | EM Excess | Avg Exp | Sharpe | PF | MDD | Trades |",
+        "|------|-----------|--------|-------|--------|--------|-----------|---------|--------|----|-----|--------|",
     ])
     for i, rec in enumerate(bundle.get("candidates", []), start=1):
         m = rec.get("metrics", {})
         lines.append(
             f"| {i} | {rec.get('candidate_id')} | {rec.get('promotion', {}).get('status')} | "
             f"{rec.get('rank_score', 0):.2f} | {m.get('total_return', 0):.2f}% | "
-            f"{m.get('benchmark_excess_return', 0):.2f}%p | {m.get('sharpe', 0):.2f} | "
+            f"{m.get('benchmark_excess_return', 0):.2f}%p | "
+            f"{m.get('exposure_matched_excess_return', 0):.2f}%p | "
+            f"{m.get('avg_exposure_pct', 0):.1f}% | {m.get('sharpe', 0):.2f} | "
             f"{m.get('profit_factor', 0):.2f} | {m.get('mdd', 0):.2f}% | {m.get('total_trades', 0)} |"
         )
     lines.extend(
@@ -1112,6 +1252,8 @@ def main() -> None:
             f"{i}. {rec['candidate_id']}: {rec['promotion']['status']} "
             f"ret={m.get('total_return', 0):.2f}% "
             f"excess={m.get('benchmark_excess_return', 0):.2f}%p "
+            f"em_excess={m.get('exposure_matched_excess_return', 0):.2f}%p "
+            f"avg_exp={m.get('avg_exposure_pct', 0):.1f}% "
             f"sharpe={m.get('sharpe', 0):.2f}"
         )
 
