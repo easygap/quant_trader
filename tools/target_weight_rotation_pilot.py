@@ -35,6 +35,7 @@ DEFAULT_PILOT_PREVIEW_CAPS = {
 }
 DEFAULT_CAP_BUFFER_PCT = 0.05
 DEFAULT_CAP_ROUNDING_STEP = 10_000
+DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
 
 
 def _split_symbols(raw: str | None) -> list[str] | None:
@@ -83,8 +84,11 @@ def resolve_shadow_batch_range(
     if shadow_days is not None:
         if shadow_start_date is not None:
             raise ValueError("--shadow-days cannot be combined with --shadow-start-date")
+        shadow_day_count = int(shadow_days)
+        if shadow_day_count <= 0:
+            raise ValueError("--shadow-days must be positive")
         end_date = shadow_end_date or today or datetime.now().strftime("%Y-%m-%d")
-        dates = _recent_weekday_dates(end_date, int(shadow_days))
+        dates = _recent_weekday_dates(end_date, shadow_day_count)
         return dates[0], dates[-1], dates
 
     if shadow_start_date is None or shadow_end_date is None:
@@ -548,10 +552,16 @@ def write_shadow_bootstrap_artifact(
     end_date: str,
     requested_dates: list[str],
     results: list[dict[str, Any]],
+    target_unique_trade_days: int | None = None,
     launch_artifacts: dict[str, Any] | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
+    covered_trade_days = {
+        item.get("trade_day")
+        for item in results
+        if item.get("status") in {"recorded", "already_recorded"} and item.get("trade_day")
+    }
     summary = {
         "requested_dates": len(requested_dates),
         "recorded": sum(1 for item in results if item.get("status") == "recorded"),
@@ -559,7 +569,11 @@ def write_shadow_bootstrap_artifact(
         "duplicate_trade_day": sum(1 for item in results if item.get("status") == "duplicate_trade_day"),
         "failed": sum(1 for item in results if item.get("status") == "failed"),
         "unique_trade_days": len({item.get("trade_day") for item in results if item.get("trade_day")}),
+        "covered_unique_trade_days": len(covered_trade_days),
     }
+    if target_unique_trade_days is not None:
+        summary["target_unique_trade_days"] = int(target_unique_trade_days)
+        summary["target_met"] = len(covered_trade_days) >= int(target_unique_trade_days)
     payload = {
         "artifact_type": "target_weight_rotation_shadow_bootstrap",
         "schema_version": 1,
@@ -589,6 +603,8 @@ def run_shadow_bootstrap(
     raw_symbols: str | None = None,
     cash: float | None = None,
     preview_caps: dict[str, int] | None = None,
+    target_unique_trade_days: int | None = None,
+    max_scan_weekdays: int | None = None,
     generate_readiness_artifacts: bool = True,
     generate_runbook: bool = True,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -602,6 +618,42 @@ def run_shadow_bootstrap(
 
     config = config or Config.get()
     requested_dates = _date_range(start_date, end_date)
+    prebuilt_plans: dict[str, TargetWeightPlan] = {}
+    target_unique = int(target_unique_trade_days) if target_unique_trade_days is not None else None
+    scan_count = len(requested_dates)
+    if target_unique is not None:
+        if target_unique <= 0:
+            raise ValueError("target_unique_trade_days must be positive")
+        if max_scan_weekdays is not None and max_scan_weekdays <= 0:
+            raise ValueError("max_scan_weekdays must be positive")
+        default_scan_count = max(len(requested_dates), target_unique * DEFAULT_SHADOW_SCAN_MULTIPLIER)
+        scan_count = int(max_scan_weekdays) if max_scan_weekdays is not None else default_scan_count
+        scan_count = max(scan_count, target_unique)
+        scan_dates = _recent_weekday_dates(end_date, scan_count)
+        selected: list[tuple[str, TargetWeightPlan]] = []
+        selected_trade_days: set[str] = set()
+        for as_of in reversed(scan_dates):
+            try:
+                plan = build_plan(
+                    candidate_id=candidate_id,
+                    raw_symbols=raw_symbols,
+                    as_of_date=as_of,
+                    cash=cash,
+                    config=config,
+                    collector=collector,
+                )
+            except Exception:
+                logger.exception("target-weight shadow bootstrap scan failed for {}", as_of)
+                continue
+            if plan.trade_day in selected_trade_days:
+                continue
+            selected_trade_days.add(plan.trade_day)
+            selected.append((as_of, plan))
+            if len(selected) >= target_unique:
+                break
+        selected.sort(key=lambda item: (item[1].trade_day, item[0]))
+        requested_dates = [as_of for as_of, _ in selected]
+        prebuilt_plans = {as_of: plan for as_of, plan in selected}
     existing_dates_by_strategy: dict[str, set[str]] = {}
     seen_trade_days: set[str] = set()
     results: list[dict[str, Any]] = []
@@ -611,14 +663,16 @@ def run_shadow_bootstrap(
 
     for as_of in requested_dates:
         try:
-            plan = build_plan(
-                candidate_id=candidate_id,
-                raw_symbols=raw_symbols,
-                as_of_date=as_of,
-                cash=cash,
-                config=config,
-                collector=collector,
-            )
+            plan = prebuilt_plans.get(as_of)
+            if plan is None:
+                plan = build_plan(
+                    candidate_id=candidate_id,
+                    raw_symbols=raw_symbols,
+                    as_of_date=as_of,
+                    cash=cash,
+                    config=config,
+                    collector=collector,
+                )
             evidence_strategy = plan.candidate_id
             if evidence_strategy not in existing_dates_by_strategy:
                 existing_dates_by_strategy[evidence_strategy] = {
@@ -684,6 +738,24 @@ def run_shadow_bootstrap(
                 "error": str(exc),
             })
 
+    if target_unique is not None:
+        covered_trade_days = {
+            item.get("trade_day")
+            for item in results
+            if item.get("status") in {"recorded", "already_recorded"} and item.get("trade_day")
+        }
+        if len(covered_trade_days) < target_unique:
+            results.append({
+                "status": "failed",
+                "reason": (
+                    f"target unique trade days not met: "
+                    f"{len(covered_trade_days)}/{target_unique} "
+                    f"within {scan_count} scanned weekdays"
+                ),
+                "target_unique_trade_days": target_unique,
+                "covered_unique_trade_days": len(covered_trade_days),
+            })
+
     launch_artifacts = {"attempted": False}
     if generate_readiness_artifacts:
         artifact_candidate_id = latest_plan.candidate_id if latest_plan is not None else candidate_id
@@ -695,26 +767,41 @@ def run_shadow_bootstrap(
             cap_recommendation=latest_cap_recommendation,
         )
 
+    artifact_start_date = requested_dates[0] if requested_dates else start_date
+    artifact_end_date = requested_dates[-1] if requested_dates else end_date
     artifact_path = write_shadow_bootstrap_artifact(
         candidate_id=latest_plan.candidate_id if latest_plan is not None else candidate_id,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=artifact_start_date,
+        end_date=artifact_end_date,
         requested_dates=requested_dates,
         results=results,
+        target_unique_trade_days=target_unique,
         launch_artifacts=launch_artifacts,
         output_dir=output_dir,
     )
 
+    covered_trade_days = {
+        item.get("trade_day")
+        for item in results
+        if item.get("status") in {"recorded", "already_recorded"} and item.get("trade_day")
+    }
     summary = {
         "requested_dates": len(requested_dates),
         "recorded": sum(1 for item in results if item.get("status") == "recorded"),
         "already_recorded": sum(1 for item in results if item.get("status") == "already_recorded"),
         "duplicate_trade_day": sum(1 for item in results if item.get("status") == "duplicate_trade_day"),
         "failed": sum(1 for item in results if item.get("status") == "failed"),
+        "covered_unique_trade_days": len(covered_trade_days),
     }
+    if target_unique is not None:
+        summary["target_unique_trade_days"] = target_unique
+        summary["target_met"] = len(covered_trade_days) >= target_unique
     return {
         "summary": summary,
         "results": results,
+        "start_date": artifact_start_date,
+        "end_date": artifact_end_date,
+        "requested_dates": requested_dates,
         "launch_artifacts": launch_artifacts,
         "artifact_path": artifact_path,
     }
@@ -865,7 +952,10 @@ def main() -> None:
     parser.add_argument(
         "--shadow-days",
         type=int,
-        help="Auto-select the most recent N weekdays for shadow bootstrap; optionally anchor with --shadow-end-date.",
+        help=(
+            "Auto-select recent weekdays until N unique resolved trade days are "
+            "covered for shadow bootstrap; optionally anchor with --shadow-end-date."
+        ),
     )
     parser.add_argument(
         "--shadow-end-date",
@@ -923,6 +1013,7 @@ def main() -> None:
             start_date=shadow_start_date,
             end_date=shadow_end_date,
             cash=args.cash,
+            target_unique_trade_days=args.shadow_days,
             generate_readiness_artifacts=not args.skip_readiness_artifacts,
             generate_runbook=not args.skip_runbook,
             preview_caps=preview_caps,
@@ -931,16 +1022,24 @@ def main() -> None:
         summary = batch["summary"]
         print("\nTarget-weight shadow bootstrap")
         print(f"  candidate: {args.candidate_id}")
-        print(f"  range: {shadow_start_date} ~ {shadow_end_date}")
+        print(f"  range: {batch.get('start_date', shadow_start_date)} ~ {batch.get('end_date', shadow_end_date)}")
         if args.shadow_days is not None:
-            print(f"  auto-selected weekdays: {', '.join(requested_dates)}")
+            selected_dates = batch.get("requested_dates") or requested_dates
+            print(f"  auto-selected weekdays: {', '.join(selected_dates)}")
         print(
             "  summary: "
             f"recorded={summary['recorded']} "
             f"already_recorded={summary['already_recorded']} "
             f"duplicate_trade_day={summary['duplicate_trade_day']} "
-            f"failed={summary['failed']}"
+            f"failed={summary['failed']} "
+            f"covered_unique_trade_days={summary['covered_unique_trade_days']}"
         )
+        if args.shadow_days is not None:
+            print(
+                "  target: "
+                f"unique_trade_days={summary['covered_unique_trade_days']}/{summary['target_unique_trade_days']} "
+                f"met={'YES' if summary['target_met'] else 'NO'}"
+            )
         if batch["launch_artifacts"].get("attempted"):
             readiness = batch["launch_artifacts"]["launch_readiness"]
             print(
