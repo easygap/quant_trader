@@ -213,9 +213,13 @@ def check_pilot_entry(
     auth = get_active_pilot(strategy, today)
 
     if auth is None:
-        return PilotCheckResult(allowed=False, reason="no active pilot authorization")
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason="no active pilot authorization",
+        )
 
-    # 이하 모든 blocked return에서 audit 기록 (allowed=True는 마지막에 기록)
+    # Every branch returns through _pilot_check_result so blocked outcomes are audited too.
 
     caps = {
         "max_orders_per_day": auth.max_orders_per_day,
@@ -229,16 +233,31 @@ def check_pilot_entry(
         from core.paper_runtime import get_paper_runtime_state
         rt = get_paper_runtime_state(strategy, as_of_date=today)
         if rt.state == "frozen":
-            return PilotCheckResult(allowed=False, reason="frozen state — pilot entry blocked",
-                                    auth=asdict(auth), caps_snapshot=caps)
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason="frozen state — pilot entry blocked",
+                auth=auth,
+                caps=caps,
+            )
         if rt.metrics.get("recent_anomaly_count", 0) > 0:
             latest_anomalies = rt.last_anomalies
             if any(a.get("severity") == "critical" for a in latest_anomalies):
-                return PilotCheckResult(allowed=False,
-                                        reason="critical anomaly active — pilot entry blocked",
-                                        auth=asdict(auth), caps_snapshot=caps)
-    except Exception:
-        pass
+                return _pilot_check_result(
+                    strategy,
+                    allowed=False,
+                    reason="critical anomaly active — pilot entry blocked",
+                    auth=auth,
+                    caps=caps,
+                )
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"runtime guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
 
     # ── 1b. Evidence freshness + benchmark finalization guard ──
     try:
@@ -246,78 +265,186 @@ def check_pilot_entry(
         from core.paper_runtime import filter_runtime_eligible
         all_recs = get_canonical_records(strategy)
         eligible, _ = filter_runtime_eligible(all_recs)
-        if eligible:
-            latest_date = eligible[-1].get("date", "")
-            days_stale = (datetime.strptime(today, "%Y-%m-%d") -
-                          datetime.strptime(latest_date, "%Y-%m-%d")).days if latest_date else 999
-            if days_stale > PILOT_MAX_EVIDENCE_STALE_DAYS:
-                return PilotCheckResult(
-                    allowed=False,
-                    reason=f"evidence stale ({days_stale}d > {PILOT_MAX_EVIDENCE_STALE_DAYS}d) — collect evidence first",
-                    auth=asdict(auth), caps_snapshot=caps)
-            # benchmark finalization: 최근 기록 중 final 비율
-            recent = eligible[-5:]
-            final_count = sum(1 for r in recent if r.get("benchmark_status") == "final")
-            final_ratio = final_count / len(recent) if recent else 0
-            if final_ratio < PILOT_MIN_BENCHMARK_FINAL_RATIO:
-                return PilotCheckResult(
-                    allowed=False,
-                    reason=f"benchmark final ratio {final_ratio:.0%} < {PILOT_MIN_BENCHMARK_FINAL_RATIO:.0%} — finalize benchmarks first",
-                    auth=asdict(auth), caps_snapshot=caps)
-    except Exception:
-        pass
+        if not eligible:
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason="no eligible evidence — collect shadow bootstrap first",
+                auth=auth,
+                caps=caps,
+            )
+
+        latest_date = eligible[-1].get("date", "")
+        days_stale = (datetime.strptime(today, "%Y-%m-%d") -
+                      datetime.strptime(latest_date, "%Y-%m-%d")).days if latest_date else 999
+        if days_stale > PILOT_MAX_EVIDENCE_STALE_DAYS:
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason=f"evidence stale ({days_stale}d > {PILOT_MAX_EVIDENCE_STALE_DAYS}d) — collect evidence first",
+                auth=auth,
+                caps=caps,
+            )
+        # benchmark finalization: 최근 기록 중 final 비율
+        recent = eligible[-5:]
+        final_count = sum(1 for r in recent if r.get("benchmark_status") == "final")
+        final_ratio = final_count / len(recent) if recent else 0
+        if final_ratio < PILOT_MIN_BENCHMARK_FINAL_RATIO:
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason=f"benchmark final ratio {final_ratio:.0%} < {PILOT_MIN_BENCHMARK_FINAL_RATIO:.0%} — finalize benchmarks first",
+                auth=auth,
+                caps=caps,
+            )
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"evidence guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
 
     # ── 2. Notifier health ──
     try:
         notifier_path = RUNTIME_DIR / "notifier_health.json"
-        if notifier_path.exists():
-            nh = json.loads(notifier_path.read_text(encoding="utf-8"))
-            if not nh.get("discord_configured", False):
-                return PilotCheckResult(allowed=False,
-                                        reason="notifier unhealthy — pilot requires discord webhook",
-                                        auth=asdict(auth), caps_snapshot=caps)
-    except Exception:
-        pass
+        if not notifier_path.exists():
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason="notifier health missing — pilot requires discord webhook",
+                auth=auth,
+                caps=caps,
+            )
+        nh = json.loads(notifier_path.read_text(encoding="utf-8"))
+        if not nh.get("discord_configured", False):
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason="notifier unhealthy — pilot requires discord webhook",
+                auth=auth,
+                caps=caps,
+            )
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"notifier guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
 
     # ── 3. Orders per day ──
-    orders_today = _count_orders_today(strategy, today_dt)
+    try:
+        orders_today = _count_orders_today(strategy, today_dt)
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"order-count guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
     remaining_orders = auth.max_orders_per_day - orders_today
     if remaining_orders <= 0:
-        return PilotCheckResult(allowed=False,
-                                reason=f"max_orders_per_day={auth.max_orders_per_day} reached (today={orders_today})",
-                                auth=asdict(auth), remaining_orders=0, caps_snapshot=caps)
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"max_orders_per_day={auth.max_orders_per_day} reached (today={orders_today})",
+            auth=auth,
+            caps=caps,
+            remaining_orders=0,
+        )
 
     # ── 4. Concurrent positions ──
-    current_positions = _count_positions(strategy)
+    try:
+        current_positions = _count_positions(strategy)
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"position-count guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
     if current_positions >= auth.max_concurrent_positions:
-        return PilotCheckResult(allowed=False,
-                                reason=f"max_concurrent_positions={auth.max_concurrent_positions} reached (current={current_positions})",
-                                auth=asdict(auth), caps_snapshot=caps)
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"max_concurrent_positions={auth.max_concurrent_positions} reached (current={current_positions})",
+            auth=auth,
+            caps=caps,
+        )
 
     # ── 5. Notional per trade ──
     if candidate_notional > 0 and candidate_notional > auth.max_notional_per_trade:
-        return PilotCheckResult(allowed=False,
-                                reason=f"max_notional_per_trade={auth.max_notional_per_trade:,} exceeded ({candidate_notional:,.0f})",
-                                auth=asdict(auth), caps_snapshot=caps)
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"max_notional_per_trade={auth.max_notional_per_trade:,} exceeded ({candidate_notional:,.0f})",
+            auth=auth,
+            caps=caps,
+        )
 
     # ── 6. Gross exposure ──
-    current_exposure = _get_gross_exposure(strategy)
+    try:
+        current_exposure = _get_gross_exposure(strategy)
+    except Exception as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"gross-exposure guard failed — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
     remaining_exposure = auth.max_gross_exposure - current_exposure
     if remaining_exposure <= 0:
-        return PilotCheckResult(allowed=False,
-                                reason=f"max_gross_exposure={auth.max_gross_exposure:,} reached (current={current_exposure:,.0f})",
-                                auth=asdict(auth), remaining_exposure=0, caps_snapshot=caps)
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"max_gross_exposure={auth.max_gross_exposure:,} reached (current={current_exposure:,.0f})",
+            auth=auth,
+            caps=caps,
+            remaining_exposure=0,
+        )
 
-    result = PilotCheckResult(
+    return _pilot_check_result(
+        strategy,
         allowed=True,
         reason="pilot authorized",
-        auth=asdict(auth),
+        auth=auth,
+        caps=caps,
         remaining_orders=remaining_orders,
         remaining_exposure=int(remaining_exposure),
+    )
+
+
+def _pilot_check_result(
+    strategy: str,
+    *,
+    allowed: bool,
+    reason: str,
+    auth: PilotAuthorization | dict | None = None,
+    caps: dict | None = None,
+    remaining_orders: int | None = None,
+    remaining_exposure: int | None = None,
+) -> PilotCheckResult:
+    """Build and audit a pilot check result."""
+    decision = "allowed" if allowed else "blocked"
+    _audit_pilot_check(strategy, decision, reason, caps)
+    if isinstance(auth, PilotAuthorization):
+        auth_payload = asdict(auth)
+    else:
+        auth_payload = auth
+    return PilotCheckResult(
+        allowed=allowed,
+        reason=reason,
+        auth=auth_payload,
+        remaining_orders=remaining_orders,
+        remaining_exposure=remaining_exposure,
         caps_snapshot=caps,
     )
-    _audit_pilot_check(strategy, "allowed", result.reason, caps)
-    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -348,41 +475,41 @@ def _audit_pilot_check(strategy: str, decision: str, reason: str,
 # ═══════════════════════════════════════════════════════════════
 
 def _count_orders_today(strategy: str, as_of_date: str | datetime | None = None) -> int:
+    from database.models import get_session, TradeHistory
+
+    session = get_session()
     try:
-        from database.models import get_session, TradeHistory
-        session = get_session()
-        today_start = _coerce_date(as_of_date).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_end = today_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+        today_start = _coerce_date(as_of_date).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        today_end = today_start.replace(
+            hour=23, minute=59, second=59, microsecond=999999
+        )
         count = session.query(TradeHistory).filter(
             TradeHistory.account_key == strategy,
             TradeHistory.mode == "paper",
             TradeHistory.executed_at >= today_start,
             TradeHistory.executed_at <= today_end,
         ).count()
-        session.close()
         return count
-    except Exception:
-        return 0
+    finally:
+        session.close()
 
 
 def _count_positions(strategy: str) -> int:
-    try:
-        from database.repositories import get_all_positions
-        positions = get_all_positions(account_key=strategy)
-        return len(positions) if positions else 0
-    except Exception:
-        return 0
+    from database.repositories import get_all_positions
+
+    positions = get_all_positions(account_key=strategy)
+    return len(positions) if positions else 0
 
 
 def _get_gross_exposure(strategy: str) -> float:
-    try:
-        from database.repositories import get_all_positions
-        positions = get_all_positions(account_key=strategy)
-        if not positions:
-            return 0
-        return sum((p.avg_price or 0) * (p.quantity or 0) for p in positions)
-    except Exception:
+    from database.repositories import get_all_positions
+
+    positions = get_all_positions(account_key=strategy)
+    if not positions:
         return 0
+    return sum((p.avg_price or 0) * (p.quantity or 0) for p in positions)
 
 
 def save_pilot_session_artifact(strategy: str, date: str,

@@ -281,7 +281,7 @@ quant_trader/
 | **strategy_diagnostics.py** | `DiagnosticLine` — 전략별 신호·점수 진단 라인 생성. 스케줄러·대시보드에서 전략 실행 현황 요약 시 사용. |
 | **paper_evidence.py** | Paper Evidence 런타임 수집. `DailyEvidence` 데이터클래스, `collect_daily_evidence()`, `append_shadow_plan_evidence()`, `finalize_daily_evidence()`, `generate_promotion_package()`, 3종 benchmark excess (same_universe/exposure_matched/cash_adjusted), 6 anomaly rule (repeated_reject, phantom_position, stale_pending, duplicate_flood, reconcile, deep_drawdown), cash-only carry-forward (zero-return semantics). Shadow plan evidence는 `execution_backed=False`라 promotion에는 반영되지 않는다. |
 | **paper_runtime.py** | Paper Runtime State Machine. 5개 상태 (research_disabled/normal/degraded/frozen/blocked_insufficient_evidence), schema quarantine (legacy record 제외), allowed_actions (모든 상태에서 exit/cancel/reconcile/finalize/evidence/reporting 허용). `get_paper_runtime_state()`, `filter_runtime_eligible()`. |
-| **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. |
+| **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `check_pilot_entry()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. Pilot entry guard는 모든 allowed/blocked 결정을 audit하고 runtime/evidence/notifier/order/position/exposure guard 예외를 fail-closed로 차단한다. |
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
 | **target_weight_rotation.py** | Target-weight 후보의 portfolio-level plan 생성. 직전 거래일 점수, KS11 risk overlay, 목표비중 수량 산출, pilot cap 검증을 담당. 일반 `generate_signal()` 전략으로 위장하지 않는다. 전용 pilot 실행은 주문 실패 시 후속 주문을 중단한다. `tools/target_weight_rotation_pilot.py --record-shadow-evidence`로 dry-run launch-readiness evidence를 남기고, cap preview로 pilot 승인 전 기본/제안 캡 적합성을 확인한다. |
@@ -364,7 +364,7 @@ quant_trader/
 | **test_paper_lifecycle.py** | Full paper lifecycle (BUY/SELL/Snapshot, 격리 DB truncate, 4/4 PASS). |
 | **test_paper_evidence.py** | Paper Evidence 수집/검증 (52건): JSONL I/O, anomaly detection, benchmark missing, E2E replay 7일, cash-only zero-return deadlock regression, shadow evidence 분리, target-weight shadow plan evidence. |
 | **test_paper_runtime.py** | Paper Runtime State Machine (45건): 상태 전이, schema quarantine, allowed_actions, auto-unfreeze. |
-| **test_paper_pilot.py** | Paper Pilot Authorization: pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites, artifact-only target-weight 후보 eligibility. |
+| **test_paper_pilot.py** | Paper Pilot Authorization: pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites, artifact-only target-weight 후보 eligibility, fail-closed/audited entry guard. |
 | **test_paper_preflight.py** | Paper Preflight Check: 운영 준비 상태 점검 시나리오. |
 | **test_promotion_engine.py** | Promotion 규칙: metrics 기반 자동 판정, threshold 경계. |
 | **test_order_state_machine.py** | 주문 상태기계: 9개 상태 전이, assert invariant. |
@@ -709,6 +709,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
 | ✅ **target-weight paper/pilot adapter 추가** | `core/target_weight_rotation.py` + `tools/target_weight_rotation_pilot.py`로 직전 거래일 점수 기반 목표비중 plan을 만들고 pilot cap을 plan-level로 검증. `OrderExecutor.execute_buy_quantity()`로 paper-only exact quantity 매수를 지원. live 모드는 계속 거부 |
 | ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. artifact에는 기본/제안 cap preview도 기록 |
+| ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -828,4 +829,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (target-weight shadow proof 반영)
+> **최종 수정**: 2026-04-30 (pilot entry fail-closed guard 반영)
