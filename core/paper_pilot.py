@@ -30,6 +30,7 @@ PILOT_MIN_SHADOW_CLEAN_DAYS = 3
 PILOT_MAX_EVIDENCE_STALE_DAYS = 5
 # pilot entry guard: 최근 5일 benchmark final 비율 최소 기준
 PILOT_MIN_BENCHMARK_FINAL_RATIO = 0.4
+PILOT_ELIGIBLE_STATUSES = ("provisional_paper_candidate", "approved", "live_candidate")
 
 
 def _coerce_date(value: str | datetime | None = None) -> datetime:
@@ -148,16 +149,53 @@ def disable_pilot(strategy: str, reason: str = "", operator: str = "cli") -> Non
     logger.info("Pilot disabled: {} — {}", strategy, reason)
 
 
-def _check_pilot_eligibility(strategy: str) -> None:
-    """pilot 사전 조건 확인. 미충족 시 ValueError."""
-    from core.strategy_universe import is_paper_eligible
-    if not is_paper_eligible(strategy):
-        raise ValueError(f"{strategy} is not paper-eligible (disabled/backtest-only)")
+def _artifact_promotion_record(strategy: str) -> dict | None:
+    """Return canonical artifact promotion record for adapter-only candidates."""
+    try:
+        from core.promotion_engine import load_promotion_artifact
 
+        promotions = load_promotion_artifact()
+        if not promotions:
+            return None
+        record = promotions.get(strategy)
+        return record if isinstance(record, dict) else None
+    except Exception:
+        return None
+
+
+def _check_pilot_eligibility(strategy: str) -> None:
+    """pilot 사전 조건 확인. 미충족 시 ValueError.
+
+    Normal strategies are checked through STRATEGY_STATUS. Portfolio-level
+    adapter candidates may be eligible through canonical promotion artifacts
+    without being registered in the per-symbol scheduler registry.
+    """
+    from core.strategy_universe import is_paper_eligible
     from strategies import get_strategy_status
-    status = get_strategy_status(strategy)
-    if status.get("status") not in ("provisional_paper_candidate", "approved"):
-        raise ValueError(f"{strategy} status={status.get('status')} — pilot requires provisional_paper_candidate or approved")
+
+    if is_paper_eligible(strategy):
+        status = get_strategy_status(strategy)
+        if status.get("status") not in PILOT_ELIGIBLE_STATUSES:
+            raise ValueError(
+                f"{strategy} status={status.get('status')} — "
+                "pilot requires provisional_paper_candidate or approved"
+            )
+        return
+
+    artifact_record = _artifact_promotion_record(strategy)
+    if artifact_record and "paper" in artifact_record.get("allowed_modes", []):
+        status = artifact_record.get("status")
+        if status in PILOT_ELIGIBLE_STATUSES:
+            return
+        raise ValueError(
+            f"{strategy} artifact status={status} — "
+            "pilot requires provisional_paper_candidate or approved"
+        )
+
+    raise ValueError(
+        f"{strategy} is not paper-eligible "
+        "(disabled/backtest-only and not eligible in canonical promotion artifact)"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
