@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -170,3 +171,91 @@ def test_execute_plan_dry_run_preserves_sell_before_buy_ordering():
     assert actions == sorted(actions, reverse=True)
     assert execution["executed"] == 0
     assert execution["skipped"] == len(plan.orders)
+
+
+def test_execute_plan_stops_after_failed_sell_before_buy():
+    from core.target_weight_rotation import TargetWeightOrder, TargetWeightPlan
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = TargetWeightPlan(
+        candidate_id="candidate",
+        as_of_date="2025-03-03",
+        trade_day="2025-03-03",
+        score_day="2025-02-28",
+        params_hash="hash",
+        symbols=["AAA", "BBB"],
+        targets=["BBB"],
+        prices={"AAA": 100.0, "BBB": 200.0},
+        target_exposure=0.8,
+        base_target_exposure=0.8,
+        risk_off=False,
+        nav=10_000.0,
+        cash_before=1_000.0,
+        market_value_before=9_000.0,
+        cash_after_estimate=1_000.0,
+        gross_exposure_after=8_000.0,
+        target_position_count=1,
+        orders=[
+            TargetWeightOrder(
+                symbol="AAA",
+                action="SELL",
+                price=100.0,
+                quantity=10,
+                notional=1_000.0,
+                current_quantity=10,
+                target_quantity=0,
+                current_weight_pct=10.0,
+                target_weight_pct=0.0,
+                reason="sell first",
+            ),
+            TargetWeightOrder(
+                symbol="BBB",
+                action="BUY",
+                price=200.0,
+                quantity=5,
+                notional=1_000.0,
+                current_quantity=0,
+                target_quantity=5,
+                current_weight_pct=0.0,
+                target_weight_pct=10.0,
+                reason="buy second",
+            ),
+        ],
+        diagnostics={},
+    )
+
+    class FakeExecutor:
+        buy_calls = 0
+
+        def __init__(self, config, account_key=""):
+            pass
+
+        def execute_sell(self, **kwargs):
+            return {"success": False, "reason": "no position"}
+
+        def execute_buy_quantity(self, **kwargs):
+            FakeExecutor.buy_calls += 1
+            return {"success": True}
+
+    class FakePortfolio:
+        def __init__(self, config, account_key=""):
+            pass
+
+        def get_available_cash(self):
+            return 10_000.0
+
+        def get_total_value(self):
+            return 10_000.0
+
+    with patch("core.order_executor.OrderExecutor", FakeExecutor), \
+         patch("core.portfolio_manager.PortfolioManager", FakePortfolio):
+        execution = execute_plan(
+            plan,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            dry_run=False,
+        )
+
+    assert execution["failed"] == 1
+    assert execution["halted"] is True
+    assert execution["details"][1]["status"] == "skipped_after_failure"
+    assert FakeExecutor.buy_calls == 0
