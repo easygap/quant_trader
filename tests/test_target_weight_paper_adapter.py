@@ -151,6 +151,55 @@ def test_target_weight_pilot_help_lists_shadow_days():
     assert "--shadow-days" in result.stdout
 
 
+def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    calls = {}
+
+    def fake_run_shadow_bootstrap(**kwargs):
+        calls.update(kwargs)
+        return {
+            "summary": {
+                "recorded": 1,
+                "already_recorded": 0,
+                "duplicate_trade_day": 0,
+                "failed": 1,
+                "covered_unique_trade_days": 1,
+                "target_unique_trade_days": 2,
+                "target_met": False,
+            },
+            "launch_artifacts": {"attempted": False},
+            "artifact_path": tmp_path / "shadow_batch.json",
+            "start_date": "2026-04-10",
+            "end_date": "2026-04-13",
+            "requested_dates": ["2026-04-10", "2026-04-13"],
+        }
+
+    monkeypatch.setattr(twp, "run_shadow_bootstrap", fake_run_shadow_bootstrap)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--shadow-days",
+            "2",
+            "--shadow-end-date",
+            "2026-04-13",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert calls["target_unique_trade_days"] == 2
+    assert "met=NO" in output
+    assert "status: BLOCKED - shadow bootstrap incomplete" in output
+
+
 def test_target_weight_plan_uses_prior_day_scores_for_targets():
     from core.target_weight_rotation import build_target_weight_plan
 
@@ -514,6 +563,134 @@ def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_p
     assert result["launch_artifacts"] == {"attempted": False}
     assert not (runtime_dir / "target_weight_candidate_pilot_launch_readiness.json").exists()
     assert not (runtime_dir / "target_weight_candidate_pilot_runbook.md").exists()
+
+
+def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: _adapter_plan())
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: {
+            "executed": 1,
+            "skipped": 1,
+            "failed": 1,
+            "halted": True,
+            "halt_reason": "BUY CCC failed: rejected",
+            "details": [],
+        },
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("incomplete execution must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_execution_incomplete" in result["evidence_collection"]["reason"]
+    assert saved_sessions[0]["execution_complete"] is False
+    assert saved_sessions[0]["evidence_collectible"] is False
+    assert payload["evidence_collection"]["status"] == "blocked"
+
+
+def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    collected = []
+    saved_sessions = []
+    plan = _adapter_plan()
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: {
+            "executed": len(plan.orders),
+            "skipped": 0,
+            "failed": 0,
+            "halted": False,
+            "halt_reason": "",
+            "details": [],
+        },
+    )
+
+    def collect_daily_evidence(**kwargs):
+        collected.append(kwargs)
+        return SimpleNamespace(date=kwargs["date"].strftime("%Y-%m-%d"))
+
+    monkeypatch.setattr(pe, "collect_daily_evidence", collect_daily_evidence)
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["execution_evidence"]["complete"] is True
+    assert result["evidence_collection"]["status"] == "recorded"
+    assert len(collected) == 1
+    caps = collected[0]["pilot_caps_snapshot"]
+    assert caps["target_weight_execution"]["complete"] is True
+    assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
+    assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
+    assert saved_sessions[0]["execution_complete"] is True
 
 
 def test_run_shadow_bootstrap_records_range_and_skips_duplicates(monkeypatch, tmp_path):
