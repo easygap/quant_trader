@@ -424,6 +424,8 @@ def test_resolve_shadow_batch_range_supports_auto_days():
         )
     with pytest.raises(ValueError, match="must be provided together"):
         resolve_shadow_batch_range(shadow_end_date="2026-04-10")
+    with pytest.raises(ValueError, match="must be positive"):
+        resolve_shadow_batch_range(shadow_days=0, shadow_end_date="2026-04-10")
 
 
 def test_record_shadow_evidence_for_plan_is_non_promotable(monkeypatch, tmp_path):
@@ -592,3 +594,47 @@ def test_run_shadow_bootstrap_skips_duplicate_trade_day_in_batch(monkeypatch, tm
     assert result["summary"]["recorded"] == 1
     assert result["summary"]["duplicate_trade_day"] == 1
     assert len(pe.get_canonical_records("target_weight_candidate")) == 1
+
+
+def test_run_shadow_bootstrap_auto_days_backfills_unique_trade_days(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import core.paper_runtime as pr
+    import tools.target_weight_rotation_pilot as twp
+
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(pr, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "_check_pilot_eligibility", lambda strategy: None)
+
+    def build_plan(**kwargs):
+        as_of = kwargs["as_of_date"]
+        if as_of == "2026-04-13":
+            return replace(_adapter_plan_for_date("2026-04-10"), as_of_date=as_of)
+        return _adapter_plan_for_date(as_of)
+
+    monkeypatch.setattr(twp, "build_plan", build_plan)
+
+    result = twp.run_shadow_bootstrap(
+        start_date="2026-04-10",
+        end_date="2026-04-13",
+        target_unique_trade_days=2,
+        max_scan_weekdays=3,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    records = pe.get_canonical_records("target_weight_candidate")
+
+    assert result["requested_dates"] == ["2026-04-09", "2026-04-13"]
+    assert result["summary"]["recorded"] == 2
+    assert result["summary"]["duplicate_trade_day"] == 0
+    assert result["summary"]["covered_unique_trade_days"] == 2
+    assert result["summary"]["target_unique_trade_days"] == 2
+    assert result["summary"]["target_met"] is True
+    assert [record["date"] for record in records] == ["2026-04-09", "2026-04-10"]
+    assert payload["summary"]["covered_unique_trade_days"] == 2
+    assert payload["summary"]["target_met"] is True
