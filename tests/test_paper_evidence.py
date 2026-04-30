@@ -1167,6 +1167,40 @@ class TestCleanDayAccumulation:
 class TestShadowEvidenceNotPromotable:
     """shadow evidence는 promotable real paper day를 오염시키지 않아야 함."""
 
+    def test_append_shadow_plan_evidence_is_non_promotable(self, evidence_dir):
+        from core.paper_evidence import append_shadow_plan_evidence, get_canonical_records
+
+        ev = append_shadow_plan_evidence(
+            "target_weight_shadow",
+            "2026-04-10",
+            total_value=10_000_000,
+            cash=10_000_000,
+            invested=0,
+            position_count=3,
+            watchlist_symbols=["005930", "000660", "035420"],
+            diagnostics=[{"ok": True, "text": "dry_run_plan"}],
+            benchmark_meta={"source": "target_weight_shadow_plan"},
+        )
+        duplicate = append_shadow_plan_evidence(
+            "target_weight_shadow",
+            "2026-04-10",
+            total_value=10_000_000,
+            cash=10_000_000,
+        )
+
+        records = get_canonical_records("target_weight_shadow")
+
+        assert ev is not None
+        assert duplicate is None
+        assert len(records) == 1
+        assert records[0]["evidence_mode"] == "shadow_bootstrap"
+        assert records[0]["session_mode"] == "shadow_bootstrap"
+        assert records[0]["execution_backed"] is False
+        assert records[0]["order_submit_count"] == 0
+        assert records[0]["fill_count"] == 0
+        assert records[0]["same_universe_excess"] is None
+        assert records[0]["benchmark_status"] == "final"
+
     def test_shadow_excluded_from_promotion(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, get_canonical_records
 

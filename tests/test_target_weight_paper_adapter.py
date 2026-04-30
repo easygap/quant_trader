@@ -58,6 +58,70 @@ def _params():
     }
 
 
+def _adapter_plan():
+    from core.target_weight_rotation import TargetWeightOrder, TargetWeightPlan
+
+    orders = [
+        TargetWeightOrder(
+            symbol="AAA",
+            action="BUY",
+            price=100.0,
+            quantity=11_000,
+            notional=1_100_000.0,
+            current_quantity=0,
+            target_quantity=11_000,
+            current_weight_pct=0.0,
+            target_weight_pct=11.0,
+            reason="target_weight_rebalance_buy",
+        ),
+        TargetWeightOrder(
+            symbol="BBB",
+            action="BUY",
+            price=200.0,
+            quantity=4_500,
+            notional=900_000.0,
+            current_quantity=0,
+            target_quantity=4_500,
+            current_weight_pct=0.0,
+            target_weight_pct=9.0,
+            reason="target_weight_rebalance_buy",
+        ),
+        TargetWeightOrder(
+            symbol="CCC",
+            action="BUY",
+            price=300.0,
+            quantity=4_000,
+            notional=1_200_000.0,
+            current_quantity=0,
+            target_quantity=4_000,
+            current_weight_pct=0.0,
+            target_weight_pct=12.0,
+            reason="target_weight_rebalance_buy",
+        ),
+    ]
+    return TargetWeightPlan(
+        candidate_id="target_weight_candidate",
+        as_of_date="2026-04-10",
+        trade_day="2026-04-10",
+        score_day="2026-04-09",
+        params_hash="hash",
+        symbols=["AAA", "BBB", "CCC"],
+        targets=["AAA", "BBB", "CCC"],
+        prices={"AAA": 100.0, "BBB": 200.0, "CCC": 300.0},
+        target_exposure=0.32,
+        base_target_exposure=0.8,
+        risk_off=True,
+        nav=10_000_000.0,
+        cash_before=10_000_000.0,
+        market_value_before=0.0,
+        cash_after_estimate=6_800_000.0,
+        gross_exposure_after=3_200_000.0,
+        target_position_count=3,
+        orders=orders,
+        diagnostics={"missing_symbols": [], "benchmark_symbol": "KS11"},
+    )
+
+
 def test_target_weight_plan_uses_prior_day_scores_for_targets():
     from core.target_weight_rotation import build_target_weight_plan
 
@@ -259,3 +323,49 @@ def test_execute_plan_stops_after_failed_sell_before_buy():
     assert execution["halted"] is True
     assert execution["details"][1]["status"] == "skipped_after_failure"
     assert FakeExecutor.buy_calls == 0
+
+
+def test_preview_plan_against_caps_flags_default_pilot_caps():
+    from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
+
+    default_preview = preview_plan_against_caps(_adapter_plan())
+    relaxed_preview = preview_plan_against_caps(
+        _adapter_plan(),
+        build_preview_caps(
+            max_orders=3,
+            max_positions=3,
+            max_notional=1_300_000,
+            max_exposure=3_300_000,
+        ),
+    )
+
+    assert default_preview.allowed is False
+    assert "remaining_orders" in default_preview.reason
+    assert "max order notional" in default_preview.reason
+    assert "target positions" in default_preview.reason
+    assert "gross exposure" in default_preview.reason
+    assert relaxed_preview.allowed is True
+
+
+def test_record_shadow_evidence_for_plan_is_non_promotable(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import record_shadow_evidence_for_plan
+
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    plan = _adapter_plan()
+
+    ev = record_shadow_evidence_for_plan(
+        plan,
+        validation=SimpleNamespace(allowed=False, reason="no active pilot authorization"),
+    )
+    records = pe.get_canonical_records(plan.candidate_id)
+
+    assert ev is not None
+    assert ev.execution_backed is False
+    assert ev.evidence_mode == "shadow_bootstrap"
+    assert ev.benchmark_status == "final"
+    assert ev.same_universe_excess is None
+    assert len(records) == 1
+    assert records[0]["benchmark_meta"]["source"] == "target_weight_shadow_plan"
+    assert records[0]["diagnostics"][0]["dry_run_only"] is True
+    assert records[0]["diagnostics"][0]["pilot_validation_reason"] == "no active pilot authorization"
