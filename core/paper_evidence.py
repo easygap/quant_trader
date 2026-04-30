@@ -751,6 +751,98 @@ def _derive_session_mode(evidence_mode: str, pilot_authorized: bool) -> str:
     return "normal_paper"
 
 
+def append_shadow_plan_evidence(
+    strategy: str,
+    date: str | datetime,
+    *,
+    total_value: float,
+    cash: float,
+    invested: float = 0.0,
+    position_count: int = 0,
+    watchlist_symbols: list[str] | None = None,
+    diagnostics: list[dict] | None = None,
+    benchmark_status: str = "final",
+    benchmark_meta: dict | None = None,
+) -> DailyEvidence | None:
+    """Append non-promotable shadow evidence from a dry-run plan.
+
+    This records launch-readiness evidence only. It intentionally leaves
+    returns/excess metrics null and execution_backed=False so promotion/live
+    eligibility cannot be improved by dry-run planning records.
+    """
+    if isinstance(date, str):
+        day = datetime.strptime(date, "%Y-%m-%d")
+    else:
+        day = date
+    today_str = day.strftime("%Y-%m-%d")
+    jsonl_path = _evidence_path(strategy)
+
+    if _already_recorded(jsonl_path, today_str):
+        logger.info("Shadow plan evidence already recorded: {} {}", strategy, today_str)
+        return None
+
+    meta = dict(benchmark_meta or {})
+    meta.setdefault("source", "shadow_plan")
+    meta.setdefault("watchlist_size", len(watchlist_symbols or []))
+    meta.setdefault("performance_excess_computed", False)
+    meta.setdefault("note", "dry-run plan evidence; not execution-backed performance")
+
+    ev = DailyEvidence(
+        date=today_str,
+        day_number=_compute_day_number(jsonl_path, today_str),
+        strategy=strategy,
+        total_value=float(total_value),
+        cash=float(cash),
+        invested=float(invested),
+        daily_return=None,
+        cumulative_return=None,
+        mdd=None,
+        position_count=int(position_count),
+        total_trades=0,
+        buy_count=0,
+        sell_count=0,
+        realized_pnl=0.0,
+        unrealized_pnl=0.0,
+        winning_trades=0,
+        losing_trades=0,
+        same_universe_excess=None,
+        exposure_matched_excess=None,
+        cash_adjusted_excess=None,
+        benchmark_meta=meta,
+        benchmark_status=benchmark_status,
+        raw_fill_rate=None,
+        effective_fill_rate=None,
+        turnover=0.0,
+        signal_density=None,
+        reconcile_count=0,
+        stale_pending_count=0,
+        phantom_position_count=0,
+        restart_recovery_count=0,
+        duplicate_blocked_count=0,
+        reject_count=0,
+        diagnostics=diagnostics or [],
+        cross_validation_warnings=[],
+        anomalies=[],
+        status="normal",
+        record_version=1,
+        schema_version=2,
+        evidence_mode="shadow_bootstrap",
+        execution_backed=False,
+        order_submit_count=0,
+        fill_count=0,
+        session_mode="shadow_bootstrap",
+        pilot_authorized=False,
+        pilot_caps_snapshot={},
+    )
+
+    _append_jsonl(jsonl_path, asdict(ev))
+    logger.info(
+        "Shadow plan evidence recorded: {} day={} bench={} strategy={}",
+        today_str, ev.day_number, benchmark_status, strategy,
+    )
+    return ev
+
+
 # ═══════════════════════════════════════════════════════════════
 # 메인 진입점
 # ═══════════════════════════════════════════════════════════════
