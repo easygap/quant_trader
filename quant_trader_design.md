@@ -113,7 +113,8 @@
 - Follow-up full result (2026-04-30): canonical liquidity top-20 `target_weight_rotation` full sweep은 alpha 후보를 확인. best 기존 후보=`target_weight_rotation_top3_40_100_excess`, return=+212.21%, raw excess=+62.82%p, exposure-matched excess=+83.66%p. 다만 `promotion_status=paper_only`와 turnover/year=1412.1%로 decision=`KEEP_RESEARCH_ONLY`
 - Follow-up research implementation/result (2026-04-30): target-weight score-floor 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지. 다음은 turnover-aware rebalance/tolerance/correlation 필터가 우선
 - Follow-up research implementation/result (2026-04-30): target-weight rank-hysteresis 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, exposure-matched excess=+150.88%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 다음 병목은 drawdown-aware exposure/market-risk overlay
-- Follow-up research implementation/result (2026-04-30): target-weight benchmark-risk overlay 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%, risk-off rebalance=38.9%로 research sweep 기준 `provisional_paper_candidate` 도달. 다음 병목은 canonical evaluation/paper pilot 연결
+- Follow-up research implementation/result (2026-04-30): target-weight benchmark-risk overlay 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%, risk-off rebalance=38.9%로 research sweep 기준 `provisional_paper_candidate` 도달
+- Follow-up canonical bridge (2026-04-30): `tools/evaluate_and_promote.py --canonical`이 위 target-weight 후보를 동일 candidate id/params hash로 `reports/promotion/*` canonical bundle에 포함. `promotion_result.json`과 `--check-only`에서 `provisional_paper_candidate` 재현 확인. 아직 paper execution adapter는 없으므로 registry/pilot 자동운영에는 미등록
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1406,6 +1407,7 @@ quant_trader/
 - [x] **target-weight score-floor 후보 추가** — `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금화. best top5 floor0 +210.21%/Sharpe 1.41/WF positive 100%였지만 turnover/year 1081.5%로 승격 금지
 - [x] **target-weight rank-hysteresis 후보 추가** — `hold_rank_buffer`로 churn 완화. best top5 floor0 hold3 +278.57%/raw excess +129.18%p/Sharpe 1.65/WF positive 100%/turnover 807.8%. MDD=-28.25%라 drawdown gate는 미통과
 - [x] **target-weight benchmark-risk overlay 후보 추가** — KS11 SMA/낙폭/변동성 기반 부분 노출 축소. best risk60_35 +210.24%/raw excess +60.85%p/Sharpe 1.60/PF 5.73/MDD -19.24%/turnover 858.0%/WF positive 100%로 research sweep 기준 provisional 후보 도달
+- [x] **target-weight canonical bridge 추가** — `evaluate_and_promote.py --canonical`이 risk60_35를 canonical promotion bundle에 포함하고 `promotion_result.json`에서 provisional 상태 재현. Paper adapter는 다음 단계
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
@@ -1509,4 +1511,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-30 (target-weight benchmark-risk overlay full sweep 및 provisional 후보 반영)
+> **최종 수정**: 2026-04-30 (target-weight canonical bridge 및 provisional bundle 재현 반영)
