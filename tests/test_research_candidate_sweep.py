@@ -175,6 +175,12 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
         "target_weight_rotation_top3_40_100_floor0",
         "target_weight_rotation_top3_40_100_floor3",
         "target_weight_rotation_top5_60_120_floor0",
+        "target_weight_rotation_top5_60_120_floor0_hold3",
+        "target_weight_rotation_top5_60_120_floor0_exp80",
+        "target_weight_rotation_top5_60_120_floor0_exp80_tol3",
+        "target_weight_rotation_top5_60_120_floor0_exp75",
+        "target_weight_rotation_top3_40_100_hold2",
+        "target_weight_rotation_top5_60_120_floor0_tol3",
         "target_weight_rotation_top3_60_120_partial_cash",
     ]
     assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
@@ -184,6 +190,11 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
     assert direct[0].params["target_top_n"] == 2
     assert direct[3].params["min_score_floor_pct"] == 0.0
     assert direct[4].params["min_score_floor_pct"] == 3.0
+    assert direct[6].params["hold_rank_buffer"] == 3
+    assert direct[7].params["target_exposure"] == 0.80
+    assert direct[8].params["target_tolerance_pct"] == 3.0
+    assert direct[9].params["target_exposure"] == 0.75
+    assert direct[11].params["target_tolerance_pct"] == 3.0
     assert direct[-1].params["market_exposure_mode"] == "benchmark_sma"
 
 
