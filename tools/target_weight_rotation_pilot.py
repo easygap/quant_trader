@@ -101,14 +101,27 @@ def build_plan(
     )
 
 
-def execute_plan(plan: TargetWeightPlan, *, config: Any | None = None, dry_run: bool = True) -> dict[str, Any]:
+def execute_plan(
+    plan: TargetWeightPlan,
+    *,
+    config: Any | None = None,
+    dry_run: bool = True,
+    stop_on_failure: bool = True,
+) -> dict[str, Any]:
     from config.config_loader import Config
 
     config = config or Config.get()
     if config.trading.get("mode") == "live":
         raise ValueError("target-weight pilot adapter refuses live mode")
 
-    results = {"executed": 0, "skipped": 0, "failed": 0, "details": []}
+    results = {
+        "executed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "halted": False,
+        "halt_reason": "",
+        "details": [],
+    }
     if dry_run:
         for order in plan.orders:
             results["skipped"] += 1
@@ -124,7 +137,17 @@ def execute_plan(plan: TargetWeightPlan, *, config: Any | None = None, dry_run: 
     executor = OrderExecutor(config, account_key=plan.candidate_id)
     portfolio = PortfolioManager(config, account_key=plan.candidate_id)
 
+    halt_reason = ""
     for order in plan.orders:
+        if stop_on_failure and halt_reason:
+            results["skipped"] += 1
+            results["details"].append({
+                "order": asdict(order),
+                "status": "skipped_after_failure",
+                "reason": halt_reason,
+            })
+            continue
+
         try:
             if order.action == "SELL":
                 res = executor.execute_sell(
@@ -151,6 +174,10 @@ def execute_plan(plan: TargetWeightPlan, *, config: Any | None = None, dry_run: 
                 results["executed"] += 1
             else:
                 results["failed"] += 1
+                if stop_on_failure:
+                    halt_reason = f"{order.action} {order.symbol} failed: {res.get('reason', 'unknown')}"
+                    results["halted"] = True
+                    results["halt_reason"] = halt_reason
             results["details"].append({
                 "order": asdict(order),
                 "status": status,
@@ -159,6 +186,10 @@ def execute_plan(plan: TargetWeightPlan, *, config: Any | None = None, dry_run: 
         except Exception as exc:
             logger.exception("target-weight order failed: {}", order.symbol)
             results["failed"] += 1
+            if stop_on_failure:
+                halt_reason = f"{order.action} {order.symbol} exception: {exc}"
+                results["halted"] = True
+                results["halt_reason"] = halt_reason
             results["details"].append({
                 "order": asdict(order),
                 "status": "exception",
