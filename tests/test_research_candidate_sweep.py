@@ -194,6 +194,66 @@ def test_candidate_to_strategy_metrics_maps_research_fields():
     assert metrics.turnover_per_year == 300.0
 
 
+def test_calculate_research_metrics_adds_exposure_matched_diagnostics():
+    import pandas as pd
+    from tools.research_candidate_sweep import calculate_research_metrics
+
+    dates = pd.bdate_range("2025-01-01", periods=4)
+    equity = pd.DataFrame(
+        {
+            "date": dates,
+            "value": [100.0, 105.0, 105.0, 110.0],
+            "cash": [50.0, 52.5, 105.0, 55.0],
+            "n_positions": [1, 1, 0, 1],
+        }
+    )
+    benchmark_returns = pd.Series([0.10, -0.05, 0.02], index=dates[1:])
+
+    metrics = calculate_research_metrics(
+        {"equity_curve": equity, "trades": []},
+        capital=100.0,
+        benchmark_daily_returns=benchmark_returns,
+    )
+
+    assert metrics["total_return"] == 10.0
+    assert metrics["avg_exposure_pct"] == 37.5
+    assert metrics["median_exposure_pct"] == 50.0
+    assert metrics["avg_cash_pct"] == 62.5
+    assert metrics["invested_days_pct"] == 75.0
+    assert metrics["exposure_source"] == "cash_value"
+    assert metrics["exposure_matched_bh_return"] == -2.5
+
+
+def test_build_candidate_record_keeps_exposure_matched_excess_diagnostic():
+    from tools.research_candidate_sweep import CandidateSpec, build_candidate_record
+
+    rec = build_candidate_record(
+        CandidateSpec("diagnostic", "relative_strength_rotation", {}, "diagnostic"),
+        {
+            "total_return": 10.0,
+            "sharpe": 0.5,
+            "profit_factor": 1.2,
+            "mdd": -5.0,
+            "total_trades": 30,
+            "wf_positive_rate": 0.5,
+            "wf_sharpe_positive_rate": 0.5,
+            "wf_windows": 3,
+            "wf_total_trades": 30,
+            "ev_per_trade": 1,
+            "cost_adjusted_cagr": 3.0,
+            "turnover_per_year": 200.0,
+            "exposure_matched_bh_return": 2.38,
+            "exposure_matched_bh_sharpe": 0.1,
+        },
+        {"ew_bh_return": 20.0, "ew_bh_sharpe": 0.6},
+    )
+
+    assert rec["alpha_pass"] is False
+    assert rec["metrics"]["benchmark_excess_return"] == -10.0
+    assert rec["metrics"]["exposure_matched_excess_return"] == 7.62
+    assert rec["metrics"]["exposure_matched_excess_sharpe"] == 0.4
+
+
 def test_sort_candidates_prefers_alpha_pass_over_high_non_alpha_score():
     from tools.research_candidate_sweep import sort_candidate_records
 
@@ -330,6 +390,7 @@ def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):
     assert not (tmp_path / "reports" / "promotion").exists()
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["artifact_type"] == "research_candidate_sweep_bundle"
+    assert "EM Excess" in md_path.read_text(encoding="utf-8")
 
 
 def test_portfolio_backtester_strategy_config_for_run_applies_overlay():
