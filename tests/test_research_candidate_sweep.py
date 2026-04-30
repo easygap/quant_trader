@@ -62,6 +62,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "benchmark_relative_momentum_120d" in ids
     assert "risk_budget_momentum_120d_balanced" in ids
     assert "cash_switch_rotation_sma200" in ids
+    assert "benchmark_aware_rotation_60_120_dense" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -138,6 +139,25 @@ def test_build_candidate_specs_supports_cash_switch_family_aliases():
     assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
     assert {spec.strategy for spec in direct} == {"relative_strength_rotation"}
     assert all(spec.params["market_filter_exit"] is True for spec in direct)
+
+
+def test_build_candidate_specs_supports_benchmark_aware_rotation_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("benchmark_aware_rotation")
+    alias = build_candidate_specs("relative_rank")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "benchmark_aware_rotation_60_120_dense",
+        "benchmark_aware_rotation_80_160_dense",
+        "benchmark_aware_rotation_40_100_dense",
+        "benchmark_aware_rotation_60_120_balanced",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"relative_strength_rotation"}
+    assert all(spec.params["score_mode"] == "benchmark_excess" for spec in direct)
+    assert all(spec.params["rank_entry_mode"] == "dense_ranked" for spec in direct)
+    assert direct[-1].diversification["max_positions"] == 4
 
 
 def test_build_candidate_specs_rejects_unknown_family():
