@@ -61,6 +61,38 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     return dates
 
 
+def _recent_weekday_dates(end_date: str, count: int) -> list[str]:
+    if count <= 0:
+        raise ValueError("shadow days must be positive")
+    day = datetime.strptime(end_date, "%Y-%m-%d").date()
+    dates: list[str] = []
+    while len(dates) < count:
+        if day.weekday() < 5:
+            dates.append(day.strftime("%Y-%m-%d"))
+        day -= timedelta(days=1)
+    return list(reversed(dates))
+
+
+def resolve_shadow_batch_range(
+    *,
+    shadow_start_date: str | None = None,
+    shadow_end_date: str | None = None,
+    shadow_days: int | None = None,
+    today: str | None = None,
+) -> tuple[str, str, list[str]]:
+    if shadow_days is not None:
+        if shadow_start_date is not None:
+            raise ValueError("--shadow-days cannot be combined with --shadow-start-date")
+        end_date = shadow_end_date or today or datetime.now().strftime("%Y-%m-%d")
+        dates = _recent_weekday_dates(end_date, int(shadow_days))
+        return dates[0], dates[-1], dates
+
+    if shadow_start_date is None or shadow_end_date is None:
+        raise ValueError("--shadow-start-date and --shadow-end-date must be provided together")
+    dates = _date_range(shadow_start_date, shadow_end_date)
+    return shadow_start_date, shadow_end_date, dates
+
+
 def _load_symbols(config: Any, raw_symbols: str | None) -> list[str]:
     explicit = _split_symbols(raw_symbols)
     if explicit:
@@ -608,7 +640,7 @@ def run_shadow_bootstrap(
             seen_trade_days.add(plan.trade_day)
 
             pilot_check = check_pilot_entry(
-                candidate_id,
+                evidence_strategy,
                 candidate_notional=plan.max_order_notional,
                 as_of_date=plan.trade_day,
             )
@@ -831,13 +863,18 @@ def main() -> None:
         help="Run multi-date shadow bootstrap from YYYY-MM-DD; implies dry-run shadow evidence.",
     )
     parser.add_argument(
+        "--shadow-days",
+        type=int,
+        help="Auto-select the most recent N weekdays for shadow bootstrap; optionally anchor with --shadow-end-date.",
+    )
+    parser.add_argument(
         "--shadow-end-date",
-        help="Run multi-date shadow bootstrap through YYYY-MM-DD; implies dry-run shadow evidence.",
+        help="Run shadow bootstrap through YYYY-MM-DD; required with --shadow-start-date or optional with --shadow-days.",
     )
     parser.add_argument(
         "--skip-readiness-artifacts",
         action="store_true",
-        help="Skip launch readiness JSON/MD generation when --record-shadow-evidence is used.",
+        help="Skip launch readiness JSON/MD generation when shadow evidence is recorded.",
     )
     parser.add_argument(
         "--skip-runbook",
@@ -861,20 +898,30 @@ def main() -> None:
         max_exposure=args.preview_max_exposure,
     )
 
-    shadow_batch = args.shadow_start_date is not None or args.shadow_end_date is not None
+    shadow_batch = (
+        args.shadow_start_date is not None
+        or args.shadow_end_date is not None
+        or args.shadow_days is not None
+    )
     if shadow_batch:
-        if args.shadow_start_date is None or args.shadow_end_date is None:
-            parser.error("--shadow-start-date and --shadow-end-date must be provided together")
         if args.execute or args.collect_evidence:
             parser.error("shadow bootstrap date range cannot be combined with --execute or --collect-evidence")
         if args.as_of_date:
-            parser.error("--as-of-date is not used with --shadow-start-date/--shadow-end-date")
+            parser.error("--as-of-date is not used with shadow bootstrap batch options")
+        try:
+            shadow_start_date, shadow_end_date, requested_dates = resolve_shadow_batch_range(
+                shadow_start_date=args.shadow_start_date,
+                shadow_end_date=args.shadow_end_date,
+                shadow_days=args.shadow_days,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
 
         batch = run_shadow_bootstrap(
             candidate_id=args.candidate_id,
             raw_symbols=args.symbols,
-            start_date=args.shadow_start_date,
-            end_date=args.shadow_end_date,
+            start_date=shadow_start_date,
+            end_date=shadow_end_date,
             cash=args.cash,
             generate_readiness_artifacts=not args.skip_readiness_artifacts,
             generate_runbook=not args.skip_runbook,
@@ -884,7 +931,9 @@ def main() -> None:
         summary = batch["summary"]
         print("\nTarget-weight shadow bootstrap")
         print(f"  candidate: {args.candidate_id}")
-        print(f"  range: {args.shadow_start_date} ~ {args.shadow_end_date}")
+        print(f"  range: {shadow_start_date} ~ {shadow_end_date}")
+        if args.shadow_days is not None:
+            print(f"  auto-selected weekdays: {', '.join(requested_dates)}")
         print(
             "  summary: "
             f"recorded={summary['recorded']} "
