@@ -708,7 +708,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
 | ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
 | ✅ **target-weight paper/pilot adapter 추가** | `core/target_weight_rotation.py` + `tools/target_weight_rotation_pilot.py`로 직전 거래일 점수 기반 목표비중 plan을 만들고 pilot cap을 plan-level로 검증. `OrderExecutor.execute_buy_quantity()`로 paper-only exact quantity 매수를 지원. live 모드는 계속 거부 |
-| ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. `--shadow-days 3` 또는 `--shadow-start-date/--shadow-end-date`로 여러 날짜 shadow bootstrap을 한 번에 누적할 수 있고, 같은 실행에서 launch readiness JSON/MD와 pilot runbook을 생성하며 session/batch artifact에는 기본 cap preview, plan 기반 최소/추천 cap, enable 명령, launch artifact 경로를 기록 |
+| ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. `--shadow-days 3` 또는 `--shadow-start-date/--shadow-end-date`로 여러 날짜 shadow bootstrap을 한 번에 누적할 수 있고, `--shadow-days N`은 휴장/데이터 공백으로 같은 거래일에 매핑되면 과거 평일을 추가 스캔해 N개 고유 resolved trade_day 충족을 목표로 한다. 같은 실행에서 launch readiness JSON/MD와 pilot runbook을 생성하며 session/batch artifact에는 기본 cap preview, plan 기반 최소/추천 cap, enable 명령, launch artifact 경로를 기록 |
 | ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
@@ -719,7 +719,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 |------|------|
 | 즉시 canonical promotion | 완료. `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 canonical promotion bundle에서도 `provisional_paper_candidate`로 재현됨 |
 | 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional이며 전용 paper/pilot adapter가 준비됨. 일반 scheduler registry에는 아직 넣지 않음 |
-| 다음 후보 탐색 | 새 알파 탐색보다 target-weight pilot을 `--shadow-days 3`로 shadow/dry-run evidence 3 clean days 확보 → cap 조정 승인 → capped paper 순서로 돌려 execution-backed evidence 품질을 검증 |
+| 다음 후보 탐색 | 새 알파 탐색보다 target-weight pilot을 `--shadow-days 3`로 고유 resolved trade_day 기준 shadow/dry-run evidence 3 clean days 확보 → cap 조정 승인 → capped paper 순서로 돌려 execution-backed evidence 품질을 검증 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
@@ -829,4 +829,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (target-weight launch artifact 자동화 반영)
+> **최종 수정**: 2026-04-30 (target-weight shadow-days unique trade_day 보강 반영)
