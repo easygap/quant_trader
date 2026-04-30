@@ -358,6 +358,62 @@ def execute_plan(
     return results
 
 
+def summarize_execution_for_evidence(plan: TargetWeightPlan, execution: dict[str, Any]) -> dict[str, Any]:
+    planned = len(plan.orders)
+    executed = int(execution.get("executed", 0) or 0)
+    failed = int(execution.get("failed", 0) or 0)
+    skipped = int(execution.get("skipped", 0) or 0)
+    halted = bool(execution.get("halted", False))
+    complete = failed == 0 and skipped == 0 and not halted and executed == planned
+    reason = "all planned target-weight orders executed"
+    if not complete:
+        reason = (
+            "target_weight_execution_incomplete: "
+            f"executed={executed}/{planned} failed={failed} skipped={skipped} halted={halted}"
+        )
+        halt_reason = execution.get("halt_reason")
+        if halt_reason:
+            reason = f"{reason}; halt_reason={halt_reason}"
+
+    return {
+        "complete": complete,
+        "reason": reason,
+        "planned_orders": planned,
+        "executed_orders": executed,
+        "failed_orders": failed,
+        "skipped_orders": skipped,
+        "halted": halted,
+        "halt_reason": execution.get("halt_reason", ""),
+        "params_hash": plan.params_hash,
+        "target_symbols": list(plan.targets),
+        "target_exposure": plan.target_exposure,
+        "gross_exposure_after": plan.gross_exposure_after,
+        "max_order_notional": plan.max_order_notional,
+    }
+
+
+def build_pilot_evidence_caps_snapshot(
+    plan: TargetWeightPlan,
+    validation: Any,
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    caps = dict(getattr(validation, "caps_snapshot", None) or {})
+    caps["target_weight_plan"] = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "score_day": plan.score_day,
+        "params_hash": plan.params_hash,
+        "targets": list(plan.targets),
+        "target_exposure": plan.target_exposure,
+        "base_target_exposure": plan.base_target_exposure,
+        "risk_off": plan.risk_off,
+        "gross_exposure_after": plan.gross_exposure_after,
+        "max_order_notional": plan.max_order_notional,
+    }
+    caps["target_weight_execution"] = summarize_execution_for_evidence(plan, execution)
+    return caps
+
+
 def write_session_artifact(
     *,
     plan: TargetWeightPlan,
@@ -368,6 +424,7 @@ def write_session_artifact(
     execution: dict[str, Any],
     dry_run: bool,
     shadow_evidence: dict[str, Any] | None = None,
+    evidence_collection: dict[str, Any] | None = None,
     launch_artifacts: dict[str, Any] | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
@@ -384,6 +441,7 @@ def write_session_artifact(
         "cap_recommendation": cap_recommendation,
         "execution": execution,
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
+        "evidence_collection": evidence_collection or {"attempted": False, "recorded": False},
         "launch_artifacts": launch_artifacts or {"attempted": False},
         "live_safety": {
             "live_enabled": False,
@@ -852,16 +910,23 @@ def run_pilot(
         raise ValueError(f"pilot plan blocked: {validation.reason}")
 
     execution = execute_plan(plan, config=config, dry_run=dry_run)
+    execution_evidence = summarize_execution_for_evidence(plan, execution)
+    evidence_collection = {"attempted": False, "recorded": False}
 
     if execute:
+        evidence_caps_snapshot = build_pilot_evidence_caps_snapshot(plan, validation, execution)
         pilot_session = {
             "active": True,
             "session_mode": "pilot_paper",
             "evidence_mode": "pilot_paper",
             "pilot_authorized": True,
-            "pilot_caps_snapshot": validation.caps_snapshot,
+            "pilot_caps_snapshot": evidence_caps_snapshot,
             "orders_planned": len(plan.orders),
             "orders_executed": execution.get("executed", 0),
+            "execution_complete": execution_evidence["complete"],
+            "evidence_collectible": execution_evidence["complete"],
+            "evidence_block_reason": "" if execution_evidence["complete"] else execution_evidence["reason"],
+            "target_weight_execution": execution_evidence,
         }
         save_pilot_session_artifact(
             strategy=candidate_id,
@@ -870,18 +935,32 @@ def run_pilot(
         )
 
         if collect_evidence:
-            from core.paper_evidence import collect_daily_evidence
+            evidence_collection = {
+                "attempted": True,
+                "recorded": False,
+                "status": "blocked",
+                "reason": execution_evidence["reason"],
+                "target_weight_execution": execution_evidence,
+            }
+            if execution_evidence["complete"]:
+                from core.paper_evidence import collect_daily_evidence
 
-            collect_daily_evidence(
-                strategy=candidate_id,
-                mode="paper",
-                account_key=candidate_id,
-                date=datetime.strptime(plan.trade_day, "%Y-%m-%d"),
-                watchlist_symbols=plan.symbols,
-                evidence_mode="pilot_paper",
-                pilot_authorized=True,
-                pilot_caps_snapshot=validation.caps_snapshot,
-            )
+                evidence_record = collect_daily_evidence(
+                    strategy=candidate_id,
+                    mode="paper",
+                    account_key=candidate_id,
+                    date=datetime.strptime(plan.trade_day, "%Y-%m-%d"),
+                    watchlist_symbols=plan.symbols,
+                    evidence_mode="pilot_paper",
+                    pilot_authorized=True,
+                    pilot_caps_snapshot=evidence_caps_snapshot,
+                )
+                evidence_collection.update({
+                    "recorded": evidence_record is not None,
+                    "status": "recorded" if evidence_record is not None else "already_recorded",
+                    "reason": "pilot_paper evidence recorded"
+                    if evidence_record is not None else "pilot_paper evidence already recorded",
+                })
 
     shadow_evidence_record = None
     shadow_evidence_summary = {"attempted": False, "recorded": False}
@@ -914,6 +993,7 @@ def run_pilot(
         execution=execution,
         dry_run=dry_run,
         shadow_evidence=shadow_evidence_summary,
+        evidence_collection=evidence_collection,
         launch_artifacts=launch_artifacts,
         output_dir=output_dir,
     )
@@ -925,6 +1005,8 @@ def run_pilot(
         "cap_preview": cap_preview,
         "cap_recommendation": cap_recommendation,
         "execution": execution,
+        "execution_evidence": execution_evidence,
+        "evidence_collection": evidence_collection,
         "shadow_evidence": shadow_evidence_record,
         "shadow_evidence_summary": shadow_evidence_summary,
         "launch_artifacts": launch_artifacts,
@@ -1040,6 +1122,9 @@ def main() -> None:
                 f"unique_trade_days={summary['covered_unique_trade_days']}/{summary['target_unique_trade_days']} "
                 f"met={'YES' if summary['target_met'] else 'NO'}"
             )
+        shadow_incomplete = summary["failed"] > 0 or (
+            args.shadow_days is not None and not summary.get("target_met", False)
+        )
         if batch["launch_artifacts"].get("attempted"):
             readiness = batch["launch_artifacts"]["launch_readiness"]
             print(
@@ -1051,7 +1136,13 @@ def main() -> None:
             print(f"  readiness artifact: {readiness['json_path']}")
             if batch["launch_artifacts"].get("runbook_path"):
                 print(f"  runbook: {batch['launch_artifacts']['runbook_path']}")
+        if shadow_incomplete:
+            print("  status: BLOCKED - shadow bootstrap incomplete")
+        else:
+            print("  status: OK")
         print(f"  artifact: {batch['artifact_path']}")
+        if shadow_incomplete:
+            raise SystemExit(1)
         return
 
     result = run_pilot(
@@ -1087,6 +1178,10 @@ def main() -> None:
         f"notional={suggested_caps['max_notional_per_trade']:,} "
         f"exposure={suggested_caps['max_gross_exposure']:,}"
     )
+    if result["evidence_collection"].get("attempted"):
+        evidence_status = result["evidence_collection"].get("status", "unknown")
+        evidence_reason = result["evidence_collection"].get("reason", "")
+        print(f"  pilot evidence: {evidence_status} - {evidence_reason}")
     if result["shadow_evidence_summary"].get("attempted"):
         status = "recorded" if result["shadow_evidence_summary"].get("recorded") else "already recorded"
         print(f"  shadow evidence: {status}")
@@ -1101,6 +1196,8 @@ def main() -> None:
         if result["launch_artifacts"].get("runbook_path"):
             print(f"  runbook: {result['launch_artifacts']['runbook_path']}")
     print(f"  artifact: {result['artifact_path']}")
+    if result["evidence_collection"].get("status") == "blocked":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
