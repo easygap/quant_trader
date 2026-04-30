@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 class FakeCollector:
@@ -132,6 +135,20 @@ def _adapter_plan_for_date(day: str):
         "2026-04-10": "2026-04-09",
     }.get(day, "2026-04-09")
     return replace(_adapter_plan(), as_of_date=day, trade_day=day, score_day=score_day)
+
+
+def test_target_weight_pilot_help_lists_shadow_days():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "tools/target_weight_rotation_pilot.py", "--help"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "--shadow-days" in result.stdout
 
 
 def test_target_weight_plan_uses_prior_day_scores_for_targets():
@@ -377,6 +394,36 @@ def test_recommend_pilot_caps_matches_target_weight_plan():
     assert rec["suggested_preview"]["allowed"] is True
     assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
+
+
+def test_resolve_shadow_batch_range_supports_auto_days():
+    from tools.target_weight_rotation_pilot import resolve_shadow_batch_range
+
+    start, end, dates = resolve_shadow_batch_range(
+        shadow_days=3,
+        shadow_end_date="2026-04-13",
+    )
+
+    assert start == "2026-04-09"
+    assert end == "2026-04-13"
+    assert dates == ["2026-04-09", "2026-04-10", "2026-04-13"]
+
+    explicit_start, explicit_end, explicit_dates = resolve_shadow_batch_range(
+        shadow_start_date="2026-04-08",
+        shadow_end_date="2026-04-10",
+    )
+    assert explicit_start == "2026-04-08"
+    assert explicit_end == "2026-04-10"
+    assert explicit_dates == ["2026-04-08", "2026-04-09", "2026-04-10"]
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        resolve_shadow_batch_range(
+            shadow_start_date="2026-04-08",
+            shadow_end_date="2026-04-10",
+            shadow_days=3,
+        )
+    with pytest.raises(ValueError, match="must be provided together"):
+        resolve_shadow_batch_range(shadow_end_date="2026-04-10")
 
 
 def test_record_shadow_evidence_for_plan_is_non_promotable(monkeypatch, tmp_path):
