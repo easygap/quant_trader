@@ -58,11 +58,46 @@ def test_build_candidate_specs_supports_all_families():
     assert "rotation_base" in ids
     assert "momentum_factor_60d" in ids
     assert "breakout_volume_strict" in ids
+    assert "trend_pullback_balanced" in ids
+    assert "benchmark_relative_momentum_120d" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
         "breakout_volume",
+        "trend_pullback",
     }
+
+
+def test_build_candidate_specs_supports_pullback_family_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("pullback")
+    alias = build_candidate_specs("trend_pullback")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "trend_pullback_base",
+        "trend_pullback_aggressive",
+        "trend_pullback_balanced",
+        "trend_pullback_conservative",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"trend_pullback"}
+
+
+def test_build_candidate_specs_supports_benchmark_relative_family_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("benchmark_relative")
+    alias = build_candidate_specs("relative_momentum")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "benchmark_relative_momentum_60d",
+        "benchmark_relative_momentum_120d",
+        "benchmark_relative_momentum_lowvol",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"momentum_factor"}
+    assert all(spec.params["benchmark_relative"] is True for spec in direct)
 
 
 def test_build_candidate_specs_rejects_unknown_family():

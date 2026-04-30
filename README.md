@@ -13,7 +13,7 @@
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡)
 > - `QUANT_AUTO_ENTRY` 해석 단일화: YAML hash와 resolved hash를 분리해 실험 설정 drift 감지
-> - Research sweep: top-20 all-family 후보 14개 재검증도 `NO_ALPHA_CANDIDATE`; 다음 연구는 새 alpha 후보군 설계 우선
+> - Research sweep: 기존 top-20 all-family 후보 14개 재검증도 `NO_ALPHA_CANDIDATE`; `pullback` 및 benchmark-relative momentum 후보군을 research-only로 추가
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
@@ -174,12 +174,16 @@ pytest tests/ -q
 ## 전략 상태
 
 승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현.  
-Research candidate sweep — `tools/research_candidate_sweep.py --quick --candidate-family all`로 promotion과 분리된 rotation/momentum/breakout 후보 랭킹 artifact를 생성.
+Research candidate sweep — `tools/research_candidate_sweep.py --quick --candidate-family all`로 promotion과 분리된 rotation/momentum/breakout/pullback/benchmark-relative 후보 랭킹 artifact를 생성.
 Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정.
 
 2026-04-29 all-family quick sweep: 5종목(`005930,000660,035720,051910,068270`)에서 rotation/momentum/breakout 후보 14개를 비교했지만 모두 benchmark excess return/Sharpe를 통과하지 못해 `NO_ALPHA_CANDIDATE`로 판정. 이 결과만으로 canonical promotion이나 paper/live 승격은 진행하지 않습니다.
 
 2026-04-30 top-20 all-family quick sweep: canonical liquidity universe 20종목에서 동일 후보 14개를 재검증했지만 `NO_ALPHA_CANDIDATE` 유지. best=`momentum_factor_120d`는 return +118.56%, Sharpe 0.79였으나 benchmark excess=-30.83%p, MDD=-40.08%로 승격 불가. 다음 연구는 단순 후보 확장이 아니라 benchmark를 이기는 새로운 alpha 후보군 설계로 전환합니다.
+
+2026-04-30 follow-up: 기존 전략 중 외부 재무 데이터 의존이 없는 `trend_pullback`을 `pullback` candidate family로 추가했습니다. 또한 기존 실패 원인(절대수익은 높지만 benchmark에 뒤처짐)을 직접 겨냥하기 위해 `momentum_factor`에 KS11 대비 초과 모멘텀/변동성 게이트 옵션을 추가하고 `benchmark_relative` candidate family로 노출했습니다. `all` sweep은 이제 rotation/momentum/breakout/pullback/benchmark-relative 후보군을 함께 평가합니다.
+
+2026-04-30 5-symbol smoke sweep: 신규 `benchmark_relative` 3개와 `pullback` 4개 모두 `NO_ALPHA_CANDIDATE`. best=`benchmark_relative_momentum_60d` return +4.13%, excess=-169.50%p; best pullback=`trend_pullback_aggressive` return +3.04%, excess=-170.59%p. 두 후보군은 계속 research-only입니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|

@@ -684,9 +684,12 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
-| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
+| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout/pullback/benchmark-relative 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
 | ✅ **2026-04-29 all-family quick sweep** | 5종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`rotation_slow_momentum`이나 excess=-165.22%p / excess Sharpe=-1.07 |
 | ✅ **2026-04-30 top-20 all-family quick sweep** | canonical liquidity universe 20종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`, return=+118.56%, excess=-30.83%p, MDD=-40.08% |
+| ✅ **pullback 후보군 추가** | `trend_pullback` 기반 research-only 후보 4개 추가. 외부 재무 데이터 없이 SMA/RSI/ADX 눌림목 진입을 benchmark-aware sweep에서 검증 |
+| ✅ **benchmark-relative momentum 추가** | `momentum_factor`에 KS11 대비 초과 모멘텀/변동성 게이트 옵션 추가. research-only 후보 3개로 현재 실패 원인(benchmark underperformance)을 직접 검증 |
+| ✅ **2026-04-30 신규 후보 smoke sweep** | 5종목 기준 `benchmark_relative`/`pullback` 모두 `NO_ALPHA_CANDIDATE`. best 신규 후보도 excess=-169%p 이하라 promotion 미진행 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -695,8 +698,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 항목 | 결정 |
 |------|------|
 | 즉시 canonical promotion | 진행하지 않음. 2026-04-29/30 all-family quick sweep 모두 benchmark excess gate 미달 |
-| 현재 후보군 | rotation/momentum/breakout 14개 모두 research_only 유지 |
-| 다음 후보 탐색 | 단순 유니버스 확장보다 benchmark를 이기는 새 alpha 후보군 설계 우선. benchmark 대비 초과수익/초과 Sharpe를 1차 통과 조건으로 유지 |
+| 현재 후보군 | rotation/momentum/breakout 기존 14개 모두 research_only 유지. pullback 4개와 benchmark-relative 3개는 신규 research-only 검증 대상 |
+| 다음 후보 탐색 | 신규 smoke sweep도 실패. 다음은 단순 타이밍 필터보다 노출 구조/리스크 예산/동일 유니버스 상대강도 개선처럼 benchmark를 이기는 새 alpha 후보군 설계 우선 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)

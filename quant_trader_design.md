@@ -95,9 +95,12 @@
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
 - Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`
-- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout 후보 랭킹과 decision action을 생성하고 benchmark excess 음수 후보를 상위 alpha 후보에서 배제
+- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative 후보 랭킹과 decision action을 생성하고 benchmark excess 음수 후보를 상위 alpha 후보에서 배제
 - Latest research decision (2026-04-29): 5종목 all-family quick sweep에서 후보 14개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`; canonical promotion은 진행하지 않고 유니버스 확장 또는 새 후보군 설계를 우선
 - Latest research decision (2026-04-30): canonical liquidity top-20 all-family quick sweep에서도 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`는 +118.56%였지만 benchmark excess=-30.83%p, MDD=-40.08%; promotion 미진행
+- Follow-up research implementation (2026-04-30): 외부 재무 데이터 의존이 없는 `trend_pullback` 기반 `pullback` 후보군 4개를 추가해 다음 benchmark-aware sweep 대상으로 지정
+- Follow-up research implementation (2026-04-30): `momentum_factor`에 KS11 대비 초과 모멘텀/변동성 게이트 옵션을 추가하고 `benchmark_relative` 후보군 3개를 추가
+- Follow-up smoke result (2026-04-30): 5종목 `benchmark_relative`/`pullback` quick sweep 모두 `NO_ALPHA_CANDIDATE`; 신규 후보도 promotion 미진행
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1373,6 +1376,9 @@ quant_trader/
 - [x] **전략 분류 확정** — rotation: provisional, scoring: paper_only. BV/MR/TF/ensemble: disabled (research_only)
 - [x] **2026-04-29 all-family quick sweep** — rotation/momentum/breakout 14개 후보 모두 `NO_ALPHA_CANDIDATE`; promotion 미진행
 - [x] **2026-04-30 top-20 all-family quick sweep** — 20종목 후보 14개 모두 `NO_ALPHA_CANDIDATE`; best momentum도 benchmark excess/MDD 미달
+- [x] **pullback 후보군 추가** — `trend_pullback` 기반 research-only 후보 4개 추가. `all` sweep에 포함
+- [x] **benchmark-relative momentum 후보군 추가** — KS11 대비 초과 모멘텀과 변동성 게이트로 현재 underperformance 원인을 직접 검증
+- [x] **신규 후보 5종목 smoke sweep** — benchmark_relative/pullback 모두 `NO_ALPHA_CANDIDATE`; 다음은 노출 구조와 동일 유니버스 상대강도 개선 우선
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
