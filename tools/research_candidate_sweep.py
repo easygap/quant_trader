@@ -556,6 +556,45 @@ def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
             description="faster monthly top-3 target-weight rotation ranked by KS11 excess momentum",
         ),
         CandidateSpec(
+            candidate_id="target_weight_rotation_top3_40_100_floor0",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "short_weight": 0.7,
+                "min_score_floor_pct": 0.0,
+            },
+            description="faster top-3 target rotation that leaves slots in cash below zero excess momentum",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top3_40_100_floor3",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "short_weight": 0.7,
+                "min_score_floor_pct": 3.0,
+            },
+            description="faster top-3 target rotation with a stricter 3pct excess score floor",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+            },
+            description="broader top-5 target rotation that leaves weak excess slots in cash",
+        ),
+        CandidateSpec(
             candidate_id="target_weight_rotation_top3_60_120_partial_cash",
             strategy="target_weight_rotation",
             params={
@@ -1125,6 +1164,9 @@ def run_target_weight_rotation_backtest(
                 targets: list[str] = []
                 if score_day is not None:
                     score_row = score_panel.loc[score_day].dropna().sort_values(ascending=False)
+                    min_score_floor = params.get("min_score_floor_pct")
+                    if min_score_floor is not None:
+                        score_row = score_row[score_row >= float(min_score_floor) / 100.0]
                     targets = [sym for sym in score_row.index.tolist() if sym in prices][:top_n]
                 target_exposure = _target_exposure_for_day(day, benchmark_close, params)
                 target_exposures.append(target_exposure)
