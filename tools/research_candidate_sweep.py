@@ -219,6 +219,97 @@ def build_breakout_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_pullback_candidate_specs() -> list[CandidateSpec]:
+    """Trend-pullback variants for testing dip entries inside an existing trend."""
+    return [
+        CandidateSpec(
+            candidate_id="trend_pullback_base",
+            strategy="trend_pullback",
+            params={},
+            description="current config baseline",
+        ),
+        CandidateSpec(
+            candidate_id="trend_pullback_aggressive",
+            strategy="trend_pullback",
+            params={
+                "sma_period": 50,
+                "rsi_entry": 48,
+                "adx_min": 18,
+                "rsi_exit": 72,
+            },
+            description="more frequent pullback entries in medium trends",
+        ),
+        CandidateSpec(
+            candidate_id="trend_pullback_balanced",
+            strategy="trend_pullback",
+            params={
+                "sma_period": 60,
+                "rsi_entry": 42,
+                "adx_min": 20,
+                "rsi_exit": 68,
+            },
+            description="balanced pullback entries with standard trend confirmation",
+        ),
+        CandidateSpec(
+            candidate_id="trend_pullback_conservative",
+            strategy="trend_pullback",
+            params={
+                "sma_period": 80,
+                "rsi_entry": 38,
+                "adx_min": 22,
+                "rsi_exit": 65,
+            },
+            description="stricter pullback entries with slower trend confirmation",
+        ),
+    ]
+
+
+def build_benchmark_relative_candidate_specs() -> list[CandidateSpec]:
+    """Benchmark-relative momentum variants targeting same-universe excess returns."""
+    return [
+        CandidateSpec(
+            candidate_id="benchmark_relative_momentum_60d",
+            strategy="momentum_factor",
+            params={
+                "benchmark_relative": True,
+                "benchmark_symbol": "KS11",
+                "lookback_days": 60,
+                "buy_threshold_pct": 3.0,
+                "sell_threshold_pct": -2.0,
+                "max_realized_vol_pct": 35.0,
+            },
+            description="60d stock momentum must exceed KS11 by at least 3%",
+        ),
+        CandidateSpec(
+            candidate_id="benchmark_relative_momentum_120d",
+            strategy="momentum_factor",
+            params={
+                "benchmark_relative": True,
+                "benchmark_symbol": "KS11",
+                "lookback_days": 120,
+                "buy_threshold_pct": 6.0,
+                "sell_threshold_pct": -3.0,
+                "max_realized_vol_pct": 35.0,
+            },
+            description="120d stock momentum must exceed KS11 by at least 6%",
+        ),
+        CandidateSpec(
+            candidate_id="benchmark_relative_momentum_lowvol",
+            strategy="momentum_factor",
+            params={
+                "benchmark_relative": True,
+                "benchmark_symbol": "KS11",
+                "lookback_days": 120,
+                "buy_threshold_pct": 4.0,
+                "sell_threshold_pct": -2.0,
+                "max_realized_vol_pct": 28.0,
+                "sell_on_high_vol": True,
+            },
+            description="benchmark-relative momentum with a stricter volatility gate",
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -227,14 +318,21 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         return build_momentum_candidate_specs()
     if family in ("breakout", "breakout_volume"):
         return build_breakout_candidate_specs()
+    if family in ("pullback", "trend_pullback"):
+        return build_pullback_candidate_specs()
+    if family in ("benchmark_relative", "relative_momentum", "bench_rel_momentum"):
+        return build_benchmark_relative_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
             *build_momentum_candidate_specs(),
             *build_breakout_candidate_specs(),
+            *build_pullback_candidate_specs(),
+            *build_benchmark_relative_candidate_specs(),
         ]
     raise ValueError(
-        "candidate_family must be one of: rotation, momentum, breakout, all"
+        "candidate_family must be one of: rotation, momentum, breakout, pullback, "
+        "benchmark_relative, all"
     )
 
 
@@ -844,7 +942,7 @@ def main() -> None:
     parser.add_argument(
         "--candidate-family",
         default=DEFAULT_CANDIDATE_FAMILY,
-        choices=["rotation", "momentum", "breakout", "all"],
+        choices=["rotation", "momentum", "breakout", "pullback", "benchmark_relative", "all"],
         help="Research candidate family to evaluate.",
     )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
