@@ -131,7 +131,7 @@ quant_trader/
 │   ├── paper_preflight.py              # Paper 세션 전 체크리스트 CLI
 │   ├── paper_launch_readiness.py       # Paper 진입 준비 상태 확인 CLI
 │   ├── paper_runtime_status.py         # Paper 실행 상태 모니터링 CLI
-│   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정
+│   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정(+canonicalized research candidate)
 │   ├── research_candidate_sweep.py     # Research-only 후보 sweep → benchmark-aware ranking artifact
 │   ├── rebuild_paper_runtime.py        # Paper 런타임 재구성
 │   └── quarantine_test_artifacts.py    # 테스트 artifact 격리
@@ -283,7 +283,7 @@ quant_trader/
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
 | **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
-| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행. |
+| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행하며, 현재 canonical bundle에는 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` canonicalized research candidate도 포함. |
 
 ### 3.4 strategies/
 
@@ -703,6 +703,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight score-floor 후보 추가** | `min_score_floor_pct`로 약한 KS11 초과 모멘텀 슬롯을 현금으로 남기는 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지 |
 | ✅ **target-weight rank-hysteresis 후보 추가** | `hold_rank_buffer`로 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 research-only |
 | ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
+| ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -710,9 +711,9 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 | 항목 | 결정 |
 |------|------|
-| 즉시 canonical promotion | 아직 자동 진행하지 않음. target-weight risk overlay 후보가 research sweep에서 provisional 조건을 처음 통과했지만, 현재 canonical 도구는 기존 등록 전략만 평가 |
-| 현재 후보군 | rotation/momentum/breakout 기존 후보는 research_only/paper_only 유지. pullback 4개, benchmark-relative 3개, risk-budget 5개, cash-switch 3개, benchmark-aware rotation 4개, target-weight rotation 19개 중 2개가 research sweep 기준 `provisional_paper_candidate` |
-| 다음 후보 탐색 | 새 알파 탐색보다 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 canonical evaluation/paper pilot 경로에 연결하고, 동일 로직을 paper evidence로 검증 |
+| 즉시 canonical promotion | 완료. `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 canonical promotion bundle에서도 `provisional_paper_candidate`로 재현됨 |
+| 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional. 단, target-weight 후보는 아직 paper execution adapter가 없어 registry/pilot 자동운영에는 미등록 |
+| 다음 후보 탐색 | 새 알파 탐색보다 target-weight paper adapter를 추가해 동일 로직을 pilot caps와 paper evidence로 검증 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
@@ -822,4 +823,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (target-weight benchmark-risk overlay full sweep 및 provisional 후보 반영)
+> **최종 수정**: 2026-04-30 (target-weight canonical bridge 및 provisional bundle 재현 반영)
