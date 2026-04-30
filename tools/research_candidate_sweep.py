@@ -609,6 +609,124 @@ def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
             description="top-5 score-floor rotation that retains holdings still ranked within the top 8",
         ),
         CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_sma120_55",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.55,
+            },
+            description="hold-buffer top-5 rotation that cuts exposure to 55pct below KS11 SMA120",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_sma200_55",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 200,
+                "bear_target_exposure": 0.55,
+            },
+            description="hold-buffer top-5 rotation that cuts exposure to 55pct below KS11 SMA200",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk120_55",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.55,
+                "benchmark_drawdown_lookback": 120,
+                "benchmark_drawdown_trigger_pct": 8.0,
+                "benchmark_vol_lookback": 60,
+                "benchmark_vol_trigger_pct": 30.0,
+            },
+            description="hold-buffer top-5 rotation with SMA/drawdown/volatility risk-off exposure cut",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk90_45",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 90,
+                "bear_target_exposure": 0.45,
+                "benchmark_drawdown_lookback": 90,
+                "benchmark_drawdown_trigger_pct": 6.0,
+                "benchmark_vol_lookback": 40,
+                "benchmark_vol_trigger_pct": 28.0,
+            },
+            description="faster benchmark-risk overlay that cuts hold-buffer top-5 exposure to 45pct",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk90_35",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 90,
+                "bear_target_exposure": 0.35,
+                "benchmark_drawdown_lookback": 90,
+                "benchmark_drawdown_trigger_pct": 6.0,
+                "benchmark_vol_lookback": 40,
+                "benchmark_vol_trigger_pct": 28.0,
+            },
+            description="faster benchmark-risk overlay that cuts hold-buffer top-5 exposure to 35pct",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 60,
+                "bear_target_exposure": 0.35,
+                "benchmark_drawdown_lookback": 60,
+                "benchmark_drawdown_trigger_pct": 5.0,
+                "benchmark_vol_lookback": 40,
+                "benchmark_vol_trigger_pct": 28.0,
+            },
+            description="shorter benchmark-risk overlay that cuts hold-buffer top-5 exposure to 35pct",
+        ),
+        CandidateSpec(
             candidate_id="target_weight_rotation_top5_60_120_floor0_exp80",
             strategy="target_weight_rotation",
             params={
@@ -1023,19 +1141,52 @@ def _target_exposure_for_day(
 ) -> float:
     base = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
     mode = str(params.get("market_exposure_mode", "fixed")).lower().strip()
-    if mode != "benchmark_sma" or benchmark_close.empty:
+    if mode == "fixed" or benchmark_close.empty:
         return base
 
     score_day = _score_date_before(benchmark_close.index, day)
     if score_day is None:
         return base
-    ma_period = int(params.get("market_ma_period", 120))
-    sma = benchmark_close.rolling(ma_period, min_periods=ma_period).mean()
-    if pd.isna(sma.get(score_day, np.nan)):
-        return base
-    if float(benchmark_close.loc[score_day]) < float(sma.loc[score_day]):
+
+    def bear_exposure() -> float:
         return max(0.0, min(float(params.get("bear_target_exposure", base)), 1.0))
-    return base
+
+    ma_period = int(params.get("market_ma_period", 120))
+    risk_off = False
+    if ma_period > 0:
+        sma = benchmark_close.rolling(ma_period, min_periods=ma_period).mean()
+        if not pd.isna(sma.get(score_day, np.nan)):
+            risk_off = float(benchmark_close.loc[score_day]) < float(sma.loc[score_day])
+    if mode == "benchmark_sma":
+        return bear_exposure() if risk_off else base
+
+    if mode != "benchmark_risk":
+        return base
+
+    history = benchmark_close.loc[benchmark_close.index <= score_day].dropna().astype(float)
+    if history.empty:
+        return base
+
+    drawdown_trigger = params.get("benchmark_drawdown_trigger_pct")
+    if drawdown_trigger is not None:
+        drawdown_lookback = max(2, int(params.get("benchmark_drawdown_lookback", ma_period or 120)))
+        drawdown_window = history.tail(drawdown_lookback)
+        rolling_peak = float(drawdown_window.max()) if not drawdown_window.empty else 0.0
+        if rolling_peak > 0:
+            drawdown_pct = (float(history.iloc[-1]) / rolling_peak - 1.0) * 100
+            if drawdown_pct <= -abs(float(drawdown_trigger)):
+                risk_off = True
+
+    vol_trigger = params.get("benchmark_vol_trigger_pct")
+    if vol_trigger is not None:
+        vol_lookback = max(2, int(params.get("benchmark_vol_lookback", 60)))
+        returns = history.pct_change().dropna().tail(vol_lookback)
+        if len(returns) >= 2:
+            realized_vol_pct = float(returns.std()) * np.sqrt(252) * 100
+            if realized_vol_pct >= float(vol_trigger):
+                risk_off = True
+
+    return bear_exposure() if risk_off else base
 
 
 def _select_target_weight_targets(
@@ -1263,6 +1414,8 @@ def run_target_weight_rotation_backtest(
         rebalance_count = 0
         filled_slots: list[int] = []
         target_exposures: list[float] = []
+        base_target_exposure = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
+        risk_off_rebalance_count = 0
         total_turnover = 0.0
 
         for day in eval_index:
@@ -1291,6 +1444,8 @@ def run_target_weight_rotation_backtest(
                     )
                 target_exposure = _target_exposure_for_day(day, benchmark_close, params)
                 target_exposures.append(target_exposure)
+                if target_exposure < base_target_exposure - 1e-9:
+                    risk_off_rebalance_count += 1
                 cash, positions, new_trades, turnover = _execute_target_weight_rebalance(
                     day=day,
                     cash=cash,
@@ -1336,6 +1491,13 @@ def run_target_weight_rotation_backtest(
                 "avg_target_exposure_pct": round(
                     float(np.mean(target_exposures)) * 100, 1
                 ) if target_exposures else 0,
+                "min_target_exposure_pct": round(
+                    float(np.min(target_exposures)) * 100, 1
+                ) if target_exposures else 0,
+                "risk_off_rebalance_count": risk_off_rebalance_count,
+                "risk_off_rebalance_pct": round(
+                    risk_off_rebalance_count / rebalance_count * 100, 1
+                ) if rebalance_count else 0,
                 "target_weight_turnover_per_year": round(
                     total_turnover / capital / years * 100, 1
                 ) if capital > 0 else 0,

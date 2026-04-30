@@ -96,7 +96,8 @@
 | **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
 | **방어형 후보 raw benchmark 해석** | cash-switch처럼 평균 노출이 낮은 후보는 full B&H 대비 excess가 과도하게 나빠 보일 수 있음 | **진단 추가** — research sweep에 exposure-matched B&H return/sharpe/MDD/excess 기록. 단, promotion gate는 raw benchmark excess 유지 |
-| **회전 전략의 sparse signal 한계** | 월간 상대강도 후보가 BUY/SELL 신호만 내면 목표 top-N을 지속적으로 채우지 못해 평균 노출이 낮게 측정될 수 있음 | **검증 완료** — target-weight top-N research backtester로 avg exposure 85%대까지 개선. 5종목 smoke는 raw excess 음수였지만 canonical top-20 full sweep은 alpha 후보 확인. `hold_rank_buffer` 적용 후 best raw excess=+129.18%p, turnover/year=807.8%로 turnover gate는 통과했으나 MDD=-28.25%라 drawdown gate 유지 |
+| **회전 전략의 sparse signal 한계** | 월간 상대강도 후보가 BUY/SELL 신호만 내면 목표 top-N을 지속적으로 채우지 못해 평균 노출이 낮게 측정될 수 있음 | **검증 완료** — target-weight top-N research backtester로 avg exposure 85%대까지 개선. 5종목 smoke는 raw excess 음수였지만 canonical top-20 full sweep은 alpha 후보 확인. `hold_rank_buffer` 적용 후 turnover gate 통과, `benchmark_risk` overlay 적용 후 best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 return=+210.24%, raw excess=+60.85%p, Sharpe=1.60, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 provisional gate 통과 |
+| **target-weight 후보의 paper 연결 부재** | research-only evaluator에서 provisional 후보가 나와도 현재 canonical/paper 경로는 등록 전략만 평가 | **다음 과제** — `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 canonical evaluation 및 paper pilot evidence 흐름에 연결해야 함 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크 미포함. paper/live에만 존재 | 백테스트-live 성과 차이 원인. 문서화됨 |
 
 ---
