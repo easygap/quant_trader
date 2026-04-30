@@ -16,6 +16,7 @@ Paper Pilot Authorization 통합 테스트
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from dataclasses import asdict
 
@@ -102,6 +103,17 @@ def _seed_v2(evidence_dir, strategy, days):
         _append_jsonl(jsonl_path, record)
 
 
+def _read_pilot_audit(runtime_dir):
+    path = runtime_dir / "pilot_audit.jsonl"
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 class TestPilotBasic:
 
     def test_no_pilot_entry_blocked(self, evidence_dir, runtime_dir, fresh_db):
@@ -115,6 +127,10 @@ class TestPilotBasic:
         result = check_pilot_entry("scoring", as_of_date="2026-04-07")
         assert result.allowed is False
         assert "no active pilot" in result.reason
+
+        audit = _read_pilot_audit(runtime_dir)
+        assert audit[-1]["decision"] == "blocked"
+        assert "no active pilot" in audit[-1]["reason"]
 
     def test_valid_pilot_entry_allowed(self, evidence_dir, runtime_dir, fresh_db):
         """blocked + valid pilot + caps OK → entry allowed."""
@@ -202,6 +218,104 @@ class TestPilotBasic:
         result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert result.allowed is False
         assert "notifier" in result.reason.lower()
+
+    def test_missing_notifier_health_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """notifier health artifact 부재 → pilot entry blocked."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "notifier health missing" in result.reason.lower()
+
+    def test_guard_exception_blocks_and_audits_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """runtime guard 예외는 fail-closed + audit."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        with patch("core.paper_runtime.get_paper_runtime_state",
+                   side_effect=RuntimeError("runtime unavailable")):
+            result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        audit = _read_pilot_audit(runtime_dir)
+
+        assert result.allowed is False
+        assert "runtime guard failed" in result.reason.lower()
+        assert audit[-1]["decision"] == "blocked"
+        assert "runtime guard failed" in audit[-1]["reason"].lower()
+
+    def test_evidence_guard_exception_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """evidence guard 예외는 fail-closed."""
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        rt = SimpleNamespace(state="blocked_insufficient_evidence", metrics={}, last_anomalies=[])
+        with patch("core.paper_runtime.get_paper_runtime_state", return_value=rt), \
+             patch("core.paper_evidence.get_canonical_records",
+                   side_effect=RuntimeError("evidence unavailable")):
+            result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "evidence guard failed" in result.reason.lower()
+
+    def test_corrupt_notifier_health_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """notifier health JSON 파싱 실패는 fail-closed."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text("{not-json", encoding="utf-8")
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "notifier guard failed" in result.reason.lower()
+
+    def test_order_count_guard_exception_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """주문 수 카운터 오류는 cap 우회가 아니라 pilot block."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        with patch("core.paper_pilot._count_orders_today",
+                   side_effect=RuntimeError("db locked")):
+            result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "order-count guard failed" in result.reason.lower()
 
 
 class TestPilotEligibility:
