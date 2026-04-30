@@ -319,7 +319,7 @@ quant_trader/
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
 | **momentum_top_portfolio.py** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. `run_momentum_top_portfolio_backtest()`: WatchlistManager(momentum_top) → 종목별 데이터 수집 → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성 → 시장 국면 필터·포트폴리오 스탑 적용. `print_momentum_top_portfolio_report()`. `--mode backtest_momentum_top`에서 사용. |
 | **param_optimizer.py** | Grid Search / Bayesian(scikit-optimize). train_ratio·OOS 보고. `--include-weights` 시 **스코어링 가중치 대칭 Grid Search + OOS 샤프≥1.0 게이트**. `--auto-correlation`: 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화. `--disable-weights w_rsi,w_ma` 등으로 수동 지정도 가능. `Backtester.run(..., param_overrides=)`. |
-| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|pullback|benchmark_relative|risk_budget|cash_switch|all` 후보를 포트폴리오 단위로 평가하고 raw EW B&H benchmark excess, exposure-matched B&H diagnostic, EV, CAGR, turnover, WF 안정성으로 랭킹/진단하며 decision action을 포함해 `reports/research_sweeps/`에 저장. |
+| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|pullback|benchmark_relative|risk_budget|cash_switch|benchmark_aware_rotation|all` 후보를 포트폴리오 단위로 평가하고 raw EW B&H benchmark excess, exposure-matched B&H diagnostic, EV, CAGR, turnover, WF 안정성으로 랭킹/진단하며 decision action을 포함해 `reports/research_sweeps/`에 저장. |
 
 ### 3.7 database/
 
@@ -684,7 +684,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
-| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. raw EW B&H gate는 유지하면서 exposure-matched B&H 진단값도 기록. promotion/live gate와 분리 |
+| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. raw EW B&H gate는 유지하면서 exposure-matched B&H 진단값도 기록. promotion/live gate와 분리 |
 | ✅ **2026-04-29 all-family quick sweep** | 5종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`rotation_slow_momentum`이나 excess=-165.22%p / excess Sharpe=-1.07 |
 | ✅ **2026-04-30 top-20 all-family quick sweep** | canonical liquidity universe 20종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`, return=+118.56%, excess=-30.83%p, MDD=-40.08% |
 | ✅ **pullback 후보군 추가** | `trend_pullback` 기반 research-only 후보 4개 추가. 외부 재무 데이터 없이 SMA/RSI/ADX 눌림목 진입을 benchmark-aware sweep에서 검증 |
@@ -695,6 +695,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **cash-switch 후보군 추가** | `relative_strength_rotation.market_filter_exit`로 KS11 이동평균 하회 시 보유 포지션을 현금화하는 research-only 후보 3개 추가 |
 | ✅ **2026-04-30 cash-switch smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`cash_switch_rotation_slow_defensive`, return=+1.87%, excess=-171.76%p, MDD=-11.78%라 promotion 미진행 |
 | ✅ **exposure-matched benchmark 진단 추가** | 후보별 `avg_exposure_pct`, `avg_cash_pct`, `exposure_matched_bh_return/sharpe/mdd`, `exposure_matched_excess_return/sharpe` 기록. cash-switch 평균 노출 8.4~10.0%, exposure-matched excess=-7.87%p~-0.36%p로 신호 edge도 미확인 |
+| ✅ **benchmark-aware rotation 후보군 추가** | `relative_strength_rotation.score_mode=benchmark_excess`, `rank_entry_mode=dense_ranked`, `exit_rebalance_mode=score_floor`를 추가해 KS11 대비 상대강도 랭킹과 노출 유지형 회전을 research-only로 검증 |
+| ✅ **benchmark-aware rotation smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced`, return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p라 promotion 미진행. fast 40/100은 exposure-matched excess=+2.04%p로 다음 연구 힌트만 제공 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -703,8 +705,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 항목 | 결정 |
 |------|------|
 | 즉시 canonical promotion | 진행하지 않음. 2026-04-29/30 all-family quick sweep 모두 benchmark excess gate 미달 |
-| 현재 후보군 | rotation/momentum/breakout 기존 14개 모두 research_only 유지. pullback 4개, benchmark-relative 3개, risk-budget 5개, cash-switch 3개도 research-only 유지 |
-| 다음 후보 탐색 | risk-budget/cash-switch 모두 excess gate 실패. exposure-matched 진단상 단순 현금화도 신호 edge가 부족함. 다음은 benchmark beta를 과도하게 버리지 않는 랭킹 개선, exposure 유지형 alpha, 부분 헤지 설계 우선 |
+| 현재 후보군 | rotation/momentum/breakout 기존 후보 모두 research_only 유지. pullback 4개, benchmark-relative 3개, risk-budget 5개, cash-switch 3개, benchmark-aware rotation 4개도 research-only 유지 |
+| 다음 후보 탐색 | risk-budget/cash-switch/benchmark-aware rotation 모두 raw excess gate 실패. sparse BUY/SELL 신호가 노출을 충분히 유지하지 못하므로 다음은 monthly top-N 목표비중 리밸런싱 백테스터와 부분 헤지 설계를 우선 |
 | 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)

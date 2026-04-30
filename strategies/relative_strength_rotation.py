@@ -47,6 +47,7 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         self.indicator_engine = IndicatorEngine(self.config)
         self.params = self.config.strategies.get("relative_strength_rotation", {})
         self._mf_series = None  # KS11 > SMA200 market filter cache
+        self._benchmark_composite_cache = {}
         logger.info("RelativeStrengthRotationStrategy 초기화 완료")
 
     def _ensure_market_filter(self, dates_index):
@@ -80,6 +81,63 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         except Exception as e:
             logger.warning("market_filter: KS11 로드 실패 — 필터 비활성화: {}", e)
 
+    def _benchmark_composite(
+        self,
+        index: pd.Index,
+        short_lb: int,
+        long_lb: int,
+        short_w: float,
+        benchmark_symbol: str,
+    ) -> pd.Series:
+        """Return benchmark composite momentum aligned to the input index."""
+        if len(index) == 0:
+            return pd.Series(dtype=float, index=index)
+
+        try:
+            from core.data_collector import DataCollector
+
+            dates = pd.to_datetime(index)
+            margin_days = max(long_lb * 3, 180)
+            start = (dates.min() - pd.Timedelta(days=margin_days)).strftime("%Y-%m-%d")
+            end = dates.max().strftime("%Y-%m-%d")
+            cache_key = (
+                benchmark_symbol,
+                int(short_lb),
+                int(long_lb),
+                float(short_w),
+                start,
+                end,
+            )
+            if cache_key in self._benchmark_composite_cache:
+                cached = self._benchmark_composite_cache[cache_key]
+                aligned = cached.reindex(dates, method="ffill")
+                return pd.Series(aligned.to_numpy(), index=index)
+
+            collector = DataCollector()
+            collector.quiet_ohlcv_log = True
+            benchmark = collector.fetch_korean_stock(
+                benchmark_symbol,
+                start_date=start,
+                end_date=end,
+            )
+            if benchmark is None or benchmark.empty:
+                logger.warning("benchmark-aware rotation: benchmark data unavailable")
+                return pd.Series(np.nan, index=index)
+
+            if "date" in benchmark.columns:
+                benchmark = benchmark.set_index("date")
+            benchmark.index = pd.to_datetime(benchmark.index)
+            close = benchmark["close"].astype(float)
+            ret_short = close.pct_change(short_lb)
+            ret_long = close.pct_change(long_lb)
+            benchmark_composite = short_w * ret_short + (1.0 - short_w) * ret_long
+            self._benchmark_composite_cache[cache_key] = benchmark_composite
+            aligned = benchmark_composite.reindex(dates, method="ffill")
+            return pd.Series(aligned.to_numpy(), index=index)
+        except Exception as e:
+            logger.warning("benchmark-aware rotation disabled: {}", e)
+            return pd.Series(np.nan, index=index)
+
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """모멘텀 지표 계산 + 월간 리밸런싱 signal 생성."""
         analyzed = self.indicator_engine.calculate_all(df.copy())
@@ -92,6 +150,19 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         sma_period = self.params.get("sma_period", 60)
         short_w = self.params.get("short_weight", 0.6)
         long_w = 1.0 - short_w
+        score_mode = str(self.params.get("score_mode", "absolute")).lower().strip()
+        rank_entry_mode = str(
+            self.params.get("rank_entry_mode", "absolute_trend")
+        ).lower().strip()
+        use_positive_momentum_filter = bool(
+            self.params.get("use_positive_momentum_filter", True)
+        )
+        use_trend_filter = bool(self.params.get("use_trend_filter", True))
+        exit_trend_edge_enabled = bool(self.params.get("exit_trend_edge", True))
+        exit_rebalance_mode = str(
+            self.params.get("exit_rebalance_mode", "absolute_trend")
+        ).lower().strip()
+        sell_score_floor_pct = float(self.params.get("sell_score_floor_pct", -8.0))
 
         close = analyzed["close"]
 
@@ -104,6 +175,28 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
 
         # ── 복합 모멘텀 점수 ──
         composite = short_w * ret_short + long_w * ret_long
+        score_composite = composite.copy()
+        benchmark_composite = pd.Series(np.nan, index=analyzed.index)
+        benchmark_excess = pd.Series(np.nan, index=analyzed.index)
+        benchmark_score_available = pd.Series(True, index=analyzed.index)
+        if score_mode == "benchmark_excess":
+            benchmark_symbol = str(self.params.get("benchmark_symbol", "KS11"))
+            benchmark_composite = self._benchmark_composite(
+                analyzed.index,
+                short_lb,
+                long_lb,
+                short_w,
+                benchmark_symbol,
+            )
+            benchmark_excess = composite - benchmark_composite
+            score_composite = benchmark_excess
+            benchmark_score_available = benchmark_excess.notna()
+        elif score_mode != "absolute":
+            logger.warning(
+                "relative_strength_rotation: unknown score_mode={} fallback to absolute",
+                score_mode,
+            )
+            score_mode = "absolute"
 
         # ── 리밸런싱일 (매월 첫 거래일) ──
         months = analyzed.index.to_series().dt.to_period("M")
@@ -114,8 +207,17 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         above_trend = sma.notna() & (close > sma)
         positive_momentum = composite.notna() & (composite > 0)
 
-        # Entry: 리밸런싱 + 양수 모멘텀 + 추세 유지
-        entry_cond = rebalance & positive_momentum & above_trend
+        # Entry: 기본은 기존 절대 모멘텀+추세, 연구 후보는 dense ranking 허용.
+        if rank_entry_mode == "dense_ranked":
+            entry_cond = rebalance & score_composite.notna()
+            if use_positive_momentum_filter:
+                entry_cond = entry_cond & positive_momentum
+            if use_trend_filter:
+                entry_cond = entry_cond & above_trend
+        else:
+            entry_cond = rebalance & positive_momentum & above_trend
+        if score_mode == "benchmark_excess":
+            entry_cond = entry_cond & benchmark_score_available
         market_filter_pass = pd.Series(True, index=analyzed.index)
 
         # ── 종목 절대모멘텀 필터 (T-1 기준) ──
@@ -150,12 +252,26 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         )
         analyzed["market_filter_exit"] = market_filter_exit
 
-        # Exit (리밸런싱): 모멘텀 음수 또는 추세 붕괴
-        exit_rebalance = rebalance & (~positive_momentum | ~above_trend)
+        # Exit (리밸런싱): 기본은 기존 절대 모멘텀/추세, 연구 후보는 score floor 허용.
+        if exit_rebalance_mode == "score_floor":
+            exit_rebalance = (
+                rebalance
+                & (
+                    score_composite.isna()
+                    | ((score_composite * 100) <= sell_score_floor_pct)
+                )
+            )
+        elif exit_rebalance_mode == "none":
+            exit_rebalance = pd.Series(False, index=analyzed.index)
+        else:
+            exit_rebalance = rebalance & (~positive_momentum | ~above_trend)
 
         # Exit (비리밸런싱): SMA 하향 이탈 edge-trigger
         prev_above = above_trend.shift(1, fill_value=True)
-        exit_trend_edge = ~rebalance & ~above_trend & prev_above
+        if exit_trend_edge_enabled:
+            exit_trend_edge = ~rebalance & ~above_trend & prev_above
+        else:
+            exit_trend_edge = pd.Series(False, index=analyzed.index)
 
         exit_cond = exit_rebalance | exit_trend_edge | market_filter_exit
 
@@ -163,17 +279,21 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         analyzed["ret_60d"] = ret_short
         analyzed["ret_120d"] = ret_long
         analyzed["composite_score"] = composite
+        analyzed["score_mode"] = score_mode
+        analyzed["ranking_score"] = score_composite
+        analyzed["benchmark_composite_score"] = benchmark_composite
+        analyzed["benchmark_excess_score"] = benchmark_excess
         analyzed["sma_trend"] = sma
         analyzed["rebalance_day"] = rebalance
         analyzed["above_trend"] = above_trend
 
         # ── Score ──
-        raw_score = composite.fillna(0) * 100  # 백분율
+        raw_score = score_composite.fillna(0) * 100  # 백분율
         analyzed["strategy_score"] = raw_score
 
         # total_score: signal_scaling [2,5] 호환.
         # composite 0% → 3.0, 10% → 4.0, 20% → 5.0, -10% → 2.0
-        analyzed["total_score"] = (3.0 + composite.fillna(0) * 10).clip(
+        analyzed["total_score"] = (3.0 + score_composite.fillna(0) * 10).clip(
             lower=2.0, upper=5.0
         )
 
@@ -207,6 +327,14 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
             "score": score,
             "details": {
                 "composite_score": round(last.get("composite_score", 0), 4),
+                "ranking_score": round(last.get("ranking_score", 0), 4),
+                "score_mode": last.get("score_mode", "absolute"),
+                "benchmark_composite_score": round(
+                    last.get("benchmark_composite_score", 0), 4
+                ),
+                "benchmark_excess_score": round(
+                    last.get("benchmark_excess_score", 0), 4
+                ),
                 "ret_60d": round(last.get("ret_60d", 0), 4),
                 "ret_120d": round(last.get("ret_120d", 0), 4),
                 "rebalance_day": bool(last.get("rebalance_day", False)),

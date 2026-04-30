@@ -433,6 +433,82 @@ def build_cash_switch_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_benchmark_aware_rotation_candidate_specs() -> list[CandidateSpec]:
+    """Exposure-retaining rotation variants ranked by stock momentum above KS11."""
+    balanced_budget = {
+        "max_positions": 4,
+        "max_position_ratio": 0.25,
+        "max_investment_ratio": 0.85,
+        "min_cash_ratio": 0.10,
+    }
+    common = {
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+        "rank_entry_mode": "dense_ranked",
+        "use_positive_momentum_filter": False,
+        "use_trend_filter": False,
+        "exit_trend_edge": False,
+        "exit_rebalance_mode": "score_floor",
+        "disable_trailing_stop": True,
+        "take_profit_rate": 0.10,
+    }
+    return [
+        CandidateSpec(
+            candidate_id="benchmark_aware_rotation_60_120_dense",
+            strategy="relative_strength_rotation",
+            params={
+                **common,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "sma_period": 60,
+                "short_weight": 0.6,
+                "sell_score_floor_pct": -8.0,
+            },
+            description="dense monthly rotation ranked by 60/120d momentum excess over KS11",
+        ),
+        CandidateSpec(
+            candidate_id="benchmark_aware_rotation_80_160_dense",
+            strategy="relative_strength_rotation",
+            params={
+                **common,
+                "short_lookback": 80,
+                "long_lookback": 160,
+                "sma_period": 80,
+                "short_weight": 0.5,
+                "sell_score_floor_pct": -10.0,
+            },
+            description="slower benchmark-aware rotation with a wider excess score floor",
+        ),
+        CandidateSpec(
+            candidate_id="benchmark_aware_rotation_40_100_dense",
+            strategy="relative_strength_rotation",
+            params={
+                **common,
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "sma_period": 50,
+                "short_weight": 0.7,
+                "sell_score_floor_pct": -6.0,
+            },
+            description="faster benchmark-aware rotation with a tighter excess score floor",
+        ),
+        CandidateSpec(
+            candidate_id="benchmark_aware_rotation_60_120_balanced",
+            strategy="relative_strength_rotation",
+            params={
+                **common,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "sma_period": 60,
+                "short_weight": 0.6,
+                "sell_score_floor_pct": -8.0,
+            },
+            description="benchmark-aware rotation with broader, lower single-name exposure",
+            diversification=balanced_budget,
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -449,6 +525,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         return build_risk_budget_candidate_specs()
     if family in ("cash_switch", "market_exit", "market_filter_exit"):
         return build_cash_switch_candidate_specs()
+    if family in (
+        "benchmark_aware_rotation",
+        "bench_aware_rotation",
+        "relative_rank",
+        "exposure_retaining",
+    ):
+        return build_benchmark_aware_rotation_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -458,10 +541,11 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_benchmark_relative_candidate_specs(),
             *build_risk_budget_candidate_specs(),
             *build_cash_switch_candidate_specs(),
+            *build_benchmark_aware_rotation_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
-        "benchmark_relative, risk_budget, cash_switch, all"
+        "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, all"
     )
 
 
@@ -1224,6 +1308,7 @@ def main() -> None:
             "benchmark_relative",
             "risk_budget",
             "cash_switch",
+            "benchmark_aware_rotation",
             "all",
         ],
         help="Research candidate family to evaluate.",
