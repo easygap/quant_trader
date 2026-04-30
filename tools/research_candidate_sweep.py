@@ -595,6 +595,90 @@ def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
             description="broader top-5 target rotation that leaves weak excess slots in cash",
         ),
         CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+            },
+            description="top-5 score-floor rotation that retains holdings still ranked within the top 8",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_exp80",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "target_exposure": 0.80,
+                "min_score_floor_pct": 0.0,
+            },
+            description="top-5 score-floor rotation with 80pct target exposure to reduce turnover",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_exp80_tol3",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "target_exposure": 0.80,
+                "min_score_floor_pct": 0.0,
+                "target_tolerance_pct": 3.0,
+            },
+            description="top-5 score-floor rotation with 80pct exposure and wider rebalance tolerance",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_exp75",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "target_exposure": 0.75,
+                "min_score_floor_pct": 0.0,
+            },
+            description="top-5 score-floor rotation with 75pct target exposure to test turnover relief",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top3_40_100_hold2",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "short_weight": 0.7,
+                "hold_rank_buffer": 2,
+            },
+            description="faster top-3 target rotation that keeps current holdings within a 2-rank buffer",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_tol3",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "target_tolerance_pct": 3.0,
+            },
+            description="top-5 score-floor rotation with a wider 3pct rebalance tolerance",
+        ),
+        CandidateSpec(
             candidate_id="target_weight_rotation_top3_60_120_partial_cash",
             strategy="target_weight_rotation",
             params={
@@ -954,6 +1038,36 @@ def _target_exposure_for_day(
     return base
 
 
+def _select_target_weight_targets(
+    score_row: pd.Series,
+    prices: dict[str, float],
+    positions: dict[str, dict[str, float]],
+    top_n: int,
+    hold_rank_buffer: int,
+) -> list[str]:
+    ranked = [
+        sym
+        for sym in score_row.index.tolist()
+        if sym in prices and prices.get(sym, 0.0) > 0
+    ]
+    targets = ranked[:top_n]
+    if hold_rank_buffer <= 0 or not positions:
+        return targets
+
+    retention_pool = ranked[top_n : top_n + hold_rank_buffer]
+    for held in [sym for sym in retention_pool if sym in positions]:
+        if held in targets:
+            continue
+        replacement_idx = next(
+            (idx for idx in range(len(targets) - 1, -1, -1) if targets[idx] not in positions),
+            None,
+        )
+        if replacement_idx is None:
+            break
+        targets[replacement_idx] = held
+    return targets
+
+
 def _execute_target_weight_rebalance(
     *,
     day: pd.Timestamp,
@@ -1140,6 +1254,7 @@ def run_target_weight_rotation_backtest(
 
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
+        hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
         rebalance_days = set(monthly_rebalance_days(eval_index))
         cash = float(capital)
         positions: dict[str, dict[str, float]] = {}
@@ -1167,7 +1282,13 @@ def run_target_weight_rotation_backtest(
                     min_score_floor = params.get("min_score_floor_pct")
                     if min_score_floor is not None:
                         score_row = score_row[score_row >= float(min_score_floor) / 100.0]
-                    targets = [sym for sym in score_row.index.tolist() if sym in prices][:top_n]
+                    targets = _select_target_weight_targets(
+                        score_row,
+                        prices,
+                        positions,
+                        top_n,
+                        hold_rank_buffer,
+                    )
                 target_exposure = _target_exposure_for_day(day, benchmark_close, params)
                 target_exposures.append(target_exposure)
                 cash, positions, new_trades, turnover = _execute_target_weight_rebalance(
@@ -1208,6 +1329,7 @@ def run_target_weight_rotation_backtest(
             "trades": trades,
             "target_weight_metrics": {
                 "target_top_n": top_n,
+                "hold_rank_buffer": hold_rank_buffer,
                 "rebalance_count": rebalance_count,
                 "avg_slots_filled": round(avg_slots, 2),
                 "slot_fill_rate_pct": round(avg_slots / top_n * 100, 1) if top_n else 0,
@@ -1393,10 +1515,26 @@ def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, An
         reasons.append("benchmark_excess_sharpe <= 0")
     if promotion.get("status") != "provisional_paper_candidate":
         reasons.append(f"promotion_status={promotion.get('status')}")
+    if metrics.get("sharpe", 0) < 0.45:
+        reasons.append("sharpe < 0.45")
+    if metrics.get("profit_factor", 0) < 1.2:
+        reasons.append("profit_factor < 1.2")
+    if metrics.get("wf_positive_rate", 0) < 0.6:
+        reasons.append("wf_positive_rate < 0.6")
+    if metrics.get("wf_sharpe_positive_rate", 0) < 0.6:
+        reasons.append("wf_sharpe_positive_rate < 0.6")
+    if metrics.get("mdd", 0) < -20:
+        reasons.append("mdd < -20")
+    if metrics.get("wf_windows", 0) < 3:
+        reasons.append("wf_windows < 3")
+    if metrics.get("wf_total_trades", 0) < 30:
+        reasons.append("wf_total_trades < 30")
     if metrics.get("total_trades", 0) < 30:
         reasons.append("total_trades < 30")
     if metrics.get("ev_per_trade") is not None and metrics.get("ev_per_trade", 0) <= 0:
         reasons.append("ev_per_trade <= 0")
+    if metrics.get("cost_adjusted_cagr") is not None and metrics.get("cost_adjusted_cagr", 0) <= 0:
+        reasons.append("cost_adjusted_cagr <= 0")
     if metrics.get("turnover_per_year") is not None and metrics.get("turnover_per_year", 0) >= 1000:
         reasons.append("turnover_per_year >= 1000")
     return reasons

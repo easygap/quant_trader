@@ -95,7 +95,7 @@
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
 - Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`
-- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹과 decision action을 생성하고 raw benchmark excess 음수 후보를 상위 alpha 후보에서 배제. defensive/cash-heavy 후보 해석을 위해 exposure-matched B&H 진단값도 기록. target-weight 후보는 `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금으로 남기는 score-floor 변형을 지원
+- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹과 decision action을 생성하고 raw benchmark excess 음수 후보를 상위 alpha 후보에서 배제. defensive/cash-heavy 후보 해석을 위해 exposure-matched B&H 진단값도 기록. target-weight 후보는 `min_score_floor_pct` score-floor와 `hold_rank_buffer` rank-hysteresis 변형을 지원
 - Latest research decision (2026-04-29): 5종목 all-family quick sweep에서 후보 14개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`; canonical promotion은 진행하지 않고 유니버스 확장 또는 새 후보군 설계를 우선
 - Latest research decision (2026-04-30): canonical liquidity top-20 all-family quick sweep에서도 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`는 +118.56%였지만 benchmark excess=-30.83%p, MDD=-40.08%; promotion 미진행
 - Follow-up research implementation (2026-04-30): 외부 재무 데이터 의존이 없는 `trend_pullback` 기반 `pullback` 후보군 4개를 추가해 다음 benchmark-aware sweep 대상으로 지정
@@ -112,6 +112,7 @@
 - Follow-up smoke result (2026-04-30): `target_weight_rotation` 5종목 quick sweep도 `NO_ALPHA_CANDIDATE`. best=`target_weight_rotation_top3_40_100_excess` return=+128.44%, Sharpe=1.13, avg exposure=85.3%였지만 raw excess=-45.19%p라 promotion 미진행
 - Follow-up full result (2026-04-30): canonical liquidity top-20 `target_weight_rotation` full sweep은 alpha 후보를 확인. best 기존 후보=`target_weight_rotation_top3_40_100_excess`, return=+212.21%, raw excess=+62.82%p, exposure-matched excess=+83.66%p. 다만 `promotion_status=paper_only`와 turnover/year=1412.1%로 decision=`KEEP_RESEARCH_ONLY`
 - Follow-up research implementation/result (2026-04-30): target-weight score-floor 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지. 다음은 turnover-aware rebalance/tolerance/correlation 필터가 우선
+- Follow-up research implementation/result (2026-04-30): target-weight rank-hysteresis 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, exposure-matched excess=+150.88%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 다음 병목은 drawdown-aware exposure/market-risk overlay
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1089,7 +1090,7 @@ quant_trader/
 
 - 과거 3~5년 데이터 → 훈련/검증 분리 → 파라미터 최적화 → OOS 검증 → 거래비용·슬리피지 반영 → 페이퍼 트레이딩 → 소액 실전.
 - **벤치마크 비교**: 코스피 지수(KS11) 대비 초과 수익 여부에 더해, **코스피 상위 50종목 동일비중 매수·홀딩** 대비 out-of-sample 초과 수익 여부를 검증합니다. Top50 벤치마크는 `--mode validate` 시 기본 사용하며, `--no-benchmark-top50` 으로 비활성화할 수 있습니다. 벤치마크·유니버스 종목 리스트는 **검증 시작일(as_of_date)** 기준으로 가져오며, `risk_params.backtest_universe` 설정에 따라 **생존자 편향**을 완화할 수 있습니다(아래 §8.2.1 참고).
-- **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남겨 과도한 forced allocation을 줄입니다.
+- **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남기고, `hold_rank_buffer`를 주면 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안에서는 유지해 과도한 교체를 줄입니다.
 
 **⚠️ 생존자 편향 (Survivorship Bias) — §8.2.1**
 
@@ -1402,6 +1403,7 @@ quant_trader/
 - [x] **target-weight top-N rotation smoke sweep** — best +128.44%/Sharpe 1.13/avg exposure 85.3%로 sparse 노출 병목은 해소했지만 raw excess=-45.19%p라 promotion 금지
 - [x] **canonical top-20 target-weight full sweep** — best 기존 후보 +212.21%/raw excess +62.82%p/exposure-matched excess +83.66%p로 alpha 후보 확인. turnover/year 1412.1%와 paper_only 상태 때문에 `KEEP_RESEARCH_ONLY`
 - [x] **target-weight score-floor 후보 추가** — `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금화. best top5 floor0 +210.21%/Sharpe 1.41/WF positive 100%였지만 turnover/year 1081.5%로 승격 금지
+- [x] **target-weight rank-hysteresis 후보 추가** — `hold_rank_buffer`로 churn 완화. best top5 floor0 hold3 +278.57%/raw excess +129.18%p/Sharpe 1.65/WF positive 100%/turnover 807.8%. MDD=-28.25%라 drawdown gate는 미통과
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
@@ -1505,4 +1507,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-30 (canonical top-20 target-weight full sweep 및 score-floor 후보 반영)
+> **최종 수정**: 2026-04-30 (target-weight rank-hysteresis full sweep 및 다음 MDD 병목 반영)

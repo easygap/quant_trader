@@ -204,6 +204,58 @@ def test_target_weight_rotation_delta_rebalances_and_charges_costs():
     assert with_cost["equity_curve"]["value"].iloc[-1] < no_cost["equity_curve"]["value"].iloc[-1]
 
 
+def test_target_weight_rotation_hold_rank_buffer_reduces_symbol_churn():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    base_params = {
+        "target_top_n": 2,
+        "target_exposure": 0.80,
+        "target_tolerance_pct": 0.0,
+        "short_lookback": 2,
+        "long_lookback": 3,
+        "short_weight": 0.5,
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+    }
+    base = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params=base_params,
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=NoCostRiskManager(),
+    )
+    buffered = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params={**base_params, "hold_rank_buffer": 1},
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    base_march_symbols = {
+        t["symbol"]
+        for t in base["trades"]
+        if t["date"] >= pd.Timestamp("2025-03-03")
+    }
+    buffered_march_symbols = {
+        t["symbol"]
+        for t in buffered["trades"]
+        if t["date"] >= pd.Timestamp("2025-03-03")
+    }
+
+    assert "CCC" in base_march_symbols
+    assert "CCC" not in buffered_march_symbols
+    assert buffered["target_weight_metrics"]["hold_rank_buffer"] == 1
+    assert (
+        buffered["target_weight_metrics"]["target_weight_turnover_per_year"]
+        < base["target_weight_metrics"]["target_weight_turnover_per_year"]
+    )
+
+
 def test_target_weight_rotation_score_floor_leaves_weak_slots_in_cash():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
