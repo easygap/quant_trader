@@ -284,7 +284,7 @@ quant_trader/
 | **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `check_pilot_entry()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. Pilot entry guard는 모든 allowed/blocked 결정을 audit하고 runtime/evidence/notifier/order/position/exposure guard 예외를 fail-closed로 차단한다. |
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
-| **target_weight_rotation.py** | Target-weight 후보의 portfolio-level plan 생성. 직전 거래일 점수, KS11 risk overlay, 목표비중 수량 산출, pilot cap 검증을 담당. 일반 `generate_signal()` 전략으로 위장하지 않는다. 전용 pilot 실행은 주문 실패 시 후속 주문을 중단한다. `tools/target_weight_rotation_pilot.py --record-shadow-evidence`로 dry-run launch-readiness evidence를 남기고, cap preview로 pilot 승인 전 기본/제안 캡 적합성을 확인한다. |
+| **target_weight_rotation.py** | Target-weight 후보의 portfolio-level plan 생성. 직전 거래일 점수, KS11 risk overlay, 목표비중 수량 산출, pilot cap 검증을 담당. 일반 `generate_signal()` 전략으로 위장하지 않는다. 전용 pilot 실행은 주문 실패 시 후속 주문을 중단한다. `tools/target_weight_rotation_pilot.py --record-shadow-evidence`로 dry-run launch-readiness evidence, launch readiness JSON/MD, pilot runbook을 남기고, cap preview로 pilot 승인 전 기본/제안 캡 적합성을 확인한다. |
 | **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
 | **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행하며, 현재 canonical bundle에는 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` canonicalized research candidate도 포함. |
 
@@ -708,7 +708,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
 | ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
 | ✅ **target-weight paper/pilot adapter 추가** | `core/target_weight_rotation.py` + `tools/target_weight_rotation_pilot.py`로 직전 거래일 점수 기반 목표비중 plan을 만들고 pilot cap을 plan-level로 검증. `OrderExecutor.execute_buy_quantity()`로 paper-only exact quantity 매수를 지원. live 모드는 계속 거부 |
-| ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. artifact에는 기본/제안 cap preview도 기록 |
+| ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. 같은 실행에서 launch readiness JSON/MD와 pilot runbook을 생성하고 session artifact에는 기본/제안 cap preview와 launch artifact 경로를 기록 |
 | ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
@@ -829,4 +829,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-30 (pilot entry fail-closed guard 반영)
+> **최종 수정**: 2026-04-30 (target-weight launch artifact 자동화 반영)
