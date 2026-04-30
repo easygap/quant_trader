@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -369,3 +371,59 @@ def test_record_shadow_evidence_for_plan_is_non_promotable(monkeypatch, tmp_path
     assert records[0]["benchmark_meta"]["source"] == "target_weight_shadow_plan"
     assert records[0]["diagnostics"][0]["dry_run_only"] is True
     assert records[0]["diagnostics"][0]["pilot_validation_reason"] == "no active pilot authorization"
+
+
+def test_run_pilot_shadow_generates_readiness_and_runbook(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import core.paper_runtime as pr
+    import tools.target_weight_rotation_pilot as twp
+
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(pr, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "_check_pilot_eligibility", lambda strategy: None)
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: _adapter_plan())
+
+    result = twp.run_pilot(
+        record_shadow_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    readiness = result["launch_artifacts"]["launch_readiness"]
+
+    assert result["shadow_evidence"] is not None
+    assert result["launch_artifacts"]["attempted"] is True
+    assert Path(readiness["json_path"]).exists()
+    assert Path(readiness["md_path"]).exists()
+    assert Path(result["launch_artifacts"]["runbook_path"]).exists()
+    assert readiness["launch_ready"] is False
+    assert readiness["shadow_days"] >= 1
+    assert payload["launch_artifacts"]["attempted"] is True
+    assert payload["launch_artifacts"]["launch_readiness"]["clean_final_days_current"] == 1
+    assert "clean_final_days" in payload["launch_artifacts"]["launch_readiness"]["blocking_requirements"][0]
+
+
+def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: _adapter_plan())
+
+    result = twp.run_pilot(
+        record_shadow_evidence=False,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["launch_artifacts"] == {"attempted": False}
+    assert not (runtime_dir / "target_weight_candidate_pilot_launch_readiness.json").exists()
+    assert not (runtime_dir / "target_weight_candidate_pilot_runbook.md").exists()

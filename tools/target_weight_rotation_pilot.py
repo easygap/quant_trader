@@ -247,6 +247,7 @@ def write_session_artifact(
     execution: dict[str, Any],
     dry_run: bool,
     shadow_evidence: dict[str, Any] | None = None,
+    launch_artifacts: dict[str, Any] | None = None,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -261,6 +262,7 @@ def write_session_artifact(
         "cap_preview": asdict(cap_preview),
         "execution": execution,
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
+        "launch_artifacts": launch_artifacts or {"attempted": False},
         "live_safety": {
             "live_enabled": False,
             "note": "adapter refuses live mode; live gate remains canonical-artifact + paper-evidence driven",
@@ -330,6 +332,41 @@ def record_shadow_evidence_for_plan(
     )
 
 
+def generate_launch_artifacts(
+    candidate_id: str,
+    *,
+    include_runbook: bool = True,
+) -> dict[str, Any]:
+    """Generate launch-readiness artifacts after shadow/pilot planning."""
+    from core.paper_pilot import (
+        compute_launch_readiness,
+        generate_launch_readiness_artifact,
+        generate_pilot_runbook,
+    )
+
+    readiness = compute_launch_readiness(candidate_id)
+    json_path, md_path = generate_launch_readiness_artifact(candidate_id)
+    result: dict[str, Any] = {
+        "attempted": True,
+        "launch_readiness": {
+            "json_path": str(json_path),
+            "md_path": str(md_path),
+            "infra_ready": readiness.get("infra_ready", False),
+            "launch_ready": readiness.get("launch_ready", False),
+            "clean_final_days_current": readiness.get("clean_final_days_current", 0),
+            "clean_final_days_required": readiness.get("clean_final_days_required", 0),
+            "shadow_days": readiness.get("shadow_days", 0),
+            "strategy": readiness.get("strategy", candidate_id),
+            "blocking_requirements": readiness.get("blocking_requirements", []),
+        },
+        "runbook_path": None,
+    }
+    if include_runbook:
+        runbook_path = generate_pilot_runbook(candidate_id)
+        result["runbook_path"] = str(runbook_path)
+    return result
+
+
 def run_pilot(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -340,6 +377,8 @@ def run_pilot(
     collect_evidence: bool = False,
     record_shadow_evidence: bool = False,
     preview_caps: dict[str, int] | None = None,
+    generate_readiness_artifacts: bool = True,
+    generate_runbook: bool = True,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
@@ -415,6 +454,13 @@ def run_pilot(
             "reason": "recorded" if shadow_evidence_record is not None else "already recorded",
         }
 
+    launch_artifacts = {"attempted": False}
+    if dry_run and record_shadow_evidence and generate_readiness_artifacts:
+        launch_artifacts = generate_launch_artifacts(
+            plan.candidate_id,
+            include_runbook=generate_runbook,
+        )
+
     artifact_path = write_session_artifact(
         plan=plan,
         pilot_check=pilot_check,
@@ -423,6 +469,7 @@ def run_pilot(
         execution=execution,
         dry_run=dry_run,
         shadow_evidence=shadow_evidence_summary,
+        launch_artifacts=launch_artifacts,
         output_dir=output_dir,
     )
 
@@ -434,6 +481,7 @@ def run_pilot(
         "execution": execution,
         "shadow_evidence": shadow_evidence_record,
         "shadow_evidence_summary": shadow_evidence_summary,
+        "launch_artifacts": launch_artifacts,
         "artifact_path": artifact_path,
     }
 
@@ -450,6 +498,16 @@ def main() -> None:
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
+    )
+    parser.add_argument(
+        "--skip-readiness-artifacts",
+        action="store_true",
+        help="Skip launch readiness JSON/MD generation when --record-shadow-evidence is used.",
+    )
+    parser.add_argument(
+        "--skip-runbook",
+        action="store_true",
+        help="Skip pilot runbook generation when readiness artifacts are generated.",
     )
     parser.add_argument("--preview-max-orders", type=int, help="Proposed pilot cap preview: max orders/day.")
     parser.add_argument("--preview-max-positions", type=int, help="Proposed pilot cap preview: max concurrent positions.")
@@ -469,6 +527,8 @@ def main() -> None:
         execute=args.execute,
         collect_evidence=args.collect_evidence,
         record_shadow_evidence=args.record_shadow_evidence,
+        generate_readiness_artifacts=not args.skip_readiness_artifacts,
+        generate_runbook=not args.skip_runbook,
         preview_caps=build_preview_caps(
             max_orders=args.preview_max_orders,
             max_positions=args.preview_max_positions,
@@ -491,6 +551,16 @@ def main() -> None:
     if result["shadow_evidence_summary"].get("attempted"):
         status = "recorded" if result["shadow_evidence_summary"].get("recorded") else "already recorded"
         print(f"  shadow evidence: {status}")
+    if result["launch_artifacts"].get("attempted"):
+        readiness = result["launch_artifacts"]["launch_readiness"]
+        print(
+            "  readiness: "
+            f"infra={'YES' if readiness['infra_ready'] else 'NO'} "
+            f"launch={'YES' if readiness['launch_ready'] else 'NO'}"
+        )
+        print(f"  readiness artifact: {readiness['json_path']}")
+        if result["launch_artifacts"].get("runbook_path"):
+            print(f"  runbook: {result['launch_artifacts']['runbook_path']}")
     print(f"  artifact: {result['artifact_path']}")
 
 
