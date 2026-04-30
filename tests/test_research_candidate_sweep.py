@@ -63,11 +63,13 @@ def test_build_candidate_specs_supports_all_families():
     assert "risk_budget_momentum_120d_balanced" in ids
     assert "cash_switch_rotation_sma200" in ids
     assert "benchmark_aware_rotation_60_120_dense" in ids
+    assert "target_weight_rotation_top3_60_120_excess" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
         "breakout_volume",
         "trend_pullback",
+        "target_weight_rotation",
     }
 
 
@@ -158,6 +160,26 @@ def test_build_candidate_specs_supports_benchmark_aware_rotation_aliases():
     assert all(spec.params["score_mode"] == "benchmark_excess" for spec in direct)
     assert all(spec.params["rank_entry_mode"] == "dense_ranked" for spec in direct)
     assert direct[-1].diversification["max_positions"] == 4
+
+
+def test_build_candidate_specs_supports_target_weight_rotation_aliases():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_rotation")
+    alias = build_candidate_specs("monthly_topn")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top2_60_120_excess",
+        "target_weight_rotation_top3_60_120_excess",
+        "target_weight_rotation_top3_40_100_excess",
+        "target_weight_rotation_top3_60_120_partial_cash",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["score_mode"] == "benchmark_excess" for spec in direct)
+    assert all(spec.params["rebalance_frequency"] == "monthly" for spec in direct)
+    assert direct[0].params["target_top_n"] == 2
+    assert direct[-1].params["market_exposure_mode"] == "benchmark_sma"
 
 
 def test_build_candidate_specs_rejects_unknown_family():
@@ -397,6 +419,56 @@ def test_build_candidate_record_records_diversification_budget():
 
     assert rec["diversification"]["max_positions"] == 3
     assert rec["diversification"]["min_cash_ratio"] == 0.30
+
+
+def test_evaluate_candidate_routes_target_weight_rotation(monkeypatch):
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.bdate_range("2025-01-01", periods=3)
+
+    def fake_target_runner(**kwargs):
+        return {
+            "equity_curve": pd.DataFrame(
+                {
+                    "date": dates,
+                    "value": [100.0, 104.0, 108.0],
+                    "cash": [20.0, 22.0, 24.0],
+                    "n_positions": [2, 2, 2],
+                }
+            ),
+            "trades": [
+                {"date": dates[1], "symbol": "005930", "action": "BUY", "price": 10, "quantity": 1, "pnl": 0},
+                {"date": dates[2], "symbol": "005930", "action": "REBALANCE_SELL", "price": 11, "quantity": 1, "pnl": 1},
+            ],
+            "target_weight_metrics": {
+                "target_top_n": 2,
+                "rebalance_count": 1,
+                "avg_slots_filled": 2.0,
+                "slot_fill_rate_pct": 100.0,
+            },
+        }
+
+    monkeypatch.setattr(sweep, "run_target_weight_rotation_backtest", fake_target_runner)
+
+    metrics = sweep.evaluate_candidate(
+        sweep.CandidateSpec(
+            "target",
+            "target_weight_rotation",
+            {"target_top_n": 2},
+            "target",
+        ),
+        ["005930"],
+        "2025-01-01",
+        "2025-01-03",
+        100.0,
+        pd.Series([0.01, 0.01], index=dates[1:]),
+    )
+
+    assert metrics["total_return"] == 8.0
+    assert metrics["target_top_n"] == 2
+    assert metrics["rebalance_count"] == 1
+    assert metrics["avg_slots_filled"] == 2.0
 
 
 def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):

@@ -509,6 +509,70 @@ def build_benchmark_aware_rotation_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
+    """Research-only monthly top-N target-weight rotation variants."""
+    common = {
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+        "rebalance_frequency": "monthly",
+        "target_exposure": 0.85,
+        "target_tolerance_pct": 1.0,
+    }
+    return [
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top2_60_120_excess",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 2,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+            },
+            description="monthly top-2 target-weight rotation ranked by 60/120d KS11 excess momentum",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top3_60_120_excess",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+            },
+            description="monthly top-3 target-weight rotation ranked by 60/120d KS11 excess momentum",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top3_40_100_excess",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 40,
+                "long_lookback": 100,
+                "short_weight": 0.7,
+            },
+            description="faster monthly top-3 target-weight rotation ranked by KS11 excess momentum",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top3_60_120_partial_cash",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 3,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.55,
+            },
+            description="top-3 target rotation with a KS11 SMA exposure overlay",
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -532,6 +596,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "exposure_retaining",
     ):
         return build_benchmark_aware_rotation_candidate_specs()
+    if family in (
+        "target_weight_rotation",
+        "target_topn",
+        "topn_rotation",
+        "monthly_topn",
+    ):
+        return build_target_weight_rotation_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -542,10 +613,12 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_risk_budget_candidate_specs(),
             *build_cash_switch_candidate_specs(),
             *build_benchmark_aware_rotation_candidate_specs(),
+            *build_target_weight_rotation_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
-        "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, all"
+        "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
+        "target_weight_rotation, all"
     )
 
 
@@ -757,6 +830,356 @@ def exposure_matched_benchmark_metrics(
         "exposure_matched_bh_sharpe": round(sharpe, 2),
         "exposure_matched_bh_mdd": round(mdd, 2),
     }
+
+
+def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
+    """Normalize a fetched OHLCV frame into a close series."""
+    if df is None or df.empty or "close" not in df.columns:
+        return pd.Series(dtype=float)
+
+    data = df.copy()
+    if "date" in data.columns:
+        data = data.set_index("date")
+    idx = pd.to_datetime(data.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    series = data["close"].astype(float).copy()
+    series.index = idx.normalize()
+    return series[series > 0].groupby(level=0).last().sort_index()
+
+
+def monthly_rebalance_days(index: pd.Index) -> list[pd.Timestamp]:
+    """Return the first available trading day for each month in the index."""
+    if len(index) == 0:
+        return []
+    idx = pd.DatetimeIndex(index).sort_values()
+    months = idx.to_series().dt.to_period("M")
+    mask = (months != months.shift(1)).fillna(True)
+    return [pd.Timestamp(day).normalize() for day in idx[mask.to_numpy()]]
+
+
+def _score_date_before(index: pd.Index, day: pd.Timestamp) -> pd.Timestamp | None:
+    prior = pd.DatetimeIndex(index)[pd.DatetimeIndex(index) < pd.Timestamp(day)]
+    if len(prior) == 0:
+        return None
+    return pd.Timestamp(prior[-1]).normalize()
+
+
+def _target_weight_score_panel(
+    close_panel: pd.DataFrame,
+    benchmark_close: pd.Series,
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    short_lb = int(params.get("short_lookback", 60))
+    long_lb = int(params.get("long_lookback", 120))
+    short_w = float(params.get("short_weight", 0.6))
+    score_mode = str(params.get("score_mode", "absolute")).lower().strip()
+
+    composite = (
+        short_w * close_panel.pct_change(short_lb)
+        + (1.0 - short_w) * close_panel.pct_change(long_lb)
+    )
+    if score_mode != "benchmark_excess":
+        return composite
+
+    if benchmark_close.empty:
+        return pd.DataFrame(np.nan, index=close_panel.index, columns=close_panel.columns)
+
+    benchmark_composite = (
+        short_w * benchmark_close.pct_change(short_lb)
+        + (1.0 - short_w) * benchmark_close.pct_change(long_lb)
+    )
+    aligned = benchmark_composite.reindex(close_panel.index, method="ffill")
+    return composite.sub(aligned, axis=0)
+
+
+def _target_exposure_for_day(
+    day: pd.Timestamp,
+    benchmark_close: pd.Series,
+    params: dict[str, Any],
+) -> float:
+    base = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
+    mode = str(params.get("market_exposure_mode", "fixed")).lower().strip()
+    if mode != "benchmark_sma" or benchmark_close.empty:
+        return base
+
+    score_day = _score_date_before(benchmark_close.index, day)
+    if score_day is None:
+        return base
+    ma_period = int(params.get("market_ma_period", 120))
+    sma = benchmark_close.rolling(ma_period, min_periods=ma_period).mean()
+    if pd.isna(sma.get(score_day, np.nan)):
+        return base
+    if float(benchmark_close.loc[score_day]) < float(sma.loc[score_day]):
+        return max(0.0, min(float(params.get("bear_target_exposure", base)), 1.0))
+    return base
+
+
+def _execute_target_weight_rebalance(
+    *,
+    day: pd.Timestamp,
+    cash: float,
+    positions: dict[str, dict[str, float]],
+    prices: dict[str, float],
+    targets: list[str],
+    target_exposure: float,
+    rebalance_tolerance: float,
+    risk_manager,
+) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float]:
+    nav = cash + sum(
+        pos["qty"] * prices.get(sym, 0.0)
+        for sym, pos in positions.items()
+        if prices.get(sym, 0.0) > 0
+    )
+    if nav <= 0:
+        return cash, positions, [], 0.0
+
+    target_set = {sym for sym in targets if prices.get(sym, 0.0) > 0}
+    per_target_value = nav * target_exposure / len(target_set) if target_set else 0.0
+    desired_qty: dict[str, float] = {}
+    for sym in set(positions) | target_set:
+        price = prices.get(sym, 0.0)
+        if price <= 0:
+            continue
+        desired_qty[sym] = per_target_value / price if sym in target_set else 0.0
+
+    trades: list[dict[str, Any]] = []
+    turnover = 0.0
+
+    # Sells first so buys can use freed cash.
+    for sym, desired in sorted(desired_qty.items()):
+        current = float(positions.get(sym, {}).get("qty", 0.0))
+        qty_to_sell = current - desired
+        if qty_to_sell <= 1e-9:
+            continue
+        price = prices[sym]
+        if abs(qty_to_sell * price) / nav < rebalance_tolerance:
+            continue
+        avg_price = float(positions[sym].get("avg_price", price))
+        costs = risk_manager.calculate_transaction_costs(
+            price,
+            qty_to_sell,
+            "SELL",
+            avg_price=avg_price,
+        )
+        execution_price = float(costs["execution_price"])
+        tax = float(costs.get("tax", 0) or 0) + float(costs.get("capital_gains_tax", 0) or 0)
+        commission = float(costs.get("commission", 0) or 0)
+        pnl = (execution_price - avg_price) * qty_to_sell - commission - tax
+        proceeds = execution_price * qty_to_sell - commission - tax
+        cash += proceeds
+        turnover += abs(execution_price * qty_to_sell)
+        remaining = current - qty_to_sell
+        if remaining <= 1e-9:
+            positions.pop(sym, None)
+        else:
+            positions[sym]["qty"] = remaining
+        trades.append(
+            {
+                "date": day,
+                "symbol": sym,
+                "action": "REBALANCE_SELL",
+                "price": execution_price,
+                "quantity": qty_to_sell,
+                "pnl": pnl,
+                "pnl_rate": ((execution_price / avg_price) - 1) * 100 if avg_price > 0 else 0,
+            }
+        )
+
+    buy_plans = []
+    total_outlay = 0.0
+    for sym, desired in sorted(desired_qty.items()):
+        current = float(positions.get(sym, {}).get("qty", 0.0))
+        qty_to_buy = desired - current
+        if qty_to_buy <= 1e-9 or prices.get(sym, 0.0) <= 0:
+            continue
+        if abs(qty_to_buy * prices[sym]) / nav < rebalance_tolerance:
+            continue
+        costs = risk_manager.calculate_transaction_costs(prices[sym], qty_to_buy, "BUY")
+        outlay = float(costs["execution_price"]) * qty_to_buy + float(costs.get("commission", 0) or 0)
+        buy_plans.append((sym, qty_to_buy, costs, outlay))
+        total_outlay += outlay
+
+    scale = 1.0
+    if total_outlay > cash and total_outlay > 0:
+        scale = max(cash / total_outlay * 0.998, 0.0)
+
+    for sym, qty, _costs, _outlay in buy_plans:
+        qty *= scale
+        if qty <= 1e-9:
+            continue
+        costs = risk_manager.calculate_transaction_costs(prices[sym], qty, "BUY")
+        execution_price = float(costs["execution_price"])
+        commission = float(costs.get("commission", 0) or 0)
+        outlay = execution_price * qty + commission
+        if outlay > cash + 1e-6:
+            continue
+        old_qty = float(positions.get(sym, {}).get("qty", 0.0))
+        old_avg = float(positions.get(sym, {}).get("avg_price", execution_price))
+        new_qty = old_qty + qty
+        new_avg = ((old_qty * old_avg) + (qty * execution_price)) / new_qty
+        positions[sym] = {"qty": new_qty, "avg_price": new_avg}
+        cash -= outlay
+        turnover += abs(execution_price * qty)
+        trades.append(
+            {
+                "date": day,
+                "symbol": sym,
+                "action": "BUY",
+                "price": execution_price,
+                "quantity": qty,
+                "pnl": 0,
+                "pnl_rate": 0,
+            }
+        )
+
+    return cash, positions, trades, turnover
+
+
+def run_target_weight_rotation_backtest(
+    symbols: list[str],
+    start: str,
+    end: str,
+    capital: float,
+    params: dict[str, Any],
+    *,
+    collector=None,
+    risk_manager=None,
+) -> dict[str, Any]:
+    """Research-only monthly top-N target-weight rotation backtest."""
+    from core.data_collector import DataCollector
+    from core.risk_manager import RiskManager
+
+    symbols = normalize_symbols(symbols)
+    short_lb = int(params.get("short_lookback", 60))
+    long_lb = int(params.get("long_lookback", 120))
+    warmup_days = max(long_lb * 3, 180)
+    fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=warmup_days)).strftime("%Y-%m-%d")
+    collector = collector or DataCollector()
+    risk_manager = risk_manager or RiskManager()
+
+    previous_quiet = getattr(collector, "quiet_ohlcv_log", None)
+    if previous_quiet is not None:
+        collector.quiet_ohlcv_log = True
+    try:
+        close_parts = []
+        valid_symbols = []
+        for sym in symbols:
+            df = collector.fetch_korean_stock(sym, fetch_start, end)
+            close = close_series_from_ohlcv(df)
+            if close.empty:
+                continue
+            close.name = sym
+            close_parts.append(close)
+            valid_symbols.append(sym)
+
+        if not close_parts:
+            return {
+                "equity_curve": pd.DataFrame(),
+                "trades": [],
+                "target_weight_metrics": {
+                    "target_top_n": int(params.get("target_top_n", 0) or 0),
+                    "rebalance_count": 0,
+                    "avg_slots_filled": 0,
+                    "slot_fill_rate_pct": 0,
+                },
+            }
+
+        close_panel = pd.concat(close_parts, axis=1).sort_index().ffill()
+        close_panel = close_panel[~close_panel.index.duplicated(keep="last")]
+        benchmark_symbol = str(params.get("benchmark_symbol", "KS11"))
+        benchmark_close = close_series_from_ohlcv(
+            collector.fetch_korean_stock(benchmark_symbol, fetch_start, end)
+        )
+        score_panel = _target_weight_score_panel(close_panel, benchmark_close, params)
+
+        eval_index = close_panel.loc[
+            (close_panel.index >= pd.Timestamp(start)) & (close_panel.index <= pd.Timestamp(end))
+        ].index
+        if len(eval_index) == 0:
+            return {"equity_curve": pd.DataFrame(), "trades": [], "target_weight_metrics": {}}
+
+        top_n = max(1, int(params.get("target_top_n", 3)))
+        tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
+        rebalance_days = set(monthly_rebalance_days(eval_index))
+        cash = float(capital)
+        positions: dict[str, dict[str, float]] = {}
+        trades: list[dict[str, Any]] = []
+        equity_rows: list[dict[str, Any]] = []
+        rebalance_count = 0
+        filled_slots: list[int] = []
+        target_exposures: list[float] = []
+        total_turnover = 0.0
+
+        for day in eval_index:
+            day = pd.Timestamp(day).normalize()
+            price_row = close_panel.loc[day]
+            prices = {
+                sym: float(price_row[sym])
+                for sym in valid_symbols
+                if sym in price_row.index and pd.notna(price_row[sym]) and float(price_row[sym]) > 0
+            }
+
+            if day in rebalance_days:
+                score_day = _score_date_before(score_panel.index, day)
+                targets: list[str] = []
+                if score_day is not None:
+                    score_row = score_panel.loc[score_day].dropna().sort_values(ascending=False)
+                    targets = [sym for sym in score_row.index.tolist() if sym in prices][:top_n]
+                target_exposure = _target_exposure_for_day(day, benchmark_close, params)
+                target_exposures.append(target_exposure)
+                cash, positions, new_trades, turnover = _execute_target_weight_rebalance(
+                    day=day,
+                    cash=cash,
+                    positions=positions,
+                    prices=prices,
+                    targets=targets,
+                    target_exposure=target_exposure,
+                    rebalance_tolerance=tolerance,
+                    risk_manager=risk_manager,
+                )
+                trades.extend(new_trades)
+                total_turnover += turnover
+                rebalance_count += 1
+                filled_slots.append(len([sym for sym in targets if sym in positions]))
+
+            market_value = sum(
+                float(pos["qty"]) * prices.get(sym, 0.0)
+                for sym, pos in positions.items()
+                if prices.get(sym, 0.0) > 0
+            )
+            value = cash + market_value
+            equity_rows.append(
+                {
+                    "date": day,
+                    "value": value,
+                    "cash": cash,
+                    "n_positions": len(positions),
+                    "market_value": market_value,
+                }
+            )
+
+        years = max(len(equity_rows) / 252, 1 / 252)
+        avg_slots = float(np.mean(filled_slots)) if filled_slots else 0.0
+        return {
+            "equity_curve": pd.DataFrame(equity_rows),
+            "trades": trades,
+            "target_weight_metrics": {
+                "target_top_n": top_n,
+                "rebalance_count": rebalance_count,
+                "avg_slots_filled": round(avg_slots, 2),
+                "slot_fill_rate_pct": round(avg_slots / top_n * 100, 1) if top_n else 0,
+                "avg_target_exposure_pct": round(
+                    float(np.mean(target_exposures)) * 100, 1
+                ) if target_exposures else 0,
+                "target_weight_turnover_per_year": round(
+                    total_turnover / capital / years * 100, 1
+                ) if capital > 0 else 0,
+            },
+        }
+    finally:
+        if previous_quiet is not None:
+            collector.quiet_ohlcv_log = previous_quiet
 
 
 def calculate_research_metrics(
@@ -1043,6 +1466,18 @@ def evaluate_candidate(
     from backtest.portfolio_backtester import PortfolioBacktester
     from config.config_loader import Config
 
+    if spec.strategy == "target_weight_rotation":
+        result = run_target_weight_rotation_backtest(
+            symbols=symbols,
+            start=start,
+            end=end,
+            capital=capital,
+            params=spec.params,
+        )
+        metrics = calculate_research_metrics(result, capital, benchmark_daily_returns)
+        metrics.update(result.get("target_weight_metrics", {}))
+        return metrics
+
     config = Config.get()
     fetch_start = (pd.Timestamp(start) - pd.DateOffset(months=14)).strftime("%Y-%m-%d")
     with temporary_diversification(config, diversification_for_spec(spec)):
@@ -1309,6 +1744,7 @@ def main() -> None:
             "risk_budget",
             "cash_switch",
             "benchmark_aware_rotation",
+            "target_weight_rotation",
             "all",
         ],
         help="Research candidate family to evaluate.",
