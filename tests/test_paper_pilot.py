@@ -220,6 +220,33 @@ class TestPilotEligibility:
         with pytest.raises(ValueError, match="pilot requires provisional_paper_candidate"):
             enable_pilot(OBSERVATION_STRATEGY, "2026-04-01", "2026-04-30")
 
+    def test_artifact_only_target_weight_candidate_can_enable_pilot(
+        self, evidence_dir, runtime_dir, fresh_db, monkeypatch
+    ):
+        """Portfolio-level canonical candidates need not be scheduler-registered."""
+        candidate_id = "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"
+
+        import core.promotion_engine as pe
+        monkeypatch.setattr(
+            pe,
+            "load_promotion_artifact",
+            lambda: {
+                candidate_id: {
+                    "status": "provisional_paper_candidate",
+                    "allowed_modes": ["backtest", "paper"],
+                    "reason": "canonical test fixture",
+                }
+            },
+        )
+
+        from core.paper_pilot import enable_pilot, get_active_pilot
+
+        enable_pilot(candidate_id, "2026-04-01", "2026-04-30")
+        auth = get_active_pilot(candidate_id, "2026-04-07")
+
+        assert auth is not None
+        assert auth.strategy == candidate_id
+
     def test_rotation_no_prerequisites(self, evidence_dir, runtime_dir, fresh_db):
         """rotation no evidence → prerequisites not met."""
         from core.paper_pilot import check_pilot_prerequisites
