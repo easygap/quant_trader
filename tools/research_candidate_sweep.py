@@ -386,6 +386,53 @@ def build_risk_budget_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_cash_switch_candidate_specs() -> list[CandidateSpec]:
+    """Market-filter exit variants that switch to cash when broad market trend breaks."""
+    defensive_budget = {
+        "max_positions": 3,
+        "max_position_ratio": 0.20,
+        "max_investment_ratio": 0.60,
+        "min_cash_ratio": 0.30,
+    }
+    return [
+        CandidateSpec(
+            candidate_id="cash_switch_rotation_sma200",
+            strategy="relative_strength_rotation",
+            params={
+                "market_filter_sma200": True,
+                "market_filter_exit": True,
+                "market_filter_ma_period": 200,
+            },
+            description="rotation blocks entries and exits to cash when KS11 is below SMA200",
+        ),
+        CandidateSpec(
+            candidate_id="cash_switch_rotation_sma120",
+            strategy="relative_strength_rotation",
+            params={
+                "market_filter_sma200": True,
+                "market_filter_exit": True,
+                "market_filter_ma_period": 120,
+            },
+            description="faster cash switch when KS11 is below SMA120",
+        ),
+        CandidateSpec(
+            candidate_id="cash_switch_rotation_slow_defensive",
+            strategy="relative_strength_rotation",
+            params={
+                "short_lookback": 80,
+                "long_lookback": 160,
+                "sma_period": 80,
+                "short_weight": 0.5,
+                "market_filter_sma200": True,
+                "market_filter_exit": True,
+                "market_filter_ma_period": 200,
+            },
+            description="slow rotation with defensive exposure and KS11 cash switch",
+            diversification=defensive_budget,
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -400,6 +447,8 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         return build_benchmark_relative_candidate_specs()
     if family in ("risk_budget", "exposure", "diversification"):
         return build_risk_budget_candidate_specs()
+    if family in ("cash_switch", "market_exit", "market_filter_exit"):
+        return build_cash_switch_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -408,10 +457,11 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_pullback_candidate_specs(),
             *build_benchmark_relative_candidate_specs(),
             *build_risk_budget_candidate_specs(),
+            *build_cash_switch_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
-        "benchmark_relative, risk_budget, all"
+        "benchmark_relative, risk_budget, cash_switch, all"
     )
 
 
@@ -1033,6 +1083,7 @@ def main() -> None:
             "pullback",
             "benchmark_relative",
             "risk_budget",
+            "cash_switch",
             "all",
         ],
         help="Research candidate family to evaluate.",
