@@ -176,6 +176,12 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
         "target_weight_rotation_top3_40_100_floor3",
         "target_weight_rotation_top5_60_120_floor0",
         "target_weight_rotation_top5_60_120_floor0_hold3",
+        "target_weight_rotation_top5_60_120_floor0_hold3_sma120_55",
+        "target_weight_rotation_top5_60_120_floor0_hold3_sma200_55",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk120_55",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk90_45",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk90_35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
         "target_weight_rotation_top5_60_120_floor0_exp80",
         "target_weight_rotation_top5_60_120_floor0_exp80_tol3",
         "target_weight_rotation_top5_60_120_floor0_exp75",
@@ -191,10 +197,16 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
     assert direct[3].params["min_score_floor_pct"] == 0.0
     assert direct[4].params["min_score_floor_pct"] == 3.0
     assert direct[6].params["hold_rank_buffer"] == 3
-    assert direct[7].params["target_exposure"] == 0.80
-    assert direct[8].params["target_tolerance_pct"] == 3.0
-    assert direct[9].params["target_exposure"] == 0.75
-    assert direct[11].params["target_tolerance_pct"] == 3.0
+    assert direct[7].params["market_exposure_mode"] == "benchmark_sma"
+    assert direct[7].params["market_ma_period"] == 120
+    assert direct[9].params["market_exposure_mode"] == "benchmark_risk"
+    assert direct[10].params["bear_target_exposure"] == 0.45
+    assert direct[11].params["bear_target_exposure"] == 0.35
+    assert direct[12].params["market_ma_period"] == 60
+    assert direct[13].params["target_exposure"] == 0.80
+    assert direct[14].params["target_tolerance_pct"] == 3.0
+    assert direct[15].params["target_exposure"] == 0.75
+    assert direct[17].params["target_tolerance_pct"] == 3.0
     assert direct[-1].params["market_exposure_mode"] == "benchmark_sma"
 
 
