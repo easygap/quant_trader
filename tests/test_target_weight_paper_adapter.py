@@ -200,6 +200,63 @@ def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path,
     assert "status: BLOCKED - shadow bootstrap incomplete" in output
 
 
+def test_pilot_cli_exits_nonzero_when_execution_fidelity_blocked(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+
+    def fake_run_pilot(**kwargs):
+        return {
+            "plan": plan,
+            "validation": SimpleNamespace(allowed=True, reason="pilot caps satisfied"),
+            "cap_preview": SimpleNamespace(allowed=True, reason="proposed pilot caps"),
+            "cap_recommendation": {
+                "suggested_caps": {
+                    "max_orders_per_day": 3,
+                    "max_concurrent_positions": 3,
+                    "max_notional_per_trade": 1_260_000,
+                    "max_gross_exposure": 3_360_000,
+                }
+            },
+            "execution": {
+                "executed": len(plan.orders),
+                "failed": 0,
+                "skipped": 0,
+                "halted": False,
+                "halt_reason": "",
+                "details": [],
+            },
+            "execution_evidence": {
+                "complete": False,
+                "reason": "target_weight_position_mismatch: CCC actual=0 target=4000",
+            },
+            "evidence_collection": {"attempted": False, "recorded": False},
+            "shadow_evidence_summary": {"attempted": False, "recorded": False},
+            "launch_artifacts": {"attempted": False},
+            "artifact_path": tmp_path / "session.json",
+        }
+
+    monkeypatch.setattr(twp, "run_pilot", fake_run_pilot)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--execute",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "execution fidelity: BLOCKED" in output
+    assert "target_weight_position_mismatch" in output
+
+
 def test_target_weight_plan_uses_prior_day_scores_for_targets():
     from core.target_weight_rotation import build_target_weight_plan
 
@@ -605,6 +662,7 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
             "details": [],
         },
     )
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
     monkeypatch.setattr(
         pe,
         "collect_daily_evidence",
@@ -625,6 +683,71 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
     assert saved_sessions[0]["execution_complete"] is False
     assert saved_sessions[0]["evidence_collectible"] is False
     assert payload["evidence_collection"]["status"] == "blocked"
+
+
+def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(pp, "save_pilot_session_artifact", lambda **kwargs: None)
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: {
+            "executed": len(plan.orders),
+            "skipped": 0,
+            "failed": 0,
+            "halted": False,
+            "halt_reason": "",
+            "details": [],
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders[:-1]
+        },
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("position mismatch must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    reconciliation = result["execution_evidence"]["position_reconciliation"]
+    assert result["execution_evidence"]["order_complete"] is True
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_position_mismatch" in result["evidence_collection"]["reason"]
+    assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
 
 
 def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_path):
@@ -669,6 +792,14 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
             "details": [],
         },
     )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    )
 
     def collect_daily_evidence(**kwargs):
         collected.append(kwargs)
@@ -688,6 +819,7 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert len(collected) == 1
     caps = collected[0]["pilot_caps_snapshot"]
     assert caps["target_weight_execution"]["complete"] is True
+    assert caps["target_weight_execution"]["position_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
     assert saved_sessions[0]["execution_complete"] is True
