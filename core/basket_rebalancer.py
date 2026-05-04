@@ -322,9 +322,16 @@ class BasketRebalancer:
 
             try:
                 if order.action == "BUY":
-                    res = executor.execute_buy(
-                        symbol=order.symbol, price=order.price, quantity=order.quantity,
-                        reason=f"리밸런싱: {order.reason}", strategy="basket_rebalance",
+                    available_cash = self.portfolio_mgr.get_available_cash()
+                    total_value = self.portfolio_mgr.get_total_value()
+                    res = executor.execute_buy_quantity(
+                        symbol=order.symbol,
+                        price=order.price,
+                        quantity=order.quantity,
+                        capital=total_value,
+                        available_cash=available_cash,
+                        reason=f"리밸런싱: {order.reason}",
+                        strategy="basket_rebalance",
                     )
                 else:
                     res = executor.execute_sell(

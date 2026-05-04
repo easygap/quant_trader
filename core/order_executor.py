@@ -391,6 +391,166 @@ class OrderExecutor:
 
         return result
 
+    def execute_buy_quantity(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        capital: float,
+        available_cash: float,
+        signal_score: float = 0,
+        reason: str = "",
+        strategy: str = "",
+        avg_daily_volume: float = None,
+        atr: float = None,
+    ) -> dict:
+        """Execute a fixed-quantity paper buy.
+
+        Portfolio target-weight adapters already decide quantities at the book
+        level, so the normal risk-ratio position sizer must not override them.
+        This path is deliberately paper-only.
+        """
+        with PositionLock():
+            return self._execute_buy_quantity_impl(
+                symbol=symbol,
+                price=price,
+                quantity=quantity,
+                capital=capital,
+                available_cash=available_cash,
+                signal_score=signal_score,
+                reason=reason,
+                strategy=strategy,
+                avg_daily_volume=avg_daily_volume,
+                atr=atr,
+            )
+
+    def _execute_buy_quantity_impl(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        capital: float,
+        available_cash: float,
+        signal_score: float = 0,
+        reason: str = "",
+        strategy: str = "",
+        avg_daily_volume: float = None,
+        atr: float = None,
+    ) -> dict:
+        if self.mode == "live":
+            return {"success": False, "reason": "fixed-quantity buy is paper-only"}
+
+        quantity = int(quantity or 0)
+        if quantity <= 0:
+            return {"success": False, "reason": "quantity must be positive"}
+        if price <= 0:
+            return {"success": False, "reason": "price must be positive"}
+
+        if self._should_block_new_buy_volatility_window():
+            return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
+
+        costs = self.risk_manager.calculate_transaction_costs(
+            price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+        )
+        expected_price = float(price)
+        fill_price = float(costs["execution_price"])
+        total_required = fill_price * quantity + float(costs.get("commission", 0) or 0)
+        if total_required > float(available_cash):
+            return {
+                "success": False,
+                "reason": "사용 가능 현금 부족",
+                "required": total_required,
+                "available_cash": available_cash,
+            }
+
+        pre_check = self._pre_order_check(action="BUY")
+        if not pre_check["allowed"]:
+            return {"success": False, "reason": pre_check["reason"]}
+
+        stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
+        tp_info = self.risk_manager.calculate_take_profit(price)
+        trailing_stop = self.risk_manager.calculate_trailing_stop(price, atr)
+
+        order = self.order_book.create_order(
+            symbol=symbol,
+            action="BUY",
+            requested_qty=quantity,
+            requested_price=expected_price,
+            strategy=strategy,
+            account_key=self.account_key,
+            mode=self.mode,
+        )
+        existing_open = [
+            o for o in self.order_book.get_open_orders(symbol)
+            if o.order_id != order.order_id
+        ]
+        if existing_open:
+            order.transition(OrderStatus.REJECTED, reason="중복 주문: 미완료 주문 존재")
+            return {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+
+        order.transition(OrderStatus.SUBMITTED)
+        order.transition(OrderStatus.ACKED)
+        order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+        assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
+
+        _order_at = datetime.now()
+        save_trade(
+            symbol=symbol,
+            action="BUY",
+            price=fill_price,
+            quantity=quantity,
+            commission=costs["commission"],
+            tax=0,
+            slippage=costs["slippage"],
+            strategy=strategy,
+            signal_score=signal_score,
+            reason=reason,
+            mode=self.mode,
+            account_key=self.account_key,
+            signal_at=_order_at,
+            order_at=_order_at,
+            expected_price=expected_price,
+            actual_slippage_pct=None,
+        )
+        _log_op_event(
+            "SIGNAL",
+            f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
+            symbol=symbol,
+            strategy=strategy,
+            mode=self.mode,
+        )
+        save_position(
+            symbol=symbol,
+            avg_price=fill_price,
+            quantity=quantity,
+            stop_loss_price=stop_loss,
+            take_profit_price=tp_info["target_final"],
+            trailing_stop_price=trailing_stop,
+            strategy=strategy,
+            account_key=self.account_key,
+        )
+        log_trade("BUY", symbol, fill_price, quantity, reason)
+
+        result = {
+            "success": True,
+            "symbol": symbol,
+            "action": "BUY",
+            "price": fill_price,
+            "quantity": quantity,
+            "total_amount": fill_price * quantity,
+            "stop_loss": stop_loss,
+            "take_profit": tp_info["target_final"],
+            "trailing_stop": trailing_stop,
+            "costs": costs,
+            "mode": self.mode,
+            "paper_fixed_quantity": True,
+        }
+        logger.info(
+            "✅ 고정수량 paper 매수 완료: {} {}주 @ {:,.0f}원",
+            symbol, quantity, fill_price,
+        )
+        return result
+
     def execute_sell(
         self,
         symbol: str,
