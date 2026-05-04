@@ -2,7 +2,7 @@
 
 > **문서 버전**: v5.2
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-29
+> **최종 수정**: 2026-04-30
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -94,9 +94,28 @@
 - Paper Preflight (`core/paper_preflight.py`): 세션 전 운영 준비 상태 점검
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
-- Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`
-- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 후보 랭킹과 decision action을 생성하고 benchmark excess 음수 후보를 상위 alpha 후보에서 배제
-- Latest research decision (2026-04-29): 5종목 quick sweep에서 rotation 변형 6개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`; 즉시 canonical promotion은 진행하지 않고 새 후보군 또는 확장 universe를 우선 탐색
+- Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`, `tools/target_weight_rotation_pilot.py`
+- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹과 decision action을 생성하고 raw benchmark excess 음수 후보를 상위 alpha 후보에서 배제. defensive/cash-heavy 후보 해석을 위해 exposure-matched B&H 진단값도 기록. target-weight 후보는 `min_score_floor_pct` score-floor와 `hold_rank_buffer` rank-hysteresis 변형을 지원
+- Latest research decision (2026-04-29): 5종목 all-family quick sweep에서 후보 14개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`; canonical promotion은 진행하지 않고 유니버스 확장 또는 새 후보군 설계를 우선
+- Latest research decision (2026-04-30): canonical liquidity top-20 all-family quick sweep에서도 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`는 +118.56%였지만 benchmark excess=-30.83%p, MDD=-40.08%; promotion 미진행
+- Follow-up research implementation (2026-04-30): 외부 재무 데이터 의존이 없는 `trend_pullback` 기반 `pullback` 후보군 4개를 추가해 다음 benchmark-aware sweep 대상으로 지정
+- Follow-up research implementation (2026-04-30): `momentum_factor`에 KS11 대비 초과 모멘텀/변동성 게이트 옵션을 추가하고 `benchmark_relative` 후보군 3개를 추가
+- Follow-up smoke result (2026-04-30): 5종목 `benchmark_relative`/`pullback` quick sweep 모두 `NO_ALPHA_CANDIDATE`; 신규 후보도 promotion 미진행
+- Follow-up research implementation (2026-04-30): `CandidateSpec.diversification`을 추가하고 `risk_budget` 후보군 5개를 추가해 집중형/균형형/방어형 exposure 구조를 비교 가능하게 함
+- Follow-up smoke result (2026-04-30): `risk_budget` 5종목 quick sweep도 `NO_ALPHA_CANDIDATE`. 방어형 rotation은 MDD=-6.41%로 개선됐지만 excess=-162.72%p라 alpha 없음
+- Follow-up research implementation (2026-04-30): `relative_strength_rotation.market_filter_exit`와 `cash_switch` 후보군 3개를 추가해 KS11 이동평균 하회 시 현금화 구조를 검증 가능하게 함
+- Follow-up smoke result (2026-04-30): `cash_switch` 5종목 quick sweep도 `NO_ALPHA_CANDIDATE`. best=`cash_switch_rotation_slow_defensive` return=+1.87%, excess=-171.76%p, MDD=-11.78%; alpha 없음
+- Follow-up diagnostics (2026-04-30): research sweep에 exposure-matched benchmark 진단 추가. cash-switch 평균 노출은 8.4~10.0%, exposure-matched excess=-7.87%p~-0.36%p로 낮은 노출을 보정해도 신호 edge가 아직 없음
+- Follow-up research implementation (2026-04-30): `relative_strength_rotation`에 KS11 대비 복합 모멘텀 차감 랭킹(`score_mode=benchmark_excess`), dense monthly entry, score-floor rebalance exit를 추가하고 `benchmark_aware_rotation` 후보군 4개로 노출 유지형 alpha를 검증 가능하게 함
+- Follow-up smoke result (2026-04-30): `benchmark_aware_rotation` 5종목 quick sweep도 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced` return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p; fast 40/100은 exposure-matched excess=+2.04%p라 다음 top-N 목표비중 리밸런싱 연구 후보
+- Follow-up research implementation (2026-04-30): `target_weight_rotation` research-only evaluator를 추가. 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체하고, delta 리밸런싱 거래비용과 일별 cash/value/n_positions 노출을 기록
+- Follow-up smoke result (2026-04-30): `target_weight_rotation` 5종목 quick sweep도 `NO_ALPHA_CANDIDATE`. best=`target_weight_rotation_top3_40_100_excess` return=+128.44%, Sharpe=1.13, avg exposure=85.3%였지만 raw excess=-45.19%p라 promotion 미진행
+- Follow-up full result (2026-04-30): canonical liquidity top-20 `target_weight_rotation` full sweep은 alpha 후보를 확인. best 기존 후보=`target_weight_rotation_top3_40_100_excess`, return=+212.21%, raw excess=+62.82%p, exposure-matched excess=+83.66%p. 다만 `promotion_status=paper_only`와 turnover/year=1412.1%로 decision=`KEEP_RESEARCH_ONLY`
+- Follow-up research implementation/result (2026-04-30): target-weight score-floor 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지. 다음은 turnover-aware rebalance/tolerance/correlation 필터가 우선
+- Follow-up research implementation/result (2026-04-30): target-weight rank-hysteresis 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, exposure-matched excess=+150.88%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 다음 병목은 drawdown-aware exposure/market-risk overlay
+- Follow-up research implementation/result (2026-04-30): target-weight benchmark-risk overlay 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%, risk-off rebalance=38.9%로 research sweep 기준 `provisional_paper_candidate` 도달
+- Follow-up canonical bridge (2026-04-30): `tools/evaluate_and_promote.py --canonical`이 위 target-weight 후보를 동일 candidate id/params hash로 `reports/promotion/*` canonical bundle에 포함. `promotion_result.json`과 `--check-only`에서 `provisional_paper_candidate` 재현 확인.
+- Follow-up paper/pilot adapter (2026-04-30): `core/target_weight_rotation.py`가 직전 거래일 score 기반 portfolio-level 목표비중 plan과 pilot cap 검증을 담당하고, `tools/target_weight_rotation_pilot.py`가 dry-run/제한 paper 실행 artifact를 생성한다. `OrderExecutor.execute_buy_quantity()`는 paper-only exact quantity 매수를 지원하며 live 모드는 계속 거부한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1074,6 +1093,8 @@ quant_trader/
 
 - 과거 3~5년 데이터 → 훈련/검증 분리 → 파라미터 최적화 → OOS 검증 → 거래비용·슬리피지 반영 → 페이퍼 트레이딩 → 소액 실전.
 - **벤치마크 비교**: 코스피 지수(KS11) 대비 초과 수익 여부에 더해, **코스피 상위 50종목 동일비중 매수·홀딩** 대비 out-of-sample 초과 수익 여부를 검증합니다. Top50 벤치마크는 `--mode validate` 시 기본 사용하며, `--no-benchmark-top50` 으로 비활성화할 수 있습니다. 벤치마크·유니버스 종목 리스트는 **검증 시작일(as_of_date)** 기준으로 가져오며, `risk_params.backtest_universe` 설정에 따라 **생존자 편향**을 완화할 수 있습니다(아래 §8.2.1 참고).
+- **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남기고, `hold_rank_buffer`를 주면 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안에서는 유지해 과도한 교체를 줄입니다. `market_exposure_mode=benchmark_risk`는 직전 거래일까지의 KS11 SMA/rolling drawdown/realized volatility만 사용해 risk-off 리밸런싱의 부분 노출 축소와 `risk_off_rebalance_pct`를 기록합니다.
+- **Target-weight paper/pilot 실행**: `tools/target_weight_rotation_pilot.py`는 canonical candidate id의 params를 읽어 동일 로직으로 목표 수량을 계산하고, `core.paper_pilot.check_pilot_entry()`와 plan-level cap 검증을 통과해야 paper 주문을 낼 수 있습니다. 기본은 dry-run이며 `--execute`를 줘도 `trading.mode=live`에서는 거부합니다.
 
 **⚠️ 생존자 편향 (Survivorship Bias) — §8.2.1**
 
@@ -1370,8 +1391,27 @@ quant_trader/
 - [x] **승격 규칙 v3** — `core/promotion_engine.py` metrics 기반 자동 판정 + artifact-driven
 - [x] **Paper Evidence 체계** — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate
 - [x] **전략 분류 확정** — rotation: provisional, scoring: paper_only. BV/MR/TF/ensemble: disabled (research_only)
-- [x] **2026-04-29 quick sweep** — 5종목 rotation 변형 6개 모두 `NO_ALPHA_CANDIDATE`; 다음 방향은 후보군 재설계 또는 universe 확장
-- [x] **테스트 296건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
+- [x] **2026-04-29 all-family quick sweep** — rotation/momentum/breakout 14개 후보 모두 `NO_ALPHA_CANDIDATE`; promotion 미진행
+- [x] **2026-04-30 top-20 all-family quick sweep** — 20종목 후보 14개 모두 `NO_ALPHA_CANDIDATE`; best momentum도 benchmark excess/MDD 미달
+- [x] **pullback 후보군 추가** — `trend_pullback` 기반 research-only 후보 4개 추가. `all` sweep에 포함
+- [x] **benchmark-relative momentum 후보군 추가** — KS11 대비 초과 모멘텀과 변동성 게이트로 현재 underperformance 원인을 직접 검증
+- [x] **신규 후보 5종목 smoke sweep** — benchmark_relative/pullback 모두 `NO_ALPHA_CANDIDATE`; 다음은 노출 구조와 동일 유니버스 상대강도 개선 우선
+- [x] **risk-budget 후보군 추가** — 후보별 diversification budget을 artifact에 남기고 집중형/균형형/방어형 exposure 비교 가능
+- [x] **risk-budget smoke sweep** — MDD 개선은 확인했지만 benchmark excess 실패. 다음은 상대강도/현금 전환/부분 헤지 설계
+- [x] **cash-switch 후보군 추가** — KS11 이동평균 하회 시 보유 포지션을 현금화하는 rotation 변형 3개 추가
+- [x] **cash-switch smoke sweep** — MDD 방어는 일부 확인했지만 benchmark excess 실패. 다음은 benchmark-aware 랭킹/exposure-matched 검증 우선
+- [x] **exposure-matched benchmark 진단 추가** — cash-switch 평균 노출 8.4~10.0%, 같은 노출 B&H 대비 excess도 음수라 단순 현금화보다 신호 edge 개선 필요
+- [x] **benchmark-aware rotation 후보군 추가** — KS11 대비 상대강도 랭킹, dense entry, score-floor exit로 노출 유지형 회전 후보 검증
+- [x] **benchmark-aware rotation smoke sweep** — best return +21.65%였지만 raw excess=-151.98%p라 promotion 금지. fast 후보의 exposure-matched excess +2.04%p는 top-N 목표비중 연구 힌트로만 사용
+- [x] **target-weight top-N rotation 백테스터 추가** — 월간 직전일 score 기준 top-N 목표비중 보유/교체, delta 리밸런싱 비용, 노출 진단 구현
+- [x] **target-weight top-N rotation smoke sweep** — best +128.44%/Sharpe 1.13/avg exposure 85.3%로 sparse 노출 병목은 해소했지만 raw excess=-45.19%p라 promotion 금지
+- [x] **canonical top-20 target-weight full sweep** — best 기존 후보 +212.21%/raw excess +62.82%p/exposure-matched excess +83.66%p로 alpha 후보 확인. turnover/year 1412.1%와 paper_only 상태 때문에 `KEEP_RESEARCH_ONLY`
+- [x] **target-weight score-floor 후보 추가** — `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금화. best top5 floor0 +210.21%/Sharpe 1.41/WF positive 100%였지만 turnover/year 1081.5%로 승격 금지
+- [x] **target-weight rank-hysteresis 후보 추가** — `hold_rank_buffer`로 churn 완화. best top5 floor0 hold3 +278.57%/raw excess +129.18%p/Sharpe 1.65/WF positive 100%/turnover 807.8%. MDD=-28.25%라 drawdown gate는 미통과
+- [x] **target-weight benchmark-risk overlay 후보 추가** — KS11 SMA/낙폭/변동성 기반 부분 노출 축소. best risk60_35 +210.24%/raw excess +60.85%p/Sharpe 1.60/PF 5.73/MDD -19.24%/turnover 858.0%/WF positive 100%로 research sweep 기준 provisional 후보 도달
+- [x] **target-weight canonical bridge 추가** — `evaluate_and_promote.py --canonical`이 risk60_35를 canonical promotion bundle에 포함하고 `promotion_result.json`에서 provisional 상태 재현
+- [x] **target-weight paper/pilot adapter 추가** — portfolio-level plan, pilot cap validation, paper-only exact quantity order path 추가. Live gate는 변경 없음
+- [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
 
@@ -1474,4 +1514,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-29 (v5.2: freeze pack, auto-entry 해석 단일화, YAML/resolved hash, 운영 체크리스트 반영)
+> **최종 수정**: 2026-04-30 (target-weight paper/pilot adapter 반영)
