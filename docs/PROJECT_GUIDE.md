@@ -685,6 +685,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
 | ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation 변형을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
+| ✅ **2026-04-29 quick sweep 판정** | 5종목 rotation 변형 6개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`, canonical promotion 미진행 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -696,6 +697,15 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 펀더멘털 신호 고도화 | `fundamental_factor`·앙상블 구성 반영됨. 지표·해외 종목·공시 연계 강화 | 중기 |
 | 웹 대시보드 강화 | 전략별 신호, 주문 목록, API 사용량 표시 | 중기 |
 | WebSocket 갭 처리 | 재연결 시 REST API 보충 조회, 갭 중 급변 감지 | 중기 |
+
+### 다음 연구 방향 — 2026-04-29 기준
+
+| 항목 | 결정 |
+|------|------|
+| 기존 rotation 변형 추가 승격 | 보류. quick sweep에서 `NO_ALPHA_CANDIDATE` |
+| 즉시 canonical promotion | 진행하지 않음. benchmark excess gate 미달 |
+| 다음 후보 탐색 | 유니버스 확장, 다른 후보군 설계, benchmark 대비 초과수익/초과 Sharpe 우선 |
+| 운영 원칙 | paper/live gate는 유지. research artifact만으로 실전 전환 금지 |
 
 상세는 `quant_trader_design.md` §5.13, §5.14, §9.1, §10 참고.
 
