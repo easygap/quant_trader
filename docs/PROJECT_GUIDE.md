@@ -2,7 +2,7 @@
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-29
+> **최종 수정**: 2026-04-30
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -120,6 +120,7 @@ quant_trader/
 │   ├── paper_pilot.py           # Paper Pilot Authorization (launch readiness + pilot auth + 리스크 캡)
 │   ├── paper_preflight.py       # Paper Preflight Check (운영 준비 상태 점검)
 │   ├── strategy_universe.py     # Paper 대상 전략 canonical 목록
+│   ├── target_weight_rotation.py # Portfolio-level target-weight plan 생성/검증
 │   ├── evidence_collector.py    # 일일 실적 증거 자동 누적 (장마감 후 scheduler 호출)
 │   ├── promotion_engine.py      # metrics 기반 전략 승격 판정 (research→paper→live)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
@@ -131,8 +132,9 @@ quant_trader/
 │   ├── paper_preflight.py              # Paper 세션 전 체크리스트 CLI
 │   ├── paper_launch_readiness.py       # Paper 진입 준비 상태 확인 CLI
 │   ├── paper_runtime_status.py         # Paper 실행 상태 모니터링 CLI
-│   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정
+│   ├── evaluate_and_promote.py         # Canonical 평가 → artifact → 승격 판정(+canonicalized research candidate)
 │   ├── research_candidate_sweep.py     # Research-only 후보 sweep → benchmark-aware ranking artifact
+│   ├── target_weight_rotation_pilot.py # target-weight 후보 전용 paper/pilot adapter + shadow proof
 │   ├── rebuild_paper_runtime.py        # Paper 런타임 재구성
 │   └── quarantine_test_artifacts.py    # 테스트 artifact 격리
 ├── strategies/
@@ -277,13 +279,14 @@ quant_trader/
 | **data_validator.py** | OHLCV Null·NaN·음수 주가·거래량·타임스탬프 역전 등 검사. |
 | **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 텔레그램 Bot API → 3차 이메일(SMTP). `critical=True` 시 모든 채널 동시 발송. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
 | **strategy_diagnostics.py** | `DiagnosticLine` — 전략별 신호·점수 진단 라인 생성. 스케줄러·대시보드에서 전략 실행 현황 요약 시 사용. |
-| **paper_evidence.py** | Paper Evidence 런타임 수집. `DailyEvidence` 데이터클래스, `collect_daily_evidence()`, `finalize_daily_evidence()`, `generate_promotion_package()`, 3종 benchmark excess (same_universe/exposure_matched/cash_adjusted), 6 anomaly rule (repeated_reject, phantom_position, stale_pending, duplicate_flood, reconcile, deep_drawdown), cash-only carry-forward (zero-return semantics). |
+| **paper_evidence.py** | Paper Evidence 런타임 수집. `DailyEvidence` 데이터클래스, `collect_daily_evidence()`, `append_shadow_plan_evidence()`, `finalize_daily_evidence()`, `generate_promotion_package()`, 3종 benchmark excess (same_universe/exposure_matched/cash_adjusted), 6 anomaly rule (repeated_reject, phantom_position, stale_pending, duplicate_flood, reconcile, deep_drawdown), cash-only carry-forward (zero-return semantics). Shadow plan evidence는 `execution_backed=False`라 promotion에는 반영되지 않는다. |
 | **paper_runtime.py** | Paper Runtime State Machine. 5개 상태 (research_disabled/normal/degraded/frozen/blocked_insufficient_evidence), schema quarantine (legacy record 제외), allowed_actions (모든 상태에서 exit/cancel/reconcile/finalize/evidence/reporting 허용). `get_paper_runtime_state()`, `filter_runtime_eligible()`. |
-| **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. |
+| **paper_pilot.py** | Paper Pilot Authorization. `PilotAuthorization` 데이터클래스, `enable_pilot()`, `get_active_pilot()`, `check_pilot_prerequisites()`, `check_pilot_entry()`, `compute_launch_readiness()`, `generate_launch_readiness_artifact()`. launch readiness: clean_final_days ≥ 3 + evidence_fresh + benchmark_final_ratio ≥ 40% + notifier_ready. Pilot entry guard는 모든 allowed/blocked 결정을 audit하고 runtime/evidence/notifier/order/position/exposure guard 예외를 fail-closed로 차단한다. |
 | **paper_preflight.py** | Paper 세션 전 운영 준비 상태 점검. runtime state, allowed_actions, evidence freshness, notifier health 등 확인. |
 | **strategy_universe.py** | Paper 대상 전략 canonical 목록. 전략별 paper eligibility, 승격 상태, 활성화 여부 관리. |
+| **target_weight_rotation.py** | Target-weight 후보의 portfolio-level plan 생성. 직전 거래일 점수, KS11 risk overlay, 목표비중 수량 산출, pilot cap 검증을 담당. 일반 `generate_signal()` 전략으로 위장하지 않는다. 전용 pilot 실행은 주문 실패 시 후속 주문을 중단한다. `tools/target_weight_rotation_pilot.py --record-shadow-evidence`로 dry-run launch-readiness evidence, launch readiness JSON/MD, pilot runbook을 남기고, cap preview로 pilot 승인 전 기본/제안 캡 적합성을 확인한다. |
 | **evidence_collector.py** | 일일 실적 증거 자동 누적. scheduler 장마감 후 호출. `collect_daily_evidence()` wrapper. |
-| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행. |
+| **promotion_engine.py** | metrics 기반 전략 승격 판정. `research_only → paper_only → provisional_paper_candidate → live_candidate`. debiased WF + PF + Sharpe + EV/turnover + paper evidence 기준. `tools/evaluate_and_promote.py --canonical`으로 실행하며, 현재 canonical bundle에는 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` canonicalized research candidate도 포함. |
 
 ### 3.4 strategies/
 
@@ -319,7 +322,7 @@ quant_trader/
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
 | **momentum_top_portfolio.py** | 다종목 동일비중 모멘텀 포트폴리오 백테스트. `run_momentum_top_portfolio_backtest()`: WatchlistManager(momentum_top) → 종목별 데이터 수집 → 리밸런싱 주기(기본 20일)마다 포트폴리오 재구성 → 시장 국면 필터·포트폴리오 스탑 적용. `print_momentum_top_portfolio_report()`. `--mode backtest_momentum_top`에서 사용. |
 | **param_optimizer.py** | Grid Search / Bayesian(scikit-optimize). train_ratio·OOS 보고. `--include-weights` 시 **스코어링 가중치 대칭 Grid Search + OOS 샤프≥1.0 게이트**. `--auto-correlation`: 최적화 전 상관 분석 자동 실행, 고상관 지표 자동 비활성화. `--disable-weights w_rsi,w_ma` 등으로 수동 지정도 가능. `Backtester.run(..., param_overrides=)`. |
-| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. rotation 변형을 포트폴리오 단위로 평가하고 benchmark excess, EV, CAGR, turnover, WF 안정성으로 랭킹하며 decision action을 포함해 `reports/research_sweeps/`에 저장. |
+| **tools/research_candidate_sweep.py** | promotion/live artifact와 분리된 research-only 후보 공장. `--candidate-family rotation|momentum|breakout|pullback|benchmark_relative|risk_budget|cash_switch|benchmark_aware_rotation|target_weight_rotation|all` 후보를 포트폴리오 단위로 평가하고 raw EW B&H benchmark excess, exposure-matched B&H diagnostic, EV, CAGR, turnover, WF 안정성으로 랭킹/진단하며 decision action을 포함해 `reports/research_sweeps/`에 저장. target-weight 후보는 `min_score_floor_pct` score-floor, `hold_rank_buffer` rank-hysteresis, `market_exposure_mode=benchmark_risk` SMA/낙폭/변동성 risk-off 노출 축소를 지원. |
 
 ### 3.7 database/
 
@@ -359,9 +362,9 @@ quant_trader/
 | **test_strategy_validator.py** | 전략 검증(validate) 로직. |
 | **test_trading_hours.py** | 장 시간·휴장일. |
 | **test_paper_lifecycle.py** | Full paper lifecycle (BUY/SELL/Snapshot, 격리 DB truncate, 4/4 PASS). |
-| **test_paper_evidence.py** | Paper Evidence 수집/검증 (51건): JSONL I/O, anomaly detection, benchmark missing, E2E replay 7일, cash-only zero-return deadlock regression, shadow evidence 분리. |
+| **test_paper_evidence.py** | Paper Evidence 수집/검증 (52건): JSONL I/O, anomaly detection, benchmark missing, E2E replay 7일, cash-only zero-return deadlock regression, shadow evidence 분리, target-weight shadow plan evidence. |
 | **test_paper_runtime.py** | Paper Runtime State Machine (45건): 상태 전이, schema quarantine, allowed_actions, auto-unfreeze. |
-| **test_paper_pilot.py** | Paper Pilot Authorization (29건): pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites. |
+| **test_paper_pilot.py** | Paper Pilot Authorization: pilot enable/disable, cap enforcement, launch readiness, preflight prerequisites, artifact-only target-weight 후보 eligibility, fail-closed/audited entry guard. |
 | **test_paper_preflight.py** | Paper Preflight Check: 운영 준비 상태 점검 시나리오. |
 | **test_promotion_engine.py** | Promotion 규칙: metrics 기반 자동 판정, threshold 경계. |
 | **test_order_state_machine.py** | 주문 상태기계: 9개 상태 전이, assert invariant. |
@@ -678,16 +681,46 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **`--force-live` 제거** | canonical bundle + paper evidence hard gate 우회 불가 |
 | ✅ **벤치마크 거래비용** | `_buy_and_hold_metrics`에 commission/tax/slippage 반영 |
 | ✅ **debiased 전략 재평가** | 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows |
-| ✅ **테스트 296건 green** | live/paper/promotion/research sweep 회귀 묶음 기준 |
+| ✅ **테스트 298건 green** | live/paper/promotion/research sweep 회귀 묶음 기준 |
 | ✅ **Paper Runtime State Machine** | `core/paper_runtime.py` — 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine |
 | ✅ **Paper Pilot Authorization** | `core/paper_pilot.py` — launch readiness + pilot auth + 리스크 캡 |
 | ✅ **Paper Preflight** | `core/paper_preflight.py` — 세션 전 운영 준비 상태 점검 |
 | ✅ **Strategy Universe** | `core/strategy_universe.py` — paper 대상 전략 canonical 목록 |
 | ✅ **Paper 운영 도구** | `tools/` — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI |
-| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation 변형을 benchmark-aware artifact로 랭킹하고 decision action 생성. promotion/live gate와 분리 |
-| ✅ **2026-04-29 quick sweep 판정** | 5종목 rotation 변형 6개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`, canonical promotion 미진행 |
+| ✅ **Research candidate sweep** | `tools/research_candidate_sweep.py` — rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보군을 benchmark-aware artifact로 랭킹하고 decision action 생성. raw EW B&H gate는 유지하면서 exposure-matched B&H 진단값도 기록. promotion/live gate와 분리 |
+| ✅ **2026-04-29 all-family quick sweep** | 5종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`rotation_slow_momentum`이나 excess=-165.22%p / excess Sharpe=-1.07 |
+| ✅ **2026-04-30 top-20 all-family quick sweep** | canonical liquidity universe 20종목, 후보 14개 비교 결과 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`, return=+118.56%, excess=-30.83%p, MDD=-40.08% |
+| ✅ **pullback 후보군 추가** | `trend_pullback` 기반 research-only 후보 4개 추가. 외부 재무 데이터 없이 SMA/RSI/ADX 눌림목 진입을 benchmark-aware sweep에서 검증 |
+| ✅ **benchmark-relative momentum 추가** | `momentum_factor`에 KS11 대비 초과 모멘텀/변동성 게이트 옵션 추가. research-only 후보 3개로 현재 실패 원인(benchmark underperformance)을 직접 검증 |
+| ✅ **2026-04-30 신규 후보 smoke sweep** | 5종목 기준 `benchmark_relative`/`pullback` 모두 `NO_ALPHA_CANDIDATE`. best 신규 후보도 excess=-169%p 이하라 promotion 미진행 |
+| ✅ **risk-budget 후보군 추가** | `CandidateSpec.diversification`을 artifact에 기록하고 momentum/rotation 신호를 집중형·균형형·방어형 exposure budget으로 비교 |
+| ✅ **2026-04-30 risk-budget smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. 방어형 rotation은 MDD=-6.41%로 개선됐지만 excess=-162.72%p라 promotion 미진행 |
+| ✅ **cash-switch 후보군 추가** | `relative_strength_rotation.market_filter_exit`로 KS11 이동평균 하회 시 보유 포지션을 현금화하는 research-only 후보 3개 추가 |
+| ✅ **2026-04-30 cash-switch smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`cash_switch_rotation_slow_defensive`, return=+1.87%, excess=-171.76%p, MDD=-11.78%라 promotion 미진행 |
+| ✅ **exposure-matched benchmark 진단 추가** | 후보별 `avg_exposure_pct`, `avg_cash_pct`, `exposure_matched_bh_return/sharpe/mdd`, `exposure_matched_excess_return/sharpe` 기록. cash-switch 평균 노출 8.4~10.0%, exposure-matched excess=-7.87%p~-0.36%p로 신호 edge도 미확인 |
+| ✅ **benchmark-aware rotation 후보군 추가** | `relative_strength_rotation.score_mode=benchmark_excess`, `rank_entry_mode=dense_ranked`, `exit_rebalance_mode=score_floor`를 추가해 KS11 대비 상대강도 랭킹과 노출 유지형 회전을 research-only로 검증 |
+| ✅ **benchmark-aware rotation smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced`, return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p라 promotion 미진행. fast 40/100은 exposure-matched excess=+2.04%p로 다음 연구 힌트만 제공 |
+| ✅ **target-weight top-N rotation 백테스터 추가** | sparse BUY/SELL 신호 대신 매월 직전 거래일 기준 top-N을 목표비중으로 보유/교체하는 research-only 경로 추가. delta 리밸런싱, 거래비용, 일별 cash/value/n_positions 노출 진단 기록 |
+| ✅ **target-weight top-N rotation smoke sweep** | 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`target_weight_rotation_top3_40_100_excess`, return=+128.44%, Sharpe=1.13, avg exposure=85.3%로 노출은 개선됐지만 raw excess=-45.19%p라 promotion 미진행 |
+| ✅ **canonical top-20 target-weight full sweep** | 20종목 기준 alpha 후보 확인. best 기존 후보=`target_weight_rotation_top3_40_100_excess`, return=+212.21%, raw excess=+62.82%p, exposure-matched excess=+83.66%p. 다만 promotion=`paper_only`, turnover/year=1412.1%라 `KEEP_RESEARCH_ONLY` |
+| ✅ **target-weight score-floor 후보 추가** | `min_score_floor_pct`로 약한 KS11 초과 모멘텀 슬롯을 현금으로 남기는 후보 3개 추가. best=`target_weight_rotation_top5_60_120_floor0`, return=+210.21%, Sharpe=1.41, WF positive=100%, raw excess=+60.82%p였지만 turnover/year=1081.5%라 승격 금지 |
+| ✅ **target-weight rank-hysteresis 후보 추가** | `hold_rank_buffer`로 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, return=+278.57%, raw excess=+129.18%p, Sharpe=1.65, WF positive/Sh+ 100%, turnover/year=807.8%. turnover 병목은 해소했지만 MDD=-28.25%라 research-only |
+| ✅ **target-weight benchmark-risk overlay 후보 추가** | KS11 SMA/낙폭/변동성 risk-off 구간에 부분 노출을 줄이는 후보 6개 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 `provisional_paper_candidate` 도달 |
+| ✅ **target-weight canonical bridge 추가** | `tools/evaluate_and_promote.py --canonical`이 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`를 동일 후보 ID/params hash로 재평가하고 `reports/promotion/*` canonical bundle에 기록. `promotion_result.json`에서 `provisional_paper_candidate` 확인 |
+| ✅ **target-weight paper/pilot adapter 추가** | `core/target_weight_rotation.py` + `tools/target_weight_rotation_pilot.py`로 직전 거래일 점수 기반 목표비중 plan을 만들고 pilot cap을 plan-level로 검증. `OrderExecutor.execute_buy_quantity()`로 paper-only exact quantity 매수를 지원. 실행형 `pilot_paper` evidence는 계획 주문 전부 성공(`executed == planned`, failed/skipped/halted 없음)일 때만 수집하고, 부분 실행/중단은 세션 artifact에 차단 사유를 남긴 뒤 승격 증거에서 제외한다. live 모드는 계속 거부 |
+| ✅ **target-weight shadow proof 추가** | dry-run에서 `--record-shadow-evidence`를 켜면 `append_shadow_plan_evidence()`가 non-promotable `shadow_bootstrap` record를 남김. `execution_backed=False`, excess=null이라 promotion은 오염하지 않고, launch readiness의 clean final day만 채운다. `--shadow-days 3` 또는 `--shadow-start-date/--shadow-end-date`로 여러 날짜 shadow bootstrap을 한 번에 누적할 수 있고, `--shadow-days N`은 휴장/데이터 공백으로 같은 거래일에 매핑되면 과거 평일을 추가 스캔해 N개 고유 resolved trade_day 충족을 목표로 한다. 목표 미달 또는 날짜별 실패가 있으면 CLI는 non-zero로 종료해 불완전한 증거가 자동화에서 성공으로 처리되지 않게 한다. 같은 실행에서 launch readiness JSON/MD와 pilot runbook을 생성하며 session/batch artifact에는 기본 cap preview, plan 기반 최소/추천 cap, enable 명령, launch artifact 경로를 기록 |
+| ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
+
+### 다음 연구 방향 — 2026-04-30 기준
+
+| 항목 | 결정 |
+|------|------|
+| 즉시 canonical promotion | 완료. `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 canonical promotion bundle에서도 `provisional_paper_candidate`로 재현됨 |
+| 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional이며 전용 paper/pilot adapter가 준비됨. 일반 scheduler registry에는 아직 넣지 않음 |
+| 다음 후보 탐색 | 새 알파 탐색보다 target-weight pilot을 `--shadow-days 3`로 고유 resolved trade_day 기준 shadow/dry-run evidence 3 clean days 확보 → cap 조정 승인 → capped paper 순서로 돌려 execution-backed evidence 품질을 검증 |
+| 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
@@ -805,4 +838,4 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 
 > 📌 **상세 설계·지표 공식·전략 로직·시스템 진단**: `quant_trader_design.md`
 > **문서 버전**: v5.2
-> **최종 수정**: 2026-04-29 (60영업일 freeze pack, QUANT_AUTO_ENTRY 해석 단일화, YAML/resolved hash, Paper 운영 checklist 반영)
+> **최종 수정**: 2026-04-30 (target-weight execution-aware pilot evidence 반영)
