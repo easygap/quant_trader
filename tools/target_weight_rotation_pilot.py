@@ -358,15 +358,90 @@ def execute_plan(
     return results
 
 
-def summarize_execution_for_evidence(plan: TargetWeightPlan, execution: dict[str, Any]) -> dict[str, Any]:
+def _position_quantity(position: Any) -> int:
+    if position is None:
+        return 0
+    if isinstance(position, dict):
+        return int(position.get("quantity", 0) or 0)
+    return int(getattr(position, "quantity", 0) or 0)
+
+
+def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] | None) -> dict[str, Any]:
+    expected = {order.symbol: int(order.target_quantity) for order in plan.orders}
+    actual = {
+        symbol: _position_quantity((positions or {}).get(symbol))
+        for symbol in expected
+    }
+    mismatches = [
+        {
+            "symbol": symbol,
+            "target_quantity": target_quantity,
+            "actual_quantity": actual.get(symbol, 0),
+        }
+        for symbol, target_quantity in expected.items()
+        if actual.get(symbol, 0) != target_quantity
+    ]
+    complete = len(mismatches) == 0
+    reason = "post-execution positions match target-weight plan"
+    if not complete:
+        mismatch_text = ", ".join(
+            f"{item['symbol']} actual={item['actual_quantity']} target={item['target_quantity']}"
+            for item in mismatches
+        )
+        reason = f"target_weight_position_mismatch: {mismatch_text}"
+
+    return {
+        "checked": True,
+        "complete": complete,
+        "reason": reason,
+        "expected_quantities": expected,
+        "actual_quantities": actual,
+        "mismatches": mismatches,
+    }
+
+
+def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
+    expected = {order.symbol: int(order.target_quantity) for order in plan.orders}
+    return {
+        "checked": True,
+        "complete": False,
+        "reason": f"target_weight_position_reconciliation_failed: {error}",
+        "expected_quantities": expected,
+        "actual_quantities": {},
+        "mismatches": [
+            {
+                "symbol": symbol,
+                "target_quantity": target_quantity,
+                "actual_quantity": None,
+            }
+            for symbol, target_quantity in expected.items()
+        ],
+    }
+
+
+def summarize_execution_for_evidence(
+    plan: TargetWeightPlan,
+    execution: dict[str, Any],
+    position_reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     planned = len(plan.orders)
     executed = int(execution.get("executed", 0) or 0)
     failed = int(execution.get("failed", 0) or 0)
     skipped = int(execution.get("skipped", 0) or 0)
     halted = bool(execution.get("halted", False))
-    complete = failed == 0 and skipped == 0 and not halted and executed == planned
+    order_complete = failed == 0 and skipped == 0 and not halted and executed == planned
+    reconciliation = position_reconciliation or {
+        "checked": False,
+        "complete": True,
+        "reason": "position reconciliation not required",
+        "expected_quantities": {},
+        "actual_quantities": {},
+        "mismatches": [],
+    }
+    position_complete = bool(reconciliation.get("complete", False))
+    complete = order_complete and position_complete
     reason = "all planned target-weight orders executed"
-    if not complete:
+    if not order_complete:
         reason = (
             "target_weight_execution_incomplete: "
             f"executed={executed}/{planned} failed={failed} skipped={skipped} halted={halted}"
@@ -374,16 +449,20 @@ def summarize_execution_for_evidence(plan: TargetWeightPlan, execution: dict[str
         halt_reason = execution.get("halt_reason")
         if halt_reason:
             reason = f"{reason}; halt_reason={halt_reason}"
+    elif not position_complete:
+        reason = reconciliation.get("reason", "target_weight_position_mismatch")
 
     return {
         "complete": complete,
         "reason": reason,
+        "order_complete": order_complete,
         "planned_orders": planned,
         "executed_orders": executed,
         "failed_orders": failed,
         "skipped_orders": skipped,
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
+        "position_reconciliation": reconciliation,
         "params_hash": plan.params_hash,
         "target_symbols": list(plan.targets),
         "target_exposure": plan.target_exposure,
@@ -396,6 +475,7 @@ def build_pilot_evidence_caps_snapshot(
     plan: TargetWeightPlan,
     validation: Any,
     execution: dict[str, Any],
+    position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     caps = dict(getattr(validation, "caps_snapshot", None) or {})
     caps["target_weight_plan"] = {
@@ -410,7 +490,11 @@ def build_pilot_evidence_caps_snapshot(
         "gross_exposure_after": plan.gross_exposure_after,
         "max_order_notional": plan.max_order_notional,
     }
-    caps["target_weight_execution"] = summarize_execution_for_evidence(plan, execution)
+    caps["target_weight_execution"] = summarize_execution_for_evidence(
+        plan,
+        execution,
+        position_reconciliation=position_reconciliation,
+    )
     return caps
 
 
@@ -910,11 +994,30 @@ def run_pilot(
         raise ValueError(f"pilot plan blocked: {validation.reason}")
 
     execution = execute_plan(plan, config=config, dry_run=dry_run)
-    execution_evidence = summarize_execution_for_evidence(plan, execution)
+    position_reconciliation = None
+    if execute:
+        try:
+            position_reconciliation = reconcile_plan_positions(
+                plan,
+                _load_positions(plan.candidate_id),
+            )
+        except Exception as exc:
+            logger.exception("target-weight position reconciliation failed for {}", plan.candidate_id)
+            position_reconciliation = failed_position_reconciliation(plan, exc)
+    execution_evidence = summarize_execution_for_evidence(
+        plan,
+        execution,
+        position_reconciliation=position_reconciliation,
+    )
     evidence_collection = {"attempted": False, "recorded": False}
 
     if execute:
-        evidence_caps_snapshot = build_pilot_evidence_caps_snapshot(plan, validation, execution)
+        evidence_caps_snapshot = build_pilot_evidence_caps_snapshot(
+            plan,
+            validation,
+            execution,
+            position_reconciliation=position_reconciliation,
+        )
         pilot_session = {
             "active": True,
             "session_mode": "pilot_paper",
@@ -1178,6 +1281,9 @@ def main() -> None:
         f"notional={suggested_caps['max_notional_per_trade']:,} "
         f"exposure={suggested_caps['max_gross_exposure']:,}"
     )
+    if args.execute:
+        fidelity_status = "OK" if result["execution_evidence"].get("complete") else "BLOCKED"
+        print(f"  execution fidelity: {fidelity_status} - {result['execution_evidence'].get('reason', '')}")
     if result["evidence_collection"].get("attempted"):
         evidence_status = result["evidence_collection"].get("status", "unknown")
         evidence_reason = result["evidence_collection"].get("reason", "")
@@ -1196,6 +1302,8 @@ def main() -> None:
         if result["launch_artifacts"].get("runbook_path"):
             print(f"  runbook: {result['launch_artifacts']['runbook_path']}")
     print(f"  artifact: {result['artifact_path']}")
+    if args.execute and not result["execution_evidence"].get("complete", False):
+        raise SystemExit(1)
     if result["evidence_collection"].get("status") == "blocked":
         raise SystemExit(1)
 
