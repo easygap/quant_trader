@@ -731,6 +731,15 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 웹 대시보드 강화 | 전략별 신호, 주문 목록, API 사용량 표시 | 중기 |
 | WebSocket 갭 처리 | 재연결 시 REST API 보충 조회, 갭 중 급변 감지 | 중기 |
 
+### 다음 연구 방향 — 2026-04-29 기준
+
+| 항목 | 결정 |
+|------|------|
+| 기존 rotation 변형 추가 승격 | 보류. quick sweep에서 `NO_ALPHA_CANDIDATE` |
+| 즉시 canonical promotion | 진행하지 않음. benchmark excess gate 미달 |
+| 다음 후보 탐색 | 유니버스 확장, 다른 후보군 설계, benchmark 대비 초과수익/초과 Sharpe 우선 |
+| 운영 원칙 | paper/live gate는 유지. research artifact만으로 실전 전환 금지 |
+
 상세는 `quant_trader_design.md` §5.13, §5.14, §9.1, §10 참고.
 
 ---
