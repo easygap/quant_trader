@@ -267,6 +267,7 @@ def execute_plan(
     config: Any | None = None,
     dry_run: bool = True,
     stop_on_failure: bool = True,
+    pre_execution_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -290,6 +291,21 @@ def execute_plan(
                 "status": "dry_run",
             })
         return results
+
+    if pre_execution_reconciliation is None:
+        try:
+            pre_execution_reconciliation = reconcile_plan_starting_positions(
+                plan,
+                _load_positions(plan.candidate_id),
+            )
+        except Exception as exc:
+            logger.exception(
+                "target-weight pre-execution position reconciliation failed for {}",
+                plan.candidate_id,
+            )
+            pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
+    if not pre_execution_reconciliation["complete"]:
+        return blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
 
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
@@ -378,6 +394,21 @@ def _expected_position_quantities(plan: TargetWeightPlan) -> dict[str, int]:
     return dict(sorted(expected.items()))
 
 
+def _starting_position_quantities(plan: TargetWeightPlan) -> dict[str, int]:
+    if hasattr(plan, "starting_position_quantities"):
+        raw_expected = dict(plan.starting_position_quantities)
+    else:
+        raw_expected = {
+            order.symbol: int(order.current_quantity)
+            for order in plan.orders
+            if int(order.current_quantity) > 0
+        }
+    expected: dict[str, int] = {}
+    for raw_symbol, quantity in raw_expected.items():
+        expected[normalize_symbol(raw_symbol)] = int(quantity)
+    return dict(sorted(expected.items()))
+
+
 def _actual_position_quantities(positions: dict[str, Any] | None) -> dict[str, int]:
     actual: dict[str, int] = {}
     for raw_symbol, position in (positions or {}).items():
@@ -442,6 +473,68 @@ def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] |
     }
 
 
+def reconcile_plan_starting_positions(
+    plan: TargetWeightPlan,
+    positions: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected = _starting_position_quantities(plan)
+    actual_all = _actual_position_quantities(positions)
+    actual = {symbol: actual_all.get(symbol, 0) for symbol in expected}
+    mismatches = [
+        {
+            "symbol": symbol,
+            "expected_quantity": expected_quantity,
+            "actual_quantity": actual.get(symbol, 0),
+        }
+        for symbol, expected_quantity in expected.items()
+        if actual.get(symbol, 0) != expected_quantity
+    ]
+    unexpected_positions = [
+        {
+            "symbol": symbol,
+            "actual_quantity": quantity,
+        }
+        for symbol, quantity in sorted(actual_all.items())
+        if symbol not in expected and quantity > 0
+    ]
+    actual_quantities = dict(sorted(actual.items()))
+    actual_quantities.update({
+        symbol: quantity
+        for symbol, quantity in sorted(actual_all.items())
+        if symbol not in expected and quantity > 0
+    })
+    complete = len(mismatches) == 0 and len(unexpected_positions) == 0
+    reason = "pre-execution positions match target-weight plan inputs"
+    if not complete:
+        reason_parts = []
+        if mismatches:
+            mismatch_text = ", ".join(
+                (
+                    f"{item['symbol']} actual={item['actual_quantity']} "
+                    f"expected={item['expected_quantity']}"
+                )
+                for item in mismatches
+            )
+            reason_parts.append(f"mismatches: {mismatch_text}")
+        if unexpected_positions:
+            unexpected_text = ", ".join(
+                f"{item['symbol']} actual={item['actual_quantity']}"
+                for item in unexpected_positions
+            )
+            reason_parts.append(f"unexpected: {unexpected_text}")
+        reason = f"target_weight_pre_execution_position_drift: {'; '.join(reason_parts)}"
+
+    return {
+        "checked": True,
+        "complete": complete,
+        "reason": reason,
+        "expected_quantities": expected,
+        "actual_quantities": actual_quantities,
+        "mismatches": mismatches,
+        "unexpected_positions": unexpected_positions,
+    }
+
+
 def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
     expected = _expected_position_quantities(plan)
     return {
@@ -462,9 +555,56 @@ def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> 
     }
 
 
+def failed_starting_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
+    expected = _starting_position_quantities(plan)
+    return {
+        "checked": True,
+        "complete": False,
+        "reason": f"target_weight_pre_execution_reconciliation_failed: {error}",
+        "expected_quantities": expected,
+        "actual_quantities": {},
+        "mismatches": [
+            {
+                "symbol": symbol,
+                "expected_quantity": expected_quantity,
+                "actual_quantity": None,
+            }
+            for symbol, expected_quantity in expected.items()
+        ],
+        "unexpected_positions": [],
+    }
+
+
+def blocked_execution_for_pre_execution_drift(
+    plan: TargetWeightPlan,
+    pre_execution_reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    reason = pre_execution_reconciliation.get(
+        "reason",
+        "target_weight_pre_execution_position_drift",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "pre_execution_reconciliation": pre_execution_reconciliation,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_pre_execution_position_drift",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def summarize_execution_for_evidence(
     plan: TargetWeightPlan,
     execution: dict[str, Any],
+    pre_execution_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     planned = len(plan.orders)
@@ -473,6 +613,15 @@ def summarize_execution_for_evidence(
     skipped = int(execution.get("skipped", 0) or 0)
     halted = bool(execution.get("halted", False))
     order_complete = failed == 0 and skipped == 0 and not halted and executed == planned
+    pre_reconciliation = pre_execution_reconciliation or execution.get("pre_execution_reconciliation") or {
+        "checked": False,
+        "complete": True,
+        "reason": "pre-execution position reconciliation not required",
+        "expected_quantities": {},
+        "actual_quantities": {},
+        "mismatches": [],
+        "unexpected_positions": [],
+    }
     reconciliation = position_reconciliation or {
         "checked": False,
         "complete": True,
@@ -482,10 +631,13 @@ def summarize_execution_for_evidence(
         "mismatches": [],
         "unexpected_positions": [],
     }
+    pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     position_complete = bool(reconciliation.get("complete", False))
-    complete = order_complete and position_complete
+    complete = pre_execution_complete and order_complete and position_complete
     reason = "all planned target-weight orders executed"
-    if not order_complete:
+    if not pre_execution_complete:
+        reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
+    elif not order_complete:
         reason = (
             "target_weight_execution_incomplete: "
             f"executed={executed}/{planned} failed={failed} skipped={skipped} halted={halted}"
@@ -499,6 +651,7 @@ def summarize_execution_for_evidence(
     return {
         "complete": complete,
         "reason": reason,
+        "pre_execution_complete": pre_execution_complete,
         "order_complete": order_complete,
         "planned_orders": planned,
         "executed_orders": executed,
@@ -506,6 +659,7 @@ def summarize_execution_for_evidence(
         "skipped_orders": skipped,
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
+        "pre_execution_reconciliation": pre_reconciliation,
         "position_reconciliation": reconciliation,
         "params_hash": plan.params_hash,
         "target_symbols": list(plan.targets),
@@ -519,6 +673,7 @@ def build_pilot_evidence_caps_snapshot(
     plan: TargetWeightPlan,
     validation: Any,
     execution: dict[str, Any],
+    pre_execution_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     caps = dict(getattr(validation, "caps_snapshot", None) or {})
@@ -533,11 +688,13 @@ def build_pilot_evidence_caps_snapshot(
         "risk_off": plan.risk_off,
         "gross_exposure_after": plan.gross_exposure_after,
         "max_order_notional": plan.max_order_notional,
+        "position_quantities_before": _starting_position_quantities(plan),
         "target_quantities_after": _expected_position_quantities(plan),
     }
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
         execution,
+        pre_execution_reconciliation=pre_execution_reconciliation,
         position_reconciliation=position_reconciliation,
     )
     return caps
@@ -1038,9 +1195,32 @@ def run_pilot(
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
 
-    execution = execute_plan(plan, config=config, dry_run=dry_run)
-    position_reconciliation = None
+    pre_execution_reconciliation = None
     if execute:
+        try:
+            pre_execution_reconciliation = reconcile_plan_starting_positions(
+                plan,
+                _load_positions(plan.candidate_id),
+            )
+        except Exception as exc:
+            logger.exception(
+                "target-weight pre-execution position reconciliation failed for {}",
+                plan.candidate_id,
+            )
+            pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
+
+    if execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
+        execution = blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
+    else:
+        execution = execute_plan(
+            plan,
+            config=config,
+            dry_run=dry_run,
+            pre_execution_reconciliation=pre_execution_reconciliation,
+        )
+
+    position_reconciliation = None
+    if execute and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"]):
         try:
             position_reconciliation = reconcile_plan_positions(
                 plan,
@@ -1052,6 +1232,7 @@ def run_pilot(
     execution_evidence = summarize_execution_for_evidence(
         plan,
         execution,
+        pre_execution_reconciliation=pre_execution_reconciliation,
         position_reconciliation=position_reconciliation,
     )
     evidence_collection = {"attempted": False, "recorded": False}
@@ -1061,6 +1242,7 @@ def run_pilot(
             plan,
             validation,
             execution,
+            pre_execution_reconciliation=pre_execution_reconciliation,
             position_reconciliation=position_reconciliation,
         )
         pilot_session = {
