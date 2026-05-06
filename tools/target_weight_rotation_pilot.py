@@ -1088,6 +1088,100 @@ def build_pilot_evidence_caps_snapshot(
     return caps
 
 
+def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] | None:
+    from core.paper_evidence import get_canonical_records
+
+    for record in get_canonical_records(plan.candidate_id):
+        if record.get("date") == plan.trade_day:
+            return record
+    return None
+
+
+def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, Any]:
+    record = _latest_existing_evidence_record(plan)
+    result = {
+        "checked": True,
+        "valid": False,
+        "date": plan.trade_day,
+        "strategy": plan.candidate_id,
+        "reason": "",
+        "mismatches": [],
+        "record_summary": {},
+    }
+    if record is None:
+        result["reason"] = (
+            "target_weight_existing_evidence_missing: "
+            f"no canonical evidence record for {plan.candidate_id} {plan.trade_day}"
+        )
+        return result
+
+    caps = record.get("pilot_caps_snapshot") or {}
+    target_plan = caps.get("target_weight_plan") or {}
+    target_execution = caps.get("target_weight_execution") or {}
+    position_reconciliation = target_execution.get("position_reconciliation") or {}
+    order_result_reconciliation = target_execution.get("order_result_reconciliation") or {}
+    fill_reconciliation = target_execution.get("fill_reconciliation") or {}
+
+    result["record_summary"] = {
+        "date": record.get("date"),
+        "strategy": record.get("strategy"),
+        "evidence_mode": record.get("evidence_mode"),
+        "session_mode": record.get("session_mode"),
+        "execution_backed": record.get("execution_backed"),
+        "pilot_authorized": record.get("pilot_authorized"),
+        "target_weight_execution_complete": target_execution.get("complete"),
+        "params_hash": target_plan.get("params_hash") or target_execution.get("params_hash"),
+    }
+
+    checks = [
+        ("record.strategy", record.get("strategy"), plan.candidate_id),
+        ("record.evidence_mode", record.get("evidence_mode"), "pilot_paper"),
+        ("record.session_mode", record.get("session_mode"), "pilot_paper"),
+        ("record.execution_backed", record.get("execution_backed"), True),
+        ("record.pilot_authorized", record.get("pilot_authorized"), True),
+        ("target_weight_plan.candidate_id", target_plan.get("candidate_id"), plan.candidate_id),
+        ("target_weight_plan.trade_day", target_plan.get("trade_day"), plan.trade_day),
+        ("target_weight_plan.params_hash", target_plan.get("params_hash"), plan.params_hash),
+        ("target_weight_execution.params_hash", target_execution.get("params_hash"), plan.params_hash),
+        ("target_weight_execution.complete", target_execution.get("complete"), True),
+        ("target_weight_execution.planned_orders", target_execution.get("planned_orders"), len(plan.orders)),
+        ("target_weight_execution.idempotency_allowed", target_execution.get("idempotency_allowed"), True),
+        ("target_weight_execution.pre_execution_complete", target_execution.get("pre_execution_complete"), True),
+        ("target_weight_execution.order_count_complete", target_execution.get("order_count_complete"), True),
+        ("target_weight_execution.order_result_complete", target_execution.get("order_result_complete"), True),
+        ("target_weight_execution.order_complete", target_execution.get("order_complete"), True),
+        (
+            "target_weight_execution.order_result_reconciliation.complete",
+            order_result_reconciliation.get("complete"),
+            True,
+        ),
+        ("target_weight_execution.fill_complete", target_execution.get("fill_complete"), True),
+        ("target_weight_execution.fill_reconciliation.complete", fill_reconciliation.get("complete"), True),
+        ("target_weight_execution.position_reconciliation.complete", position_reconciliation.get("complete"), True),
+    ]
+    for field, actual, expected in checks:
+        if actual != expected:
+            result["mismatches"].append({
+                "field": field,
+                "expected": expected,
+                "actual": actual,
+            })
+
+    if result["mismatches"]:
+        preview = ", ".join(
+            f"{item['field']} actual={item['actual']} expected={item['expected']}"
+            for item in result["mismatches"][:5]
+        )
+        if len(result["mismatches"]) > 5:
+            preview = f"{preview}, +{len(result['mismatches']) - 5} more"
+        result["reason"] = f"target_weight_existing_evidence_invalid: {preview}"
+        return result
+
+    result["valid"] = True
+    result["reason"] = "existing pilot_paper evidence verified"
+    return result
+
+
 def write_session_artifact(
     *,
     plan: TargetWeightPlan,
@@ -1708,12 +1802,28 @@ def run_pilot(
                     pilot_authorized=True,
                     pilot_caps_snapshot=evidence_caps_snapshot,
                 )
-                evidence_collection.update({
-                    "recorded": evidence_record is not None,
-                    "status": "recorded" if evidence_record is not None else "already_recorded",
-                    "reason": "pilot_paper evidence recorded"
-                    if evidence_record is not None else "pilot_paper evidence already recorded",
-                })
+                if evidence_record is not None:
+                    evidence_collection.update({
+                        "recorded": True,
+                        "status": "recorded",
+                        "reason": "pilot_paper evidence recorded",
+                    })
+                else:
+                    existing_evidence = verify_existing_pilot_evidence_record(plan)
+                    if existing_evidence["valid"]:
+                        evidence_collection.update({
+                            "recorded": False,
+                            "status": "already_recorded",
+                            "reason": "existing pilot_paper evidence verified",
+                            "existing_evidence": existing_evidence,
+                        })
+                    else:
+                        evidence_collection.update({
+                            "recorded": False,
+                            "status": "blocked",
+                            "reason": existing_evidence["reason"],
+                            "existing_evidence": existing_evidence,
+                        })
 
     shadow_evidence_record = None
     shadow_evidence_summary = {"attempted": False, "recorded": False}
