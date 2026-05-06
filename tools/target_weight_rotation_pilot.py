@@ -23,6 +23,7 @@ from core.target_weight_rotation import (
     TargetWeightPlan,
     build_target_weight_plan,
     load_canonical_target_weight_spec,
+    normalize_symbol,
     validate_plan_against_pilot,
 )
 
@@ -366,12 +367,29 @@ def _position_quantity(position: Any) -> int:
     return int(getattr(position, "quantity", 0) or 0)
 
 
+def _expected_position_quantities(plan: TargetWeightPlan) -> dict[str, int]:
+    if hasattr(plan, "expected_position_quantities"):
+        raw_expected = dict(plan.expected_position_quantities)
+    else:
+        raw_expected = {order.symbol: int(order.target_quantity) for order in plan.orders}
+    expected: dict[str, int] = {}
+    for raw_symbol, quantity in raw_expected.items():
+        expected[normalize_symbol(raw_symbol)] = int(quantity)
+    return dict(sorted(expected.items()))
+
+
+def _actual_position_quantities(positions: dict[str, Any] | None) -> dict[str, int]:
+    actual: dict[str, int] = {}
+    for raw_symbol, position in (positions or {}).items():
+        symbol = normalize_symbol(raw_symbol)
+        actual[symbol] = actual.get(symbol, 0) + _position_quantity(position)
+    return actual
+
+
 def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] | None) -> dict[str, Any]:
-    expected = {order.symbol: int(order.target_quantity) for order in plan.orders}
-    actual = {
-        symbol: _position_quantity((positions or {}).get(symbol))
-        for symbol in expected
-    }
+    expected = _expected_position_quantities(plan)
+    actual_all = _actual_position_quantities(positions)
+    actual = {symbol: actual_all.get(symbol, 0) for symbol in expected}
     mismatches = [
         {
             "symbol": symbol,
@@ -381,27 +399,51 @@ def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] |
         for symbol, target_quantity in expected.items()
         if actual.get(symbol, 0) != target_quantity
     ]
-    complete = len(mismatches) == 0
+    unexpected_positions = [
+        {
+            "symbol": symbol,
+            "actual_quantity": quantity,
+        }
+        for symbol, quantity in sorted(actual_all.items())
+        if symbol not in expected and quantity > 0
+    ]
+    actual_quantities = dict(sorted(actual.items()))
+    actual_quantities.update({
+        symbol: quantity
+        for symbol, quantity in sorted(actual_all.items())
+        if symbol not in expected and quantity > 0
+    })
+    complete = len(mismatches) == 0 and len(unexpected_positions) == 0
     reason = "post-execution positions match target-weight plan"
     if not complete:
-        mismatch_text = ", ".join(
-            f"{item['symbol']} actual={item['actual_quantity']} target={item['target_quantity']}"
-            for item in mismatches
-        )
-        reason = f"target_weight_position_mismatch: {mismatch_text}"
+        reason_parts = []
+        if mismatches:
+            mismatch_text = ", ".join(
+                f"{item['symbol']} actual={item['actual_quantity']} target={item['target_quantity']}"
+                for item in mismatches
+            )
+            reason_parts.append(f"mismatches: {mismatch_text}")
+        if unexpected_positions:
+            unexpected_text = ", ".join(
+                f"{item['symbol']} actual={item['actual_quantity']}"
+                for item in unexpected_positions
+            )
+            reason_parts.append(f"unexpected: {unexpected_text}")
+        reason = f"target_weight_position_mismatch: {'; '.join(reason_parts)}"
 
     return {
         "checked": True,
         "complete": complete,
         "reason": reason,
         "expected_quantities": expected,
-        "actual_quantities": actual,
+        "actual_quantities": actual_quantities,
         "mismatches": mismatches,
+        "unexpected_positions": unexpected_positions,
     }
 
 
 def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
-    expected = {order.symbol: int(order.target_quantity) for order in plan.orders}
+    expected = _expected_position_quantities(plan)
     return {
         "checked": True,
         "complete": False,
@@ -416,6 +458,7 @@ def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> 
             }
             for symbol, target_quantity in expected.items()
         ],
+        "unexpected_positions": [],
     }
 
 
@@ -437,6 +480,7 @@ def summarize_execution_for_evidence(
         "expected_quantities": {},
         "actual_quantities": {},
         "mismatches": [],
+        "unexpected_positions": [],
     }
     position_complete = bool(reconciliation.get("complete", False))
     complete = order_complete and position_complete
@@ -489,6 +533,7 @@ def build_pilot_evidence_caps_snapshot(
         "risk_off": plan.risk_off,
         "gross_exposure_after": plan.gross_exposure_after,
         "max_order_notional": plan.max_order_notional,
+        "target_quantities_after": _expected_position_quantities(plan),
     }
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
