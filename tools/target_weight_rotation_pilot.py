@@ -499,10 +499,21 @@ def check_execution_idempotency(
         "previous_orders_executed": pilot_session.get("orders_executed"),
     })
     if allow_rerun:
+        previous_complete = bool(pilot_session.get("execution_complete", False))
+        previous_orders_executed = int(pilot_session.get("orders_executed") or 0)
+        if previous_complete and previous_orders_executed > 0:
+            return {
+                **result,
+                "allowed": False,
+                "reason": (
+                    "target_weight_completed_execution_rerun_blocked: "
+                    f"existing completed pilot session for {plan.candidate_id} {plan.trade_day}"
+                ),
+            }
         return {
             **result,
             "allowed": True,
-            "reason": "operator allowed target-weight pilot rerun",
+            "reason": "operator allowed incomplete target-weight pilot rerun",
         }
     return {
         **result,
@@ -1560,14 +1571,14 @@ def assess_plan_liquidity(
     symbols = liquidity.get("symbols") or {}
     if not symbols:
         return {
-            "checked": False,
-            "complete": True,
-            "reason": "target_weight_liquidity_preflight_unavailable: plan has no liquidity diagnostics",
+            "checked": True,
+            "complete": False,
+            "reason": "target_weight_liquidity_preflight_failed: missing liquidity diagnostics",
             "lookback_days": int(lookback_days),
             "max_order_adv_pct": float(max_order_adv_pct),
             "orders_checked": 0,
             "orders": [],
-            "violations": [],
+            "violations": ["missing liquidity diagnostics"],
         }
 
     orders: list[dict[str, Any]] = []
@@ -2804,7 +2815,10 @@ def main() -> None:
     parser.add_argument(
         "--allow-rerun",
         action="store_true",
-        help="Explicitly allow a same-candidate/trade-day execute rerun when a pilot session artifact already exists.",
+        help=(
+            "Explicitly allow recovery rerun only for incomplete/interrupted "
+            "same-candidate/trade-day pilot sessions."
+        ),
     )
     parser.add_argument("--preview-max-orders", type=int, help="Proposed pilot cap preview: max orders/day.")
     parser.add_argument("--preview-max-positions", type=int, help="Proposed pilot cap preview: max concurrent positions.")

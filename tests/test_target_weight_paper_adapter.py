@@ -303,6 +303,129 @@ def test_target_weight_pilot_help_lists_shadow_days():
     assert "--allow-rerun" in result.stdout
 
 
+def test_target_weight_pilot_control_enable_guard_blocks_requested_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    calls = {}
+
+    def fake_build_preview_caps(**kwargs):
+        calls["caps"] = kwargs
+        return {"requested": True}
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        calls["audit"] = kwargs
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": False,
+                    "reason": "max order notional exceeds cap",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.build_preview_caps",
+        fake_build_preview_caps,
+    )
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=2,
+        max_positions=2,
+        max_notional=1_000_000,
+        max_exposure=3_000_000,
+    )
+
+    with pytest.raises(ValueError, match="requested target-weight pilot caps"):
+        _target_weight_enable_guard(args)
+
+    assert calls["caps"] == {
+        "max_orders": 2,
+        "max_positions": 2,
+        "max_notional": 1_000_000,
+        "max_exposure": 3_000_000,
+    }
+    assert calls["audit"]["preview_caps"] == {"requested": True}
+
+
+def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "proposed pilot caps satisfied",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    result = _target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+
+
+def test_paper_pilot_control_enable_stops_before_auth_when_target_weight_guard_fails(
+    monkeypatch,
+    capsys,
+):
+    import core.paper_pilot as pp
+    import tools.paper_pilot_control as ppc
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+
+    monkeypatch.setattr(pp, "check_pilot_prerequisites", lambda strategy: (True, "ok"))
+    monkeypatch.setattr(pp, "enable_pilot", lambda *args, **kwargs: pytest.fail("pilot auth must not be written"))
+    monkeypatch.setattr(
+        ppc,
+        "_target_weight_enable_guard",
+        lambda args: (_ for _ in ()).throw(ValueError("target-weight audit blocked")),
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        valid_to="2026-04-30",
+        max_orders=2,
+        max_positions=2,
+        max_notional=1_000_000,
+        max_exposure=3_000_000,
+        reason="test",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        ppc.run_enable(args)
+
+    assert exc.value.code == 1
+    assert "target-weight audit blocked" in capsys.readouterr().out
+
+
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
@@ -633,6 +756,7 @@ def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
             dry_run=False,
+            liquidity_check={"checked": True, "complete": True, "reason": "ok"},
             pre_trade_risk_check={"checked": True, "complete": True, "reason": "ok"},
         )
 
@@ -882,6 +1006,19 @@ def test_assess_plan_liquidity_blocks_large_adv_order():
     assert liquidity["orders"][0]["symbol"] == "AAA"
     assert liquidity["orders"][0]["order_adv_pct"] == 11.0
     assert "AAA" in liquidity["violations"][0]
+
+
+def test_assess_plan_liquidity_blocks_missing_diagnostics():
+    from tools.target_weight_rotation_pilot import assess_plan_liquidity
+
+    plan = replace(_adapter_plan(), diagnostics={"missing_symbols": []})
+
+    liquidity = assess_plan_liquidity(plan)
+
+    assert liquidity["checked"] is True
+    assert liquidity["complete"] is False
+    assert "target_weight_liquidity_preflight_failed" in liquidity["reason"]
+    assert "missing liquidity diagnostics" in liquidity["violations"]
 
 
 def test_assess_plan_pre_trade_risk_passes_when_cash_covers_costed_orders():
@@ -1317,6 +1454,62 @@ def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_p
     assert any("liquidity_preflight" in reason for reason in audit["blocking_reasons"])
     assert "BLOCKED" in report_text
     assert "target_weight_liquidity_preflight_failed" in report_text
+
+
+def test_run_pilot_readiness_audit_blocks_missing_liquidity_diagnostics(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = replace(_adapter_plan(), diagnostics={"missing_symbols": []})
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    audit = result["audit"]
+    report_text = result["report_path"].read_text(encoding="utf-8")
+
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["liquidity_check"]["complete"] is False
+    assert any("missing liquidity diagnostics" in reason for reason in audit["blocking_reasons"])
+    assert "missing liquidity diagnostics" in report_text
 
 
 def test_run_pilot_readiness_audit_blocks_pre_trade_risk(monkeypatch, tmp_path):
@@ -1969,6 +2162,112 @@ def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_duplicate_execution_attempt" in result["evidence_collection"]["reason"]
     assert payload["execution_idempotency"]["allowed"] is False
+
+
+def test_check_execution_idempotency_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    from tools.target_weight_rotation_pilot import check_execution_idempotency
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    idempotency = check_execution_idempotency(plan, allow_rerun=True)
+
+    assert idempotency["allowed"] is False
+    assert idempotency["allow_rerun"] is True
+    assert "target_weight_completed_execution_rerun_blocked" in idempotency["reason"]
+
+
+def test_run_pilot_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("completed rerun must not overwrite prior pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("completed rerun must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("completed rerun must block before position reads"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("completed rerun must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        allow_rerun=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["execution_idempotency"]["allowed"] is False
+    assert "target_weight_completed_execution_rerun_blocked" in result["execution_idempotency"]["reason"]
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["halted"] is True
+    assert result["evidence_collection"]["status"] == "blocked"
 
 
 def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp_path):
