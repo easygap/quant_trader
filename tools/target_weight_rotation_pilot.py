@@ -1410,6 +1410,25 @@ def _plan_summary(plan: TargetWeightPlan) -> dict[str, Any]:
     }
 
 
+def _build_readiness_operator_commands(
+    plan: TargetWeightPlan,
+    cap_recommendation: dict[str, Any],
+) -> dict[str, str]:
+    base = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {plan.candidate_id} --as-of-date {plan.as_of_date}"
+    )
+    return {
+        "collect_shadow_days": (
+            "python tools/target_weight_rotation_pilot.py "
+            f"--candidate-id {plan.candidate_id} --shadow-days 3 --shadow-end-date {plan.as_of_date}"
+        ),
+        "rerun_readiness_audit": f"{base} --readiness-audit",
+        "enable_suggested_caps": str(cap_recommendation.get("enable_command", "")).strip(),
+        "execute_capped_paper": f"{base} --execute --collect-evidence",
+    }
+
+
 def build_pilot_readiness_audit(
     *,
     plan: TargetWeightPlan,
@@ -1493,6 +1512,7 @@ def build_pilot_readiness_audit(
         "next_action": next_action,
         "blocking_reasons": blockers,
         "warning_reasons": warnings,
+        "operator_commands": _build_readiness_operator_commands(plan, cap_recommendation),
         "plan_summary": _plan_summary(plan),
         "pilot_check": _pilot_check_to_dict(pilot_check),
         "plan_validation": asdict(validation),
@@ -1512,17 +1532,115 @@ def build_pilot_readiness_audit(
     }
 
 
+def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
+    return f"target_weight_pilot_readiness_audit_{audit['candidate_id']}_{audit['trade_day']}"
+
+
+def _audit_display_status(audit: dict[str, Any]) -> str:
+    if audit.get("ready_for_capped_pilot"):
+        return "READY"
+    if audit.get("ready_for_cap_approval"):
+        return "CAP_APPROVAL_READY"
+    return "BLOCKED"
+
+
+def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
+    plan = audit["plan_summary"]
+    launch = audit["launch_readiness"]
+    caps = audit["cap_recommendation"]["suggested_caps"]
+    commands = audit.get("operator_commands", {})
+    lines = [
+        "# Target-weight Pilot Readiness Audit",
+        "",
+        f"- Candidate: `{audit['candidate_id']}`",
+        f"- Trade day: `{audit['trade_day']}`",
+        f"- Generated: `{audit['generated_at']}`",
+        f"- Status: **{_audit_display_status(audit)}**",
+        f"- Next action: {audit['next_action']}",
+        "",
+        "## Plan",
+        f"- Score day: `{plan['score_day']}`",
+        f"- Targets: {', '.join(plan['targets']) if plan['targets'] else '(none)'}",
+        f"- Orders: {plan['order_count']}",
+        f"- Target positions: {plan['target_position_count']}",
+        f"- Max order notional: {plan['max_order_notional']:,.0f}",
+        f"- Gross exposure after rebalance: {plan['gross_exposure_after']:,.0f}",
+        f"- Target exposure: {plan['target_exposure']:.2%}",
+        "",
+        "## Launch Readiness",
+        f"- Clean final days: {launch['clean_final_days_current']}/{launch['clean_final_days_required']}",
+        f"- Infrastructure ready: {'YES' if launch['infra_ready'] else 'NO'}",
+        f"- Pilot authorization present: {'YES' if launch.get('pilot_authorization_present') else 'NO'}",
+        f"- Launch ready: {'YES' if launch['launch_ready'] else 'NO'}",
+        f"- Runtime state: `{launch.get('runtime_state', 'unknown')}`",
+        "",
+        "## Suggested Caps",
+        f"- max_orders_per_day: {caps['max_orders_per_day']}",
+        f"- max_concurrent_positions: {caps['max_concurrent_positions']}",
+        f"- max_notional_per_trade: {caps['max_notional_per_trade']:,}",
+        f"- max_gross_exposure: {caps['max_gross_exposure']:,}",
+        "",
+        "## Blocking Reasons",
+    ]
+    blockers = audit.get("blocking_reasons") or []
+    lines.extend([f"- {reason}" for reason in blockers] or ["- none"])
+    lines.extend(["", "## Warnings"])
+    warnings = audit.get("warning_reasons") or []
+    lines.extend([f"- {reason}" for reason in warnings] or ["- none"])
+    lines.extend([
+        "",
+        "## Operator Commands",
+        "",
+        "### Collect Shadow Days",
+        "```bash",
+        commands.get("collect_shadow_days", ""),
+        "```",
+        "",
+        "### Rerun Readiness Audit",
+        "```bash",
+        commands.get("rerun_readiness_audit", ""),
+        "```",
+        "",
+        "### Enable Suggested Caps",
+        "```bash",
+        commands.get("enable_suggested_caps", ""),
+        "```",
+        "",
+        "### Execute Capped Paper",
+        "```bash",
+        commands.get("execute_capped_paper", ""),
+        "```",
+        "",
+        "## No-order Safety",
+        "- orders_submitted: false",
+        "- shadow_evidence_recorded: false",
+        "- pilot_evidence_recorded: false",
+        "- pilot_session_written: false",
+        "",
+        "This audit is an operator checkpoint. It does not imply live eligibility.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def write_pilot_readiness_audit_artifact(
     audit: dict[str, Any],
     *,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / (
-        "target_weight_pilot_readiness_audit_"
-        f"{audit['candidate_id']}_{audit['trade_day']}.json"
-    )
+    path = output_dir / f"{_pilot_readiness_audit_path_stem(audit)}.json"
     path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def write_pilot_readiness_audit_report(
+    audit: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{_pilot_readiness_audit_path_stem(audit)}.md"
+    path.write_text(render_pilot_readiness_audit_markdown(audit), encoding="utf-8")
     return path
 
 
@@ -1586,10 +1704,12 @@ def run_pilot_readiness_audit(
         trading_mode=trading_mode,
     )
     artifact_path = write_pilot_readiness_audit_artifact(audit, output_dir=output_dir)
+    report_path = write_pilot_readiness_audit_report(audit, output_dir=output_dir)
     return {
         "plan": plan,
         "audit": audit,
         "artifact_path": artifact_path,
+        "report_path": report_path,
     }
 
 
@@ -2263,9 +2383,7 @@ def main() -> None:
         launch = audit["launch_readiness"]
         cap_rec = audit["cap_recommendation"]
         suggested_caps = cap_rec["suggested_caps"]
-        status = "READY" if audit["ready_for_capped_pilot"] else (
-            "CAP_APPROVAL_READY" if audit["ready_for_cap_approval"] else "BLOCKED"
-        )
+        status = _audit_display_status(audit)
         print("\nTarget-weight pilot readiness audit")
         print(f"  candidate: {audit['candidate_id']}")
         print(f"  trade_day: {audit['trade_day']} score_day: {plan_summary['score_day']}")
@@ -2302,7 +2420,10 @@ def main() -> None:
         for reason in audit["warning_reasons"][:5]:
             print(f"  warning: {reason}")
         print(f"  next: {audit['next_action']}")
+        if audit.get("operator_commands", {}).get("enable_suggested_caps"):
+            print("  enable command: see report")
         print(f"  artifact: {result['artifact_path']}")
+        print(f"  report: {result['report_path']}")
         if not audit["ready_for_cap_approval"]:
             raise SystemExit(1)
         return
