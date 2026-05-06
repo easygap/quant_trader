@@ -66,6 +66,7 @@ class TargetWeightPlan:
     orders: list[TargetWeightOrder]
     diagnostics: dict[str, Any]
     target_quantities_after: dict[str, int] | None = None
+    position_quantities_before: dict[str, int] | None = None
 
     @property
     def max_order_notional(self) -> float:
@@ -87,6 +88,19 @@ class TargetWeightPlan:
                 for symbol, quantity in self.target_quantities_after.items()
             }
         return {order.symbol: int(order.target_quantity) for order in self.orders}
+
+    @property
+    def starting_position_quantities(self) -> dict[str, int]:
+        if self.position_quantities_before is not None:
+            return {
+                symbol: int(quantity)
+                for symbol, quantity in self.position_quantities_before.items()
+            }
+        return {
+            order.symbol: int(order.current_quantity)
+            for order in self.orders
+            if int(order.current_quantity) > 0
+        }
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -478,6 +492,10 @@ def build_target_weight_plan(
         projected_qty[sym] = scaled_target_qty
 
     orders = [*sell_orders, *buy_orders]
+    position_quantities_before = {
+        sym: int(pos["quantity"])
+        for sym, pos in sorted(current_positions.items())
+    }
     target_quantities_after = {
         sym: int(projected_qty.get(sym, 0))
         for sym in sorted(desired_qty)
@@ -517,6 +535,7 @@ def build_target_weight_plan(
             "generated_at": datetime.now().isoformat(),
         },
         target_quantities_after=target_quantities_after,
+        position_quantities_before=position_quantities_before,
     )
 
 
