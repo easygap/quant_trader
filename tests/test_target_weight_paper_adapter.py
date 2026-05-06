@@ -177,6 +177,38 @@ def _complete_fills(plan):
     ]
 
 
+def _existing_pilot_evidence_record(plan):
+    return {
+        "date": plan.trade_day,
+        "strategy": plan.candidate_id,
+        "evidence_mode": "pilot_paper",
+        "session_mode": "pilot_paper",
+        "execution_backed": True,
+        "pilot_authorized": True,
+        "pilot_caps_snapshot": {
+            "target_weight_plan": {
+                "candidate_id": plan.candidate_id,
+                "trade_day": plan.trade_day,
+                "params_hash": plan.params_hash,
+            },
+            "target_weight_execution": {
+                "complete": True,
+                "params_hash": plan.params_hash,
+                "planned_orders": len(plan.orders),
+                "idempotency_allowed": True,
+                "pre_execution_complete": True,
+                "order_count_complete": True,
+                "order_result_complete": True,
+                "order_complete": True,
+                "order_result_reconciliation": {"complete": True},
+                "fill_complete": True,
+                "fill_reconciliation": {"complete": True},
+                "position_reconciliation": {"complete": True},
+            },
+        },
+    }
+
+
 def _adapter_plan_for_date(day: str):
     score_day = {
         "2026-04-08": "2026-04-07",
@@ -644,6 +676,39 @@ def test_reconcile_plan_fills_flags_partial_quantity():
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[0].symbol
     assert reconciliation["mismatches"][0]["expected_quantity"] == plan.orders[0].quantity
     assert reconciliation["mismatches"][0]["actual_quantity"] == plan.orders[0].quantity - 1
+
+
+def test_verify_existing_pilot_evidence_accepts_complete_record(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [_existing_pilot_evidence_record(plan)])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is True
+    assert verification["reason"] == "existing pilot_paper evidence verified"
+
+
+def test_verify_existing_pilot_evidence_rejects_non_pilot_record(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    record["evidence_mode"] = "real_paper"
+    record["session_mode"] = "normal_paper"
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} >= {
+        "record.evidence_mode",
+        "record.session_mode",
+    }
 
 
 def test_preview_plan_against_caps_flags_default_pilot_caps():
@@ -1441,6 +1506,126 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
     assert caps["target_weight_plan"]["position_quantities_before"] == {}
+    assert saved_sessions[0]["execution_complete"] is True
+
+
+def test_run_pilot_accepts_verified_already_recorded_pilot_evidence(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(pe, "collect_daily_evidence", lambda **kwargs: None)
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [_existing_pilot_evidence_record(plan)])
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_evidence"]["complete"] is True
+    assert result["evidence_collection"]["status"] == "already_recorded"
+    assert result["evidence_collection"]["existing_evidence"]["valid"] is True
+    assert payload["evidence_collection"]["existing_evidence"]["valid"] is True
+    assert saved_sessions[0]["execution_complete"] is True
+
+
+def test_run_pilot_blocks_unverified_already_recorded_evidence(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    stale_record = _existing_pilot_evidence_record(plan)
+    stale_record["evidence_mode"] = "real_paper"
+    stale_record["session_mode"] = "normal_paper"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(pe, "collect_daily_evidence", lambda **kwargs: None)
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [stale_record])
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_evidence"]["complete"] is True
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_existing_evidence_invalid" in result["evidence_collection"]["reason"]
+    assert result["evidence_collection"]["existing_evidence"]["valid"] is False
+    assert payload["evidence_collection"]["status"] == "blocked"
     assert saved_sessions[0]["execution_complete"] is True
 
 
