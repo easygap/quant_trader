@@ -862,7 +862,12 @@ class TestPilotSessionE2E:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        from core.paper_pilot import save_pilot_session_artifact, enable_pilot
+        from core.paper_pilot import (
+            enable_pilot,
+            load_pilot_session_artifact,
+            pilot_session_artifact_path,
+            save_pilot_session_artifact,
+        )
 
         (runtime_dir).mkdir(parents=True, exist_ok=True)
         (runtime_dir / "notifier_health.json").write_text(
@@ -882,6 +887,8 @@ class TestPilotSessionE2E:
         assert artifact["strategy"] == PILOT_STRATEGY
         assert artifact["pilot_session"]["active"] is True
         assert artifact["evidence_snapshot"] is not None
+        assert pilot_session_artifact_path(PILOT_STRATEGY, "2026-04-07") == json_path
+        assert load_pilot_session_artifact(PILOT_STRATEGY, "2026-04-07")["strategy"] == PILOT_STRATEGY
 
         md_path = runtime_dir / f"pilot_session_{PILOT_STRATEGY}_2026-04-07.md"
         assert md_path.exists()
