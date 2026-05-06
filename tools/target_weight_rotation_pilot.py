@@ -272,6 +272,7 @@ def execute_plan(
     pre_execution_reconciliation: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
+    pre_trade_risk_check: dict[str, Any] | None = None,
     max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     allow_rerun: bool = False,
 ) -> dict[str, Any]:
@@ -337,6 +338,15 @@ def execute_plan(
     if liquidity_check is not None and not liquidity_check.get("complete", False):
         return blocked_execution_for_liquidity(plan, liquidity_check)
 
+    if pre_trade_risk_check is None:
+        try:
+            pre_trade_risk_check = assess_plan_pre_trade_risk(plan, config=config)
+        except Exception as exc:
+            logger.exception("target-weight pre-trade risk validation failed for {}", plan.candidate_id)
+            pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
+    if pre_trade_risk_check is not None and not pre_trade_risk_check.get("complete", False):
+        return blocked_execution_for_pre_trade_risk(plan, pre_trade_risk_check)
+
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
 
@@ -356,14 +366,17 @@ def execute_plan(
 
         try:
             if order.action == "SELL":
+                avg_daily_volume = _avg_daily_volume_for_order(plan, order)
                 res = executor.execute_sell(
                     symbol=order.symbol,
                     price=order.price,
                     quantity=order.quantity,
                     reason=order.reason,
                     strategy=plan.candidate_id,
+                    avg_daily_volume=avg_daily_volume,
                 )
             else:
+                avg_daily_volume = _avg_daily_volume_for_order(plan, order)
                 available_cash = portfolio.get_available_cash()
                 total_value = portfolio.get_total_value()
                 res = executor.execute_buy_quantity(
@@ -374,6 +387,7 @@ def execute_plan(
                     available_cash=available_cash,
                     reason=order.reason,
                     strategy=plan.candidate_id,
+                    avg_daily_volume=avg_daily_volume,
                 )
             status = "success" if res.get("success") else "failed"
             if res.get("success"):
@@ -736,6 +750,32 @@ def blocked_execution_for_liquidity(
     }
 
 
+def blocked_execution_for_pre_trade_risk(
+    plan: TargetWeightPlan,
+    pre_trade_risk_check: dict[str, Any],
+) -> dict[str, Any]:
+    reason = pre_trade_risk_check.get(
+        "reason",
+        "target_weight_pre_trade_risk_failed",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "pre_trade_risk_check": pre_trade_risk_check,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_pre_trade_risk",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def reconcile_order_results(plan: TargetWeightPlan, execution: dict[str, Any]) -> dict[str, Any]:
     details = list(execution.get("details") or [])
     mismatches: list[dict[str, Any]] = []
@@ -994,6 +1034,7 @@ def summarize_execution_for_evidence(
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
+    pre_trade_risk_check: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1039,6 +1080,14 @@ def summarize_execution_for_evidence(
         "orders": [],
         "violations": [],
     }
+    pre_trade_risk = pre_trade_risk_check or execution.get("pre_trade_risk_check") or {
+        "checked": False,
+        "complete": True,
+        "reason": "pre-trade risk validation not required",
+        "violations": [],
+        "order_costs": [],
+        "cost_summary": {},
+    }
     reconciliation = position_reconciliation or {
         "checked": False,
         "complete": True,
@@ -1051,12 +1100,14 @@ def summarize_execution_for_evidence(
     idempotency_allowed = bool(idempotency.get("allowed", False))
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     liquidity_complete = bool(liquidity.get("complete", False))
+    pre_trade_risk_complete = bool(pre_trade_risk.get("complete", False))
     fill_complete = bool(fill_reconciliation.get("complete", False))
     position_complete = bool(reconciliation.get("complete", False))
     complete = (
         idempotency_allowed
         and pre_execution_complete
         and liquidity_complete
+        and pre_trade_risk_complete
         and order_complete
         and fill_complete
         and position_complete
@@ -1068,6 +1119,8 @@ def summarize_execution_for_evidence(
         reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
     elif not liquidity_complete:
         reason = liquidity.get("reason", "target_weight_liquidity_preflight_failed")
+    elif not pre_trade_risk_complete:
+        reason = pre_trade_risk.get("reason", "target_weight_pre_trade_risk_failed")
     elif not order_count_complete:
         reason = (
             "target_weight_execution_incomplete: "
@@ -1089,6 +1142,7 @@ def summarize_execution_for_evidence(
         "idempotency_allowed": idempotency_allowed,
         "pre_execution_complete": pre_execution_complete,
         "liquidity_complete": liquidity_complete,
+        "pre_trade_risk_complete": pre_trade_risk_complete,
         "order_complete": order_complete,
         "order_count_complete": order_count_complete,
         "order_result_complete": order_result_complete,
@@ -1102,6 +1156,7 @@ def summarize_execution_for_evidence(
         "execution_idempotency": idempotency,
         "pre_execution_reconciliation": pre_reconciliation,
         "liquidity_check": liquidity,
+        "pre_trade_risk_check": pre_trade_risk,
         "order_result_reconciliation": order_result_reconciliation,
         "fill_reconciliation": fill_reconciliation,
         "position_reconciliation": reconciliation,
@@ -1120,6 +1175,7 @@ def build_pilot_evidence_caps_snapshot(
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
+    pre_trade_risk_check: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1144,6 +1200,7 @@ def build_pilot_evidence_caps_snapshot(
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
+        pre_trade_risk_check=pre_trade_risk_check,
         fill_reconciliation=fill_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -1210,6 +1267,7 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("target_weight_execution.idempotency_allowed", target_execution.get("idempotency_allowed"), True),
         ("target_weight_execution.pre_execution_complete", target_execution.get("pre_execution_complete"), True),
         ("target_weight_execution.liquidity_complete", target_execution.get("liquidity_complete"), True),
+        ("target_weight_execution.pre_trade_risk_complete", target_execution.get("pre_trade_risk_complete"), True),
         ("target_weight_execution.order_count_complete", target_execution.get("order_count_complete"), True),
         ("target_weight_execution.order_result_complete", target_execution.get("order_result_complete"), True),
         ("target_weight_execution.order_complete", target_execution.get("order_complete"), True),
@@ -1253,6 +1311,7 @@ def write_session_artifact(
     cap_preview: Any,
     cap_recommendation: dict[str, Any],
     liquidity_check: dict[str, Any],
+    pre_trade_risk_check: dict[str, Any],
     execution: dict[str, Any],
     dry_run: bool,
     execution_idempotency: dict[str, Any] | None = None,
@@ -1274,6 +1333,7 @@ def write_session_artifact(
         "cap_preview": asdict(cap_preview),
         "cap_recommendation": cap_recommendation,
         "liquidity_check": liquidity_check,
+        "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
         "execution_idempotency": execution_idempotency or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
@@ -1364,6 +1424,8 @@ def append_target_weight_cap_section(
     suggested_status = "PASS" if suggested_preview.get("allowed") else "BLOCKED"
     liquidity_check = assess_plan_liquidity(plan)
     liquidity_status = "PASS" if liquidity_check["complete"] else "BLOCKED"
+    pre_trade_risk_check = assess_plan_pre_trade_risk(plan)
+    pre_trade_risk_status = "PASS" if pre_trade_risk_check["complete"] else "BLOCKED"
     existing = runbook_path.read_text(encoding="utf-8") if runbook_path.exists() else ""
     section = [
         "",
@@ -1391,6 +1453,12 @@ def append_target_weight_cap_section(
         f"- status: **{liquidity_status}** - {liquidity_check['reason']}",
         f"- max_order_adv_pct: {liquidity_check['max_order_adv_pct']:.2f}",
         f"- lookback_days: {liquidity_check['lookback_days']}",
+        "",
+        "Pre-trade risk validation:",
+        f"- status: **{pre_trade_risk_status}** - {pre_trade_risk_check.get('reason', 'not checked')}",
+        f"- projected_cash_ratio_after_costs: {float(pre_trade_risk_check.get('projected_cash_ratio_after_costs') or 0):.2%}",
+        f"- projected_investment_ratio_after_costs: {float(pre_trade_risk_check.get('projected_investment_ratio_after_costs') or 0):.2%}",
+        f"- estimated_costs: {float((pre_trade_risk_check.get('cost_summary') or {}).get('total_explicit_costs') or 0):,.0f}",
         "",
         "Suggested enable command:",
         "```bash",
@@ -1575,6 +1643,221 @@ def failed_liquidity_preflight(
     }
 
 
+def _avg_daily_volume_for_order(plan: TargetWeightPlan, order: Any) -> float | None:
+    liquidity = (plan.diagnostics or {}).get("liquidity") or {}
+    symbol_liquidity = (liquidity.get("symbols") or {}).get(order.symbol) or {}
+    avg_daily_value = symbol_liquidity.get("avg_daily_value")
+    if avg_daily_value is None or float(avg_daily_value) <= 0 or float(order.price) <= 0:
+        return None
+    return float(avg_daily_value) / float(order.price)
+
+
+def _position_avg_price_for_order(plan: TargetWeightPlan, order: Any) -> float:
+    avg_prices = (plan.diagnostics or {}).get("position_avg_prices_before") or {}
+    avg_price = avg_prices.get(order.symbol)
+    if avg_price is None or float(avg_price) <= 0:
+        return float(order.price)
+    return float(avg_price)
+
+
+def assess_plan_pre_trade_risk(
+    plan: TargetWeightPlan,
+    *,
+    config: Any | None = None,
+    risk_manager: Any | None = None,
+) -> dict[str, Any]:
+    if risk_manager is None:
+        from config.config_loader import Config
+        from core.risk_manager import RiskManager
+
+        risk_config = config if hasattr(config, "risk_params") else Config.get()
+        risk_manager = RiskManager(risk_config)
+
+    risk_params = getattr(risk_manager, "risk_params", None)
+    if risk_params is None:
+        risk_params = getattr(getattr(risk_manager, "config", None), "risk_params", {}) or {}
+    div = (risk_params or {}).get("diversification", {})
+    max_position_ratio = float(div.get("max_position_ratio", 0.20))
+    max_investment_ratio = float(div.get("max_investment_ratio", 0.70))
+    min_cash_ratio = float(div.get("min_cash_ratio", 0.20))
+    max_positions = int(div.get("max_positions", 10))
+
+    cash = float(plan.cash_before)
+    order_costs: list[dict[str, Any]] = []
+    violations: list[str] = []
+    warnings: list[str] = []
+    total_commission = 0.0
+    total_tax = 0.0
+    total_slippage = 0.0
+    total_capital_gains_tax = 0.0
+
+    for order in plan.orders:
+        action = str(order.action).upper()
+        avg_daily_volume = _avg_daily_volume_for_order(plan, order)
+        avg_price = _position_avg_price_for_order(plan, order) if action == "SELL" else None
+        costs = risk_manager.calculate_transaction_costs(
+            float(order.price),
+            int(order.quantity),
+            action,
+            avg_daily_volume=avg_daily_volume,
+            avg_price=avg_price,
+        )
+        commission = float(costs.get("commission", 0) or 0)
+        tax = float(costs.get("tax", 0) or 0)
+        capital_gains_tax = float(costs.get("capital_gains_tax", 0) or 0)
+        slippage = float(costs.get("slippage", 0) or 0)
+        execution_price = float(costs.get("execution_price", order.price) or order.price)
+        total_commission += commission
+        total_tax += tax
+        total_capital_gains_tax += capital_gains_tax
+        total_slippage += slippage
+
+        before_cash = cash
+        item = {
+            "symbol": order.symbol,
+            "action": order.action,
+            "quantity": int(order.quantity),
+            "plan_price": float(order.price),
+            "execution_price": execution_price,
+            "avg_daily_volume": avg_daily_volume,
+            "commission": commission,
+            "tax": tax,
+            "capital_gains_tax": capital_gains_tax,
+            "slippage": slippage,
+            "participation_rate": costs.get("participation_rate"),
+            "slippage_multiplier": costs.get("slippage_multiplier"),
+            "cash_before": round(before_cash, 2),
+        }
+        if action == "SELL":
+            proceeds = execution_price * int(order.quantity) - commission - tax - capital_gains_tax
+            cash += proceeds
+            item["cash_delta"] = round(proceeds, 2)
+            item["required_cash"] = 0.0
+        else:
+            required = execution_price * int(order.quantity) + commission
+            item["required_cash"] = round(required, 2)
+            item["cash_delta"] = round(-required, 2)
+            if required > cash + 1e-6:
+                violations.append(
+                    f"{order.symbol}: required cash {required:,.0f} > projected cash {cash:,.0f}"
+                )
+            cash -= required
+        item["cash_after"] = round(cash, 2)
+        order_costs.append(item)
+
+    expected_quantities = _expected_position_quantities(plan)
+    position_values: dict[str, float] = {}
+    missing_price_symbols: list[str] = []
+    for symbol, quantity in expected_quantities.items():
+        if int(quantity) <= 0:
+            continue
+        price = plan.prices.get(symbol)
+        if price is None or float(price) <= 0:
+            missing_price_symbols.append(symbol)
+            continue
+        position_values[symbol] = float(price) * int(quantity)
+
+    for symbol in missing_price_symbols:
+        violations.append(f"{symbol}: missing price for projected position risk check")
+
+    projected_gross = sum(position_values.values())
+    projected_total_value = cash + projected_gross
+    if projected_total_value <= 0:
+        violations.append("projected total value after costs is not positive")
+        projected_cash_ratio = 0.0
+        projected_investment_ratio = 1.0
+    else:
+        projected_cash_ratio = cash / projected_total_value
+        projected_investment_ratio = projected_gross / projected_total_value
+
+    target_position_count = sum(1 for value in position_values.values() if value > 0)
+    if target_position_count > max_positions:
+        violations.append(f"target positions {target_position_count} > max_positions {max_positions}")
+
+    if projected_investment_ratio > max_investment_ratio + 1e-9:
+        violations.append(
+            f"projected investment ratio {projected_investment_ratio:.2%} > max {max_investment_ratio:.2%}"
+        )
+    if projected_cash_ratio < min_cash_ratio - 1e-9:
+        violations.append(
+            f"projected cash ratio {projected_cash_ratio:.2%} < min {min_cash_ratio:.2%}"
+        )
+
+    position_ratio_rows: list[dict[str, Any]] = []
+    if projected_total_value > 0:
+        for symbol, value in sorted(position_values.items()):
+            ratio = value / projected_total_value
+            position_ratio_rows.append({
+                "symbol": symbol,
+                "value": round(value, 2),
+                "ratio": round(ratio, 6),
+            })
+            if ratio > max_position_ratio + 1e-9:
+                violations.append(
+                    f"{symbol}: projected position ratio {ratio:.2%} > max {max_position_ratio:.2%}"
+                )
+
+    complete = len(violations) == 0
+    reason = "target_weight_pre_trade_risk_passed"
+    if not complete:
+        preview = "; ".join(violations[:5])
+        if len(violations) > 5:
+            preview = f"{preview}; +{len(violations) - 5} more"
+        reason = f"target_weight_pre_trade_risk_failed: {preview}"
+
+    return {
+        "checked": True,
+        "complete": complete,
+        "reason": reason,
+        "violations": violations,
+        "warnings": warnings,
+        "projected_cash_after_costs": round(cash, 2),
+        "projected_cash_ratio_after_costs": round(projected_cash_ratio, 6),
+        "projected_gross_exposure_after_costs": round(projected_gross, 2),
+        "projected_investment_ratio_after_costs": round(projected_investment_ratio, 6),
+        "projected_total_value_after_costs": round(projected_total_value, 2),
+        "target_position_count": target_position_count,
+        "limits": {
+            "max_position_ratio": max_position_ratio,
+            "max_investment_ratio": max_investment_ratio,
+            "min_cash_ratio": min_cash_ratio,
+            "max_positions": max_positions,
+        },
+        "position_ratios": position_ratio_rows,
+        "order_costs": order_costs,
+        "cost_summary": {
+            "commission": round(total_commission, 2),
+            "tax": round(total_tax, 2),
+            "capital_gains_tax": round(total_capital_gains_tax, 2),
+            "slippage": round(total_slippage, 2),
+            "total_explicit_costs": round(
+                total_commission + total_tax + total_capital_gains_tax + total_slippage,
+                2,
+            ),
+        },
+    }
+
+
+def failed_pre_trade_risk_validation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
+    return {
+        "checked": True,
+        "complete": False,
+        "reason": f"target_weight_pre_trade_risk_failed: {error}",
+        "violations": [str(error)],
+        "warnings": [],
+        "projected_cash_after_costs": None,
+        "projected_cash_ratio_after_costs": None,
+        "projected_gross_exposure_after_costs": None,
+        "projected_investment_ratio_after_costs": None,
+        "projected_total_value_after_costs": None,
+        "target_position_count": int(plan.target_position_count),
+        "limits": {},
+        "position_ratios": [],
+        "order_costs": [],
+        "cost_summary": {},
+    }
+
+
 def _build_readiness_operator_commands(
     plan: TargetWeightPlan,
     cap_recommendation: dict[str, Any],
@@ -1605,9 +1888,10 @@ def build_pilot_readiness_audit(
     execution_idempotency: dict[str, Any],
     pre_execution_reconciliation: dict[str, Any],
     liquidity_check: dict[str, Any],
+    pre_trade_risk_check: dict[str, Any],
     trading_mode: str,
 ) -> dict[str, Any]:
-    """Combine launch, cap, duplicate, position, and liquidity checks into one no-order audit."""
+    """Combine launch, cap, duplicate, position, liquidity, and cost checks into one no-order audit."""
     suggested_preview = cap_recommendation.get("suggested_preview", {})
     blockers: list[str] = []
     warnings: list[str] = []
@@ -1638,6 +1922,11 @@ def build_pilot_readiness_audit(
             "liquidity_preflight: "
             f"{liquidity_check.get('reason', 'planned orders exceed liquidity cap')}"
         )
+    if pre_trade_risk_check.get("checked", False) and not pre_trade_risk_check.get("complete", False):
+        blockers.append(
+            "pre_trade_risk: "
+            f"{pre_trade_risk_check.get('reason', 'projected cost-adjusted plan breaches risk limits')}"
+        )
     if suggested_preview and not suggested_preview.get("allowed", False):
         blockers.append(
             "suggested_caps: "
@@ -1648,6 +1937,8 @@ def build_pilot_readiness_audit(
         warnings.append(f"preview_caps: {getattr(cap_preview, 'reason', 'preview caps blocked')}")
     if not liquidity_check.get("checked", False):
         warnings.append(f"liquidity_preflight: {liquidity_check.get('reason', 'not checked')}")
+    if not pre_trade_risk_check.get("checked", False):
+        warnings.append(f"pre_trade_risk: {pre_trade_risk_check.get('reason', 'not checked')}")
     if len(plan.orders) == 0:
         warnings.append("plan_orders: no rebalance orders for this trade day")
 
@@ -1659,6 +1950,7 @@ def build_pilot_readiness_audit(
         and bool(execution_idempotency.get("allowed", False))
         and bool(pre_execution_reconciliation.get("complete", False))
         and bool(liquidity_check.get("complete", False))
+        and bool(pre_trade_risk_check.get("complete", False))
         and bool(suggested_preview.get("allowed", False))
     )
     ready_for_capped_pilot = (
@@ -1696,6 +1988,7 @@ def build_pilot_readiness_audit(
         "execution_idempotency": execution_idempotency,
         "pre_execution_reconciliation": pre_execution_reconciliation,
         "liquidity_check": liquidity_check,
+        "pre_trade_risk_check": pre_trade_risk_check,
         "no_order_safety": {
             "orders_submitted": False,
             "shadow_evidence_recorded": False,
@@ -1724,6 +2017,7 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     launch = audit["launch_readiness"]
     caps = audit["cap_recommendation"]["suggested_caps"]
     liquidity = audit.get("liquidity_check", {})
+    pre_trade_risk = audit.get("pre_trade_risk_check", {})
     commands = audit.get("operator_commands", {})
     lines = [
         "# Target-weight Pilot Readiness Audit",
@@ -1761,6 +2055,14 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         f"- Max order ADV: {float(liquidity.get('max_order_adv_pct', 0.0)):.2f}%",
         f"- Lookback days: {liquidity.get('lookback_days', 'unknown')}",
         f"- Reason: {liquidity.get('reason', 'not checked')}",
+        "",
+        "## Pre-trade Risk",
+        f"- Status: {'PASS' if pre_trade_risk.get('complete') else 'BLOCKED'}",
+        f"- Projected cash after costs: {float(pre_trade_risk.get('projected_cash_after_costs') or 0):,.0f}",
+        f"- Projected cash ratio: {float(pre_trade_risk.get('projected_cash_ratio_after_costs') or 0):.2%}",
+        f"- Projected investment ratio: {float(pre_trade_risk.get('projected_investment_ratio_after_costs') or 0):.2%}",
+        f"- Estimated costs: {float((pre_trade_risk.get('cost_summary') or {}).get('total_explicit_costs') or 0):,.0f}",
+        f"- Reason: {pre_trade_risk.get('reason', 'not checked')}",
         "",
         "## Blocking Reasons",
     ]
@@ -1872,6 +2174,11 @@ def run_pilot_readiness_audit(
             max_order_adv_pct=max_order_adv_pct,
         )
     try:
+        pre_trade_risk_check = assess_plan_pre_trade_risk(plan, config=config)
+    except Exception as exc:
+        logger.exception("target-weight readiness pre-trade risk validation failed for {}", plan.candidate_id)
+        pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
+    try:
         pre_execution_reconciliation = reconcile_plan_starting_positions(
             plan,
             _load_positions(plan.candidate_id),
@@ -1894,6 +2201,7 @@ def run_pilot_readiness_audit(
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
+        pre_trade_risk_check=pre_trade_risk_check,
         trading_mode=trading_mode,
     )
     artifact_path = write_pilot_readiness_audit_artifact(audit, output_dir=output_dir)
@@ -2065,6 +2373,7 @@ def run_shadow_bootstrap(
             cap_preview = preview_plan_against_caps(plan, preview_caps)
             cap_recommendation = recommend_pilot_caps(plan)
             liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
+            pre_trade_risk_check = assess_plan_pre_trade_risk(plan, config=config)
             latest_plan = plan
             latest_cap_preview = cap_preview
             latest_cap_recommendation = cap_recommendation
@@ -2093,6 +2402,7 @@ def run_shadow_bootstrap(
                 "cap_preview": asdict(cap_preview),
                 "cap_recommendation": cap_recommendation,
                 "liquidity_check": liquidity_check,
+                "pre_trade_risk_check": pre_trade_risk_check,
                 "plan": plan.to_dict(),
             })
         except Exception as exc:
@@ -2223,6 +2533,11 @@ def run_pilot(
             exc,
             max_order_adv_pct=max_order_adv_pct,
         )
+    try:
+        pre_trade_risk_check = assess_plan_pre_trade_risk(plan, config=config)
+    except Exception as exc:
+        logger.exception("target-weight pre-trade risk validation failed for {}", plan.candidate_id)
+        pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
     dry_run = not execute
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
@@ -2254,6 +2569,8 @@ def run_pilot(
         execution = blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
     elif execute and not liquidity_check["complete"]:
         execution = blocked_execution_for_liquidity(plan, liquidity_check)
+    elif execute and not pre_trade_risk_check["complete"]:
+        execution = blocked_execution_for_pre_trade_risk(plan, pre_trade_risk_check)
     else:
         execution = execute_plan(
             plan,
@@ -2263,6 +2580,7 @@ def run_pilot(
             allow_rerun=allow_rerun,
             pre_execution_reconciliation=pre_execution_reconciliation,
             liquidity_check=liquidity_check,
+            pre_trade_risk_check=pre_trade_risk_check,
             max_order_adv_pct=max_order_adv_pct,
         )
 
@@ -2273,6 +2591,7 @@ def run_pilot(
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
         and liquidity_check["complete"]
+        and pre_trade_risk_check["complete"]
     ):
         try:
             fill_reconciliation = reconcile_plan_fills(
@@ -2296,6 +2615,7 @@ def run_pilot(
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
+        pre_trade_risk_check=pre_trade_risk_check,
         fill_reconciliation=fill_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -2309,6 +2629,7 @@ def run_pilot(
             execution_idempotency=execution_idempotency,
             pre_execution_reconciliation=pre_execution_reconciliation,
             liquidity_check=liquidity_check,
+            pre_trade_risk_check=pre_trade_risk_check,
             fill_reconciliation=fill_reconciliation,
             position_reconciliation=position_reconciliation,
         )
@@ -2405,6 +2726,7 @@ def run_pilot(
         cap_preview=cap_preview,
         cap_recommendation=cap_recommendation,
         liquidity_check=liquidity_check,
+        pre_trade_risk_check=pre_trade_risk_check,
         execution=execution,
         dry_run=dry_run,
         execution_idempotency=execution_idempotency,
@@ -2422,6 +2744,7 @@ def run_pilot(
         "cap_preview": cap_preview,
         "cap_recommendation": cap_recommendation,
         "liquidity_check": liquidity_check,
+        "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
         "execution_idempotency": execution_idempotency,
         "fill_reconciliation": fill_reconciliation,
@@ -2640,6 +2963,11 @@ def main() -> None:
             "  liquidity: "
             f"{'PASS' if liquidity['complete'] else 'BLOCKED'} - {liquidity['reason']}"
         )
+        pre_trade_risk = audit["pre_trade_risk_check"]
+        print(
+            "  pre-trade risk: "
+            f"{'PASS' if pre_trade_risk['complete'] else 'BLOCKED'} - {pre_trade_risk['reason']}"
+        )
         for reason in audit["blocking_reasons"][:8]:
             print(f"  blocker: {reason}")
         remaining = len(audit["blocking_reasons"]) - 8
@@ -2686,6 +3014,14 @@ def main() -> None:
     print(f"  cap preview: {'PASS' if cap_preview.allowed else 'BLOCKED'} - {cap_preview.reason}")
     liquidity = result.get("liquidity_check", {"complete": True, "reason": "liquidity preflight not checked"})
     print(f"  liquidity: {'PASS' if liquidity['complete'] else 'BLOCKED'} - {liquidity['reason']}")
+    pre_trade_risk = result.get(
+        "pre_trade_risk_check",
+        {"complete": True, "reason": "pre-trade risk validation not checked"},
+    )
+    print(
+        "  pre-trade risk: "
+        f"{'PASS' if pre_trade_risk['complete'] else 'BLOCKED'} - {pre_trade_risk['reason']}"
+    )
     print(
         "  suggested caps: "
         f"orders={suggested_caps['max_orders_per_day']} "

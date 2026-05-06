@@ -597,6 +597,10 @@ def build_target_weight_plan(
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
+            "position_avg_prices_before": {
+                sym: float(pos.get("avg_price", 0.0) or 0.0)
+                for sym, pos in sorted(current_positions.items())
+            },
             "liquidity": _liquidity_diagnostics_from_ohlcv(
                 {symbol: ohlcv_frames[symbol] for symbol in valid_symbols if symbol in ohlcv_frames},
                 trade_day=trade_day,
