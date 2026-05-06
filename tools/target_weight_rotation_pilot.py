@@ -1375,6 +1375,224 @@ def generate_launch_artifacts(
     return result
 
 
+def _unique_reasons(reasons: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for reason in reasons:
+        clean_reason = str(reason).strip()
+        if not clean_reason or clean_reason in seen:
+            continue
+        seen.add(clean_reason)
+        unique.append(clean_reason)
+    return unique
+
+
+def _plan_summary(plan: TargetWeightPlan) -> dict[str, Any]:
+    return {
+        "candidate_id": plan.candidate_id,
+        "as_of_date": plan.as_of_date,
+        "trade_day": plan.trade_day,
+        "score_day": plan.score_day,
+        "params_hash": plan.params_hash,
+        "symbol_count": len(plan.symbols),
+        "target_count": len(plan.targets),
+        "targets": list(plan.targets),
+        "order_count": len(plan.orders),
+        "target_position_count": int(plan.target_position_count),
+        "target_exposure": plan.target_exposure,
+        "base_target_exposure": plan.base_target_exposure,
+        "risk_off": plan.risk_off,
+        "nav": plan.nav,
+        "cash_before": plan.cash_before,
+        "cash_after_estimate": plan.cash_after_estimate,
+        "gross_exposure_after": plan.gross_exposure_after,
+        "max_order_notional": plan.max_order_notional,
+    }
+
+
+def build_pilot_readiness_audit(
+    *,
+    plan: TargetWeightPlan,
+    pilot_check: Any,
+    validation: Any,
+    cap_preview: Any,
+    cap_recommendation: dict[str, Any],
+    launch_readiness: dict[str, Any],
+    execution_idempotency: dict[str, Any],
+    pre_execution_reconciliation: dict[str, Any],
+    trading_mode: str,
+) -> dict[str, Any]:
+    """Combine launch, cap, duplicate, and position checks into one no-order audit."""
+    suggested_preview = cap_recommendation.get("suggested_preview", {})
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if trading_mode == "live":
+        blockers.append("trading_mode: target-weight pilot requires paper mode, not live")
+
+    for blocker in launch_readiness.get("blocking_requirements", []) or []:
+        blockers.append(f"launch_readiness: {blocker}")
+    if not launch_readiness.get("infra_ready", False):
+        blockers.append("launch_readiness: infrastructure requirements are not met")
+    if not launch_readiness.get("pilot_authorization_present", False):
+        blockers.append("pilot_authorization: no active capped pilot authorization")
+    if not getattr(validation, "allowed", False):
+        blockers.append(f"pilot_validation: {getattr(validation, 'reason', 'pilot plan blocked')}")
+    if not execution_idempotency.get("allowed", False):
+        blockers.append(
+            "execution_idempotency: "
+            f"{execution_idempotency.get('reason', 'previous pilot session found')}"
+        )
+    if not pre_execution_reconciliation.get("complete", False):
+        blockers.append(
+            "pre_execution_positions: "
+            f"{pre_execution_reconciliation.get('reason', 'starting positions do not match plan')}"
+        )
+    if suggested_preview and not suggested_preview.get("allowed", False):
+        blockers.append(
+            "suggested_caps: "
+            f"{suggested_preview.get('reason', 'suggested caps do not satisfy plan')}"
+        )
+
+    if not getattr(cap_preview, "allowed", False):
+        warnings.append(f"preview_caps: {getattr(cap_preview, 'reason', 'preview caps blocked')}")
+    if len(plan.orders) == 0:
+        warnings.append("plan_orders: no rebalance orders for this trade day")
+
+    blockers = _unique_reasons(blockers)
+    warnings = _unique_reasons(warnings)
+    ready_for_cap_approval = (
+        trading_mode != "live"
+        and bool(launch_readiness.get("infra_ready", False))
+        and bool(execution_idempotency.get("allowed", False))
+        and bool(pre_execution_reconciliation.get("complete", False))
+        and bool(suggested_preview.get("allowed", False))
+    )
+    ready_for_capped_pilot = (
+        ready_for_cap_approval
+        and bool(launch_readiness.get("launch_ready", False))
+        and bool(getattr(validation, "allowed", False))
+        and not blockers
+    )
+
+    if ready_for_capped_pilot:
+        next_action = "execute capped paper pilot with --execute --collect-evidence"
+    elif ready_for_cap_approval:
+        next_action = "enable pilot with suggested caps, then rerun readiness audit"
+    else:
+        next_action = "resolve blocking requirements before enabling or executing pilot"
+
+    return {
+        "artifact_type": "target_weight_rotation_pilot_readiness_audit",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": ready_for_cap_approval,
+        "ready_for_capped_pilot": ready_for_capped_pilot,
+        "next_action": next_action,
+        "blocking_reasons": blockers,
+        "warning_reasons": warnings,
+        "plan_summary": _plan_summary(plan),
+        "pilot_check": _pilot_check_to_dict(pilot_check),
+        "plan_validation": asdict(validation),
+        "cap_preview": asdict(cap_preview),
+        "cap_recommendation": cap_recommendation,
+        "launch_readiness": launch_readiness,
+        "execution_idempotency": execution_idempotency,
+        "pre_execution_reconciliation": pre_execution_reconciliation,
+        "no_order_safety": {
+            "orders_submitted": False,
+            "shadow_evidence_recorded": False,
+            "pilot_evidence_recorded": False,
+            "pilot_session_written": False,
+            "pilot_entry_audit_may_be_written": True,
+            "audit_artifacts_only": True,
+        },
+    }
+
+
+def write_pilot_readiness_audit_artifact(
+    audit: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / (
+        "target_weight_pilot_readiness_audit_"
+        f"{audit['candidate_id']}_{audit['trade_day']}.json"
+    )
+    path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def run_pilot_readiness_audit(
+    *,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    raw_symbols: str | None = None,
+    as_of_date: str | None = None,
+    cash: float | None = None,
+    preview_caps: dict[str, int] | None = None,
+    allow_rerun: bool = False,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    config: Any | None = None,
+    collector: Any | None = None,
+) -> dict[str, Any]:
+    """Build a no-order readiness decision for the next capped target-weight pilot."""
+    from config.config_loader import Config
+    from core.paper_pilot import check_pilot_entry, compute_launch_readiness
+
+    config = config or Config.get()
+    plan = build_plan(
+        candidate_id=candidate_id,
+        raw_symbols=raw_symbols,
+        as_of_date=as_of_date,
+        cash=cash,
+        config=config,
+        collector=collector,
+    )
+    pilot_check = check_pilot_entry(
+        plan.candidate_id,
+        candidate_notional=plan.max_order_notional,
+        as_of_date=plan.trade_day,
+    )
+    validation = validate_plan_against_pilot(plan, pilot_check)
+    cap_preview = preview_plan_against_caps(plan, preview_caps)
+    cap_recommendation = recommend_pilot_caps(plan)
+    launch_readiness = compute_launch_readiness(plan.candidate_id, as_of_date=plan.trade_day)
+    execution_idempotency = check_execution_idempotency(plan, allow_rerun=allow_rerun)
+    try:
+        pre_execution_reconciliation = reconcile_plan_starting_positions(
+            plan,
+            _load_positions(plan.candidate_id),
+        )
+    except Exception as exc:
+        logger.exception(
+            "target-weight readiness pre-execution position reconciliation failed for {}",
+            plan.candidate_id,
+        )
+        pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
+
+    trading_mode = str(getattr(config, "trading", {}).get("mode", "paper"))
+    audit = build_pilot_readiness_audit(
+        plan=plan,
+        pilot_check=pilot_check,
+        validation=validation,
+        cap_preview=cap_preview,
+        cap_recommendation=cap_recommendation,
+        launch_readiness=launch_readiness,
+        execution_idempotency=execution_idempotency,
+        pre_execution_reconciliation=pre_execution_reconciliation,
+        trading_mode=trading_mode,
+    )
+    artifact_path = write_pilot_readiness_audit_artifact(audit, output_dir=output_dir)
+    return {
+        "plan": plan,
+        "audit": audit,
+        "artifact_path": artifact_path,
+    }
+
+
 def write_shadow_bootstrap_artifact(
     *,
     candidate_id: str,
@@ -1890,6 +2108,11 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true", help="Submit paper orders. Default is dry-run.")
     parser.add_argument("--collect-evidence", action="store_true", help="Collect pilot_paper evidence after execution.")
     parser.add_argument(
+        "--readiness-audit",
+        action="store_true",
+        help="Write a no-order target-weight capped pilot readiness audit artifact.",
+    )
+    parser.add_argument(
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
@@ -1948,6 +2171,8 @@ def main() -> None:
         or args.shadow_days is not None
     )
     if shadow_batch:
+        if args.readiness_audit:
+            parser.error("--readiness-audit cannot be combined with shadow bootstrap batch options")
         if args.execute or args.collect_evidence:
             parser.error("shadow bootstrap date range cannot be combined with --execute or --collect-evidence")
         if args.as_of_date:
@@ -2014,6 +2239,71 @@ def main() -> None:
             print("  status: OK")
         print(f"  artifact: {batch['artifact_path']}")
         if shadow_incomplete:
+            raise SystemExit(1)
+        return
+
+    if args.readiness_audit:
+        if args.execute or args.collect_evidence or args.record_shadow_evidence:
+            parser.error(
+                "--readiness-audit cannot be combined with --execute, "
+                "--collect-evidence, or --record-shadow-evidence"
+            )
+
+        result = run_pilot_readiness_audit(
+            candidate_id=args.candidate_id,
+            raw_symbols=args.symbols,
+            as_of_date=args.as_of_date,
+            cash=args.cash,
+            allow_rerun=args.allow_rerun,
+            preview_caps=preview_caps,
+            output_dir=Path(args.output_dir),
+        )
+        audit = result["audit"]
+        plan_summary = audit["plan_summary"]
+        launch = audit["launch_readiness"]
+        cap_rec = audit["cap_recommendation"]
+        suggested_caps = cap_rec["suggested_caps"]
+        status = "READY" if audit["ready_for_capped_pilot"] else (
+            "CAP_APPROVAL_READY" if audit["ready_for_cap_approval"] else "BLOCKED"
+        )
+        print("\nTarget-weight pilot readiness audit")
+        print(f"  candidate: {audit['candidate_id']}")
+        print(f"  trade_day: {audit['trade_day']} score_day: {plan_summary['score_day']}")
+        print(f"  status: {status}")
+        print(
+            "  launch: "
+            f"clean={launch['clean_final_days_current']}/{launch['clean_final_days_required']} "
+            f"infra={'YES' if launch['infra_ready'] else 'NO'} "
+            f"auth={'YES' if launch.get('pilot_authorization_present') else 'NO'} "
+            f"launch={'YES' if launch['launch_ready'] else 'NO'}"
+        )
+        print(
+            "  plan: "
+            f"orders={plan_summary['order_count']} "
+            f"positions={plan_summary['target_position_count']} "
+            f"max_order={plan_summary['max_order_notional']:,.0f} "
+            f"gross_exposure={plan_summary['gross_exposure_after']:,.0f}"
+        )
+        print(
+            "  suggested caps: "
+            f"orders={suggested_caps['max_orders_per_day']} "
+            f"positions={suggested_caps['max_concurrent_positions']} "
+            f"notional={suggested_caps['max_notional_per_trade']:,} "
+            f"exposure={suggested_caps['max_gross_exposure']:,}"
+        )
+        print(f"  pilot validation: {audit['plan_validation']['reason']}")
+        print(f"  idempotency: {audit['execution_idempotency']['reason']}")
+        print(f"  positions: {audit['pre_execution_reconciliation']['reason']}")
+        for reason in audit["blocking_reasons"][:8]:
+            print(f"  blocker: {reason}")
+        remaining = len(audit["blocking_reasons"]) - 8
+        if remaining > 0:
+            print(f"  blocker: +{remaining} more")
+        for reason in audit["warning_reasons"][:5]:
+            print(f"  warning: {reason}")
+        print(f"  next: {audit['next_action']}")
+        print(f"  artifact: {result['artifact_path']}")
+        if not audit["ready_for_cap_approval"]:
             raise SystemExit(1)
         return
 
