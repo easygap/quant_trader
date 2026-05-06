@@ -512,6 +512,17 @@ def _get_gross_exposure(strategy: str) -> float:
     return sum((p.avg_price or 0) * (p.quantity or 0) for p in positions)
 
 
+def pilot_session_artifact_path(strategy: str, date: str) -> Path:
+    return RUNTIME_DIR / f"pilot_session_{strategy}_{date}.json"
+
+
+def load_pilot_session_artifact(strategy: str, date: str) -> dict | None:
+    path = pilot_session_artifact_path(strategy, date)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def save_pilot_session_artifact(strategy: str, date: str,
                                  pilot_session: dict) -> Path:
     """pilot 세션 종료 후 세션 artifact 저장. operator 확인용."""
@@ -575,7 +586,7 @@ def save_pilot_session_artifact(strategy: str, date: str,
     }
 
     # JSON
-    json_path = RUNTIME_DIR / f"pilot_session_{strategy}_{date}.json"
+    json_path = pilot_session_artifact_path(strategy, date)
     json_path.write_text(
         json.dumps(artifact, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
