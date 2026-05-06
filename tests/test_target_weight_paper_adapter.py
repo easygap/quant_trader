@@ -127,6 +127,7 @@ def _adapter_plan():
         diagnostics={
             "missing_symbols": [],
             "benchmark_symbol": "KS11",
+            "position_avg_prices_before": {},
             "liquidity": {
                 "lookback_days": 20,
                 "symbols": {
@@ -214,6 +215,7 @@ def _existing_pilot_evidence_record(plan):
                 "idempotency_allowed": True,
                 "pre_execution_complete": True,
                 "liquidity_complete": True,
+                "pre_trade_risk_complete": True,
                 "order_count_complete": True,
                 "order_result_complete": True,
                 "order_complete": True,
@@ -235,6 +237,56 @@ def _adapter_plan_for_date(day: str):
     return replace(_adapter_plan(), as_of_date=day, trade_day=day, score_day=score_day)
 
 
+class SimpleCostRiskManager:
+    def __init__(
+        self,
+        *,
+        commission_rate: float = 0.0,
+        slippage_per_share: float = 0.0,
+        tax_rate: float = 0.0,
+        max_position_ratio: float = 0.90,
+        max_investment_ratio: float = 1.20,
+        min_cash_ratio: float = 0.0,
+        max_positions: int = 10,
+    ):
+        self.commission_rate = commission_rate
+        self.slippage_per_share = slippage_per_share
+        self.tax_rate = tax_rate
+        self.risk_params = {
+            "diversification": {
+                "max_position_ratio": max_position_ratio,
+                "max_investment_ratio": max_investment_ratio,
+                "min_cash_ratio": min_cash_ratio,
+                "max_positions": max_positions,
+            }
+        }
+
+    def calculate_transaction_costs(
+        self,
+        price,
+        quantity,
+        action="BUY",
+        avg_daily_volume=None,
+        avg_price=None,
+    ):
+        commission = round(price * quantity * self.commission_rate, 0)
+        tax = round(price * quantity * self.tax_rate, 0) if action.upper() == "SELL" else 0
+        slippage = round(self.slippage_per_share * quantity, 0)
+        execution_price = price + self.slippage_per_share
+        if action.upper() == "SELL":
+            execution_price = max(0.0, price - self.slippage_per_share)
+        return {
+            "commission": commission,
+            "tax": tax,
+            "capital_gains_tax": 0,
+            "slippage": slippage,
+            "total_cost": commission + tax + slippage,
+            "execution_price": execution_price,
+            "participation_rate": None if avg_daily_volume is None else quantity / avg_daily_volume,
+            "slippage_multiplier": 1.0,
+        }
+
+
 def test_target_weight_pilot_help_lists_shadow_days():
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
@@ -249,6 +301,129 @@ def test_target_weight_pilot_help_lists_shadow_days():
     assert "--shadow-days" in result.stdout
     assert "--readiness-audit" in result.stdout
     assert "--allow-rerun" in result.stdout
+
+
+def test_target_weight_pilot_control_enable_guard_blocks_requested_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    calls = {}
+
+    def fake_build_preview_caps(**kwargs):
+        calls["caps"] = kwargs
+        return {"requested": True}
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        calls["audit"] = kwargs
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": False,
+                    "reason": "max order notional exceeds cap",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.build_preview_caps",
+        fake_build_preview_caps,
+    )
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=2,
+        max_positions=2,
+        max_notional=1_000_000,
+        max_exposure=3_000_000,
+    )
+
+    with pytest.raises(ValueError, match="requested target-weight pilot caps"):
+        _target_weight_enable_guard(args)
+
+    assert calls["caps"] == {
+        "max_orders": 2,
+        "max_positions": 2,
+        "max_notional": 1_000_000,
+        "max_exposure": 3_000_000,
+    }
+    assert calls["audit"]["preview_caps"] == {"requested": True}
+
+
+def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "proposed pilot caps satisfied",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    result = _target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+
+
+def test_paper_pilot_control_enable_stops_before_auth_when_target_weight_guard_fails(
+    monkeypatch,
+    capsys,
+):
+    import core.paper_pilot as pp
+    import tools.paper_pilot_control as ppc
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+
+    monkeypatch.setattr(pp, "check_pilot_prerequisites", lambda strategy: (True, "ok"))
+    monkeypatch.setattr(pp, "enable_pilot", lambda *args, **kwargs: pytest.fail("pilot auth must not be written"))
+    monkeypatch.setattr(
+        ppc,
+        "_target_weight_enable_guard",
+        lambda args: (_ for _ in ()).throw(ValueError("target-weight audit blocked")),
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        valid_to="2026-04-30",
+        max_orders=2,
+        max_positions=2,
+        max_notional=1_000_000,
+        max_exposure=3_000_000,
+        reason="test",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        ppc.run_enable(args)
+
+    assert exc.value.code == 1
+    assert "target-weight audit blocked" in capsys.readouterr().out
 
 
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
@@ -581,6 +756,8 @@ def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
             dry_run=False,
+            liquidity_check={"checked": True, "complete": True, "reason": "ok"},
+            pre_trade_risk_check={"checked": True, "complete": True, "reason": "ok"},
         )
 
     assert execution["failed"] == 1
@@ -729,6 +906,24 @@ def test_verify_existing_pilot_evidence_rejects_non_pilot_record(monkeypatch):
     }
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_pre_trade_risk(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    del record["pilot_caps_snapshot"]["target_weight_execution"]["pre_trade_risk_complete"]
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_execution.pre_trade_risk_complete"
+    }
+
+
 def test_preview_plan_against_caps_flags_default_pilot_caps():
     from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
 
@@ -813,6 +1008,54 @@ def test_assess_plan_liquidity_blocks_large_adv_order():
     assert "AAA" in liquidity["violations"][0]
 
 
+def test_assess_plan_liquidity_blocks_missing_diagnostics():
+    from tools.target_weight_rotation_pilot import assess_plan_liquidity
+
+    plan = replace(_adapter_plan(), diagnostics={"missing_symbols": []})
+
+    liquidity = assess_plan_liquidity(plan)
+
+    assert liquidity["checked"] is True
+    assert liquidity["complete"] is False
+    assert "target_weight_liquidity_preflight_failed" in liquidity["reason"]
+    assert "missing liquidity diagnostics" in liquidity["violations"]
+
+
+def test_assess_plan_pre_trade_risk_passes_when_cash_covers_costed_orders():
+    from tools.target_weight_rotation_pilot import assess_plan_pre_trade_risk
+
+    plan = _adapter_plan()
+    risk = assess_plan_pre_trade_risk(
+        plan,
+        risk_manager=SimpleCostRiskManager(
+            commission_rate=0.001,
+            slippage_per_share=1.0,
+        ),
+    )
+
+    assert risk["complete"] is True
+    assert risk["reason"] == "target_weight_pre_trade_risk_passed"
+    assert risk["projected_cash_after_costs"] < plan.cash_after_estimate
+    assert risk["cost_summary"]["commission"] > 0
+    assert risk["cost_summary"]["slippage"] > 0
+    assert risk["order_costs"][0]["avg_daily_volume"] == 1_000_000.0
+
+
+def test_assess_plan_pre_trade_risk_blocks_cash_shortfall_after_costs():
+    from tools.target_weight_rotation_pilot import assess_plan_pre_trade_risk
+
+    plan = replace(_adapter_plan(), cash_before=3_200_000.0)
+    risk = assess_plan_pre_trade_risk(
+        plan,
+        risk_manager=SimpleCostRiskManager(slippage_per_share=1.0),
+    )
+
+    assert risk["complete"] is False
+    assert "target_weight_pre_trade_risk_failed" in risk["reason"]
+    assert "required cash" in risk["violations"][0]
+    assert risk["projected_cash_after_costs"] < 0
+
+
 def test_execute_plan_blocks_liquidity_before_order_submission(monkeypatch):
     from tools.target_weight_rotation_pilot import assess_plan_liquidity, execute_plan
 
@@ -851,6 +1094,41 @@ def test_execute_plan_blocks_liquidity_before_order_submission(monkeypatch):
     assert execution["halted"] is True
     assert execution["details"][0]["status"] == "skipped_liquidity_preflight"
     assert "target_weight_liquidity_preflight_failed" in execution["halt_reason"]
+
+
+def test_execute_plan_blocks_pre_trade_risk_before_order_submission(monkeypatch):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    risk = {
+        "checked": True,
+        "complete": False,
+        "reason": "target_weight_pre_trade_risk_failed: cash shortfall",
+        "violations": ["cash shortfall"],
+        "warnings": [],
+        "cost_summary": {},
+        "order_costs": [],
+    }
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("pre-trade risk failure must not submit orders"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+        execution_idempotency={"allowed": True},
+        pre_execution_reconciliation={"complete": True},
+        liquidity_check={"checked": True, "complete": True, "reason": "ok"},
+        pre_trade_risk_check=risk,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert execution["details"][0]["status"] == "skipped_pre_trade_risk"
+    assert "target_weight_pre_trade_risk_failed" in execution["halt_reason"]
 
 
 def test_reconcile_plan_positions_uses_full_expected_book():
@@ -1021,6 +1299,7 @@ def test_run_pilot_shadow_generates_readiness_and_runbook(monkeypatch, tmp_path)
     runbook_text = runbook_path.read_text(encoding="utf-8")
     assert "## Target-weight Cap Recommendation" in runbook_text
     assert "Liquidity preflight:" in runbook_text
+    assert "Pre-trade risk validation:" in runbook_text
     assert "--max-orders 3 --max-positions 3" in runbook_text
     assert "--max-notional 1260000 --max-exposure 3360000" in runbook_text
 
@@ -1090,6 +1369,7 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert audit["execution_idempotency"]["allowed"] is True
     assert audit["pre_execution_reconciliation"]["complete"] is True
     assert audit["liquidity_check"]["complete"] is True
+    assert audit["pre_trade_risk_check"]["complete"] is True
     assert audit["cap_recommendation"]["suggested_caps"]["max_orders_per_day"] == 3
     assert payload["artifact_type"] == "target_weight_rotation_pilot_readiness_audit"
     assert payload["no_order_safety"]["orders_submitted"] is False
@@ -1099,6 +1379,7 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert "# Target-weight Pilot Readiness Audit" in report_text
     assert "CAP_APPROVAL_READY" in report_text
     assert "## Liquidity Preflight" in report_text
+    assert "## Pre-trade Risk" in report_text
     assert "## Operator Commands" in report_text
     assert "--max-notional 1260000 --max-exposure 3360000" in report_text
 
@@ -1173,6 +1454,134 @@ def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_p
     assert any("liquidity_preflight" in reason for reason in audit["blocking_reasons"])
     assert "BLOCKED" in report_text
     assert "target_weight_liquidity_preflight_failed" in report_text
+
+
+def test_run_pilot_readiness_audit_blocks_missing_liquidity_diagnostics(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = replace(_adapter_plan(), diagnostics={"missing_symbols": []})
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    audit = result["audit"]
+    report_text = result["report_path"].read_text(encoding="utf-8")
+
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["liquidity_check"]["complete"] is False
+    assert any("missing liquidity diagnostics" in reason for reason in audit["blocking_reasons"])
+    assert "missing liquidity diagnostics" in report_text
+
+
+def test_run_pilot_readiness_audit_blocks_pre_trade_risk(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        twp,
+        "assess_plan_pre_trade_risk",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": False,
+            "reason": "target_weight_pre_trade_risk_failed: cash shortfall",
+            "violations": ["cash shortfall"],
+            "warnings": [],
+            "cost_summary": {"total_explicit_costs": 1000.0},
+            "projected_cash_after_costs": -1000.0,
+            "projected_cash_ratio_after_costs": -0.01,
+            "projected_investment_ratio_after_costs": 1.01,
+        },
+    )
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    audit = result["audit"]
+    report_text = result["report_path"].read_text(encoding="utf-8")
+
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["pre_trade_risk_check"]["complete"] is False
+    assert any("pre_trade_risk" in reason for reason in audit["blocking_reasons"])
+    assert "## Pre-trade Risk" in report_text
+    assert "target_weight_pre_trade_risk_failed" in report_text
 
 
 def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
@@ -1602,6 +2011,81 @@ def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkey
     assert saved_sessions[0]["target_weight_execution"]["liquidity_complete"] is False
 
 
+def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    risk = {
+        "checked": True,
+        "complete": False,
+        "reason": "target_weight_pre_trade_risk_failed: cash shortfall",
+        "violations": ["cash shortfall"],
+        "warnings": [],
+        "cost_summary": {"total_explicit_costs": 1000.0},
+        "order_costs": [],
+    }
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "assess_plan_pre_trade_risk", lambda *args, **kwargs: risk)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("pre-trade risk failure must not submit orders"),
+    )
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("pre-trade risk failure must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("pre-trade risk failure must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["pre_trade_risk_check"]["complete"] is False
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["details"][0]["status"] == "skipped_pre_trade_risk"
+    assert result["execution_evidence"]["pre_trade_risk_complete"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_pre_trade_risk_failed" in result["evidence_collection"]["reason"]
+    assert saved_sessions[0]["target_weight_execution"]["pre_trade_risk_complete"] is False
+
+
 def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import core.paper_pilot as pp
@@ -1678,6 +2162,112 @@ def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_duplicate_execution_attempt" in result["evidence_collection"]["reason"]
     assert payload["execution_idempotency"]["allowed"] is False
+
+
+def test_check_execution_idempotency_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    from tools.target_weight_rotation_pilot import check_execution_idempotency
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    idempotency = check_execution_idempotency(plan, allow_rerun=True)
+
+    assert idempotency["allowed"] is False
+    assert idempotency["allow_rerun"] is True
+    assert "target_weight_completed_execution_rerun_blocked" in idempotency["reason"]
+
+
+def test_run_pilot_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("completed rerun must not overwrite prior pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("completed rerun must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("completed rerun must block before position reads"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("completed rerun must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        allow_rerun=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["execution_idempotency"]["allowed"] is False
+    assert "target_weight_completed_execution_rerun_blocked" in result["execution_idempotency"]["reason"]
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["halted"] is True
+    assert result["evidence_collection"]["status"] == "blocked"
 
 
 def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp_path):
@@ -1830,6 +2420,8 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert caps["target_weight_execution"]["pre_execution_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["liquidity_complete"] is True
     assert caps["target_weight_execution"]["liquidity_check"]["complete"] is True
+    assert caps["target_weight_execution"]["pre_trade_risk_complete"] is True
+    assert caps["target_weight_execution"]["pre_trade_risk_check"]["complete"] is True
     assert caps["target_weight_execution"]["order_result_complete"] is True
     assert caps["target_weight_execution"]["order_result_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["fill_complete"] is True

@@ -117,6 +117,9 @@
 - Follow-up canonical bridge (2026-04-30): `tools/evaluate_and_promote.py --canonical`이 위 target-weight 후보를 동일 candidate id/params hash로 `reports/promotion/*` canonical bundle에 포함. `promotion_result.json`과 `--check-only`에서 `provisional_paper_candidate` 재현 확인.
 - Follow-up paper/pilot adapter (2026-04-30): `core/target_weight_rotation.py`가 직전 거래일 score 기반 portfolio-level 목표비중 plan과 pilot cap 검증을 담당하고, `tools/target_weight_rotation_pilot.py`가 dry-run/제한 paper 실행 artifact를 생성한다. `OrderExecutor.execute_buy_quantity()`는 paper-only exact quantity 매수를 지원하며 live 모드는 계속 거부한다.
 - Follow-up liquidity preflight (2026-05-06): target-weight plan이 주문 종목별 최근 20일 평균 거래대금 진단을 포함하고, pilot adapter가 주문 notional이 평균 거래대금의 기본 5%를 넘으면 readiness/execute를 fail-closed 차단한다. 기준은 `--max-order-adv-pct`로 조정한다.
+- Follow-up pre-trade risk validation (2026-05-06): target-weight pilot adapter가 주문 제출 전에 수수료/세금/동적 슬리피지 예상 체결가를 반영해 projected cash, cash ratio, investment ratio, position ratio, max positions를 검증한다. 위반 시 `target_weight_pre_trade_risk_failed`로 readiness/execute/evidence 재사용을 fail-closed 차단한다.
+- Follow-up pilot approval guard (2026-05-06): target-weight pilot 승인 시 `paper_pilot_control.py --enable`이 readiness audit을 재실행해 requested cap, launch readiness, 유동성 preflight, 비용 반영 pre-trade risk를 통과할 때만 auth를 기록한다.
+- Follow-up completed rerun block (2026-05-06): same-candidate/trade-day 실행 완료 세션은 `--allow-rerun`을 줘도 재실행하지 않는다. `--allow-rerun`은 부분 실행/중단 세션 복구용으로 제한한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1413,6 +1416,9 @@ quant_trader/
 - [x] **target-weight canonical bridge 추가** — `evaluate_and_promote.py --canonical`이 risk60_35를 canonical promotion bundle에 포함하고 `promotion_result.json`에서 provisional 상태 재현
 - [x] **target-weight paper/pilot adapter 추가** — portfolio-level plan, pilot cap validation, paper-only exact quantity order path 추가. Live gate는 변경 없음
 - [x] **target-weight liquidity preflight 추가** — 최근 20일 평균 거래대금 대비 주문 notional 기본 5% 초과 시 readiness/execute fail-closed 차단
+- [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
+- [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
+- [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
@@ -1516,4 +1522,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-04-30 (target-weight paper/pilot adapter 반영)
+> **최종 수정**: 2026-05-06 (target-weight pilot 승인/재시도 안전장치 반영)
