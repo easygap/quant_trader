@@ -37,6 +37,8 @@ DEFAULT_PILOT_PREVIEW_CAPS = {
 DEFAULT_CAP_BUFFER_PCT = 0.05
 DEFAULT_CAP_ROUNDING_STEP = 10_000
 DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
+DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
+DEFAULT_MAX_ORDER_ADV_PCT = 5.0
 
 
 def _split_symbols(raw: str | None) -> list[str] | None:
@@ -269,6 +271,8 @@ def execute_plan(
     stop_on_failure: bool = True,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
+    liquidity_check: dict[str, Any] | None = None,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     allow_rerun: bool = False,
 ) -> dict[str, Any]:
     from config.config_loader import Config
@@ -316,6 +320,22 @@ def execute_plan(
             pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
     if not pre_execution_reconciliation["complete"]:
         return blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
+
+    if liquidity_check is None:
+        try:
+            liquidity_check = assess_plan_liquidity(
+                plan,
+                max_order_adv_pct=max_order_adv_pct,
+            )
+        except Exception as exc:
+            logger.exception("target-weight liquidity preflight failed for {}", plan.candidate_id)
+            liquidity_check = failed_liquidity_preflight(
+                plan,
+                exc,
+                max_order_adv_pct=max_order_adv_pct,
+            )
+    if liquidity_check is not None and not liquidity_check.get("complete", False):
+        return blocked_execution_for_liquidity(plan, liquidity_check)
 
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
@@ -690,6 +710,32 @@ def blocked_execution_for_duplicate_execution(
     }
 
 
+def blocked_execution_for_liquidity(
+    plan: TargetWeightPlan,
+    liquidity_check: dict[str, Any],
+) -> dict[str, Any]:
+    reason = liquidity_check.get(
+        "reason",
+        "target_weight_liquidity_preflight_failed",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "liquidity_check": liquidity_check,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_liquidity_preflight",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def reconcile_order_results(plan: TargetWeightPlan, execution: dict[str, Any]) -> dict[str, Any]:
     details = list(execution.get("details") or [])
     mismatches: list[dict[str, Any]] = []
@@ -947,6 +993,7 @@ def summarize_execution_for_evidence(
     execution: dict[str, Any],
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
+    liquidity_check: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -985,6 +1032,13 @@ def summarize_execution_for_evidence(
         "mismatches": [],
         "unexpected_positions": [],
     }
+    liquidity = liquidity_check or execution.get("liquidity_check") or {
+        "checked": False,
+        "complete": True,
+        "reason": "liquidity preflight not required",
+        "orders": [],
+        "violations": [],
+    }
     reconciliation = position_reconciliation or {
         "checked": False,
         "complete": True,
@@ -996,11 +1050,13 @@ def summarize_execution_for_evidence(
     }
     idempotency_allowed = bool(idempotency.get("allowed", False))
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
+    liquidity_complete = bool(liquidity.get("complete", False))
     fill_complete = bool(fill_reconciliation.get("complete", False))
     position_complete = bool(reconciliation.get("complete", False))
     complete = (
         idempotency_allowed
         and pre_execution_complete
+        and liquidity_complete
         and order_complete
         and fill_complete
         and position_complete
@@ -1010,6 +1066,8 @@ def summarize_execution_for_evidence(
         reason = idempotency.get("reason", "target_weight_duplicate_execution_attempt")
     elif not pre_execution_complete:
         reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
+    elif not liquidity_complete:
+        reason = liquidity.get("reason", "target_weight_liquidity_preflight_failed")
     elif not order_count_complete:
         reason = (
             "target_weight_execution_incomplete: "
@@ -1030,6 +1088,7 @@ def summarize_execution_for_evidence(
         "reason": reason,
         "idempotency_allowed": idempotency_allowed,
         "pre_execution_complete": pre_execution_complete,
+        "liquidity_complete": liquidity_complete,
         "order_complete": order_complete,
         "order_count_complete": order_count_complete,
         "order_result_complete": order_result_complete,
@@ -1042,6 +1101,7 @@ def summarize_execution_for_evidence(
         "halt_reason": execution.get("halt_reason", ""),
         "execution_idempotency": idempotency,
         "pre_execution_reconciliation": pre_reconciliation,
+        "liquidity_check": liquidity,
         "order_result_reconciliation": order_result_reconciliation,
         "fill_reconciliation": fill_reconciliation,
         "position_reconciliation": reconciliation,
@@ -1059,6 +1119,7 @@ def build_pilot_evidence_caps_snapshot(
     execution: dict[str, Any],
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
+    liquidity_check: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1082,6 +1143,7 @@ def build_pilot_evidence_caps_snapshot(
         execution,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
+        liquidity_check=liquidity_check,
         fill_reconciliation=fill_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -1147,6 +1209,7 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("target_weight_execution.planned_orders", target_execution.get("planned_orders"), len(plan.orders)),
         ("target_weight_execution.idempotency_allowed", target_execution.get("idempotency_allowed"), True),
         ("target_weight_execution.pre_execution_complete", target_execution.get("pre_execution_complete"), True),
+        ("target_weight_execution.liquidity_complete", target_execution.get("liquidity_complete"), True),
         ("target_weight_execution.order_count_complete", target_execution.get("order_count_complete"), True),
         ("target_weight_execution.order_result_complete", target_execution.get("order_result_complete"), True),
         ("target_weight_execution.order_complete", target_execution.get("order_complete"), True),
@@ -1189,6 +1252,7 @@ def write_session_artifact(
     validation: Any,
     cap_preview: Any,
     cap_recommendation: dict[str, Any],
+    liquidity_check: dict[str, Any],
     execution: dict[str, Any],
     dry_run: bool,
     execution_idempotency: dict[str, Any] | None = None,
@@ -1209,6 +1273,7 @@ def write_session_artifact(
         "plan_validation": asdict(validation),
         "cap_preview": asdict(cap_preview),
         "cap_recommendation": cap_recommendation,
+        "liquidity_check": liquidity_check,
         "execution": execution,
         "execution_idempotency": execution_idempotency or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
@@ -1297,6 +1362,8 @@ def append_target_weight_cap_section(
     suggested_preview = cap_recommendation["suggested_preview"]
     preview_status = "PASS" if getattr(cap_preview, "allowed", False) else "BLOCKED"
     suggested_status = "PASS" if suggested_preview.get("allowed") else "BLOCKED"
+    liquidity_check = assess_plan_liquidity(plan)
+    liquidity_status = "PASS" if liquidity_check["complete"] else "BLOCKED"
     existing = runbook_path.read_text(encoding="utf-8") if runbook_path.exists() else ""
     section = [
         "",
@@ -1319,6 +1386,11 @@ def append_target_weight_cap_section(
         f"- max_concurrent_positions: {suggested['max_concurrent_positions']}",
         f"- max_notional_per_trade: {suggested['max_notional_per_trade']:,}",
         f"- max_gross_exposure: {suggested['max_gross_exposure']:,}",
+        "",
+        "Liquidity preflight:",
+        f"- status: **{liquidity_status}** - {liquidity_check['reason']}",
+        f"- max_order_adv_pct: {liquidity_check['max_order_adv_pct']:.2f}",
+        f"- lookback_days: {liquidity_check['lookback_days']}",
         "",
         "Suggested enable command:",
         "```bash",
@@ -1410,6 +1482,99 @@ def _plan_summary(plan: TargetWeightPlan) -> dict[str, Any]:
     }
 
 
+def assess_plan_liquidity(
+    plan: TargetWeightPlan,
+    *,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
+    lookback_days: int = DEFAULT_LIQUIDITY_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    liquidity = (plan.diagnostics or {}).get("liquidity") or {}
+    symbols = liquidity.get("symbols") or {}
+    if not symbols:
+        return {
+            "checked": False,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_unavailable: plan has no liquidity diagnostics",
+            "lookback_days": int(lookback_days),
+            "max_order_adv_pct": float(max_order_adv_pct),
+            "orders_checked": 0,
+            "orders": [],
+            "violations": [],
+        }
+
+    orders: list[dict[str, Any]] = []
+    violations: list[str] = []
+    for order in plan.orders:
+        symbol_liquidity = symbols.get(order.symbol) or {}
+        avg_daily_value = symbol_liquidity.get("avg_daily_value")
+        last_daily_value = symbol_liquidity.get("last_daily_value")
+        item = {
+            "symbol": order.symbol,
+            "action": order.action,
+            "quantity": int(order.quantity),
+            "order_notional": float(order.notional),
+            "lookback_observations": int(symbol_liquidity.get("observations", 0) or 0),
+            "avg_daily_value": avg_daily_value,
+            "last_daily_value": last_daily_value,
+            "order_adv_pct": None,
+            "complete": False,
+            "reason": "",
+        }
+        if not symbol_liquidity.get("complete", False) or avg_daily_value is None or float(avg_daily_value) <= 0:
+            item["reason"] = str(symbol_liquidity.get("reason") or "missing liquidity data")
+            violations.append(f"{order.symbol}: {item['reason']}")
+        else:
+            order_adv_pct = float(order.notional) / float(avg_daily_value) * 100
+            item["order_adv_pct"] = round(order_adv_pct, 4)
+            if order_adv_pct > float(max_order_adv_pct):
+                item["reason"] = (
+                    f"order ADV {order_adv_pct:.2f}% > max {float(max_order_adv_pct):.2f}%"
+                )
+                violations.append(f"{order.symbol}: {item['reason']}")
+            else:
+                item["complete"] = True
+                item["reason"] = "within liquidity cap"
+        orders.append(item)
+
+    complete = len(violations) == 0
+    reason = "target_weight_liquidity_preflight_passed"
+    if not complete:
+        preview = "; ".join(violations[:5])
+        if len(violations) > 5:
+            preview = f"{preview}; +{len(violations) - 5} more"
+        reason = f"target_weight_liquidity_preflight_failed: {preview}"
+
+    return {
+        "checked": True,
+        "complete": complete,
+        "reason": reason,
+        "lookback_days": int(liquidity.get("lookback_days") or lookback_days),
+        "max_order_adv_pct": float(max_order_adv_pct),
+        "orders_checked": len(plan.orders),
+        "orders": orders,
+        "violations": violations,
+    }
+
+
+def failed_liquidity_preflight(
+    plan: TargetWeightPlan,
+    error: Exception,
+    *,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
+    lookback_days: int = DEFAULT_LIQUIDITY_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    return {
+        "checked": True,
+        "complete": False,
+        "reason": f"target_weight_liquidity_preflight_failed: {error}",
+        "lookback_days": int(lookback_days),
+        "max_order_adv_pct": float(max_order_adv_pct),
+        "orders_checked": len(plan.orders),
+        "orders": [],
+        "violations": [str(error)],
+    }
+
+
 def _build_readiness_operator_commands(
     plan: TargetWeightPlan,
     cap_recommendation: dict[str, Any],
@@ -1439,9 +1604,10 @@ def build_pilot_readiness_audit(
     launch_readiness: dict[str, Any],
     execution_idempotency: dict[str, Any],
     pre_execution_reconciliation: dict[str, Any],
+    liquidity_check: dict[str, Any],
     trading_mode: str,
 ) -> dict[str, Any]:
-    """Combine launch, cap, duplicate, and position checks into one no-order audit."""
+    """Combine launch, cap, duplicate, position, and liquidity checks into one no-order audit."""
     suggested_preview = cap_recommendation.get("suggested_preview", {})
     blockers: list[str] = []
     warnings: list[str] = []
@@ -1467,6 +1633,11 @@ def build_pilot_readiness_audit(
             "pre_execution_positions: "
             f"{pre_execution_reconciliation.get('reason', 'starting positions do not match plan')}"
         )
+    if liquidity_check.get("checked", False) and not liquidity_check.get("complete", False):
+        blockers.append(
+            "liquidity_preflight: "
+            f"{liquidity_check.get('reason', 'planned orders exceed liquidity cap')}"
+        )
     if suggested_preview and not suggested_preview.get("allowed", False):
         blockers.append(
             "suggested_caps: "
@@ -1475,6 +1646,8 @@ def build_pilot_readiness_audit(
 
     if not getattr(cap_preview, "allowed", False):
         warnings.append(f"preview_caps: {getattr(cap_preview, 'reason', 'preview caps blocked')}")
+    if not liquidity_check.get("checked", False):
+        warnings.append(f"liquidity_preflight: {liquidity_check.get('reason', 'not checked')}")
     if len(plan.orders) == 0:
         warnings.append("plan_orders: no rebalance orders for this trade day")
 
@@ -1485,6 +1658,7 @@ def build_pilot_readiness_audit(
         and bool(launch_readiness.get("infra_ready", False))
         and bool(execution_idempotency.get("allowed", False))
         and bool(pre_execution_reconciliation.get("complete", False))
+        and bool(liquidity_check.get("complete", False))
         and bool(suggested_preview.get("allowed", False))
     )
     ready_for_capped_pilot = (
@@ -1521,6 +1695,7 @@ def build_pilot_readiness_audit(
         "launch_readiness": launch_readiness,
         "execution_idempotency": execution_idempotency,
         "pre_execution_reconciliation": pre_execution_reconciliation,
+        "liquidity_check": liquidity_check,
         "no_order_safety": {
             "orders_submitted": False,
             "shadow_evidence_recorded": False,
@@ -1548,6 +1723,7 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     plan = audit["plan_summary"]
     launch = audit["launch_readiness"]
     caps = audit["cap_recommendation"]["suggested_caps"]
+    liquidity = audit.get("liquidity_check", {})
     commands = audit.get("operator_commands", {})
     lines = [
         "# Target-weight Pilot Readiness Audit",
@@ -1579,6 +1755,12 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         f"- max_concurrent_positions: {caps['max_concurrent_positions']}",
         f"- max_notional_per_trade: {caps['max_notional_per_trade']:,}",
         f"- max_gross_exposure: {caps['max_gross_exposure']:,}",
+        "",
+        "## Liquidity Preflight",
+        f"- Status: {'PASS' if liquidity.get('complete') else 'BLOCKED'}",
+        f"- Max order ADV: {float(liquidity.get('max_order_adv_pct', 0.0)):.2f}%",
+        f"- Lookback days: {liquidity.get('lookback_days', 'unknown')}",
+        f"- Reason: {liquidity.get('reason', 'not checked')}",
         "",
         "## Blocking Reasons",
     ]
@@ -1651,6 +1833,7 @@ def run_pilot_readiness_audit(
     as_of_date: str | None = None,
     cash: float | None = None,
     preview_caps: dict[str, int] | None = None,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     allow_rerun: bool = False,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
@@ -1680,6 +1863,15 @@ def run_pilot_readiness_audit(
     launch_readiness = compute_launch_readiness(plan.candidate_id, as_of_date=plan.trade_day)
     execution_idempotency = check_execution_idempotency(plan, allow_rerun=allow_rerun)
     try:
+        liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
+    except Exception as exc:
+        logger.exception("target-weight readiness liquidity preflight failed for {}", plan.candidate_id)
+        liquidity_check = failed_liquidity_preflight(
+            plan,
+            exc,
+            max_order_adv_pct=max_order_adv_pct,
+        )
+    try:
         pre_execution_reconciliation = reconcile_plan_starting_positions(
             plan,
             _load_positions(plan.candidate_id),
@@ -1701,6 +1893,7 @@ def run_pilot_readiness_audit(
         launch_readiness=launch_readiness,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
+        liquidity_check=liquidity_check,
         trading_mode=trading_mode,
     )
     artifact_path = write_pilot_readiness_audit_artifact(audit, output_dir=output_dir)
@@ -1771,6 +1964,7 @@ def run_shadow_bootstrap(
     raw_symbols: str | None = None,
     cash: float | None = None,
     preview_caps: dict[str, int] | None = None,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     target_unique_trade_days: int | None = None,
     max_scan_weekdays: int | None = None,
     generate_readiness_artifacts: bool = True,
@@ -1870,6 +2064,7 @@ def run_shadow_bootstrap(
             validation = validate_plan_against_pilot(plan, pilot_check)
             cap_preview = preview_plan_against_caps(plan, preview_caps)
             cap_recommendation = recommend_pilot_caps(plan)
+            liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
             latest_plan = plan
             latest_cap_preview = cap_preview
             latest_cap_recommendation = cap_recommendation
@@ -1897,6 +2092,7 @@ def run_shadow_bootstrap(
                 "pilot_validation": asdict(validation),
                 "cap_preview": asdict(cap_preview),
                 "cap_recommendation": cap_recommendation,
+                "liquidity_check": liquidity_check,
                 "plan": plan.to_dict(),
             })
         except Exception as exc:
@@ -1986,6 +2182,7 @@ def run_pilot(
     collect_evidence: bool = False,
     record_shadow_evidence: bool = False,
     preview_caps: dict[str, int] | None = None,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     generate_readiness_artifacts: bool = True,
     generate_runbook: bool = True,
     allow_rerun: bool = False,
@@ -2017,6 +2214,15 @@ def run_pilot(
     validation = validate_plan_against_pilot(plan, pilot_check)
     cap_preview = preview_plan_against_caps(plan, preview_caps)
     cap_recommendation = recommend_pilot_caps(plan)
+    try:
+        liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
+    except Exception as exc:
+        logger.exception("target-weight liquidity preflight failed for {}", plan.candidate_id)
+        liquidity_check = failed_liquidity_preflight(
+            plan,
+            exc,
+            max_order_adv_pct=max_order_adv_pct,
+        )
     dry_run = not execute
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
@@ -2046,6 +2252,8 @@ def run_pilot(
         execution = blocked_execution_for_duplicate_execution(plan, execution_idempotency)
     elif execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
         execution = blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
+    elif execute and not liquidity_check["complete"]:
+        execution = blocked_execution_for_liquidity(plan, liquidity_check)
     else:
         execution = execute_plan(
             plan,
@@ -2054,6 +2262,8 @@ def run_pilot(
             execution_idempotency=execution_idempotency,
             allow_rerun=allow_rerun,
             pre_execution_reconciliation=pre_execution_reconciliation,
+            liquidity_check=liquidity_check,
+            max_order_adv_pct=max_order_adv_pct,
         )
 
     fill_reconciliation = None
@@ -2062,6 +2272,7 @@ def run_pilot(
         execute
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
+        and liquidity_check["complete"]
     ):
         try:
             fill_reconciliation = reconcile_plan_fills(
@@ -2084,6 +2295,7 @@ def run_pilot(
         execution,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
+        liquidity_check=liquidity_check,
         fill_reconciliation=fill_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -2096,6 +2308,7 @@ def run_pilot(
             execution,
             execution_idempotency=execution_idempotency,
             pre_execution_reconciliation=pre_execution_reconciliation,
+            liquidity_check=liquidity_check,
             fill_reconciliation=fill_reconciliation,
             position_reconciliation=position_reconciliation,
         )
@@ -2191,6 +2404,7 @@ def run_pilot(
         validation=validation,
         cap_preview=cap_preview,
         cap_recommendation=cap_recommendation,
+        liquidity_check=liquidity_check,
         execution=execution,
         dry_run=dry_run,
         execution_idempotency=execution_idempotency,
@@ -2207,6 +2421,7 @@ def run_pilot(
         "validation": validation,
         "cap_preview": cap_preview,
         "cap_recommendation": cap_recommendation,
+        "liquidity_check": liquidity_check,
         "execution": execution,
         "execution_idempotency": execution_idempotency,
         "fill_reconciliation": fill_reconciliation,
@@ -2272,6 +2487,12 @@ def main() -> None:
     parser.add_argument("--preview-max-positions", type=int, help="Proposed pilot cap preview: max concurrent positions.")
     parser.add_argument("--preview-max-notional", type=int, help="Proposed pilot cap preview: max notional/trade.")
     parser.add_argument("--preview-max-exposure", type=int, help="Proposed pilot cap preview: max gross exposure.")
+    parser.add_argument(
+        "--max-order-adv-pct",
+        type=float,
+        default=DEFAULT_MAX_ORDER_ADV_PCT,
+        help="Block target-weight pilot orders above this percent of recent average daily traded value.",
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
@@ -2316,6 +2537,7 @@ def main() -> None:
             generate_readiness_artifacts=not args.skip_readiness_artifacts,
             generate_runbook=not args.skip_runbook,
             preview_caps=preview_caps,
+            max_order_adv_pct=args.max_order_adv_pct,
             output_dir=Path(args.output_dir),
         )
         summary = batch["summary"]
@@ -2376,6 +2598,7 @@ def main() -> None:
             cash=args.cash,
             allow_rerun=args.allow_rerun,
             preview_caps=preview_caps,
+            max_order_adv_pct=args.max_order_adv_pct,
             output_dir=Path(args.output_dir),
         )
         audit = result["audit"]
@@ -2412,6 +2635,11 @@ def main() -> None:
         print(f"  pilot validation: {audit['plan_validation']['reason']}")
         print(f"  idempotency: {audit['execution_idempotency']['reason']}")
         print(f"  positions: {audit['pre_execution_reconciliation']['reason']}")
+        liquidity = audit["liquidity_check"]
+        print(
+            "  liquidity: "
+            f"{'PASS' if liquidity['complete'] else 'BLOCKED'} - {liquidity['reason']}"
+        )
         for reason in audit["blocking_reasons"][:8]:
             print(f"  blocker: {reason}")
         remaining = len(audit["blocking_reasons"]) - 8
@@ -2440,6 +2668,7 @@ def main() -> None:
         generate_runbook=not args.skip_runbook,
         allow_rerun=args.allow_rerun,
         preview_caps=preview_caps,
+        max_order_adv_pct=args.max_order_adv_pct,
         output_dir=Path(args.output_dir),
     )
 
@@ -2455,6 +2684,8 @@ def main() -> None:
     print(f"  orders: {len(plan.orders)} max_order={plan.max_order_notional:,.0f}")
     print(f"  pilot: {'ALLOWED' if validation.allowed else 'BLOCKED'} - {validation.reason}")
     print(f"  cap preview: {'PASS' if cap_preview.allowed else 'BLOCKED'} - {cap_preview.reason}")
+    liquidity = result.get("liquidity_check", {"complete": True, "reason": "liquidity preflight not checked"})
+    print(f"  liquidity: {'PASS' if liquidity['complete'] else 'BLOCKED'} - {liquidity['reason']}")
     print(
         "  suggested caps: "
         f"orders={suggested_caps['max_orders_per_day']} "
