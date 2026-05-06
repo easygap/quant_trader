@@ -126,6 +126,7 @@ def _adapter_plan():
         orders=orders,
         diagnostics={"missing_symbols": [], "benchmark_symbol": "KS11"},
         target_quantities_after={order.symbol: order.target_quantity for order in orders},
+        position_quantities_before={},
     )
 
 
@@ -300,7 +301,10 @@ def test_target_weight_plan_records_full_expected_quantities_after_rebalance():
     assert plan.expected_position_quantities == plan.target_quantities_after
     assert set(plan.targets).issubset(set(plan.target_quantities_after))
     assert plan.target_quantities_after["AAA"] == 100
+    assert plan.position_quantities_before == {"AAA": 100}
+    assert plan.starting_position_quantities == {"AAA": 100}
     assert plan.to_dict()["target_quantities_after"] == plan.target_quantities_after
+    assert plan.to_dict()["position_quantities_before"] == plan.position_quantities_before
 
 
 def test_target_weight_plan_risk_overlay_uses_prior_day_benchmark():
@@ -469,7 +473,11 @@ def test_execute_plan_stops_after_failed_sell_before_buy():
             return 10_000.0
 
     with patch("core.order_executor.OrderExecutor", FakeExecutor), \
-         patch("core.portfolio_manager.PortfolioManager", FakePortfolio):
+         patch("core.portfolio_manager.PortfolioManager", FakePortfolio), \
+         patch(
+             "tools.target_weight_rotation_pilot._load_positions",
+             lambda account_key: {"AAA": SimpleNamespace(quantity=10)},
+         ):
         execution = execute_plan(
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
@@ -480,6 +488,28 @@ def test_execute_plan_stops_after_failed_sell_before_buy():
     assert execution["halted"] is True
     assert execution["details"][1]["status"] == "skipped_after_failure"
     assert FakeExecutor.buy_calls == 0
+
+
+def test_execute_plan_blocks_stale_starting_positions_before_order_submission(monkeypatch):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot._load_positions",
+        lambda account_key: {"ZZZ": SimpleNamespace(quantity=3)},
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert "target_weight_pre_execution_position_drift" in execution["halt_reason"]
+    assert execution["details"][0]["status"] == "skipped_pre_execution_position_drift"
 
 
 def test_preview_plan_against_caps_flags_default_pilot_caps():
@@ -568,6 +598,32 @@ def test_reconcile_plan_positions_blocks_unexpected_positive_positions():
         {"symbol": "ZZZ", "actual_quantity": 3}
     ]
     assert "unexpected: ZZZ actual=3" in reconciliation["reason"]
+
+
+def test_reconcile_plan_starting_positions_blocks_stale_plan_inputs():
+    from tools.target_weight_rotation_pilot import reconcile_plan_starting_positions
+
+    plan = replace(
+        _adapter_plan(),
+        position_quantities_before={"AAA": 7},
+    )
+
+    reconciliation = reconcile_plan_starting_positions(
+        plan,
+        {
+            "AAA": SimpleNamespace(quantity=9),
+            "ZZZ": SimpleNamespace(quantity=3),
+        },
+    )
+
+    assert reconciliation["complete"] is False
+    assert reconciliation["mismatches"] == [
+        {"symbol": "AAA", "expected_quantity": 7, "actual_quantity": 9}
+    ]
+    assert reconciliation["unexpected_positions"] == [
+        {"symbol": "ZZZ", "actual_quantity": 3}
+    ]
+    assert "target_weight_pre_execution_position_drift" in reconciliation["reason"]
 
 
 def test_resolve_shadow_batch_range_supports_auto_days():
@@ -777,6 +833,13 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
         ),
     )
     monkeypatch.setattr(pp, "save_pilot_session_artifact", lambda **kwargs: None)
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders[:-1]
+        },
+    ])
     monkeypatch.setattr(
         twp,
         "execute_plan",
@@ -789,14 +852,7 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
             "details": [],
         },
     )
-    monkeypatch.setattr(
-        twp,
-        "_load_positions",
-        lambda account_key: {
-            order.symbol: SimpleNamespace(quantity=order.target_quantity)
-            for order in plan.orders[:-1]
-        },
-    )
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
     monkeypatch.setattr(
         pe,
         "collect_daily_evidence",
@@ -811,11 +867,79 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
     )
 
     reconciliation = result["execution_evidence"]["position_reconciliation"]
+    assert result["execution_evidence"]["pre_execution_complete"] is True
     assert result["execution_evidence"]["order_complete"] is True
     assert result["execution_evidence"]["complete"] is False
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_position_mismatch" in result["evidence_collection"]["reason"]
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
+
+
+def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("stale plan must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: {"ZZZ": SimpleNamespace(quantity=3)},
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("stale plan must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    pre_reconciliation = result["execution_evidence"]["pre_execution_reconciliation"]
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution_evidence"]["pre_execution_complete"] is False
+    assert result["execution_evidence"]["order_complete"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_pre_execution_position_drift" in result["evidence_collection"]["reason"]
+    assert pre_reconciliation["unexpected_positions"] == [
+        {"symbol": "ZZZ", "actual_quantity": 3}
+    ]
+    assert saved_sessions[0]["target_weight_execution"]["pre_execution_complete"] is False
 
 
 def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_path):
@@ -860,14 +984,14 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
             "details": [],
         },
     )
-    monkeypatch.setattr(
-        twp,
-        "_load_positions",
-        lambda account_key: {
+    position_snapshots = iter([
+        {},
+        {
             order.symbol: SimpleNamespace(quantity=order.target_quantity)
             for order in plan.orders
         },
-    )
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
 
     def collect_daily_evidence(**kwargs):
         collected.append(kwargs)
@@ -887,9 +1011,11 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert len(collected) == 1
     caps = collected[0]["pilot_caps_snapshot"]
     assert caps["target_weight_execution"]["complete"] is True
+    assert caps["target_weight_execution"]["pre_execution_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["position_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
+    assert caps["target_weight_plan"]["position_quantities_before"] == {}
     assert saved_sessions[0]["execution_complete"] is True
 
 
