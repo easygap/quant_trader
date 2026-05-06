@@ -125,6 +125,7 @@ def _adapter_plan():
         target_position_count=3,
         orders=orders,
         diagnostics={"missing_symbols": [], "benchmark_symbol": "KS11"},
+        target_quantities_after={order.symbol: order.target_quantity for order in orders},
     )
 
 
@@ -279,6 +280,27 @@ def test_target_weight_plan_uses_prior_day_scores_for_targets():
     assert set(plan.targets) == {"AAA", "BBB"}
     assert "CCC" not in plan.targets
     assert {order.symbol for order in plan.orders if order.action == "BUY"} == {"AAA", "BBB"}
+
+
+def test_target_weight_plan_records_full_expected_quantities_after_rebalance():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    plan = build_target_weight_plan(
+        candidate_id="candidate",
+        symbols=["AAA", "BBB", "CCC"],
+        params={**_params(), "target_tolerance_pct": 100.0},
+        cash=100_000.0,
+        positions={"AAA": {"quantity": 100, "avg_price": 100.0}},
+        as_of_date="2025-02-03",
+        collector=FakeCollector(_frames_for_rotation()),
+    )
+
+    assert plan.orders == []
+    assert plan.target_quantities_after is not None
+    assert plan.expected_position_quantities == plan.target_quantities_after
+    assert set(plan.targets).issubset(set(plan.target_quantities_after))
+    assert plan.target_quantities_after["AAA"] == 100
+    assert plan.to_dict()["target_quantities_after"] == plan.target_quantities_after
 
 
 def test_target_weight_plan_risk_overlay_uses_prior_day_benchmark():
@@ -500,6 +522,52 @@ def test_recommend_pilot_caps_matches_target_weight_plan():
     assert rec["suggested_preview"]["allowed"] is True
     assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
+
+
+def test_reconcile_plan_positions_uses_full_expected_book():
+    from tools.target_weight_rotation_pilot import reconcile_plan_positions
+
+    plan = replace(
+        _adapter_plan(),
+        target_quantities_after={
+            "AAA": 11_000,
+            "BBB": 4_500,
+            "CCC": 4_000,
+            "DDD": 12,
+        },
+    )
+    positions = {
+        order.symbol: SimpleNamespace(quantity=order.target_quantity)
+        for order in plan.orders
+    }
+
+    reconciliation = reconcile_plan_positions(plan, positions)
+
+    assert reconciliation["complete"] is False
+    assert reconciliation["mismatches"] == [
+        {"symbol": "DDD", "target_quantity": 12, "actual_quantity": 0}
+    ]
+    assert "DDD actual=0 target=12" in reconciliation["reason"]
+
+
+def test_reconcile_plan_positions_blocks_unexpected_positive_positions():
+    from tools.target_weight_rotation_pilot import reconcile_plan_positions
+
+    plan = _adapter_plan()
+    positions = {
+        order.symbol: SimpleNamespace(quantity=order.target_quantity)
+        for order in plan.orders
+    }
+    positions["ZZZ"] = SimpleNamespace(quantity=3)
+
+    reconciliation = reconcile_plan_positions(plan, positions)
+
+    assert reconciliation["complete"] is False
+    assert reconciliation["mismatches"] == []
+    assert reconciliation["unexpected_positions"] == [
+        {"symbol": "ZZZ", "actual_quantity": 3}
+    ]
+    assert "unexpected: ZZZ actual=3" in reconciliation["reason"]
 
 
 def test_resolve_shadow_batch_range_supports_auto_days():
