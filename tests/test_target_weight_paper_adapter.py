@@ -230,6 +230,7 @@ def test_target_weight_pilot_help_lists_shadow_days():
 
     assert result.returncode == 0
     assert "--shadow-days" in result.stdout
+    assert "--readiness-audit" in result.stdout
     assert "--allow-rerun" in result.stdout
 
 
@@ -922,6 +923,73 @@ def test_run_pilot_shadow_generates_readiness_and_runbook(monkeypatch, tmp_path)
     assert "## Target-weight Cap Recommendation" in runbook_text
     assert "--max-orders 3 --max-positions 3" in runbook_text
     assert "--max-notional 1260000 --max-exposure 3360000" in runbook_text
+
+
+def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=False,
+            reason="no active pilot authorization",
+            remaining_orders=None,
+            remaining_exposure=None,
+            caps_snapshot=None,
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": False,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": False,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    audit = result["audit"]
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert audit["ready_for_cap_approval"] is True
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["next_action"] == "enable pilot with suggested caps, then rerun readiness audit"
+    assert any("pilot_authorization" in reason for reason in audit["blocking_reasons"])
+    assert any("pilot_validation" in reason for reason in audit["blocking_reasons"])
+    assert audit["execution_idempotency"]["allowed"] is True
+    assert audit["pre_execution_reconciliation"]["complete"] is True
+    assert audit["cap_recommendation"]["suggested_caps"]["max_orders_per_day"] == 3
+    assert payload["artifact_type"] == "target_weight_rotation_pilot_readiness_audit"
+    assert payload["no_order_safety"]["orders_submitted"] is False
+    assert payload["no_order_safety"]["shadow_evidence_recorded"] is False
+    assert payload["no_order_safety"]["pilot_evidence_recorded"] is False
 
 
 def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
