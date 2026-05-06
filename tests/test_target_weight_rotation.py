@@ -135,7 +135,7 @@ def test_target_weight_plan_records_liquidity_diagnostics():
             "benchmark_symbol": "KS11",
         },
         cash=100_000.0,
-        positions={},
+        positions={"AAA": {"quantity": 5, "avg_price": 95.0}},
         as_of_date="2025-03-10",
         collector=FakeCollector(_frames_for_rotation()),
     )
@@ -146,6 +146,7 @@ def test_target_weight_plan_records_liquidity_diagnostics():
     assert liquidity["symbols"]["AAA"]["complete"] is True
     assert liquidity["symbols"]["AAA"]["observations"] == 20
     assert liquidity["symbols"]["AAA"]["avg_daily_value"] > 0
+    assert plan.diagnostics["position_avg_prices_before"] == {"AAA": 95.0}
 
 
 def test_target_weight_rotation_uses_prior_day_scores_for_rebalance():
