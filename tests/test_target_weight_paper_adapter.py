@@ -977,10 +977,14 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     )
     audit = result["audit"]
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    report_text = result["report_path"].read_text(encoding="utf-8")
 
     assert audit["ready_for_cap_approval"] is True
     assert audit["ready_for_capped_pilot"] is False
     assert audit["next_action"] == "enable pilot with suggested caps, then rerun readiness audit"
+    assert "--readiness-audit" in audit["operator_commands"]["rerun_readiness_audit"]
+    assert "--max-orders 3 --max-positions 3" in audit["operator_commands"]["enable_suggested_caps"]
+    assert "--execute --collect-evidence" in audit["operator_commands"]["execute_capped_paper"]
     assert any("pilot_authorization" in reason for reason in audit["blocking_reasons"])
     assert any("pilot_validation" in reason for reason in audit["blocking_reasons"])
     assert audit["execution_idempotency"]["allowed"] is True
@@ -990,6 +994,11 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert payload["no_order_safety"]["orders_submitted"] is False
     assert payload["no_order_safety"]["shadow_evidence_recorded"] is False
     assert payload["no_order_safety"]["pilot_evidence_recorded"] is False
+    assert result["report_path"].exists()
+    assert "# Target-weight Pilot Readiness Audit" in report_text
+    assert "CAP_APPROVAL_READY" in report_text
+    assert "## Operator Commands" in report_text
+    assert "--max-notional 1260000 --max-exposure 3360000" in report_text
 
 
 def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
