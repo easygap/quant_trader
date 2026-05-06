@@ -151,6 +151,7 @@ def test_target_weight_pilot_help_lists_shadow_days():
 
     assert result.returncode == 0
     assert "--shadow-days" in result.stdout
+    assert "--allow-rerun" in result.stdout
 
 
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
@@ -398,7 +399,7 @@ def test_execute_plan_dry_run_preserves_sell_before_buy_ordering():
     assert execution["skipped"] == len(plan.orders)
 
 
-def test_execute_plan_stops_after_failed_sell_before_buy():
+def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
     from core.target_weight_rotation import TargetWeightOrder, TargetWeightPlan
     from tools.target_weight_rotation_pilot import execute_plan
 
@@ -474,6 +475,7 @@ def test_execute_plan_stops_after_failed_sell_before_buy():
 
     with patch("core.order_executor.OrderExecutor", FakeExecutor), \
          patch("core.portfolio_manager.PortfolioManager", FakePortfolio), \
+         patch("core.paper_pilot.RUNTIME_DIR", tmp_path / "paper_runtime"), \
          patch(
              "tools.target_weight_rotation_pilot._load_positions",
              lambda account_key: {"AAA": SimpleNamespace(quantity=10)},
@@ -490,10 +492,11 @@ def test_execute_plan_stops_after_failed_sell_before_buy():
     assert FakeExecutor.buy_calls == 0
 
 
-def test_execute_plan_blocks_stale_starting_positions_before_order_submission(monkeypatch):
+def test_execute_plan_blocks_stale_starting_positions_before_order_submission(monkeypatch, tmp_path):
     from tools.target_weight_rotation_pilot import execute_plan
 
     plan = _adapter_plan()
+    monkeypatch.setattr("core.paper_pilot.RUNTIME_DIR", tmp_path / "paper_runtime")
     monkeypatch.setattr(
         "tools.target_weight_rotation_pilot._load_positions",
         lambda account_key: {"ZZZ": SimpleNamespace(quantity=3)},
@@ -510,6 +513,46 @@ def test_execute_plan_blocks_stale_starting_positions_before_order_submission(mo
     assert execution["halted"] is True
     assert "target_weight_pre_execution_position_drift" in execution["halt_reason"]
     assert execution["details"][0]["status"] == "skipped_pre_execution_position_drift"
+
+
+def test_execute_plan_blocks_duplicate_session_before_order_submission(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot._load_positions",
+        lambda account_key: pytest.fail("duplicate execution must block before position reads"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert "target_weight_duplicate_execution_attempt" in execution["halt_reason"]
+    assert execution["details"][0]["status"] == "skipped_duplicate_execution_attempt"
 
 
 def test_preview_plan_against_caps_flags_default_pilot_caps():
@@ -752,6 +795,7 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
     import tools.target_weight_rotation_pilot as twp
 
     saved_sessions = []
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
     monkeypatch.setattr(twp, "build_plan", lambda **kwargs: _adapter_plan())
     monkeypatch.setattr(
         pp,
@@ -815,6 +859,7 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
     import tools.target_weight_rotation_pilot as twp
 
     plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
     monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
     monkeypatch.setattr(
         pp,
@@ -882,6 +927,7 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
 
     saved_sessions = []
     plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
     monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
     monkeypatch.setattr(
         pp,
@@ -942,6 +988,173 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
     assert saved_sessions[0]["target_weight_execution"]["pre_execution_complete"] is False
 
 
+def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": True,
+                "orders_planned": len(plan.orders),
+                "orders_executed": len(plan.orders),
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("duplicate attempt must not overwrite the prior pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("duplicate attempt must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("duplicate attempt must block before position reads"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("duplicate attempt must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_idempotency"]["allowed"] is False
+    assert result["execution_idempotency"]["previous_session_found"] is True
+    assert result["execution"]["halted"] is True
+    assert result["execution_evidence"]["idempotency_allowed"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_duplicate_execution_attempt" in result["evidence_collection"]["reason"]
+    assert payload["execution_idempotency"]["allowed"] is False
+
+
+def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    collected = []
+    saved_sessions = []
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": False,
+                "orders_planned": len(plan.orders),
+                "orders_executed": 0,
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: {
+            "executed": len(plan.orders),
+            "skipped": 0,
+            "failed": 0,
+            "halted": False,
+            "halt_reason": "",
+            "details": [],
+        },
+    )
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: collected.append(kwargs) or SimpleNamespace(date=kwargs["date"].strftime("%Y-%m-%d")),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        allow_rerun=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["execution_idempotency"]["allowed"] is True
+    assert result["execution_idempotency"]["previous_session_found"] is True
+    assert result["execution_evidence"]["complete"] is True
+    assert result["evidence_collection"]["status"] == "recorded"
+    assert len(collected) == 1
+    assert saved_sessions[0]["target_weight_execution"]["idempotency_allowed"] is True
+
+
 def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import core.paper_pilot as pp
@@ -950,6 +1163,7 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     collected = []
     saved_sessions = []
     plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
     monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
     monkeypatch.setattr(
         pp,

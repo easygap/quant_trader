@@ -268,6 +268,8 @@ def execute_plan(
     dry_run: bool = True,
     stop_on_failure: bool = True,
     pre_execution_reconciliation: dict[str, Any] | None = None,
+    execution_idempotency: dict[str, Any] | None = None,
+    allow_rerun: bool = False,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -291,6 +293,14 @@ def execute_plan(
                 "status": "dry_run",
             })
         return results
+
+    if execution_idempotency is None:
+        execution_idempotency = check_execution_idempotency(
+            plan,
+            allow_rerun=allow_rerun,
+        )
+    if not execution_idempotency["allowed"]:
+        return blocked_execution_for_duplicate_execution(plan, execution_idempotency)
 
     if pre_execution_reconciliation is None:
         try:
@@ -415,6 +425,59 @@ def _actual_position_quantities(positions: dict[str, Any] | None) -> dict[str, i
         symbol = normalize_symbol(raw_symbol)
         actual[symbol] = actual.get(symbol, 0) + _position_quantity(position)
     return actual
+
+
+def check_execution_idempotency(
+    plan: TargetWeightPlan,
+    *,
+    allow_rerun: bool = False,
+) -> dict[str, Any]:
+    from core.paper_pilot import load_pilot_session_artifact, pilot_session_artifact_path
+
+    artifact_path = pilot_session_artifact_path(plan.candidate_id, plan.trade_day)
+    result = {
+        "checked": True,
+        "allowed": True,
+        "reason": "no prior target-weight pilot execution session",
+        "allow_rerun": bool(allow_rerun),
+        "artifact_path": str(artifact_path),
+        "previous_session_found": False,
+    }
+    try:
+        artifact = load_pilot_session_artifact(plan.candidate_id, plan.trade_day)
+    except Exception as exc:
+        return {
+            **result,
+            "allowed": False,
+            "reason": f"target_weight_execution_idempotency_check_failed: {exc}",
+            "previous_session_found": True,
+        }
+
+    if artifact is None:
+        return result
+
+    pilot_session = artifact.get("pilot_session", {}) if isinstance(artifact, dict) else {}
+    result.update({
+        "previous_session_found": True,
+        "previous_generated_at": artifact.get("generated_at") if isinstance(artifact, dict) else None,
+        "previous_execution_complete": pilot_session.get("execution_complete"),
+        "previous_orders_planned": pilot_session.get("orders_planned"),
+        "previous_orders_executed": pilot_session.get("orders_executed"),
+    })
+    if allow_rerun:
+        return {
+            **result,
+            "allowed": True,
+            "reason": "operator allowed target-weight pilot rerun",
+        }
+    return {
+        **result,
+        "allowed": False,
+        "reason": (
+            "target_weight_duplicate_execution_attempt: "
+            f"existing pilot session artifact for {plan.candidate_id} {plan.trade_day}"
+        ),
+    }
 
 
 def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] | None) -> dict[str, Any]:
@@ -601,9 +664,36 @@ def blocked_execution_for_pre_execution_drift(
     }
 
 
+def blocked_execution_for_duplicate_execution(
+    plan: TargetWeightPlan,
+    execution_idempotency: dict[str, Any],
+) -> dict[str, Any]:
+    reason = execution_idempotency.get(
+        "reason",
+        "target_weight_duplicate_execution_attempt",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "execution_idempotency": execution_idempotency,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_duplicate_execution_attempt",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def summarize_execution_for_evidence(
     plan: TargetWeightPlan,
     execution: dict[str, Any],
+    execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -613,6 +703,11 @@ def summarize_execution_for_evidence(
     skipped = int(execution.get("skipped", 0) or 0)
     halted = bool(execution.get("halted", False))
     order_complete = failed == 0 and skipped == 0 and not halted and executed == planned
+    idempotency = execution_idempotency or execution.get("execution_idempotency") or {
+        "checked": False,
+        "allowed": True,
+        "reason": "execution idempotency check not required",
+    }
     pre_reconciliation = pre_execution_reconciliation or execution.get("pre_execution_reconciliation") or {
         "checked": False,
         "complete": True,
@@ -631,11 +726,14 @@ def summarize_execution_for_evidence(
         "mismatches": [],
         "unexpected_positions": [],
     }
+    idempotency_allowed = bool(idempotency.get("allowed", False))
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     position_complete = bool(reconciliation.get("complete", False))
-    complete = pre_execution_complete and order_complete and position_complete
+    complete = idempotency_allowed and pre_execution_complete and order_complete and position_complete
     reason = "all planned target-weight orders executed"
-    if not pre_execution_complete:
+    if not idempotency_allowed:
+        reason = idempotency.get("reason", "target_weight_duplicate_execution_attempt")
+    elif not pre_execution_complete:
         reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
     elif not order_complete:
         reason = (
@@ -651,6 +749,7 @@ def summarize_execution_for_evidence(
     return {
         "complete": complete,
         "reason": reason,
+        "idempotency_allowed": idempotency_allowed,
         "pre_execution_complete": pre_execution_complete,
         "order_complete": order_complete,
         "planned_orders": planned,
@@ -659,6 +758,7 @@ def summarize_execution_for_evidence(
         "skipped_orders": skipped,
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
+        "execution_idempotency": idempotency,
         "pre_execution_reconciliation": pre_reconciliation,
         "position_reconciliation": reconciliation,
         "params_hash": plan.params_hash,
@@ -673,6 +773,7 @@ def build_pilot_evidence_caps_snapshot(
     plan: TargetWeightPlan,
     validation: Any,
     execution: dict[str, Any],
+    execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -694,6 +795,7 @@ def build_pilot_evidence_caps_snapshot(
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
         execution,
+        execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -709,6 +811,7 @@ def write_session_artifact(
     cap_recommendation: dict[str, Any],
     execution: dict[str, Any],
     dry_run: bool,
+    execution_idempotency: dict[str, Any] | None = None,
     shadow_evidence: dict[str, Any] | None = None,
     evidence_collection: dict[str, Any] | None = None,
     launch_artifacts: dict[str, Any] | None = None,
@@ -726,6 +829,7 @@ def write_session_artifact(
         "cap_preview": asdict(cap_preview),
         "cap_recommendation": cap_recommendation,
         "execution": execution,
+        "execution_idempotency": execution_idempotency or {"checked": False},
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
         "evidence_collection": evidence_collection or {"attempted": False, "recorded": False},
         "launch_artifacts": launch_artifacts or {"attempted": False},
@@ -951,6 +1055,7 @@ def run_shadow_bootstrap(
     max_scan_weekdays: int | None = None,
     generate_readiness_artifacts: bool = True,
     generate_runbook: bool = True,
+    allow_rerun: bool = False,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
@@ -1163,6 +1268,7 @@ def run_pilot(
     preview_caps: dict[str, int] | None = None,
     generate_readiness_artifacts: bool = True,
     generate_runbook: bool = True,
+    allow_rerun: bool = False,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
@@ -1195,8 +1301,15 @@ def run_pilot(
     if execute and not validation.allowed:
         raise ValueError(f"pilot plan blocked: {validation.reason}")
 
-    pre_execution_reconciliation = None
+    execution_idempotency = None
     if execute:
+        execution_idempotency = check_execution_idempotency(
+            plan,
+            allow_rerun=allow_rerun,
+        )
+
+    pre_execution_reconciliation = None
+    if execute and execution_idempotency and execution_idempotency["allowed"]:
         try:
             pre_execution_reconciliation = reconcile_plan_starting_positions(
                 plan,
@@ -1209,18 +1322,26 @@ def run_pilot(
             )
             pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
 
-    if execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
+    if execute and execution_idempotency and not execution_idempotency["allowed"]:
+        execution = blocked_execution_for_duplicate_execution(plan, execution_idempotency)
+    elif execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
         execution = blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
     else:
         execution = execute_plan(
             plan,
             config=config,
             dry_run=dry_run,
+            execution_idempotency=execution_idempotency,
+            allow_rerun=allow_rerun,
             pre_execution_reconciliation=pre_execution_reconciliation,
         )
 
     position_reconciliation = None
-    if execute and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"]):
+    if (
+        execute
+        and (execution_idempotency is None or execution_idempotency["allowed"])
+        and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
+    ):
         try:
             position_reconciliation = reconcile_plan_positions(
                 plan,
@@ -1232,6 +1353,7 @@ def run_pilot(
     execution_evidence = summarize_execution_for_evidence(
         plan,
         execution,
+        execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         position_reconciliation=position_reconciliation,
     )
@@ -1242,6 +1364,7 @@ def run_pilot(
             plan,
             validation,
             execution,
+            execution_idempotency=execution_idempotency,
             pre_execution_reconciliation=pre_execution_reconciliation,
             position_reconciliation=position_reconciliation,
         )
@@ -1258,11 +1381,12 @@ def run_pilot(
             "evidence_block_reason": "" if execution_evidence["complete"] else execution_evidence["reason"],
             "target_weight_execution": execution_evidence,
         }
-        save_pilot_session_artifact(
-            strategy=candidate_id,
-            date=plan.trade_day,
-            pilot_session=pilot_session,
-        )
+        if execution_idempotency is None or execution_idempotency["allowed"]:
+            save_pilot_session_artifact(
+                strategy=candidate_id,
+                date=plan.trade_day,
+                pilot_session=pilot_session,
+            )
 
         if collect_evidence:
             evidence_collection = {
@@ -1322,6 +1446,7 @@ def run_pilot(
         cap_recommendation=cap_recommendation,
         execution=execution,
         dry_run=dry_run,
+        execution_idempotency=execution_idempotency,
         shadow_evidence=shadow_evidence_summary,
         evidence_collection=evidence_collection,
         launch_artifacts=launch_artifacts,
@@ -1335,6 +1460,7 @@ def run_pilot(
         "cap_preview": cap_preview,
         "cap_recommendation": cap_recommendation,
         "execution": execution,
+        "execution_idempotency": execution_idempotency,
         "execution_evidence": execution_evidence,
         "evidence_collection": evidence_collection,
         "shadow_evidence": shadow_evidence_record,
@@ -1382,6 +1508,11 @@ def main() -> None:
         "--skip-runbook",
         action="store_true",
         help="Skip pilot runbook generation when readiness artifacts are generated.",
+    )
+    parser.add_argument(
+        "--allow-rerun",
+        action="store_true",
+        help="Explicitly allow a same-candidate/trade-day execute rerun when a pilot session artifact already exists.",
     )
     parser.add_argument("--preview-max-orders", type=int, help="Proposed pilot cap preview: max orders/day.")
     parser.add_argument("--preview-max-positions", type=int, help="Proposed pilot cap preview: max concurrent positions.")
@@ -1485,6 +1616,7 @@ def main() -> None:
         record_shadow_evidence=args.record_shadow_evidence,
         generate_readiness_artifacts=not args.skip_readiness_artifacts,
         generate_runbook=not args.skip_runbook,
+        allow_rerun=args.allow_rerun,
         preview_caps=preview_caps,
         output_dir=Path(args.output_dir),
     )
