@@ -65,6 +65,7 @@ class TargetWeightPlan:
     target_position_count: int
     orders: list[TargetWeightOrder]
     diagnostics: dict[str, Any]
+    target_quantities_after: dict[str, int] | None = None
 
     @property
     def max_order_notional(self) -> float:
@@ -77,6 +78,15 @@ class TargetWeightPlan:
     @property
     def sell_notional(self) -> float:
         return sum(order.notional for order in self.orders if order.action == "SELL")
+
+    @property
+    def expected_position_quantities(self) -> dict[str, int]:
+        if self.target_quantities_after is not None:
+            return {
+                symbol: int(quantity)
+                for symbol, quantity in self.target_quantities_after.items()
+            }
+        return {order.symbol: int(order.target_quantity) for order in self.orders}
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -468,6 +478,10 @@ def build_target_weight_plan(
         projected_qty[sym] = scaled_target_qty
 
     orders = [*sell_orders, *buy_orders]
+    target_quantities_after = {
+        sym: int(projected_qty.get(sym, 0))
+        for sym in sorted(desired_qty)
+    }
     cash_after_estimate = cash_before + sum(o.notional for o in sell_orders) - sum(o.notional for o in buy_orders)
     gross_exposure_after = sum(
         qty * prices.get(sym, 0.0)
@@ -502,6 +516,7 @@ def build_target_weight_plan(
             "benchmark_symbol": benchmark_symbol,
             "generated_at": datetime.now().isoformat(),
         },
+        target_quantities_after=target_quantities_after,
     )
 
 
