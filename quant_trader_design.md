@@ -116,6 +116,7 @@
 - Follow-up research implementation/result (2026-04-30): target-weight benchmark-risk overlay 후보 추가. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`, return=+210.24%, raw excess=+60.85%p, exposure-matched excess=+130.96%p, Sharpe=1.60, PF=5.73, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%, risk-off rebalance=38.9%로 research sweep 기준 `provisional_paper_candidate` 도달
 - Follow-up canonical bridge (2026-04-30): `tools/evaluate_and_promote.py --canonical`이 위 target-weight 후보를 동일 candidate id/params hash로 `reports/promotion/*` canonical bundle에 포함. `promotion_result.json`과 `--check-only`에서 `provisional_paper_candidate` 재현 확인.
 - Follow-up paper/pilot adapter (2026-04-30): `core/target_weight_rotation.py`가 직전 거래일 score 기반 portfolio-level 목표비중 plan과 pilot cap 검증을 담당하고, `tools/target_weight_rotation_pilot.py`가 dry-run/제한 paper 실행 artifact를 생성한다. `OrderExecutor.execute_buy_quantity()`는 paper-only exact quantity 매수를 지원하며 live 모드는 계속 거부한다.
+- Follow-up liquidity preflight (2026-05-06): target-weight plan이 주문 종목별 최근 20일 평균 거래대금 진단을 포함하고, pilot adapter가 주문 notional이 평균 거래대금의 기본 5%를 넘으면 readiness/execute를 fail-closed 차단한다. 기준은 `--max-order-adv-pct`로 조정한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1094,7 +1095,7 @@ quant_trader/
 - 과거 3~5년 데이터 → 훈련/검증 분리 → 파라미터 최적화 → OOS 검증 → 거래비용·슬리피지 반영 → 페이퍼 트레이딩 → 소액 실전.
 - **벤치마크 비교**: 코스피 지수(KS11) 대비 초과 수익 여부에 더해, **코스피 상위 50종목 동일비중 매수·홀딩** 대비 out-of-sample 초과 수익 여부를 검증합니다. Top50 벤치마크는 `--mode validate` 시 기본 사용하며, `--no-benchmark-top50` 으로 비활성화할 수 있습니다. 벤치마크·유니버스 종목 리스트는 **검증 시작일(as_of_date)** 기준으로 가져오며, `risk_params.backtest_universe` 설정에 따라 **생존자 편향**을 완화할 수 있습니다(아래 §8.2.1 참고).
 - **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남기고, `hold_rank_buffer`를 주면 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안에서는 유지해 과도한 교체를 줄입니다. `market_exposure_mode=benchmark_risk`는 직전 거래일까지의 KS11 SMA/rolling drawdown/realized volatility만 사용해 risk-off 리밸런싱의 부분 노출 축소와 `risk_off_rebalance_pct`를 기록합니다.
-- **Target-weight paper/pilot 실행**: `tools/target_weight_rotation_pilot.py`는 canonical candidate id의 params를 읽어 동일 로직으로 목표 수량을 계산하고, `core.paper_pilot.check_pilot_entry()`와 plan-level cap 검증을 통과해야 paper 주문을 낼 수 있습니다. 기본은 dry-run이며 `--execute`를 줘도 `trading.mode=live`에서는 거부합니다.
+- **Target-weight paper/pilot 실행**: `tools/target_weight_rotation_pilot.py`는 canonical candidate id의 params를 읽어 동일 로직으로 목표 수량을 계산하고, `core.paper_pilot.check_pilot_entry()`와 plan-level cap 검증을 통과해야 paper 주문을 낼 수 있습니다. 추가로 주문별 notional이 최근 20일 평균 거래대금의 기본 5%(`--max-order-adv-pct`)를 넘으면 readiness audit과 실행을 차단합니다. 기본은 dry-run이며 `--execute`를 줘도 `trading.mode=live`에서는 거부합니다.
 
 **⚠️ 생존자 편향 (Survivorship Bias) — §8.2.1**
 
@@ -1411,6 +1412,7 @@ quant_trader/
 - [x] **target-weight benchmark-risk overlay 후보 추가** — KS11 SMA/낙폭/변동성 기반 부분 노출 축소. best risk60_35 +210.24%/raw excess +60.85%p/Sharpe 1.60/PF 5.73/MDD -19.24%/turnover 858.0%/WF positive 100%로 research sweep 기준 provisional 후보 도달
 - [x] **target-weight canonical bridge 추가** — `evaluate_and_promote.py --canonical`이 risk60_35를 canonical promotion bundle에 포함하고 `promotion_result.json`에서 provisional 상태 재현
 - [x] **target-weight paper/pilot adapter 추가** — portfolio-level plan, pilot cap validation, paper-only exact quantity order path 추가. Live gate는 변경 없음
+- [x] **target-weight liquidity preflight 추가** — 최근 20일 평균 거래대금 대비 주문 notional 기본 5% 초과 시 readiness/execute fail-closed 차단
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)

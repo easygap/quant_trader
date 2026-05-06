@@ -120,6 +120,34 @@ def test_target_weight_rotation_holds_top_n_with_cash_buffer():
     assert 0.79 <= first_exposure <= 0.81
 
 
+def test_target_weight_plan_records_liquidity_diagnostics():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    plan = build_target_weight_plan(
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-03-10",
+        collector=FakeCollector(_frames_for_rotation()),
+    )
+
+    liquidity = plan.diagnostics["liquidity"]
+
+    assert liquidity["lookback_days"] == 20
+    assert liquidity["symbols"]["AAA"]["complete"] is True
+    assert liquidity["symbols"]["AAA"]["observations"] == 20
+    assert liquidity["symbols"]["AAA"]["avg_daily_value"] > 0
+
+
 def test_target_weight_rotation_uses_prior_day_scores_for_rebalance():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
