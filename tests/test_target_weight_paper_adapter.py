@@ -124,7 +124,23 @@ def _adapter_plan():
         gross_exposure_after=3_200_000.0,
         target_position_count=3,
         orders=orders,
-        diagnostics={"missing_symbols": [], "benchmark_symbol": "KS11"},
+        diagnostics={
+            "missing_symbols": [],
+            "benchmark_symbol": "KS11",
+            "liquidity": {
+                "lookback_days": 20,
+                "symbols": {
+                    order.symbol: {
+                        "complete": True,
+                        "reason": "liquidity window available",
+                        "observations": 20,
+                        "avg_daily_value": 100_000_000.0,
+                        "last_daily_value": 100_000_000.0,
+                    }
+                    for order in orders
+                },
+            },
+        },
         target_quantities_after={order.symbol: order.target_quantity for order in orders},
         position_quantities_before={},
     )
@@ -197,6 +213,7 @@ def _existing_pilot_evidence_record(plan):
                 "planned_orders": len(plan.orders),
                 "idempotency_allowed": True,
                 "pre_execution_complete": True,
+                "liquidity_complete": True,
                 "order_count_complete": True,
                 "order_result_complete": True,
                 "order_complete": True,
@@ -754,6 +771,88 @@ def test_recommend_pilot_caps_matches_target_weight_plan():
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
 
 
+def test_assess_plan_liquidity_blocks_large_adv_order():
+    from tools.target_weight_rotation_pilot import assess_plan_liquidity
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["liquidity"] = {
+        "lookback_days": 20,
+        "symbols": {
+            "AAA": {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 10_000_000.0,
+                "last_daily_value": 10_000_000.0,
+            },
+            "BBB": {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 100_000_000.0,
+                "last_daily_value": 100_000_000.0,
+            },
+            "CCC": {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 100_000_000.0,
+                "last_daily_value": 100_000_000.0,
+            },
+        },
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+
+    liquidity = assess_plan_liquidity(plan, max_order_adv_pct=5.0)
+
+    assert liquidity["complete"] is False
+    assert "target_weight_liquidity_preflight_failed" in liquidity["reason"]
+    assert liquidity["orders"][0]["symbol"] == "AAA"
+    assert liquidity["orders"][0]["order_adv_pct"] == 11.0
+    assert "AAA" in liquidity["violations"][0]
+
+
+def test_execute_plan_blocks_liquidity_before_order_submission(monkeypatch):
+    from tools.target_weight_rotation_pilot import assess_plan_liquidity, execute_plan
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["liquidity"] = {
+        "lookback_days": 20,
+        "symbols": {
+            order.symbol: {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 10_000_000.0,
+                "last_daily_value": 10_000_000.0,
+            }
+            for order in plan.orders
+        },
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("liquidity failure must not submit orders"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+        execution_idempotency={"allowed": True},
+        pre_execution_reconciliation={"complete": True},
+        liquidity_check=assess_plan_liquidity(plan, max_order_adv_pct=5.0),
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert execution["details"][0]["status"] == "skipped_liquidity_preflight"
+    assert "target_weight_liquidity_preflight_failed" in execution["halt_reason"]
+
+
 def test_reconcile_plan_positions_uses_full_expected_book():
     from tools.target_weight_rotation_pilot import reconcile_plan_positions
 
@@ -921,6 +1020,7 @@ def test_run_pilot_shadow_generates_readiness_and_runbook(monkeypatch, tmp_path)
     assert "clean_final_days" in payload["launch_artifacts"]["launch_readiness"]["blocking_requirements"][0]
     runbook_text = runbook_path.read_text(encoding="utf-8")
     assert "## Target-weight Cap Recommendation" in runbook_text
+    assert "Liquidity preflight:" in runbook_text
     assert "--max-orders 3 --max-positions 3" in runbook_text
     assert "--max-notional 1260000 --max-exposure 3360000" in runbook_text
 
@@ -989,6 +1089,7 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert any("pilot_validation" in reason for reason in audit["blocking_reasons"])
     assert audit["execution_idempotency"]["allowed"] is True
     assert audit["pre_execution_reconciliation"]["complete"] is True
+    assert audit["liquidity_check"]["complete"] is True
     assert audit["cap_recommendation"]["suggested_caps"]["max_orders_per_day"] == 3
     assert payload["artifact_type"] == "target_weight_rotation_pilot_readiness_audit"
     assert payload["no_order_safety"]["orders_submitted"] is False
@@ -997,8 +1098,81 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert result["report_path"].exists()
     assert "# Target-weight Pilot Readiness Audit" in report_text
     assert "CAP_APPROVAL_READY" in report_text
+    assert "## Liquidity Preflight" in report_text
     assert "## Operator Commands" in report_text
     assert "--max-notional 1260000 --max-exposure 3360000" in report_text
+
+
+def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["liquidity"] = {
+        "lookback_days": 20,
+        "symbols": {
+            order.symbol: {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 10_000_000.0,
+                "last_daily_value": 10_000_000.0,
+            }
+            for order in plan.orders
+        },
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+    audit = result["audit"]
+    report_text = result["report_path"].read_text(encoding="utf-8")
+
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["liquidity_check"]["complete"] is False
+    assert any("liquidity_preflight" in reason for reason in audit["blocking_reasons"])
+    assert "BLOCKED" in report_text
+    assert "target_weight_liquidity_preflight_failed" in report_text
 
 
 def test_run_pilot_without_shadow_does_not_generate_readiness(monkeypatch, tmp_path):
@@ -1349,6 +1523,85 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
     assert saved_sessions[0]["target_weight_execution"]["pre_execution_complete"] is False
 
 
+def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["liquidity"] = {
+        "lookback_days": 20,
+        "symbols": {
+            order.symbol: {
+                "complete": True,
+                "reason": "liquidity window available",
+                "observations": 20,
+                "avg_daily_value": 10_000_000.0,
+                "last_daily_value": 10_000_000.0,
+            }
+            for order in plan.orders
+        },
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("liquidity failure must not submit orders"),
+    )
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("liquidity failure must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("liquidity failure must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    assert result["liquidity_check"]["complete"] is False
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution_evidence"]["liquidity_complete"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_liquidity_preflight_failed" in result["evidence_collection"]["reason"]
+    assert saved_sessions[0]["target_weight_execution"]["liquidity_complete"] is False
+
+
 def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import core.paper_pilot as pp
@@ -1575,6 +1828,8 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     caps = collected[0]["pilot_caps_snapshot"]
     assert caps["target_weight_execution"]["complete"] is True
     assert caps["target_weight_execution"]["pre_execution_reconciliation"]["complete"] is True
+    assert caps["target_weight_execution"]["liquidity_complete"] is True
+    assert caps["target_weight_execution"]["liquidity_check"]["complete"] is True
     assert caps["target_weight_execution"]["order_result_complete"] is True
     assert caps["target_weight_execution"]["order_result_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["fill_complete"] is True

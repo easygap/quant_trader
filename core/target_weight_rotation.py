@@ -20,6 +20,7 @@ import pandas as pd
 DEFAULT_TARGET_WEIGHT_CANDIDATE_ID = (
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"
 )
+DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,67 @@ def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
     series = data["close"].astype(float).copy()
     series.index = idx.normalize()
     return series[series > 0].groupby(level=0).last().sort_index()
+
+
+def daily_value_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
+    if df is None or df.empty or "close" not in df.columns or "volume" not in df.columns:
+        return pd.Series(dtype=float)
+
+    data = df.copy()
+    if "date" in data.columns:
+        data = data.set_index("date")
+    idx = pd.to_datetime(data.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    close = data["close"].astype(float)
+    volume = data["volume"].astype(float)
+    series = (close * volume).copy()
+    series.index = idx.normalize()
+    return series[series > 0].groupby(level=0).last().sort_index()
+
+
+def _liquidity_diagnostics_from_ohlcv(
+    frames: dict[str, pd.DataFrame],
+    *,
+    trade_day: pd.Timestamp,
+    lookback_days: int = DEFAULT_LIQUIDITY_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    symbols: dict[str, dict[str, Any]] = {}
+    for symbol, frame in frames.items():
+        daily_value = daily_value_series_from_ohlcv(frame)
+        if daily_value.empty:
+            symbols[symbol] = {
+                "complete": False,
+                "reason": "missing close/volume liquidity data",
+                "observations": 0,
+                "avg_daily_value": None,
+                "last_daily_value": None,
+            }
+            continue
+
+        window = daily_value[daily_value.index <= trade_day].tail(lookback_days)
+        if window.empty:
+            symbols[symbol] = {
+                "complete": False,
+                "reason": "no liquidity rows on or before trade day",
+                "observations": 0,
+                "avg_daily_value": None,
+                "last_daily_value": None,
+            }
+            continue
+
+        symbols[symbol] = {
+            "complete": True,
+            "reason": "liquidity window available",
+            "observations": int(len(window)),
+            "avg_daily_value": round(float(window.mean()), 2),
+            "last_daily_value": round(float(window.iloc[-1]), 2),
+        }
+
+    return {
+        "lookback_days": int(lookback_days),
+        "symbols": symbols,
+    }
 
 
 def _fetch_korean_stock(collector: Any, symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -335,11 +397,14 @@ def build_target_weight_plan(
     close_parts: list[pd.Series] = []
     valid_symbols: list[str] = []
     missing_symbols: list[str] = []
+    ohlcv_frames: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
-        close = close_series_from_ohlcv(_fetch_korean_stock(collector, symbol, start, end))
+        frame = _fetch_korean_stock(collector, symbol, start, end)
+        close = close_series_from_ohlcv(frame)
         if close.empty:
             missing_symbols.append(symbol)
             continue
+        ohlcv_frames[symbol] = frame
         close.name = symbol
         close_parts.append(close)
         valid_symbols.append(symbol)
@@ -532,6 +597,10 @@ def build_target_weight_plan(
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
+            "liquidity": _liquidity_diagnostics_from_ohlcv(
+                {symbol: ohlcv_frames[symbol] for symbol in valid_symbols if symbol in ohlcv_frames},
+                trade_day=trade_day,
+            ),
             "generated_at": datetime.now().isoformat(),
         },
         target_quantities_after=target_quantities_after,
