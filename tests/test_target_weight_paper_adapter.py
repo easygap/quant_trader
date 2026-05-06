@@ -130,6 +130,53 @@ def _adapter_plan():
     )
 
 
+def _complete_execution(plan):
+    details = []
+    for order in plan.orders:
+        result = {
+            "success": True,
+            "symbol": order.symbol,
+            "action": order.action,
+            "price": order.price,
+            "quantity": order.quantity,
+            "mode": "paper",
+        }
+        if order.action == "BUY":
+            result["paper_fixed_quantity"] = True
+        details.append({
+            "order": {
+                "symbol": order.symbol,
+                "action": order.action,
+                "quantity": order.quantity,
+            },
+            "status": "success",
+            "result": result,
+        })
+    return {
+        "executed": len(plan.orders),
+        "skipped": 0,
+        "failed": 0,
+        "halted": False,
+        "halt_reason": "",
+        "details": details,
+    }
+
+
+def _complete_fills(plan):
+    return [
+        SimpleNamespace(
+            symbol=order.symbol,
+            action=order.action,
+            quantity=order.quantity,
+            strategy=plan.candidate_id,
+            mode="paper",
+            account_key=plan.candidate_id,
+            executed_at=f"{plan.trade_day} 09:00:00",
+        )
+        for order in plan.orders
+    ]
+
+
 def _adapter_plan_for_date(day: str):
     score_day = {
         "2026-04-08": "2026-04-07",
@@ -555,6 +602,50 @@ def test_execute_plan_blocks_duplicate_session_before_order_submission(monkeypat
     assert execution["details"][0]["status"] == "skipped_duplicate_execution_attempt"
 
 
+def test_reconcile_order_results_flags_quantity_mismatch():
+    from tools.target_weight_rotation_pilot import reconcile_order_results
+
+    plan = _adapter_plan()
+    execution = _complete_execution(plan)
+    execution["details"][0]["result"]["quantity"] = plan.orders[0].quantity - 1
+
+    reconciliation = reconcile_order_results(plan, execution)
+
+    assert reconciliation["complete"] is False
+    assert "target_weight_order_result_mismatch" in reconciliation["reason"]
+    assert reconciliation["mismatches"][0]["type"] == "quantity"
+    assert reconciliation["mismatches"][0]["symbol"] == plan.orders[0].symbol
+
+
+def test_reconcile_plan_fills_flags_missing_trade_history_fill():
+    from tools.target_weight_rotation_pilot import reconcile_plan_fills
+
+    plan = _adapter_plan()
+    fills = _complete_fills(plan)[:-1]
+
+    reconciliation = reconcile_plan_fills(plan, fills)
+
+    assert reconciliation["complete"] is False
+    assert "target_weight_fill_reconciliation_mismatch" in reconciliation["reason"]
+    assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
+    assert reconciliation["mismatches"][0]["actual_quantity"] == 0
+
+
+def test_reconcile_plan_fills_flags_partial_quantity():
+    from tools.target_weight_rotation_pilot import reconcile_plan_fills
+
+    plan = _adapter_plan()
+    fills = _complete_fills(plan)
+    fills[0].quantity = plan.orders[0].quantity - 1
+
+    reconciliation = reconcile_plan_fills(plan, fills)
+
+    assert reconciliation["complete"] is False
+    assert reconciliation["mismatches"][0]["symbol"] == plan.orders[0].symbol
+    assert reconciliation["mismatches"][0]["expected_quantity"] == plan.orders[0].quantity
+    assert reconciliation["mismatches"][0]["actual_quantity"] == plan.orders[0].quantity - 1
+
+
 def test_preview_plan_against_caps_flags_default_pilot_caps():
     from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
 
@@ -830,6 +921,7 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
             "details": [],
         },
     )
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: [])
     monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
     monkeypatch.setattr(
         pe,
@@ -888,15 +980,9 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
     monkeypatch.setattr(
         twp,
         "execute_plan",
-        lambda *args, **kwargs: {
-            "executed": len(plan.orders),
-            "skipped": 0,
-            "failed": 0,
-            "halted": False,
-            "halt_reason": "",
-            "details": [],
-        },
+        lambda *args, **kwargs: _complete_execution(plan),
     )
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
     monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
     monkeypatch.setattr(
         pe,
@@ -918,6 +1004,139 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_position_mismatch" in result["evidence_collection"]["reason"]
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
+
+
+def test_run_pilot_blocks_evidence_when_order_result_reconciliation_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    execution = _complete_execution(plan)
+    execution["details"][0]["result"]["quantity"] = plan.orders[0].quantity - 1
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: execution)
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("mismatched order result must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    reconciliation = result["execution_evidence"]["order_result_reconciliation"]
+    assert result["execution_evidence"]["pre_execution_complete"] is True
+    assert result["execution_evidence"]["order_count_complete"] is True
+    assert result["execution_evidence"]["order_result_complete"] is False
+    assert result["execution_evidence"]["order_complete"] is False
+    assert result["execution_evidence"]["position_reconciliation"]["complete"] is True
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_order_result_mismatch" in result["evidence_collection"]["reason"]
+    assert reconciliation["mismatches"][0]["type"] == "quantity"
+    assert saved_sessions[0]["target_weight_execution"]["order_result_complete"] is False
+
+
+def test_run_pilot_blocks_evidence_when_fill_reconciliation_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    incomplete_fills = _complete_fills(plan)[:-1]
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: incomplete_fills)
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("mismatched fills must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    reconciliation = result["execution_evidence"]["fill_reconciliation"]
+    assert result["execution_evidence"]["order_complete"] is True
+    assert result["execution_evidence"]["fill_complete"] is False
+    assert result["execution_evidence"]["position_reconciliation"]["complete"] is True
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_fill_reconciliation_mismatch" in result["evidence_collection"]["reason"]
+    assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
+    assert saved_sessions[0]["target_weight_execution"]["fill_complete"] is False
 
 
 def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeypatch, tmp_path):
@@ -1116,15 +1335,9 @@ def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp
     monkeypatch.setattr(
         twp,
         "execute_plan",
-        lambda *args, **kwargs: {
-            "executed": len(plan.orders),
-            "skipped": 0,
-            "failed": 0,
-            "halted": False,
-            "halt_reason": "",
-            "details": [],
-        },
+        lambda *args, **kwargs: _complete_execution(plan),
     )
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -1189,15 +1402,9 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     monkeypatch.setattr(
         twp,
         "execute_plan",
-        lambda *args, **kwargs: {
-            "executed": len(plan.orders),
-            "skipped": 0,
-            "failed": 0,
-            "halted": False,
-            "halt_reason": "",
-            "details": [],
-        },
+        lambda *args, **kwargs: _complete_execution(plan),
     )
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -1226,6 +1433,10 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     caps = collected[0]["pilot_caps_snapshot"]
     assert caps["target_weight_execution"]["complete"] is True
     assert caps["target_weight_execution"]["pre_execution_reconciliation"]["complete"] is True
+    assert caps["target_weight_execution"]["order_result_complete"] is True
+    assert caps["target_weight_execution"]["order_result_reconciliation"]["complete"] is True
+    assert caps["target_weight_execution"]["fill_complete"] is True
+    assert caps["target_weight_execution"]["fill_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["position_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
