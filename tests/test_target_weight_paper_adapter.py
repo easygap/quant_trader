@@ -393,6 +393,74 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
     assert result["audit"]["cap_preview"]["allowed"] is True
 
 
+def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weight(monkeypatch, tmp_path):
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    calls = {}
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        calls["audit"] = kwargs
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "proposed pilot caps satisfied",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy="target_weight_rotation_next_candidate",
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=4,
+        max_notional=1_500_000,
+        max_exposure=4_000_000,
+    )
+
+    result = _target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+    assert calls["audit"]["candidate_id"] == "target_weight_rotation_next_candidate"
+    assert calls["audit"]["as_of_date"] == "2026-04-10"
+    assert calls["audit"]["preview_caps"] == {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 4,
+        "max_notional_per_trade": 1_500_000,
+        "max_gross_exposure": 4_000_000,
+    }
+
+
+def test_target_weight_pilot_control_enable_guard_skips_non_target_weight(monkeypatch):
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fail_audit(**kwargs):
+        pytest.fail("non target-weight strategy must not run target-weight audit")
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fail_audit,
+    )
+    args = SimpleNamespace(
+        strategy="scoring",
+        valid_from="2026-04-10",
+        max_orders=2,
+        max_positions=2,
+        max_notional=1_000_000,
+        max_exposure=3_000_000,
+    )
+
+    assert _target_weight_enable_guard(args) is None
+
+
 def test_paper_pilot_control_enable_stops_before_auth_when_target_weight_guard_fails(
     monkeypatch,
     capsys,
