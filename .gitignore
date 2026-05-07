@@ -29,6 +29,18 @@ logs/
 reports/backtest_*.html
 reports/backtest_*.txt
 reports/*.md
+reports/paper_evidence/
+reports/paper_runtime/
+reports/promotion/
+reports/research_sweeps/
+reports/paper_weekly_*.json
+reports/paper_weekly_*.txt
+reports/validation_walkforward_*.json
+reports/validation_walkforward_*.txt
+
+# --- 테스트/에이전트 임시 산출물 ---
+pytest_tmp*/
+.claude/worktrees/
 
 # --- IDE / OS ---
 .idea/
