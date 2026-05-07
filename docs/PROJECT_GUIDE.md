@@ -599,6 +599,8 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | **signal-only** (기본) | YAML `trading.auto_entry=false`, `QUANT_AUTO_ENTRY` 미설정 | 신호 분석·evidence/finalize만, 신규 주문 없음 |
 | **full paper** | `QUANT_AUTO_ENTRY=true` 환경변수 | BUY/SELL 자동 실행 (paper DB만 기록). YAML 원본은 유지하고 resolved hash만 달라짐 |
 
+full paper 신규 BUY는 preflight status artifact와 runtime state가 모두 확인되어야 실행된다. preflight 누락/손상, runtime 조회 실패, critical fail은 `OrderExecutor`와 scheduler 양쪽에서 주문 생성 전 차단하며, 기존 포지션 청산을 위한 SELL/exit 경로는 계속 허용한다.
+
 60영업일 실험은 `reports/experiment_freeze_pack.md`와 `reports/paper_experiment_manifest.json`을 기준으로 동결한다. 실행 전 `Config.yaml_hash`, `Config.resolved_hash`, `Config.auto_entry_source`를 확인해 파일 변경과 환경변수 변경을 분리해서 기록한다.
 
 ### 현재 시스템의 핵심 한계
@@ -717,6 +719,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | ✅ **target-weight pre-trade risk 추가** | `RiskManager.calculate_transaction_costs()`의 수수료/세금/동적 슬리피지 예상 체결가를 재사용해 plan 전체 주문을 제출 전 시뮬레이션한다. 예상 현금 부족, 최소 현금비중, 최대 투자비중, 종목별 최대 비중, 최대 보유 종목 수 위반은 readiness audit과 `--execute`에서 fail-closed 차단하고, session/readiness/pilot evidence snapshot에 `pre_trade_risk_check`와 cost summary를 남긴다. 매도 주문은 plan diagnostics의 기존 평균매입가를 사용해 세금/양도세 옵션과도 연결된다 |
 | ✅ **target-weight completed rerun block 추가** | same-candidate/trade-day pilot session artifact가 이미 `execution_complete=True`이고 실제 주문 실행 수량이 있으면 `--allow-rerun`을 줘도 재실행을 차단한다. `--allow-rerun`은 부분 실행/중단 세션 복구에만 사용해 완료된 실행 증거가 중복 주문으로 오염되지 않게 한다 |
 | ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리 |
+| ✅ **generic paper entry guard 추가** | `main.py --mode paper`, scheduler auto-entry, `execute_buy_quantity()` 모두 preflight/runtime 확인 실패 시 BUY를 fail-closed 차단. blocked runtime의 pilot override는 `check_pilot_entry()` 재검증을 통과해야 하며 SELL은 exit-safe 유지 |
 | ✅ **Zero-return Semantics** | cash-only/no-position day deadlock 해소 — daily_return=0.0 추론 |
 | ✅ **scoring paper_only 강등** | Sharpe/PF/WF 안정성 미달. 관찰은 가능하지만 우선 pilot 후보 아님 |
 
@@ -727,7 +730,7 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 | 즉시 canonical promotion | 완료. `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 canonical promotion bundle에서도 `provisional_paper_candidate`로 재현됨 |
 | 현재 후보군 | rotation은 등록 전략 기준 provisional, target-weight risk overlay 후보는 canonical artifact 기준 provisional이며 전용 paper/pilot adapter가 준비됨. 일반 scheduler registry에는 아직 넣지 않음 |
 | 다음 후보 탐색 | 새 알파 탐색보다 target-weight pilot을 `--shadow-days 3`로 고유 resolved trade_day 기준 shadow/dry-run evidence 3 clean days 확보 → `--readiness-audit`로 launch/cap/auth/position/idempotency/liquidity/pre-trade risk 점검 → `paper_pilot_control.py --enable`로 requested cap 재감사 후 승인 → capped paper 순서로 돌려 execution-backed evidence 품질을 검증 |
-| 운영 원칙 | research artifact만으로 paper/live 전환 금지. canonical promotion + paper evidence + live gate 필요 |
+| 운영 원칙 | research artifact만으로 paper/live 전환 금지. full paper 신규 진입은 preflight status + runtime state + 필요 시 pilot authorization을 실행 직전에 통과해야 하며, canonical promotion + paper evidence + live gate 필요 |
 
 ### 운영 안정성 — 미구현 (중기 개선)
 
