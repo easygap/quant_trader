@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +39,29 @@ def _coerce_date(value: str | datetime | None = None) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.strptime(value, "%Y-%m-%d")
+
+
+def _business_days_between(start_date: str, end_date: str) -> int:
+    """start 다음 날부터 end까지의 한국장 영업일 수를 센다."""
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if end <= start:
+        return 0
+    try:
+        from core.trading_hours import _load_holidays
+
+        holidays = _load_holidays()
+    except Exception:
+        holidays = set()
+
+    count = 0
+    day = start + timedelta(days=1)
+    while day <= end:
+        day_text = day.strftime("%Y-%m-%d")
+        if day.weekday() < 5 and day_text not in holidays:
+            count += 1
+        day += timedelta(days=1)
+    return count
 
 
 @dataclass
@@ -275,13 +298,15 @@ def check_pilot_entry(
             )
 
         latest_date = eligible[-1].get("date", "")
-        days_stale = (datetime.strptime(today, "%Y-%m-%d") -
-                      datetime.strptime(latest_date, "%Y-%m-%d")).days if latest_date else 999
+        days_stale = _business_days_between(latest_date, today) if latest_date else 999
         if days_stale > PILOT_MAX_EVIDENCE_STALE_DAYS:
             return _pilot_check_result(
                 strategy,
                 allowed=False,
-                reason=f"evidence stale ({days_stale}d > {PILOT_MAX_EVIDENCE_STALE_DAYS}d) — collect evidence first",
+                reason=(
+                    f"evidence stale ({days_stale} business days > "
+                    f"{PILOT_MAX_EVIDENCE_STALE_DAYS}) — collect evidence first"
+                ),
                 auth=auth,
                 caps=caps,
             )
@@ -733,13 +758,16 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
     if eligible:
         evidence_date = eligible[-1].get("date", "")
         try:
-            days_stale = (datetime.strptime(today, "%Y-%m-%d") -
-                          datetime.strptime(evidence_date, "%Y-%m-%d")).days
+            days_stale = _business_days_between(evidence_date, today)
             evidence_fresh = days_stale <= PILOT_MAX_EVIDENCE_STALE_DAYS
         except ValueError:
             pass
     if not evidence_fresh:
-        detail = f"stale {days_stale}d" if days_stale is not None else "no evidence"
+        detail = (
+            f"stale {days_stale} business days"
+            if days_stale is not None
+            else "no evidence"
+        )
         blockers.append(f"evidence_freshness: {detail}")
 
     # ── 3. benchmark final ratio (최근 5일) ──
@@ -809,6 +837,7 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
         "evidence_fresh": evidence_fresh,
         "evidence_date": evidence_date,
         "evidence_stale_days": days_stale,
+        "evidence_stale_unit": "business_days",
         "benchmark_ready": benchmark_ready,
         "benchmark_final_ratio": benchmark_final_ratio,
         "notifier_ready": notifier_ready,
@@ -853,7 +882,7 @@ def generate_launch_readiness_artifact(strategy: str) -> tuple[Path, Path]:
                    f">= {lr['clean_final_days_required']}",
                    lr["clean_final_days_current"] >= lr["clean_final_days_required"]),
         _lr_check("Evidence fresh", lr["evidence_date"] or "N/A",
-                   f"<= {PILOT_MAX_EVIDENCE_STALE_DAYS}d stale",
+                   f"<= {PILOT_MAX_EVIDENCE_STALE_DAYS} business days stale",
                    lr["evidence_fresh"]),
         _lr_check("Benchmark final ratio",
                    f"{lr['benchmark_final_ratio']:.0%}" if lr['benchmark_final_ratio'] is not None else "N/A",
