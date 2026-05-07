@@ -1864,6 +1864,76 @@ def test_run_pilot_blocks_evidence_when_fill_reconciliation_fails(monkeypatch, t
     assert saved_sessions[0]["target_weight_execution"]["fill_complete"] is False
 
 
+def test_run_pilot_records_artifact_when_pilot_cap_validation_blocks(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=1,
+            remaining_exposure=500_000,
+            caps_snapshot={
+                "max_orders_per_day": 1,
+                "max_concurrent_positions": 1,
+                "max_notional_per_trade": 500_000,
+                "max_gross_exposure": 500_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("cap validation block must not write runtime pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("cap validation block must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("cap validation block must not read positions"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("cap validation block must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("cap validation block must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+    )
+
+    artifact = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
+    assert result["validation"].allowed is False
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["details"][0]["status"] == "skipped_pilot_validation"
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_pilot_validation_failed" in result["evidence_collection"]["reason"]
+    assert artifact["plan_validation"]["allowed"] is False
+    assert artifact["execution"]["details"][0]["status"] == "skipped_pilot_validation"
+    assert artifact["evidence_collection"]["status"] == "blocked"
+
+
 def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import core.paper_pilot as pp
