@@ -91,6 +91,40 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _is_target_weight_strategy(strategy_name: str) -> bool:
+    return strategy_name.startswith("target_weight_")
+
+
+def _validate_target_weight_evidence_summary(
+    strategy_name: str,
+    evidence: dict[str, Any],
+) -> list[str]:
+    if not _is_target_weight_strategy(strategy_name):
+        return []
+
+    summary = evidence.get("target_weight_evidence")
+    if not isinstance(summary, dict) or summary.get("required") is not True:
+        return ["target-weight paper evidence proof summary 누락."]
+
+    issues: list[str] = []
+    promotable_days = _as_int(evidence.get("promotable_evidence_days")) or 0
+    valid_days = _as_int(summary.get("valid_pilot_days")) or 0
+    invalid_days = _as_int(summary.get("invalid_days")) or 0
+    if summary.get("all_promotable_days_verified") is not True:
+        issues.append("target-weight promotable evidence가 모두 검증된 pilot_paper 실행 증거가 아님.")
+    if valid_days < promotable_days or valid_days < 60:
+        issues.append(
+            "target-weight verified pilot_paper evidence 60영업일 미달 "
+            f"(valid={valid_days}, promotable={promotable_days})."
+        )
+    if invalid_days > 0:
+        issues.append(
+            "target-weight invalid execution evidence 존재: "
+            f"{invalid_days} days reasons={summary.get('invalid_reasons', {})}"
+        )
+    return issues
+
+
 def validate_live_readiness(
     config: Any,
     strategy_name: str,
@@ -288,5 +322,6 @@ def validate_live_readiness(
             issues.append("paper evidence win_rate 45% 미달.")
         if frozen_days > 0:
             issues.append("paper evidence에 frozen day가 존재함.")
+        issues.extend(_validate_target_weight_evidence_summary(strategy_name, evidence))
 
     return issues

@@ -21,6 +21,7 @@ def _write_json(path, payload):
 def _write_bundle(
     promotion_dir,
     *,
+    strategy="scoring",
     status="live_candidate",
     allowed_modes=None,
     generated_at=None,
@@ -46,30 +47,30 @@ def _write_bundle(
     )
     _write_json(
         promotion_dir / "metrics_summary.json",
-        {"scoring": {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}},
+        {strategy: {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}},
     )
     _write_json(
         promotion_dir / "walk_forward_summary.json",
-        {"scoring": {"windows": 5, "positive": 4, "sharpe_pos": 4, "total_trades": 80}},
+        {strategy: {"windows": 5, "positive": 4, "sharpe_pos": 4, "total_trades": 80}},
     )
     _write_json(
         promotion_dir / "benchmark_comparison.json",
         {
             "ew_bh_return": 8.0,
             "ew_bh_sharpe": 0.4,
-            "strategy_excess_return_pct": {"scoring": benchmark_excess},
-            "strategy_excess_sharpe": {"scoring": benchmark_excess_sharpe},
+            "strategy_excess_return_pct": {strategy: benchmark_excess},
+            "strategy_excess_sharpe": {strategy: benchmark_excess_sharpe},
         },
     )
     _write_json(
         promotion_dir / "promotion_result.json",
-        {"scoring": {"status": status, "allowed_modes": allowed_modes, "reason": "test"}},
+        {strategy: {"status": status, "allowed_modes": allowed_modes, "reason": "test"}},
     )
 
 
-def _write_evidence(evidence_dir, **overrides):
+def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
     payload = {
-        "strategy": "scoring",
+        "strategy": strategy,
         "recommendation": "ELIGIBLE",
         "promotable_evidence_days": 60,
         "benchmark_final_ratio": 0.9,
@@ -81,7 +82,7 @@ def _write_evidence(evidence_dir, **overrides):
         "frozen_days": 0,
     }
     payload.update(overrides)
-    _write_json(evidence_dir / "promotion_evidence_scoring.json", payload)
+    _write_json(evidence_dir / f"promotion_evidence_{strategy}.json", payload)
 
 
 def test_legacy_walkforward_file_does_not_unlock_live(tmp_path):
@@ -216,6 +217,67 @@ def test_valid_canonical_bundle_and_paper_evidence_pass(tmp_path):
     issues = validate_live_readiness(
         DummyConfig(),
         "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert issues == []
+
+
+def test_target_weight_live_gate_requires_verified_pilot_evidence(tmp_path):
+    strategy = "target_weight_rotation_test"
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir, strategy=strategy)
+    _write_evidence(
+        evidence_dir,
+        strategy=strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 59,
+            "invalid_days": 1,
+            "invalid_reasons": {"missing_target_weight_execution": 1},
+            "all_promotable_days_verified": False,
+        },
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        strategy,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("target-weight promotable evidence" in issue for issue in issues)
+    assert any("target-weight invalid execution evidence" in issue for issue in issues)
+
+
+def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
+    strategy = "target_weight_rotation_test"
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir, strategy=strategy)
+    _write_evidence(
+        evidence_dir,
+        strategy=strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "all_promotable_days_verified": True,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        strategy,
         promotion_dir=promotion_dir,
         evidence_dir=evidence_dir,
         current_git_hash="abc123",
