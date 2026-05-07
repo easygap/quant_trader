@@ -1273,6 +1273,41 @@ class TestShadowEvidenceNotPromotable:
         assert "no_execution_backed_evidence" in pkg["block_reasons"]
         assert "insufficient_days=0/60" in pkg["block_reasons"]
 
+    def test_legacy_records_without_provenance_are_not_promotable(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        jsonl_path = evidence_dir / "daily_evidence_legacy_good.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": "legacy_good",
+                "daily_return": 0.1,
+                "cumulative_return": 6.0,
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.04,
+                "cash_adjusted_excess": 0.03,
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            })
+
+        pkg_path, _ = generate_promotion_package("legacy_good")
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 0
+        assert pkg["non_promotable_evidence_days"] == 60
+        assert pkg["non_promotable_shadow_days"] == 60
+        assert "no_execution_backed_evidence" in pkg["block_reasons"]
+        assert "insufficient_days=0/60" in pkg["block_reasons"]
+
     def test_target_weight_promotion_requires_verified_pilot_execution(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
 

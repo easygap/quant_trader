@@ -9,6 +9,7 @@ allow live trading.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from datetime import datetime
@@ -19,6 +20,7 @@ from typing import Any
 LIVE_GATE_SCHEMA_VERSION = 1
 LIVE_GATE_ARTIFACT_TYPE = "canonical_promotion_bundle"
 LIVE_GATE_MAX_ARTIFACT_AGE_DAYS = 7
+LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH = 64
 
 REQUIRED_PROMOTION_ARTIFACTS = (
     "metrics_summary.json",
@@ -89,6 +91,106 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _stable_payload_hash(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_canonical_metadata_integrity(metadata: dict[str, Any]) -> list[str]:
+    """canonical metadata의 입력 snapshot과 평가 오류 상태를 검증한다."""
+    issues: list[str] = []
+
+    data_hash = metadata.get("data_snapshot_hash")
+    if not isinstance(data_hash, str) or len(data_hash) != LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH:
+        issues.append("run_metadata.data_snapshot_hash 누락 또는 형식 오류.")
+
+    manifest = metadata.get("data_snapshot_manifest")
+    if not isinstance(manifest, dict):
+        issues.append("run_metadata.data_snapshot_manifest 누락 또는 형식 오류.")
+        return issues
+
+    manifest_hash = manifest.get("data_snapshot_hash")
+    if manifest_hash != data_hash:
+        issues.append("run_metadata.data_snapshot_hash와 manifest hash 불일치.")
+
+    manifest_material = dict(manifest)
+    manifest_material.pop("data_snapshot_hash", None)
+    computed_hash = _stable_payload_hash(manifest_material)
+    if isinstance(data_hash, str) and len(data_hash) == LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH:
+        if computed_hash != data_hash:
+            issues.append("data_snapshot_manifest 재계산 hash 불일치.")
+
+    universe = manifest.get("universe")
+    if not isinstance(universe, list) or not universe:
+        issues.append("data_snapshot_manifest.universe 누락 또는 비어 있음.")
+        universe = []
+
+    universe_size = _as_int(manifest.get("universe_size"))
+    if universe and universe_size != len(universe):
+        issues.append(
+            f"data_snapshot_manifest universe_size 불일치: {universe_size} != {len(universe)}."
+        )
+
+    liquidity = manifest.get("liquidity_coverage")
+    benchmark = manifest.get("benchmark_coverage")
+    if not isinstance(liquidity, dict):
+        issues.append("data_snapshot_manifest.liquidity_coverage 누락 또는 형식 오류.")
+        liquidity = {}
+    if not isinstance(benchmark, dict):
+        issues.append("data_snapshot_manifest.benchmark_coverage 누락 또는 형식 오류.")
+        benchmark = {}
+
+    missing_liquidity = [symbol for symbol in universe if symbol not in liquidity]
+    missing_benchmark = [symbol for symbol in universe if symbol not in benchmark]
+    if missing_liquidity:
+        issues.append(f"유동성 coverage 누락 종목: {missing_liquidity[:5]}.")
+    if missing_benchmark:
+        issues.append(f"벤치마크 coverage 누락 종목: {missing_benchmark[:5]}.")
+
+    zero_liquidity = [
+        symbol
+        for symbol in universe
+        if isinstance(liquidity.get(symbol), dict)
+        and ((_as_int(liquidity[symbol].get("rows")) or 0) <= 0)
+    ]
+    zero_benchmark = [
+        symbol
+        for symbol in universe
+        if isinstance(benchmark.get(symbol), dict)
+        and ((_as_int(benchmark[symbol].get("rows")) or 0) <= 0)
+    ]
+    if zero_liquidity:
+        issues.append(f"유동성 coverage rows가 비어 있는 종목: {zero_liquidity[:5]}.")
+    if zero_benchmark:
+        issues.append(f"벤치마크 coverage rows가 비어 있는 종목: {zero_benchmark[:5]}.")
+
+    fetch_errors = manifest.get("fetch_errors")
+    if not isinstance(fetch_errors, dict):
+        issues.append("data_snapshot_manifest.fetch_errors 형식 오류.")
+    elif fetch_errors:
+        issues.append(f"data snapshot 수집 오류 존재: {list(fetch_errors)[:5]}.")
+
+    evaluation_errors = metadata.get("evaluation_errors")
+    if not isinstance(evaluation_errors, dict):
+        issues.append("run_metadata.evaluation_errors 형식 오류.")
+    elif evaluation_errors:
+        issues.append(f"canonical 평가 오류 존재: {list(evaluation_errors)[:5]}.")
+
+    walk_forward_errors = metadata.get("walk_forward_errors")
+    if not isinstance(walk_forward_errors, dict):
+        issues.append("run_metadata.walk_forward_errors 형식 오류.")
+    elif walk_forward_errors:
+        issues.append(f"walk-forward 평가 오류 존재: {list(walk_forward_errors)[:5]}.")
+
+    return issues
 
 
 def _is_target_weight_strategy(strategy_name: str) -> bool:
@@ -173,6 +275,7 @@ def validate_live_readiness(
             f"promotion artifact_type 불일치: "
             f"{metadata.get('artifact_type')!r} != {LIVE_GATE_ARTIFACT_TYPE!r}"
         )
+    issues.extend(validate_canonical_metadata_integrity(metadata))
 
     artifact_commit = metadata.get("commit_hash")
     if current_git_hash == "unknown":
@@ -226,6 +329,15 @@ def validate_live_readiness(
     if not isinstance(metrics, dict):
         issues.append(f"전략 '{strategy_name}'의 metrics_summary가 없음.")
     else:
+        evaluation_status = metrics.get("evaluation_status")
+        if evaluation_status == "failed":
+            issues.append(
+                f"전략 '{strategy_name}' canonical 평가 실패: "
+                f"{metrics.get('evaluation_stage')} {metrics.get('evaluation_error_type')} "
+                f"{metrics.get('error')}"
+            )
+        elif evaluation_status not in (None, "ok"):
+            issues.append(f"전략 '{strategy_name}' evaluation_status={evaluation_status!r} 확인 필요.")
         total_return = _as_float(metrics.get("total_return"))
         sharpe = _as_float(metrics.get("sharpe"))
         profit_factor = _as_float(metrics.get("profit_factor"))

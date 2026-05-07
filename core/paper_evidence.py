@@ -1222,6 +1222,18 @@ def _split_target_weight_promotion_records(
     return valid_records, invalid_records, invalid_reasons
 
 
+def _is_promotable_paper_evidence(record: dict) -> bool:
+    """명시적인 실제 paper 실행 provenance가 있는 record만 승격 증거로 인정."""
+    if record.get("execution_backed") is not True:
+        return False
+    evidence_mode = record.get("evidence_mode")
+    session_mode = record.get("session_mode")
+    return evidence_mode in {"real_paper", "pilot_paper"} or session_mode in {
+        "real_paper",
+        "pilot_paper",
+    }
+
+
 def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]:
     """
     60일 누적 evidence에서 promotion package + approval checklist 생성.
@@ -1233,9 +1245,9 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         logger.warning("Promotion package: no evidence for {}", strategy)
         return None, None
 
-    # provenance 분리: execution_backed=True만 승격 카운트
-    execution_records = [r for r in all_records if r.get("execution_backed", True)]
-    shadow_records = [r for r in all_records if not r.get("execution_backed", True)]
+    # provenance 분리: 명시적인 real/pilot paper 실행 record만 승격 카운트
+    execution_records = [r for r in all_records if _is_promotable_paper_evidence(r)]
+    shadow_records = [r for r in all_records if not _is_promotable_paper_evidence(r)]
     target_weight_required = _is_target_weight_strategy(strategy)
     target_weight_valid_records: list[dict] = []
     target_weight_invalid_records: list[dict] = []
@@ -1398,16 +1410,17 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "real_paper_days_total": promotable_days,
         "pilot_real_paper_days": sum(
             1 for r in all_records
-            if r.get("execution_backed", True)
+            if _is_promotable_paper_evidence(r)
             and (r.get("evidence_mode") == "pilot_paper"
                  or r.get("session_mode") == "pilot_paper")
         ),
         "non_pilot_real_paper_days": sum(
             1 for r in all_records
-            if r.get("execution_backed", True)
+            if _is_promotable_paper_evidence(r)
             and r.get("evidence_mode") != "pilot_paper"
-            and r.get("session_mode", "normal_paper") != "pilot_paper"
+            and r.get("session_mode") != "pilot_paper"
         ),
+        "non_promotable_evidence_days": shadow_days,
         "shadow_days": shadow_days,
         "target_weight_evidence": {
             "required": target_weight_required,
