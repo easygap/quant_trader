@@ -643,6 +643,28 @@ class TestPilotSchedulerIntegration:
 
 class TestPilotEvidenceFreshness:
 
+    def test_business_day_freshness_ignores_weekends_and_holidays(self, evidence_dir, runtime_dir, fresh_db):
+        """긴 주말/휴장일은 stale 영업일 수에 포함하지 않는다."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-01-26", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry, compute_launch_readiness
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
+
+        enable_pilot(PILOT_STRATEGY, "2026-01-01", "2026-02-28")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-02-03")
+        readiness = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-02-03")
+
+        assert result.allowed is True
+        assert readiness["evidence_fresh"] is True
+        assert readiness["evidence_stale_days"] == 3
+        assert readiness["evidence_stale_unit"] == "business_days"
+
     def test_stale_evidence_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """evidence가 너무 오래됨 → pilot entry blocked."""
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
@@ -721,7 +743,7 @@ class TestPilotSessionE2E:
         latest = datetime.now() - timedelta(days=1)
         earlier = latest - timedelta(days=3)
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
-            {"date": earlier.strftime("%Y-%m-%d"), "same_universe_excess": None, "benchmark_status": "failed"},
+            {"date": earlier.strftime("%Y-%m-%d"), "same_universe_excess": None, "benchmark_status": "final"},
             {"date": latest.strftime("%Y-%m-%d"), "same_universe_excess": 0.05, "benchmark_status": "final"},
         ])
 
@@ -733,6 +755,10 @@ class TestPilotSessionE2E:
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         valid_to = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
         enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
+        from core.paper_preflight import run_preflight
+        run_preflight(PILOT_STRATEGY, datetime.now().strftime("%Y-%m-%d"))
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
 
         sched = self._make_scheduler(PILOT_STRATEGY, evidence_dir, runtime_dir)
         sched._entry_candidates = [
