@@ -2002,11 +2002,18 @@ def failed_pre_trade_risk_validation(plan: TargetWeightPlan, error: Exception) -
 def _build_readiness_operator_commands(
     plan: TargetWeightPlan,
     cap_recommendation: dict[str, Any],
+    execution_trade_day_check: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     base = (
         "python tools/target_weight_rotation_pilot.py "
         f"--candidate-id {plan.candidate_id} --as-of-date {plan.as_of_date}"
     )
+    execute_command = f"{base} --execute --collect-evidence"
+    if execution_trade_day_check and not execution_trade_day_check.get("allowed", True):
+        execute_command = (
+            "# blocked: "
+            f"{execution_trade_day_check.get('reason', 'execution trade day check failed')}"
+        )
     return {
         "collect_shadow_days": (
             "python tools/target_weight_rotation_pilot.py "
@@ -2014,7 +2021,7 @@ def _build_readiness_operator_commands(
         ),
         "rerun_readiness_audit": f"{base} --readiness-audit",
         "enable_suggested_caps": str(cap_recommendation.get("enable_command", "")).strip(),
-        "execute_capped_paper": f"{base} --execute --collect-evidence",
+        "execute_capped_paper": execute_command,
     }
 
 
@@ -2027,6 +2034,7 @@ def build_pilot_readiness_audit(
     cap_recommendation: dict[str, Any],
     launch_readiness: dict[str, Any],
     execution_idempotency: dict[str, Any],
+    execution_trade_day_check: dict[str, Any],
     pre_execution_reconciliation: dict[str, Any],
     liquidity_check: dict[str, Any],
     pre_trade_risk_check: dict[str, Any],
@@ -2052,6 +2060,11 @@ def build_pilot_readiness_audit(
         blockers.append(
             "execution_idempotency: "
             f"{execution_idempotency.get('reason', 'previous pilot session found')}"
+        )
+    if execution_trade_day_check.get("checked", False) and not execution_trade_day_check.get("allowed", False):
+        blockers.append(
+            "execution_trade_day: "
+            f"{execution_trade_day_check.get('reason', 'plan trade day does not match execution day')}"
         )
     if not pre_execution_reconciliation.get("complete", False):
         blockers.append(
@@ -2089,6 +2102,7 @@ def build_pilot_readiness_audit(
         trading_mode != "live"
         and bool(launch_readiness.get("infra_ready", False))
         and bool(execution_idempotency.get("allowed", False))
+        and bool(execution_trade_day_check.get("allowed", False))
         and bool(pre_execution_reconciliation.get("complete", False))
         and bool(liquidity_check.get("complete", False))
         and bool(pre_trade_risk_check.get("complete", False))
@@ -2101,8 +2115,14 @@ def build_pilot_readiness_audit(
         and not blockers
     )
 
+    trade_day_mismatch = (
+        execution_trade_day_check.get("checked", False)
+        and not execution_trade_day_check.get("allowed", False)
+    )
     if ready_for_capped_pilot:
         next_action = "execute capped paper pilot with --execute --collect-evidence"
+    elif trade_day_mismatch:
+        next_action = "rerun readiness audit with current market data before enabling or executing pilot"
     elif ready_for_cap_approval:
         next_action = "enable pilot with suggested caps, then rerun readiness audit"
     else:
@@ -2119,7 +2139,11 @@ def build_pilot_readiness_audit(
         "next_action": next_action,
         "blocking_reasons": blockers,
         "warning_reasons": warnings,
-        "operator_commands": _build_readiness_operator_commands(plan, cap_recommendation),
+        "operator_commands": _build_readiness_operator_commands(
+            plan,
+            cap_recommendation,
+            execution_trade_day_check=execution_trade_day_check,
+        ),
         "plan_summary": _plan_summary(plan),
         "pilot_check": _pilot_check_to_dict(pilot_check),
         "plan_validation": asdict(validation),
@@ -2127,6 +2151,7 @@ def build_pilot_readiness_audit(
         "cap_recommendation": cap_recommendation,
         "launch_readiness": launch_readiness,
         "execution_idempotency": execution_idempotency,
+        "execution_trade_day_check": execution_trade_day_check,
         "pre_execution_reconciliation": pre_execution_reconciliation,
         "liquidity_check": liquidity_check,
         "pre_trade_risk_check": pre_trade_risk_check,
@@ -2150,7 +2175,9 @@ def build_target_weight_experiment_manifest(
     max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
 ) -> dict[str, Any]:
     """target-weight 후보의 60영업일 paper 운용 기준 manifest를 만든다."""
-    commands = _build_readiness_operator_commands(plan, cap_recommendation)
+    commands = dict((readiness_audit or {}).get("operator_commands") or {})
+    if not commands:
+        commands = _build_readiness_operator_commands(plan, cap_recommendation)
     manifest = {
         "artifact_type": "target_weight_paper_experiment_manifest",
         "schema_version": 1,
@@ -2335,6 +2362,7 @@ def build_target_weight_daily_ops_summary(
     plan = audit.get("plan_summary") or {}
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
+    execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     summary = {
         "artifact_type": "target_weight_daily_ops_summary",
         "schema_version": 1,
@@ -2350,6 +2378,7 @@ def build_target_weight_daily_ops_summary(
             "readiness_next_action": audit.get("next_action", ""),
             "blocking_reasons": list(audit.get("blocking_reasons") or []),
             "warning_reasons": list(audit.get("warning_reasons") or []),
+            "execution_trade_day_check": execution_trade_day_check,
         },
         "risk_snapshot": {
             "orders": plan.get("order_count", 0),
@@ -2360,6 +2389,8 @@ def build_target_weight_daily_ops_summary(
             "liquidity_reason": liquidity.get("reason", "not checked"),
             "pre_trade_risk_complete": bool(pre_trade_risk.get("complete", False)),
             "pre_trade_risk_reason": pre_trade_risk.get("reason", "not checked"),
+            "execution_trade_day_allowed": bool(execution_trade_day_check.get("allowed", False)),
+            "execution_trade_day_reason": execution_trade_day_check.get("reason", "not checked"),
         },
         "operator_commands": dict(audit.get("operator_commands") or {}),
         "manifest_hash": experiment_manifest.get("manifest_hash"),
@@ -2380,11 +2411,13 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
     decision = summary["decision"]
     risk = summary["risk_snapshot"]
     commands = summary.get("operator_commands", {})
+    execution_day = decision.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     lines = [
         "# Target-weight Daily Ops Summary",
         "",
         f"- Candidate: `{summary['candidate_id']}`",
         f"- Trade day: `{summary['trade_day']}`",
+        f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
         f"- Status: **{summary['status']}**",
         f"- Next step: {summary['next_step']}",
         "",
@@ -2409,6 +2442,11 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
             f"- Pre-trade risk: "
             f"{'PASS' if risk['pre_trade_risk_complete'] else 'BLOCKED'} - "
             f"{risk['pre_trade_risk_reason']}"
+        ),
+        (
+            f"- Execution day check: "
+            f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
+            f"{execution_day.get('reason', 'not checked')}"
         ),
         "",
         "## Blocking Reasons",
@@ -2481,6 +2519,7 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     caps = audit["cap_recommendation"]["suggested_caps"]
     liquidity = audit.get("liquidity_check", {})
     pre_trade_risk = audit.get("pre_trade_risk_check", {})
+    execution_day = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     commands = audit.get("operator_commands", {})
     lines = [
         "# Target-weight Pilot Readiness Audit",
@@ -2493,6 +2532,12 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         "",
         "## Plan",
         f"- Score day: `{plan['score_day']}`",
+        f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
+        (
+            f"- Execution day check: "
+            f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
+            f"{execution_day.get('reason', 'not checked')}"
+        ),
         f"- Targets: {', '.join(plan['targets']) if plan['targets'] else '(none)'}",
         f"- Orders: {plan['order_count']}",
         f"- Target positions: {plan['target_position_count']}",
@@ -2603,6 +2648,7 @@ def run_pilot_readiness_audit(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
+    execution_now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a no-order readiness decision for the next capped target-weight pilot."""
     from config.config_loader import Config
@@ -2627,6 +2673,7 @@ def run_pilot_readiness_audit(
     cap_recommendation = recommend_pilot_caps(plan)
     launch_readiness = compute_launch_readiness(plan.candidate_id, as_of_date=plan.trade_day)
     execution_idempotency = check_execution_idempotency(plan, allow_rerun=allow_rerun)
+    execution_trade_day_check = validate_execution_trade_day(plan, now=execution_now)
     try:
         liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
     except Exception as exc:
@@ -2662,6 +2709,7 @@ def run_pilot_readiness_audit(
         cap_recommendation=cap_recommendation,
         launch_readiness=launch_readiness,
         execution_idempotency=execution_idempotency,
+        execution_trade_day_check=execution_trade_day_check,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
         pre_trade_risk_check=pre_trade_risk_check,
@@ -2701,6 +2749,7 @@ def run_daily_ops_summary(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
+    execution_now: datetime | None = None,
 ) -> dict[str, Any]:
     """readiness audit, manifest, evidence progress를 하루 운영 요약으로 저장한다."""
     readiness = run_pilot_readiness_audit(
@@ -2714,6 +2763,7 @@ def run_daily_ops_summary(
         output_dir=output_dir,
         config=config,
         collector=collector,
+        execution_now=execution_now,
     )
     evidence_progress = summarize_target_weight_evidence_progress(
         readiness["audit"]["candidate_id"],
@@ -3483,6 +3533,12 @@ def main() -> None:
         print("\nTarget-weight daily ops summary")
         print(f"  candidate: {summary['candidate_id']}")
         print(f"  trade_day: {summary['trade_day']}")
+        execution_day = summary["decision"].get("execution_trade_day_check", {})
+        print(
+            "  execution day: "
+            f"{execution_day.get('execution_day', 'N/A')} "
+            f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
+        )
         print(f"  status: {summary['status']}")
         print(
             "  evidence: "
@@ -3531,6 +3587,12 @@ def main() -> None:
         print("\nTarget-weight pilot readiness audit")
         print(f"  candidate: {audit['candidate_id']}")
         print(f"  trade_day: {audit['trade_day']} score_day: {plan_summary['score_day']}")
+        execution_day = audit.get("execution_trade_day_check", {})
+        print(
+            "  execution day: "
+            f"{execution_day.get('execution_day', 'N/A')} "
+            f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
+        )
         print(f"  status: {status}")
         print(
             "  launch: "
