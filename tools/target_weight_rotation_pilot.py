@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,18 @@ DEFAULT_CAP_ROUNDING_STEP = 10_000
 DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 DEFAULT_MAX_ORDER_ADV_PCT = 5.0
+TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
+
+
+def _stable_manifest_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _split_symbols(raw: str | None) -> list[str] | None:
@@ -2036,6 +2049,113 @@ def build_pilot_readiness_audit(
     }
 
 
+def build_target_weight_experiment_manifest(
+    *,
+    plan: TargetWeightPlan,
+    cap_recommendation: dict[str, Any],
+    readiness_audit: dict[str, Any] | None = None,
+    target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
+) -> dict[str, Any]:
+    """target-weight 후보의 60영업일 paper 운용 기준 manifest를 만든다."""
+    commands = _build_readiness_operator_commands(plan, cap_recommendation)
+    manifest = {
+        "artifact_type": "target_weight_paper_experiment_manifest",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": plan.candidate_id,
+        "mode": "capped_paper_pilot",
+        "live_enabled": False,
+        "objective": (
+            "target-weight 후보를 제한된 paper pilot으로 운용하며 "
+            "실제 주문 기반 60영업일 승격 증거를 누적한다."
+        ),
+        "target_pilot_days": int(target_pilot_days),
+        "plan_summary": _plan_summary(plan),
+        "candidate_snapshot": {
+            "params_hash": plan.params_hash,
+            "symbols": list(plan.symbols),
+            "benchmark_symbol": (plan.diagnostics or {}).get("benchmark_symbol"),
+            "score_day": plan.score_day,
+            "trade_day": plan.trade_day,
+            "target_exposure": plan.target_exposure,
+            "base_target_exposure": plan.base_target_exposure,
+            "risk_off": plan.risk_off,
+        },
+        "evidence_policy": {
+            "shadow_clean_days_required": 3,
+            "pilot_paper_days_required": int(target_pilot_days),
+            "promotable_evidence_mode": "pilot_paper",
+            "required_provenance": {
+                "execution_backed": True,
+                "evidence_mode": "pilot_paper",
+                "session_mode": "pilot_paper",
+                "pilot_authorized": True,
+            },
+            "target_weight_execution_required": {
+                "params_hash_match": True,
+                "pre_execution_positions_complete": True,
+                "liquidity_complete": True,
+                "pre_trade_risk_complete": True,
+                "order_result_complete": True,
+                "fill_complete": True,
+                "position_reconciliation_complete": True,
+            },
+            "blocked_evidence": [
+                "shadow_bootstrap",
+                "legacy record without provenance",
+                "partial or halted execution",
+                "duplicate completed execution rerun",
+                "position drift before or after execution",
+            ],
+        },
+        "risk_controls": {
+            "pilot_caps": cap_recommendation.get("suggested_caps", {}),
+            "cap_buffer_pct": cap_recommendation.get("buffer_pct"),
+            "liquidity_max_order_adv_pct": float(max_order_adv_pct),
+            "pre_trade_cost_check": True,
+            "idempotency_check": True,
+            "live_mode_refused": True,
+        },
+        "operator_commands": commands,
+        "current_decision": {
+            "ready_for_cap_approval": bool(
+                (readiness_audit or {}).get("ready_for_cap_approval", False)
+            ),
+            "ready_for_capped_pilot": bool(
+                (readiness_audit or {}).get("ready_for_capped_pilot", False)
+            ),
+            "next_action": (readiness_audit or {}).get(
+                "next_action",
+                "run readiness audit before enabling pilot",
+            ),
+            "blocking_reasons": list((readiness_audit or {}).get("blocking_reasons") or []),
+            "warning_reasons": list((readiness_audit or {}).get("warning_reasons") or []),
+        },
+        "no_order_safety": {
+            "orders_submitted": False,
+            "paper_evidence_recorded": False,
+            "pilot_session_written": False,
+            "manifest_only": True,
+        },
+    }
+    manifest["manifest_hash"] = _stable_manifest_hash(manifest)
+    return manifest
+
+
+def write_target_weight_experiment_manifest(
+    manifest: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_id = str(manifest["candidate_id"])
+    trade_day = str((manifest.get("plan_summary") or {}).get("trade_day") or "unknown")
+    path = output_dir / f"target_weight_paper_experiment_manifest_{candidate_id}_{trade_day}.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
+
+
 def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
     return f"target_weight_pilot_readiness_audit_{audit['candidate_id']}_{audit['trade_day']}"
 
@@ -2242,11 +2362,23 @@ def run_pilot_readiness_audit(
     )
     artifact_path = write_pilot_readiness_audit_artifact(audit, output_dir=output_dir)
     report_path = write_pilot_readiness_audit_report(audit, output_dir=output_dir)
+    experiment_manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+        max_order_adv_pct=max_order_adv_pct,
+    )
+    experiment_manifest_path = write_target_weight_experiment_manifest(
+        experiment_manifest,
+        output_dir=output_dir,
+    )
     return {
         "plan": plan,
         "audit": audit,
         "artifact_path": artifact_path,
         "report_path": report_path,
+        "experiment_manifest": experiment_manifest,
+        "experiment_manifest_path": experiment_manifest_path,
     }
 
 
@@ -3020,6 +3152,7 @@ def main() -> None:
             print("  enable command: see report")
         print(f"  artifact: {result['artifact_path']}")
         print(f"  report: {result['report_path']}")
+        print(f"  experiment manifest: {result['experiment_manifest_path']}")
         if not audit["ready_for_cap_approval"]:
             raise SystemExit(1)
         return
