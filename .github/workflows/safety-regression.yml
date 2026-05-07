@@ -36,7 +36,7 @@ jobs:
 
       - name: Compile safety modules
         run: |
-          python -m py_compile core/order_executor.py core/paper_preflight.py core/scheduler.py core/live_gate.py
+          python -m py_compile core/order_executor.py core/paper_preflight.py core/scheduler.py core/live_gate.py core/target_weight_rotation.py tools/target_weight_rotation_pilot.py tools/paper_pilot_control.py
 
       - name: Run safety regression tests
         env:
@@ -50,6 +50,8 @@ jobs:
             tests/test_paper_runtime.py \
             tests/test_paper_preflight.py \
             tests/test_paper_pilot.py::TestPilotSchedulerIntegration \
+            tests/test_target_weight_rotation.py \
+            tests/test_target_weight_paper_adapter.py \
             tests/test_live_gate.py \
             tests/test_paper_evidence.py \
             tests/test_promotion_engine.py \
