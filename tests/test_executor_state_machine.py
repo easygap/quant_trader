@@ -8,10 +8,36 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 from core.order_state import OrderStatus
+
+
+def _paper_guard_patches():
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "core.paper_preflight.load_preflight_status",
+        return_value=SimpleNamespace(
+            overall="pass",
+            entry_allowed=True,
+            runtime_state="normal",
+            block_reasons=[],
+        ),
+    ))
+    stack.enter_context(patch(
+        "core.paper_runtime.get_paper_runtime_state",
+        return_value=SimpleNamespace(
+            state="normal",
+            allowed_actions=["entry", "exit", "cancel", "reconcile", "finalize"],
+            reasons=[],
+            metrics={"recent_final_ratio": 1.0, "recent_anomaly_count": 0},
+            evidence_date="2026-01-01",
+        ),
+    ))
+    return stack
 
 
 class TestExecutorUsesStateMachine:
@@ -38,7 +64,7 @@ class TestExecutorUsesStateMachine:
     def test_buy_creates_order_record(self):
         """execute_buy가 OrderBook에 OrderRecord를 생성해야 함."""
         executor = self._make_executor()
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             result = executor.execute_buy(
                 symbol="005930", price=54200, capital=10_000_000,
                 signal_score=2.5, reason="sm test", strategy="scoring",
@@ -52,7 +78,7 @@ class TestExecutorUsesStateMachine:
     def test_buy_paper_goes_through_state_transitions(self):
         """Paper BUY가 NEW → SUBMITTED → ACKED → FILLED 전이를 거치는지."""
         executor = self._make_executor()
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             result = executor.execute_buy(
                 symbol="000660", price=80000, capital=10_000_000,
                 signal_score=2.0, reason="transition test", strategy="scoring",
@@ -76,7 +102,7 @@ class TestExecutorUsesStateMachine:
         session.close()
         assert pos_before is None, "BUY 전에 position이 존재"
 
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             result = executor.execute_buy(
                 symbol="035720", price=40000, capital=10_000_000,
                 signal_score=2.0, reason="pos test", strategy="scoring",
@@ -98,7 +124,7 @@ class TestExecutorUsesStateMachine:
         executor = self._make_executor()
 
         # 먼저 BUY
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             buy_result = executor.execute_buy(
                 symbol="051910", price=30000, capital=10_000_000,
                 signal_score=2.0, reason="sell test buy", strategy="scoring",
@@ -136,7 +162,7 @@ class TestExecutorUsesStateMachine:
         )
         o.transition(OrderStatus.SUBMITTED)
 
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             result = executor.execute_buy(
                 symbol="005930", price=50000, capital=10_000_000,
                 signal_score=2.0, reason="dup test",
