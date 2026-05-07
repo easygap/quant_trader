@@ -119,15 +119,19 @@ def run_preflight(strategy: str, date: str | None = None,
 
     if has_fail:
         result.overall = "fail"
-        result.entry_allowed = False
     elif has_warn:
         result.overall = "warn"
     else:
         result.overall = "pass"
 
-    # entry 판정: runtime state 기반 + preflight critical
-    if "entry" not in result.allowed_actions:
+    # entry 판정: critical fail은 항상 차단, 그 외에는 runtime 또는 pilot 인증으로 허용.
+    if has_fail:
         result.entry_allowed = False
+    else:
+        result.entry_allowed = (
+            "entry" in result.allowed_actions
+            or bool(getattr(result, "pilot_authorized", False))
+        )
     # exit는 항상 허용 (exit-safe invariant)
     result.exit_allowed = "exit" in result.allowed_actions
 
@@ -538,8 +542,8 @@ def _format_preflight_md(result: PreflightResult) -> list[str]:
 # Scheduler 연동
 # ═══════════════════════════════════════════════════════════════
 
-def load_preflight_status(strategy: str) -> PreflightResult | None:
-    """저장된 preflight 결과 로드. scheduler 시작 시 사용."""
+def load_preflight_status(strategy: str, strict: bool = False) -> PreflightResult | None:
+    """저장된 preflight 결과 로드. strict=True면 손상된 결과를 예외로 처리한다."""
     path = RUNTIME_DIR / f"preflight_status_{strategy}.json"
     if not path.exists():
         return None
@@ -547,5 +551,7 @@ def load_preflight_status(strategy: str) -> PreflightResult | None:
         data = json.loads(path.read_text(encoding="utf-8"))
         return PreflightResult(**{k: v for k, v in data.items()
                                   if k in PreflightResult.__dataclass_fields__})
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"invalid preflight status file: {path}") from exc
         return None
