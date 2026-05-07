@@ -1374,6 +1374,7 @@ class TestShadowEvidenceNotPromotable:
                     "target_weight_execution": {
                         "complete": True,
                         "params_hash": params_hash,
+                        "execution_trade_day_allowed": True,
                         "liquidity_complete": True,
                         "pre_trade_risk_complete": True,
                         "order_result_complete": True,
@@ -1436,6 +1437,7 @@ class TestShadowEvidenceNotPromotable:
                     "target_weight_execution": {
                         "complete": True,
                         "params_hash": params_hash,
+                        "execution_trade_day_allowed": True,
                         "liquidity_complete": True,
                         "pre_trade_risk_complete": True,
                         "order_result_complete": True,
@@ -1497,6 +1499,7 @@ class TestShadowEvidenceNotPromotable:
                     "target_weight_execution": {
                         "complete": True,
                         "params_hash": params_hash,
+                        "execution_trade_day_allowed": True,
                         "liquidity_complete": True,
                         "pre_trade_risk_complete": True,
                         "order_result_complete": True,

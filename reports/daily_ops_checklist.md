@@ -52,6 +52,7 @@
 - [ ] Verified pilot days 확인: ____ / 60
 - [ ] Invalid execution days가 0인지 확인
 - [ ] Liquidity / Pre-trade risk가 PASS인지 확인
+- [ ] capped paper 실행 전 `plan.trade_day`와 KST 기준 실행일이 같은지 확인
 - [ ] 다음 명령이 cap 승인인지, capped paper 실행인지 기록
 
 ### 기록

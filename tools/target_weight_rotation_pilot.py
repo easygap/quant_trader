@@ -10,7 +10,7 @@ import math
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 DEFAULT_MAX_ORDER_ADV_PCT = 5.0
 TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
+KST = timezone(timedelta(hours=9))
 
 
 def _stable_manifest_hash(payload: dict[str, Any]) -> str:
@@ -76,6 +77,48 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     if not dates:
         raise ValueError("shadow date range contains no weekdays")
     return dates
+
+
+def _execution_day(now: datetime | None = None) -> str:
+    current = now or datetime.now(KST)
+    if current.tzinfo is not None:
+        current = current.astimezone(KST)
+    return current.date().strftime("%Y-%m-%d")
+
+
+def execution_trade_day_check_not_required() -> dict[str, Any]:
+    return {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution trade-day check not required",
+    }
+
+
+def validate_execution_trade_day(
+    plan: TargetWeightPlan,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    execution_day = _execution_day(now)
+    allowed = plan.trade_day == execution_day
+    reason = "target-weight execution trade day matches current KST date"
+    if not allowed:
+        reason = (
+            "target_weight_execution_trade_day_mismatch: "
+            f"plan_trade_day={plan.trade_day} execution_day={execution_day} "
+            f"plan_as_of_date={plan.as_of_date}; rerun with current market data before --execute"
+        )
+    return {
+        "checked": True,
+        "allowed": allowed,
+        "complete": allowed,
+        "reason": reason,
+        "plan_trade_day": plan.trade_day,
+        "plan_as_of_date": plan.as_of_date,
+        "execution_day": execution_day,
+        "timezone": "Asia/Seoul",
+    }
 
 
 def _recent_weekday_dates(end_date: str, count: int) -> list[str]:
@@ -773,6 +816,32 @@ def blocked_execution_for_pilot_validation(
     }
 
 
+def blocked_execution_for_trade_day_mismatch(
+    plan: TargetWeightPlan,
+    execution_trade_day_check: dict[str, Any],
+) -> dict[str, Any]:
+    reason = execution_trade_day_check.get(
+        "reason",
+        "target_weight_execution_trade_day_mismatch",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "execution_trade_day_check": execution_trade_day_check,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_execution_trade_day_mismatch",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def blocked_execution_for_liquidity(
     plan: TargetWeightPlan,
     liquidity_check: dict[str, Any],
@@ -1080,6 +1149,7 @@ def failed_fill_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict
 def summarize_execution_for_evidence(
     plan: TargetWeightPlan,
     execution: dict[str, Any],
+    execution_trade_day_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
@@ -1113,6 +1183,11 @@ def summarize_execution_for_evidence(
         "allowed": True,
         "reason": "execution idempotency check not required",
     }
+    trade_day_check = (
+        execution_trade_day_check
+        or execution.get("execution_trade_day_check")
+        or execution_trade_day_check_not_required()
+    )
     pre_reconciliation = pre_execution_reconciliation or execution.get("pre_execution_reconciliation") or {
         "checked": False,
         "complete": True,
@@ -1147,6 +1222,7 @@ def summarize_execution_for_evidence(
         "unexpected_positions": [],
     }
     idempotency_allowed = bool(idempotency.get("allowed", False))
+    execution_trade_day_allowed = bool(trade_day_check.get("allowed", False))
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     liquidity_complete = bool(liquidity.get("complete", False))
     pre_trade_risk_complete = bool(pre_trade_risk.get("complete", False))
@@ -1154,6 +1230,7 @@ def summarize_execution_for_evidence(
     position_complete = bool(reconciliation.get("complete", False))
     complete = (
         idempotency_allowed
+        and execution_trade_day_allowed
         and pre_execution_complete
         and liquidity_complete
         and pre_trade_risk_complete
@@ -1164,6 +1241,8 @@ def summarize_execution_for_evidence(
     reason = "all planned target-weight orders executed"
     if not idempotency_allowed:
         reason = idempotency.get("reason", "target_weight_duplicate_execution_attempt")
+    elif not execution_trade_day_allowed:
+        reason = trade_day_check.get("reason", "target_weight_execution_trade_day_mismatch")
     elif not pre_execution_complete:
         reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
     elif not liquidity_complete:
@@ -1189,6 +1268,7 @@ def summarize_execution_for_evidence(
         "complete": complete,
         "reason": reason,
         "idempotency_allowed": idempotency_allowed,
+        "execution_trade_day_allowed": execution_trade_day_allowed,
         "pre_execution_complete": pre_execution_complete,
         "liquidity_complete": liquidity_complete,
         "pre_trade_risk_complete": pre_trade_risk_complete,
@@ -1202,6 +1282,7 @@ def summarize_execution_for_evidence(
         "skipped_orders": skipped,
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
+        "execution_trade_day_check": trade_day_check,
         "execution_idempotency": idempotency,
         "pre_execution_reconciliation": pre_reconciliation,
         "liquidity_check": liquidity,
@@ -1221,6 +1302,7 @@ def build_pilot_evidence_caps_snapshot(
     plan: TargetWeightPlan,
     validation: Any,
     execution: dict[str, Any],
+    execution_trade_day_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
@@ -1246,6 +1328,7 @@ def build_pilot_evidence_caps_snapshot(
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
         execution,
+        execution_trade_day_check=execution_trade_day_check,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
@@ -1314,6 +1397,11 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("target_weight_execution.complete", target_execution.get("complete"), True),
         ("target_weight_execution.planned_orders", target_execution.get("planned_orders"), len(plan.orders)),
         ("target_weight_execution.idempotency_allowed", target_execution.get("idempotency_allowed"), True),
+        (
+            "target_weight_execution.execution_trade_day_allowed",
+            target_execution.get("execution_trade_day_allowed"),
+            True,
+        ),
         ("target_weight_execution.pre_execution_complete", target_execution.get("pre_execution_complete"), True),
         ("target_weight_execution.liquidity_complete", target_execution.get("liquidity_complete"), True),
         ("target_weight_execution.pre_trade_risk_complete", target_execution.get("pre_trade_risk_complete"), True),
@@ -1363,6 +1451,7 @@ def write_session_artifact(
     pre_trade_risk_check: dict[str, Any],
     execution: dict[str, Any],
     dry_run: bool,
+    execution_trade_day_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     shadow_evidence: dict[str, Any] | None = None,
@@ -1384,6 +1473,9 @@ def write_session_artifact(
         "liquidity_check": liquidity_check,
         "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
+        "execution_trade_day_check": (
+            execution_trade_day_check or execution_trade_day_check_not_required()
+        ),
         "execution_idempotency": execution_idempotency or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
@@ -2094,6 +2186,7 @@ def build_target_weight_experiment_manifest(
             },
             "target_weight_execution_required": {
                 "params_hash_match": True,
+                "execution_trade_day_allowed": True,
                 "pre_execution_positions_complete": True,
                 "liquidity_complete": True,
                 "pre_trade_risk_complete": True,
@@ -2928,6 +3021,7 @@ def run_pilot(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
+    execution_now: datetime | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
     from core.paper_pilot import check_pilot_entry, save_pilot_session_artifact
@@ -2969,15 +3063,24 @@ def run_pilot(
         pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
     dry_run = not execute
 
+    execution_trade_day_check = execution_trade_day_check_not_required()
+    if execute:
+        execution_trade_day_check = validate_execution_trade_day(plan, now=execution_now)
+
     execution_idempotency = None
-    if execute and validation.allowed:
+    if execute and validation.allowed and execution_trade_day_check["allowed"]:
         execution_idempotency = check_execution_idempotency(
             plan,
             allow_rerun=allow_rerun,
         )
 
     pre_execution_reconciliation = None
-    if execute and execution_idempotency and execution_idempotency["allowed"]:
+    if (
+        execute
+        and execution_trade_day_check["allowed"]
+        and execution_idempotency
+        and execution_idempotency["allowed"]
+    ):
         try:
             pre_execution_reconciliation = reconcile_plan_starting_positions(
                 plan,
@@ -2992,6 +3095,8 @@ def run_pilot(
 
     if execute and not validation.allowed:
         execution = blocked_execution_for_pilot_validation(plan, validation)
+    elif execute and not execution_trade_day_check["allowed"]:
+        execution = blocked_execution_for_trade_day_mismatch(plan, execution_trade_day_check)
     elif execute and execution_idempotency and not execution_idempotency["allowed"]:
         execution = blocked_execution_for_duplicate_execution(plan, execution_idempotency)
     elif execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
@@ -3018,6 +3123,7 @@ def run_pilot(
     if (
         execute
         and validation.allowed
+        and execution_trade_day_check["allowed"]
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
         and liquidity_check["complete"]
@@ -3042,6 +3148,7 @@ def run_pilot(
     execution_evidence = summarize_execution_for_evidence(
         plan,
         execution,
+        execution_trade_day_check=execution_trade_day_check,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
@@ -3056,6 +3163,7 @@ def run_pilot(
             plan,
             validation,
             execution,
+            execution_trade_day_check=execution_trade_day_check,
             execution_idempotency=execution_idempotency,
             pre_execution_reconciliation=pre_execution_reconciliation,
             liquidity_check=liquidity_check,
@@ -3076,7 +3184,11 @@ def run_pilot(
             "evidence_block_reason": "" if execution_evidence["complete"] else execution_evidence["reason"],
             "target_weight_execution": execution_evidence,
         }
-        if validation.allowed and (execution_idempotency is None or execution_idempotency["allowed"]):
+        if (
+            validation.allowed
+            and execution_trade_day_check["allowed"]
+            and (execution_idempotency is None or execution_idempotency["allowed"])
+        ):
             save_pilot_session_artifact(
                 strategy=candidate_id,
                 date=plan.trade_day,
@@ -3159,6 +3271,7 @@ def run_pilot(
         pre_trade_risk_check=pre_trade_risk_check,
         execution=execution,
         dry_run=dry_run,
+        execution_trade_day_check=execution_trade_day_check,
         execution_idempotency=execution_idempotency,
         fill_reconciliation=fill_reconciliation,
         shadow_evidence=shadow_evidence_summary,
@@ -3176,6 +3289,7 @@ def run_pilot(
         "liquidity_check": liquidity_check,
         "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
+        "execution_trade_day_check": execution_trade_day_check,
         "execution_idempotency": execution_idempotency,
         "fill_reconciliation": fill_reconciliation,
         "execution_evidence": execution_evidence,
