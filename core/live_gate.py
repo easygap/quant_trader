@@ -197,9 +197,26 @@ def _is_target_weight_strategy(strategy_name: str) -> bool:
     return strategy_name.startswith("target_weight_")
 
 
+def _canonical_target_weight_params_hash(
+    metadata: dict[str, Any],
+    strategy_name: str,
+) -> str | None:
+    specs = metadata.get("strategy_specs")
+    if not isinstance(specs, list):
+        return None
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("candidate_id") == strategy_name:
+            params_hash = spec.get("params_hash")
+            return params_hash if isinstance(params_hash, str) and params_hash else None
+    return None
+
+
 def _validate_target_weight_evidence_summary(
     strategy_name: str,
     evidence: dict[str, Any],
+    canonical_params_hash: str | None = None,
 ) -> list[str]:
     if not _is_target_weight_strategy(strategy_name):
         return []
@@ -214,6 +231,18 @@ def _validate_target_weight_evidence_summary(
     invalid_days = _as_int(summary.get("invalid_days")) or 0
     if summary.get("all_promotable_days_verified") is not True:
         issues.append("target-weight promotable evidence가 모두 검증된 pilot_paper 실행 증거가 아님.")
+    if summary.get("params_hash_consistent") is not True:
+        issues.append("target-weight pilot evidence params_hash가 60영업일 전체에서 일관되지 않음.")
+    evidence_params_hash = summary.get("params_hash") or evidence.get("target_weight_params_hash")
+    if not isinstance(evidence_params_hash, str) or not evidence_params_hash:
+        issues.append("target-weight pilot evidence params_hash 누락.")
+    elif not canonical_params_hash:
+        issues.append("target-weight canonical params_hash 누락.")
+    elif evidence_params_hash != canonical_params_hash:
+        issues.append(
+            "target-weight canonical params_hash 불일치: "
+            f"evidence={evidence_params_hash}, canonical={canonical_params_hash}."
+        )
     if valid_days < promotable_days or valid_days < 60:
         issues.append(
             "target-weight verified pilot_paper evidence 60영업일 미달 "
@@ -434,6 +463,12 @@ def validate_live_readiness(
             issues.append("paper evidence win_rate 45% 미달.")
         if frozen_days > 0:
             issues.append("paper evidence에 frozen day가 존재함.")
-        issues.extend(_validate_target_weight_evidence_summary(strategy_name, evidence))
+        issues.extend(
+            _validate_target_weight_evidence_summary(
+                strategy_name,
+                evidence,
+                canonical_params_hash=_canonical_target_weight_params_hash(metadata, strategy_name),
+            )
+        )
 
     return issues

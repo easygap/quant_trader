@@ -1181,6 +1181,10 @@ def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[boo
         return False, "missing_target_weight_execution"
     if plan.get("candidate_id") != strategy:
         return False, "target_weight_candidate_mismatch"
+    plan_trade_day = plan.get("trade_day")
+    record_date = record.get("date")
+    if plan_trade_day and record_date and plan_trade_day != record_date:
+        return False, "target_weight_trade_day_mismatch"
 
     plan_hash = plan.get("params_hash")
     execution_hash = execution.get("params_hash")
@@ -1203,6 +1207,17 @@ def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[boo
         return False, "target_weight_position_reconciliation_incomplete"
 
     return True, "verified_target_weight_pilot_execution"
+
+
+def _target_weight_record_params_hash(record: dict) -> str | None:
+    caps = record.get("pilot_caps_snapshot") or {}
+    plan = caps.get("target_weight_plan") or {}
+    execution = caps.get("target_weight_execution") or {}
+    plan_hash = plan.get("params_hash")
+    execution_hash = execution.get("params_hash")
+    if isinstance(plan_hash, str) and plan_hash and plan_hash == execution_hash:
+        return plan_hash
+    return None
 
 
 def _split_target_weight_promotion_records(
@@ -1252,15 +1267,31 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     target_weight_valid_records: list[dict] = []
     target_weight_invalid_records: list[dict] = []
     target_weight_invalid_reasons: dict[str, int] = {}
+    target_weight_params_hashes: list[str] = []
     if target_weight_required:
         (
             target_weight_valid_records,
             target_weight_invalid_records,
             target_weight_invalid_reasons,
         ) = _split_target_weight_promotion_records(strategy, execution_records)
+        target_weight_params_hashes = sorted({
+            params_hash
+            for record in target_weight_valid_records
+            if (params_hash := _target_weight_record_params_hash(record))
+        })
         records = target_weight_valid_records
     else:
         records = execution_records
+    target_weight_params_hash = (
+        target_weight_params_hashes[0] if len(target_weight_params_hashes) == 1 else None
+    )
+    target_weight_params_hash_consistent = (
+        not target_weight_required
+        or (
+            len(target_weight_valid_records) > 0
+            and len(target_weight_params_hashes) == 1
+        )
+    )
     total_days = len(records)
     promotable_days = total_days
     shadow_days = len(shadow_records)
@@ -1330,6 +1361,11 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         blocked = True
         block_reasons.append(
             "target_weight_invalid_execution_evidence=%d" % len(target_weight_invalid_records)
+        )
+    if target_weight_required and target_weight_valid_records and not target_weight_params_hash_consistent:
+        blocked = True
+        block_reasons.append(
+            "target_weight_params_hash_drift=%d" % len(target_weight_params_hashes)
         )
     if frozen_days > 0:
         blocked = True
@@ -1427,15 +1463,20 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
             "valid_pilot_days": len(target_weight_valid_records),
             "invalid_days": len(target_weight_invalid_records),
             "invalid_reasons": target_weight_invalid_reasons,
+            "params_hash": target_weight_params_hash,
+            "params_hashes": target_weight_params_hashes,
+            "params_hash_consistent": target_weight_params_hash_consistent,
             "all_promotable_days_verified": (
                 not target_weight_required
                 or (
                     len(target_weight_invalid_records) == 0
                     and len(target_weight_valid_records) == promotable_days
                     and promotable_days > 0
+                    and target_weight_params_hash_consistent
                 )
             ),
         },
+        "target_weight_params_hash": target_weight_params_hash,
         "target_weight_verified_pilot_days": len(target_weight_valid_records),
         "target_weight_invalid_days": len(target_weight_invalid_records),
         # backward compat aliases
