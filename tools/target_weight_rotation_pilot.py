@@ -2156,6 +2156,220 @@ def write_target_weight_experiment_manifest(
     return path
 
 
+def summarize_target_weight_evidence_progress(
+    candidate_id: str,
+    *,
+    target_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
+) -> dict[str, Any]:
+    """target-weight 후보의 pilot evidence 누적 상태를 운영 요약용으로 집계한다."""
+    from core.paper_evidence import (
+        _is_promotable_paper_evidence,
+        _target_weight_record_proof_status,
+        get_canonical_records,
+    )
+
+    records = get_canonical_records(candidate_id)
+    verified_dates: set[str] = set()
+    invalid_dates: set[str] = set()
+    invalid_reasons: dict[str, int] = {}
+    shadow_dates: set[str] = set()
+    non_promotable_dates: set[str] = set()
+    all_dates: set[str] = set()
+
+    for record in records:
+        date = str(record.get("date") or "")
+        if date:
+            all_dates.add(date)
+        if (
+            record.get("evidence_mode") == "shadow_bootstrap"
+            or record.get("session_mode") == "shadow_bootstrap"
+        ):
+            if date:
+                shadow_dates.add(date)
+            continue
+        if not _is_promotable_paper_evidence(record):
+            if date:
+                non_promotable_dates.add(date)
+            continue
+
+        valid, reason = _target_weight_record_proof_status(candidate_id, record)
+        if valid:
+            if date:
+                verified_dates.add(date)
+        else:
+            if date:
+                invalid_dates.add(date)
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+
+    verified_days = len(verified_dates)
+    remaining_days = max(int(target_days) - verified_days, 0)
+    progress_ratio = verified_days / int(target_days) if target_days else 0.0
+    return {
+        "candidate_id": candidate_id,
+        "target_days": int(target_days),
+        "verified_pilot_days": verified_days,
+        "remaining_pilot_days": remaining_days,
+        "progress_ratio": round(progress_ratio, 4),
+        "shadow_days": len(shadow_dates),
+        "invalid_execution_days": len(invalid_dates),
+        "invalid_reasons": invalid_reasons,
+        "non_promotable_days": len(non_promotable_dates),
+        "total_canonical_records": len(records),
+        "latest_record_date": max(all_dates) if all_dates else None,
+        "latest_verified_pilot_date": max(verified_dates) if verified_dates else None,
+        "latest_shadow_date": max(shadow_dates) if shadow_dates else None,
+        "ready_for_promotion_day_count": verified_days >= int(target_days),
+    }
+
+
+def build_target_weight_daily_ops_summary(
+    *,
+    audit: dict[str, Any],
+    experiment_manifest: dict[str, Any],
+    evidence_progress: dict[str, Any],
+) -> dict[str, Any]:
+    """readiness audit와 evidence progress를 하루 운영 판단용 artifact로 묶는다."""
+    if audit.get("ready_for_capped_pilot"):
+        status = "READY_TO_EXECUTE"
+        next_step = "승인된 cap으로 capped paper 실행"
+    elif audit.get("ready_for_cap_approval"):
+        status = "READY_TO_ENABLE_CAPS"
+        next_step = "추천 cap 승인 후 readiness audit 재실행"
+    else:
+        status = "BLOCKED"
+        next_step = "차단 사유 해소 후 shadow/readiness 재점검"
+
+    plan = audit.get("plan_summary") or {}
+    liquidity = audit.get("liquidity_check") or {}
+    pre_trade_risk = audit.get("pre_trade_risk_check") or {}
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": audit["candidate_id"],
+        "trade_day": audit["trade_day"],
+        "status": status,
+        "next_step": next_step,
+        "evidence_progress": evidence_progress,
+        "decision": {
+            "ready_for_cap_approval": bool(audit.get("ready_for_cap_approval")),
+            "ready_for_capped_pilot": bool(audit.get("ready_for_capped_pilot")),
+            "readiness_next_action": audit.get("next_action", ""),
+            "blocking_reasons": list(audit.get("blocking_reasons") or []),
+            "warning_reasons": list(audit.get("warning_reasons") or []),
+        },
+        "risk_snapshot": {
+            "orders": plan.get("order_count", 0),
+            "target_positions": plan.get("target_position_count", 0),
+            "max_order_notional": plan.get("max_order_notional", 0),
+            "gross_exposure_after": plan.get("gross_exposure_after", 0),
+            "liquidity_complete": bool(liquidity.get("complete", False)),
+            "liquidity_reason": liquidity.get("reason", "not checked"),
+            "pre_trade_risk_complete": bool(pre_trade_risk.get("complete", False)),
+            "pre_trade_risk_reason": pre_trade_risk.get("reason", "not checked"),
+        },
+        "operator_commands": dict(audit.get("operator_commands") or {}),
+        "manifest_hash": experiment_manifest.get("manifest_hash"),
+        "no_order_safety": {
+            "orders_submitted": False,
+            "shadow_evidence_recorded": False,
+            "pilot_evidence_recorded": False,
+            "pilot_session_written": False,
+            "summary_only": True,
+        },
+    }
+    summary["summary_hash"] = _stable_manifest_hash(summary)
+    return summary
+
+
+def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
+    progress = summary["evidence_progress"]
+    decision = summary["decision"]
+    risk = summary["risk_snapshot"]
+    commands = summary.get("operator_commands", {})
+    lines = [
+        "# Target-weight Daily Ops Summary",
+        "",
+        f"- Candidate: `{summary['candidate_id']}`",
+        f"- Trade day: `{summary['trade_day']}`",
+        f"- Status: **{summary['status']}**",
+        f"- Next step: {summary['next_step']}",
+        "",
+        "## Evidence Progress",
+        (
+            f"- Verified pilot days: "
+            f"{progress['verified_pilot_days']}/{progress['target_days']} "
+            f"({progress['progress_ratio']:.0%})"
+        ),
+        f"- Remaining pilot days: {progress['remaining_pilot_days']}",
+        f"- Shadow days: {progress['shadow_days']}",
+        f"- Invalid execution days: {progress['invalid_execution_days']}",
+        f"- Latest verified pilot date: {progress.get('latest_verified_pilot_date') or 'N/A'}",
+        "",
+        "## Risk Snapshot",
+        f"- Orders: {risk['orders']}",
+        f"- Target positions: {risk['target_positions']}",
+        f"- Max order notional: {float(risk['max_order_notional'] or 0):,.0f}",
+        f"- Gross exposure after: {float(risk['gross_exposure_after'] or 0):,.0f}",
+        f"- Liquidity: {'PASS' if risk['liquidity_complete'] else 'BLOCKED'} - {risk['liquidity_reason']}",
+        (
+            f"- Pre-trade risk: "
+            f"{'PASS' if risk['pre_trade_risk_complete'] else 'BLOCKED'} - "
+            f"{risk['pre_trade_risk_reason']}"
+        ),
+        "",
+        "## Blocking Reasons",
+    ]
+    lines.extend([f"- {reason}" for reason in decision.get("blocking_reasons") or []] or ["- none"])
+    lines.extend(["", "## Warnings"])
+    lines.extend([f"- {reason}" for reason in decision.get("warning_reasons") or []] or ["- none"])
+    lines.extend([
+        "",
+        "## Operator Commands",
+        "",
+        "### Collect Shadow Days",
+        "```bash",
+        commands.get("collect_shadow_days", ""),
+        "```",
+        "",
+        "### Rerun Readiness Audit",
+        "```bash",
+        commands.get("rerun_readiness_audit", ""),
+        "```",
+        "",
+        "### Enable Suggested Caps",
+        "```bash",
+        commands.get("enable_suggested_caps", ""),
+        "```",
+        "",
+        "### Execute Capped Paper",
+        "```bash",
+        commands.get("execute_capped_paper", ""),
+        "```",
+        "",
+        "## Safety",
+        "- No orders are submitted by this summary.",
+        "- This summary does not imply live eligibility.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_daily_ops_summary(
+    summary: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_id = str(summary["candidate_id"])
+    trade_day = str(summary["trade_day"])
+    stem = f"target_weight_daily_ops_summary_{candidate_id}_{trade_day}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(render_target_weight_daily_ops_markdown(summary), encoding="utf-8")
+    return json_path, md_path
+
+
 def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
     return f"target_weight_pilot_readiness_audit_{audit['candidate_id']}_{audit['trade_day']}"
 
@@ -2379,6 +2593,53 @@ def run_pilot_readiness_audit(
         "report_path": report_path,
         "experiment_manifest": experiment_manifest,
         "experiment_manifest_path": experiment_manifest_path,
+    }
+
+
+def run_daily_ops_summary(
+    *,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    raw_symbols: str | None = None,
+    as_of_date: str | None = None,
+    cash: float | None = None,
+    preview_caps: dict[str, int] | None = None,
+    max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
+    allow_rerun: bool = False,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    config: Any | None = None,
+    collector: Any | None = None,
+) -> dict[str, Any]:
+    """readiness audit, manifest, evidence progress를 하루 운영 요약으로 저장한다."""
+    readiness = run_pilot_readiness_audit(
+        candidate_id=candidate_id,
+        raw_symbols=raw_symbols,
+        as_of_date=as_of_date,
+        cash=cash,
+        preview_caps=preview_caps,
+        max_order_adv_pct=max_order_adv_pct,
+        allow_rerun=allow_rerun,
+        output_dir=output_dir,
+        config=config,
+        collector=collector,
+    )
+    evidence_progress = summarize_target_weight_evidence_progress(
+        readiness["audit"]["candidate_id"],
+    )
+    summary = build_target_weight_daily_ops_summary(
+        audit=readiness["audit"],
+        experiment_manifest=readiness["experiment_manifest"],
+        evidence_progress=evidence_progress,
+    )
+    summary_path, summary_report_path = write_target_weight_daily_ops_summary(
+        summary,
+        output_dir=output_dir,
+    )
+    return {
+        **readiness,
+        "evidence_progress": evidence_progress,
+        "daily_ops_summary": summary,
+        "daily_ops_summary_path": summary_path,
+        "daily_ops_summary_report_path": summary_report_path,
     }
 
 
@@ -2940,6 +3201,11 @@ def main() -> None:
         help="Write a no-order target-weight capped pilot readiness audit artifact.",
     )
     parser.add_argument(
+        "--daily-ops-summary",
+        action="store_true",
+        help="Write a no-order daily operator summary with readiness, risk, and evidence progress.",
+    )
+    parser.add_argument(
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
@@ -3007,6 +3273,8 @@ def main() -> None:
         or args.shadow_days is not None
     )
     if shadow_batch:
+        if args.daily_ops_summary:
+            parser.error("--daily-ops-summary cannot be combined with shadow bootstrap batch options")
         if args.readiness_audit:
             parser.error("--readiness-audit cannot be combined with shadow bootstrap batch options")
         if args.execute or args.collect_evidence:
@@ -3076,6 +3344,50 @@ def main() -> None:
             print("  status: OK")
         print(f"  artifact: {batch['artifact_path']}")
         if shadow_incomplete:
+            raise SystemExit(1)
+        return
+
+    if args.daily_ops_summary:
+        if args.readiness_audit or args.execute or args.collect_evidence or args.record_shadow_evidence:
+            parser.error(
+                "--daily-ops-summary cannot be combined with --readiness-audit, "
+                "--execute, --collect-evidence, or --record-shadow-evidence"
+            )
+
+        result = run_daily_ops_summary(
+            candidate_id=args.candidate_id,
+            raw_symbols=args.symbols,
+            as_of_date=args.as_of_date,
+            cash=args.cash,
+            allow_rerun=args.allow_rerun,
+            preview_caps=preview_caps,
+            max_order_adv_pct=args.max_order_adv_pct,
+            output_dir=Path(args.output_dir),
+        )
+        summary = result["daily_ops_summary"]
+        progress = summary["evidence_progress"]
+        print("\nTarget-weight daily ops summary")
+        print(f"  candidate: {summary['candidate_id']}")
+        print(f"  trade_day: {summary['trade_day']}")
+        print(f"  status: {summary['status']}")
+        print(
+            "  evidence: "
+            f"verified={progress['verified_pilot_days']}/{progress['target_days']} "
+            f"remaining={progress['remaining_pilot_days']} "
+            f"shadow={progress['shadow_days']} "
+            f"invalid={progress['invalid_execution_days']}"
+        )
+        print(f"  next: {summary['next_step']}")
+        for reason in summary["decision"]["blocking_reasons"][:8]:
+            print(f"  blocker: {reason}")
+        remaining = len(summary["decision"]["blocking_reasons"]) - 8
+        if remaining > 0:
+            print(f"  blocker: +{remaining} more")
+        print(f"  readiness artifact: {result['artifact_path']}")
+        print(f"  experiment manifest: {result['experiment_manifest_path']}")
+        print(f"  summary artifact: {result['daily_ops_summary_path']}")
+        print(f"  summary report: {result['daily_ops_summary_report_path']}")
+        if summary["status"] == "BLOCKED":
             raise SystemExit(1)
         return
 
