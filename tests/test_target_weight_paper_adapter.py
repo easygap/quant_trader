@@ -966,6 +966,44 @@ def test_recommend_pilot_caps_matches_target_weight_plan():
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
 
 
+def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+    )
+
+    plan = _adapter_plan()
+    audit = {
+        "ready_for_cap_approval": True,
+        "ready_for_capped_pilot": False,
+        "next_action": "enable pilot with suggested caps, then rerun readiness audit",
+        "blocking_reasons": ["pilot_authorization: no active capped pilot authorization"],
+        "warning_reasons": ["preview_caps: current preview blocked"],
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=recommend_pilot_caps(plan),
+        readiness_audit=audit,
+        max_order_adv_pct=3.5,
+    )
+
+    assert manifest["artifact_type"] == "target_weight_paper_experiment_manifest"
+    assert manifest["candidate_id"] == plan.candidate_id
+    assert manifest["mode"] == "capped_paper_pilot"
+    assert manifest["live_enabled"] is False
+    assert manifest["target_pilot_days"] == 60
+    assert len(manifest["manifest_hash"]) == 64
+    assert manifest["candidate_snapshot"]["params_hash"] == plan.params_hash
+    assert manifest["evidence_policy"]["required_provenance"]["evidence_mode"] == "pilot_paper"
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_complete"] is True
+    assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
+    assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
+    assert manifest["current_decision"]["ready_for_cap_approval"] is True
+    assert "enable pilot" in manifest["current_decision"]["next_action"]
+    assert "--execute --collect-evidence" in manifest["operator_commands"]["execute_capped_paper"]
+    assert manifest["no_order_safety"]["orders_submitted"] is False
+
+
 def test_assess_plan_liquidity_blocks_large_adv_order():
     from tools.target_weight_rotation_pilot import assess_plan_liquidity
 
@@ -1357,6 +1395,7 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     audit = result["audit"]
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
     report_text = result["report_path"].read_text(encoding="utf-8")
+    manifest = json.loads(result["experiment_manifest_path"].read_text(encoding="utf-8"))
 
     assert audit["ready_for_cap_approval"] is True
     assert audit["ready_for_capped_pilot"] is False
@@ -1382,6 +1421,14 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert "## Pre-trade Risk" in report_text
     assert "## Operator Commands" in report_text
     assert "--max-notional 1260000 --max-exposure 3360000" in report_text
+    assert result["experiment_manifest_path"].exists()
+    assert manifest["artifact_type"] == "target_weight_paper_experiment_manifest"
+    assert manifest["candidate_id"] == plan.candidate_id
+    assert manifest["current_decision"]["ready_for_cap_approval"] is True
+    assert manifest["current_decision"]["ready_for_capped_pilot"] is False
+    assert manifest["risk_controls"]["pilot_caps"]["max_orders_per_day"] == 3
+    assert manifest["evidence_policy"]["pilot_paper_days_required"] == 60
+    assert manifest["no_order_safety"]["manifest_only"] is True
 
 
 def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_path):
