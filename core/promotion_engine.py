@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from typing import Optional
 from loguru import logger
 
-from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+from core.live_gate import (
+    LIVE_GATE_ARTIFACT_TYPE,
+    LIVE_GATE_SCHEMA_VERSION,
+    validate_canonical_metadata_integrity,
+)
 
 
 # Canonical metrics are rounded to 2 decimals, so 0.45 keeps near-0.5 candidates
@@ -230,6 +234,10 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
         if metadata.get("artifact_type") != LIVE_GATE_ARTIFACT_TYPE:
             logger.error("run_metadata.json artifact_type 오류: {}", metadata.get("artifact_type"))
             return None
+        metadata_issues = validate_canonical_metadata_integrity(metadata)
+        if metadata_issues:
+            logger.error("run_metadata.json canonical integrity 오류: {}", "; ".join(metadata_issues))
+            return None
         if not isinstance(benchmark.get("strategy_excess_return_pct"), dict):
             logger.error("benchmark_comparison.json strategy_excess_return_pct 누락")
             return None
@@ -256,8 +264,19 @@ def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "S
         metrics_raw = json.loads((base / "metrics_summary.json").read_text(encoding="utf-8"))
         wf_raw = json.loads((base / "walk_forward_summary.json").read_text(encoding="utf-8"))
         benchmark_raw = json.loads((base / "benchmark_comparison.json").read_text(encoding="utf-8"))
+        metadata = json.loads((base / "run_metadata.json").read_text(encoding="utf-8"))
     except Exception as e:
         logger.error("Artifact 로드 실패: {}", e)
+        return {}
+    if metadata.get("schema_version") != LIVE_GATE_SCHEMA_VERSION:
+        logger.error("run_metadata.json schema_version 오류: {}", metadata.get("schema_version"))
+        return {}
+    if metadata.get("artifact_type") != LIVE_GATE_ARTIFACT_TYPE:
+        logger.error("run_metadata.json artifact_type 오류: {}", metadata.get("artifact_type"))
+        return {}
+    metadata_issues = validate_canonical_metadata_integrity(metadata)
+    if metadata_issues:
+        logger.error("run_metadata.json canonical integrity 오류: {}", "; ".join(metadata_issues))
         return {}
 
     result = {}

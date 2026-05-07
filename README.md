@@ -177,9 +177,9 @@ pytest tests/ -q
 
 ## 전략 상태
 
-승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현하며, canonical 평가 산출물에는 종목군 구성, 데이터 범위, 수집 오류를 바탕으로 만든 `data_snapshot_hash`를 남겨 입력 데이터 변화와 평가 실패 원인을 추적한다.
+승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현하며, canonical 평가 산출물에는 종목군 구성, 데이터 범위, 수집 오류를 바탕으로 만든 `data_snapshot_hash`를 남긴다. live gate와 승격 산출물 로더는 이 해시, 데이터 범위, 수집 오류, 평가 실패 상태를 다시 검증해 손상된 산출물 사용을 차단한다.
 Research candidate sweep — `tools/research_candidate_sweep.py --quick --candidate-family all`로 promotion과 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹 artifact를 생성. Raw EW B&H gate는 유지하되, defensive/cash-heavy 후보 해석을 위해 평균 노출률과 exposure-matched B&H excess도 진단값으로 기록합니다. target-weight 후보는 `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금으로 남기고, `hold_rank_buffer`로 작은 랭킹 흔들림에 따른 불필요한 교체를 줄이며, `market_exposure_mode=benchmark_risk`로 KS11 SMA/낙폭/변동성 risk-off 구간의 부분 노출 축소를 검증합니다.
-Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정.
+Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정. 승격 패키지는 `execution_backed=True`와 `real_paper`/`pilot_paper` 출처가 명시된 기록만 승격 증거로 인정해 예전 형식·수작업 기록 오염을 차단한다.
 
 2026-04-29 all-family quick sweep: 5종목(`005930,000660,035720,051910,068270`)에서 rotation/momentum/breakout 후보 14개를 비교했지만 모두 benchmark excess return/Sharpe를 통과하지 못해 `NO_ALPHA_CANDIDATE`로 판정. 이 결과만으로 canonical promotion이나 paper/live 승격은 진행하지 않습니다.
 

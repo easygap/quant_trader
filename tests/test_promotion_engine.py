@@ -17,6 +17,36 @@ from core.promotion_engine import (
     _check_paper_only, _check_provisional_candidate, _check_live_candidate,
 )
 
+
+def _canonical_snapshot_metadata():
+    from tools.evaluate_and_promote import build_data_snapshot_manifest
+
+    manifest = build_data_snapshot_manifest(
+        provider="test-provider",
+        universe_rule="테스트 유동성 상위 종목",
+        eval_start="2025-01-01",
+        eval_end="2025-12-31",
+        universe_lookback_start="2024-10-01",
+        universe_lookback_end="2024-12-31",
+        universe=["005930", "000660"],
+        liquidity_coverage={
+            "005930": {"rows": 62, "start": "2024-10-01", "end": "2024-12-31"},
+            "000660": {"rows": 61, "start": "2024-10-01", "end": "2024-12-31"},
+        },
+        benchmark_coverage={
+            "005930": {"rows": 245, "start": "2025-01-01", "end": "2025-12-31"},
+            "000660": {"rows": 245, "start": "2025-01-01", "end": "2025-12-31"},
+        },
+        fetch_errors={},
+    )
+    return {
+        "data_snapshot_hash": manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": manifest,
+        "evaluation_errors": {},
+        "walk_forward_errors": {},
+    }
+
+
 # 테스트용 inline metrics fixture (코드 상수가 아닌 테스트 데이터)
 _TEST_METRICS = {
     "relative_strength_rotation": StrategyMetrics(
@@ -353,6 +383,7 @@ class TestArtifactLoading:
                     "schema_version": LIVE_GATE_SCHEMA_VERSION,
                     "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
                     "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
                 }),
                 encoding="utf-8",
             )
@@ -364,6 +395,40 @@ class TestArtifactLoading:
             assert result is not None
             assert "scoring" in result
             assert result["scoring"]["status"] == "paper_only"
+
+    def test_load_corrupt_snapshot_returns_none(self):
+        """입력 snapshot이 손상된 artifact는 fail closed."""
+        import tempfile, json
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "metrics_summary.json").write_text("{}", encoding="utf-8")
+            (base / "walk_forward_summary.json").write_text("{}", encoding="utf-8")
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": 1.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
+            snapshot = _canonical_snapshot_metadata()
+            snapshot["data_snapshot_manifest"]["benchmark_coverage"]["005930"]["rows"] = 0
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **snapshot,
+                }),
+                encoding="utf-8",
+            )
+            (base / "promotion_result.json").write_text(
+                json.dumps({"scoring": {"status": "paper_only", "allowed_modes": ["backtest", "paper"], "reason": "test"}}),
+                encoding="utf-8",
+            )
+            result = load_promotion_artifact(str(base))
+            assert result is None
 
     def test_artifact_schema_mismatch_returns_none(self):
         """schema가 다르면 None 반환."""
