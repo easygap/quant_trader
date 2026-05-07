@@ -78,6 +78,7 @@ class PilotAuthorization:
     created_at: str = ""
     created_by: str = "cli"
     override_scope: str = "entry_only"  # entry_only | full_pilot
+    target_weight_plan_snapshot: Optional[dict] = None
 
 
 @dataclass
@@ -136,7 +137,8 @@ def get_active_pilot(strategy: str, date: str | None = None) -> PilotAuthorizati
 def enable_pilot(strategy: str, valid_from: str, valid_to: str,
                  max_orders: int = 2, max_positions: int = 2,
                  max_notional: int = 1_000_000, max_exposure: int = 3_000_000,
-                 reason: str = "", operator: str = "cli") -> PilotAuthorization:
+                 reason: str = "", operator: str = "cli",
+                 target_weight_plan_snapshot: dict | None = None) -> PilotAuthorization:
     """pilot authorization 생성."""
     # eligibility check
     _check_pilot_eligibility(strategy)
@@ -151,6 +153,7 @@ def enable_pilot(strategy: str, valid_from: str, valid_to: str,
         operator_reason=reason,
         created_at=datetime.now().isoformat(),
         created_by=operator,
+        target_weight_plan_snapshot=target_weight_plan_snapshot,
     )
     _append_auth(asdict(auth))
     logger.info("Pilot enabled: {} ({} ~ {})", strategy, valid_from, valid_to)
@@ -250,6 +253,8 @@ def check_pilot_entry(
         "max_notional_per_trade": auth.max_notional_per_trade,
         "max_gross_exposure": auth.max_gross_exposure,
     }
+    if auth.target_weight_plan_snapshot is not None:
+        caps["target_weight_plan_snapshot"] = auth.target_weight_plan_snapshot
 
     # ── 1. Critical anomaly check ──
     try:
