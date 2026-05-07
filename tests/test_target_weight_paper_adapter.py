@@ -1262,6 +1262,86 @@ def test_build_target_weight_daily_ops_summary_writes_operator_view(tmp_path):
     assert "READY_TO_ENABLE_CAPS" in report
 
 
+def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+        validate_execution_trade_day,
+        write_target_weight_daily_ops_summary,
+    )
+
+    plan = _adapter_plan()
+    cap_recommendation = recommend_pilot_caps(plan)
+    execution_trade_day_check = validate_execution_trade_day(
+        plan,
+        now=datetime(2026, 4, 11, 9, 0),
+    )
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "next_action": "rerun readiness audit with current market data before enabling or executing pilot",
+        "blocking_reasons": [f"execution_trade_day: {execution_trade_day_check['reason']}"],
+        "warning_reasons": [],
+        "execution_trade_day_check": execution_trade_day_check,
+        "operator_commands": {
+            "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --shadow-days 3",
+            "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --readiness-audit",
+            "enable_suggested_caps": cap_recommendation["enable_command"],
+            "execute_capped_paper": f"# blocked: {execution_trade_day_check['reason']}",
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 12,
+        "remaining_pilot_days": 48,
+        "progress_ratio": 0.2,
+        "shadow_days": 3,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 15,
+        "latest_record_date": "2026-04-10",
+        "latest_verified_pilot_date": "2026-04-10",
+        "latest_shadow_date": "2026-04-03",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+    json_path, md_path = write_target_weight_daily_ops_summary(summary, output_dir=tmp_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    report = md_path.read_text(encoding="utf-8")
+
+    assert summary["status"] == "BLOCKED"
+    assert summary["decision"]["execution_trade_day_check"]["allowed"] is False
+    assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert payload["risk_snapshot"]["execution_trade_day_allowed"] is False
+    assert "READY_TO_EXECUTE" not in report
+    assert "READY_TO_ENABLE_CAPS" not in report
+    assert "Execution day check: BLOCKED" in report
+    assert "target_weight_execution_trade_day_mismatch" in report
+
+
 def test_assess_plan_liquidity_blocks_large_adv_order():
     from tools.target_weight_rotation_pilot import assess_plan_liquidity
 
@@ -1649,6 +1729,7 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     result = twp.run_pilot_readiness_audit(
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     audit = result["audit"]
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
@@ -1687,6 +1768,81 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert manifest["risk_controls"]["pilot_caps"]["max_orders_per_day"] == 3
     assert manifest["evidence_policy"]["pilot_paper_days_required"] == 60
     assert manifest["no_order_safety"]["manifest_only"] is True
+
+
+def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": True,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=datetime(2026, 4, 11, 9, 0),
+    )
+    audit = result["audit"]
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    report_text = result["report_path"].read_text(encoding="utf-8")
+    manifest = json.loads(result["experiment_manifest_path"].read_text(encoding="utf-8"))
+
+    assert audit["execution_trade_day_check"]["allowed"] is False
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert any("target_weight_execution_trade_day_mismatch" in reason for reason in audit["blocking_reasons"])
+    assert audit["next_action"] == "rerun readiness audit with current market data before enabling or executing pilot"
+    assert audit["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert payload["execution_trade_day_check"]["execution_day"] == "2026-04-11"
+    assert "BLOCKED" in report_text
+    assert "Execution day check: BLOCKED" in report_text
+    assert "target_weight_execution_trade_day_mismatch" in report_text
+    assert manifest["current_decision"]["ready_for_cap_approval"] is False
+    assert manifest["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
 
 
 def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_path):
@@ -1749,6 +1905,7 @@ def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_p
     result = twp.run_pilot_readiness_audit(
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     audit = result["audit"]
     report_text = result["report_path"].read_text(encoding="utf-8")
@@ -1806,6 +1963,7 @@ def test_run_pilot_readiness_audit_blocks_missing_liquidity_diagnostics(monkeypa
     result = twp.run_pilot_readiness_audit(
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     audit = result["audit"]
     report_text = result["report_path"].read_text(encoding="utf-8")
@@ -1877,6 +2035,7 @@ def test_run_pilot_readiness_audit_blocks_pre_trade_risk(monkeypatch, tmp_path):
     result = twp.run_pilot_readiness_audit(
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     audit = result["audit"]
     report_text = result["report_path"].read_text(encoding="utf-8")
