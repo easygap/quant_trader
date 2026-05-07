@@ -152,6 +152,35 @@ def _adapter_plan():
     )
 
 
+def _pilot_caps_for_plan(plan, *, snapshot=None):
+    import tools.target_weight_rotation_pilot as twp
+
+    snapshot = snapshot if snapshot is not None else twp.build_pilot_authorization_snapshot(plan)
+    return {
+        "max_orders_per_day": 10,
+        "max_concurrent_positions": 10,
+        "max_notional_per_trade": 2_000_000,
+        "max_gross_exposure": 10_000_000,
+        "target_weight_plan_snapshot": snapshot,
+    }
+
+
+def _pilot_check_for_plan(plan, *, snapshot=None):
+    snapshot = snapshot if snapshot is not None else _pilot_caps_for_plan(plan)["target_weight_plan_snapshot"]
+    return SimpleNamespace(
+        allowed=True,
+        reason="ok",
+        remaining_orders=10,
+        remaining_exposure=10_000_000,
+        auth={
+            "strategy": plan.candidate_id,
+            "enabled": True,
+            "target_weight_plan_snapshot": snapshot,
+        },
+        caps_snapshot=_pilot_caps_for_plan(plan, snapshot=snapshot),
+    )
+
+
 def _complete_execution(plan):
     details = []
     for order in plan.orders:
@@ -223,6 +252,35 @@ def test_validate_execution_trade_day_blocks_stale_plan():
     assert "target_weight_execution_trade_day_mismatch" in check["reason"]
 
 
+def test_validate_pilot_authorization_snapshot_accepts_matching_plan():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    check = twp.validate_pilot_authorization_snapshot(plan, _pilot_check_for_plan(plan))
+
+    assert check["allowed"] is True
+    assert check["complete"] is True
+    assert check["mismatches"] == []
+
+
+def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_snapshot = twp.build_pilot_authorization_snapshot(
+        replace(plan, params_hash="old-hash")
+    )
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert "target_weight_pilot_authorization_snapshot_mismatch" in check["reason"]
+    assert check["mismatches"][0]["field"] == "params_hash"
+
+
 def _existing_pilot_evidence_record(plan):
     return {
         "date": plan.trade_day,
@@ -243,6 +301,12 @@ def _existing_pilot_evidence_record(plan):
                 "planned_orders": len(plan.orders),
                 "idempotency_allowed": True,
                 "execution_trade_day_allowed": True,
+                "pilot_authorization_snapshot_allowed": True,
+                "pilot_authorization_snapshot_check": {
+                    "checked": True,
+                    "allowed": True,
+                    "complete": True,
+                },
                 "pre_execution_complete": True,
                 "liquidity_complete": True,
                 "pre_trade_risk_complete": True,
@@ -522,6 +586,67 @@ def test_paper_pilot_control_enable_stops_before_auth_when_target_weight_guard_f
 
     assert exc.value.code == 1
     assert "target-weight audit blocked" in capsys.readouterr().out
+
+
+def test_paper_pilot_control_enable_writes_target_weight_plan_snapshot(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.paper_pilot_control as ppc
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+
+    plan = replace(_adapter_plan(), candidate_id=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID)
+    captured = {}
+
+    monkeypatch.setattr(pp, "check_pilot_prerequisites", lambda strategy: (True, "ok"))
+
+    def fake_enable_pilot(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            strategy=kwargs["strategy"],
+            valid_from=kwargs["valid_from"],
+            valid_to=kwargs["valid_to"],
+            max_orders_per_day=kwargs["max_orders"],
+            max_concurrent_positions=kwargs["max_positions"],
+            max_notional_per_trade=kwargs["max_notional"],
+            max_gross_exposure=kwargs["max_exposure"],
+            operator_reason=kwargs["reason"],
+        )
+
+    monkeypatch.setattr(pp, "enable_pilot", fake_enable_pilot)
+    monkeypatch.setattr(
+        ppc,
+        "_target_weight_enable_guard",
+        lambda args: {
+            "plan": plan,
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {"allowed": True},
+            },
+            "target_weight_plan_snapshot": {
+                "candidate_id": plan.candidate_id,
+                "trade_day": plan.trade_day,
+                "params_hash": plan.params_hash,
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        },
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        valid_to="2026-04-30",
+        max_orders=3,
+        max_positions=3,
+        max_notional=2_000_000,
+        max_exposure=10_000_000,
+        reason="test",
+    )
+
+    ppc.run_enable(args)
+
+    assert captured["target_weight_plan_snapshot"]["candidate_id"] == plan.candidate_id
+    assert captured["target_weight_plan_snapshot"]["trade_day"] == plan.trade_day
+    assert captured["target_weight_plan_snapshot"]["params_hash"] == plan.params_hash
 
 
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
@@ -1040,6 +1165,24 @@ def test_verify_existing_pilot_evidence_rejects_missing_execution_trade_day_chec
     }
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_authorization_snapshot_check(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    del record["pilot_caps_snapshot"]["target_weight_execution"]["pilot_authorization_snapshot_allowed"]
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_execution.pilot_authorization_snapshot_allowed"
+    }
+
+
 def test_preview_plan_against_caps_flags_default_pilot_caps():
     from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
 
@@ -1113,6 +1256,7 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["evidence_policy"]["required_provenance"]["evidence_mode"] == "pilot_paper"
     assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_trade_day_allowed"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["pilot_authorization_snapshot_allowed"] is True
     assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
     assert manifest["current_decision"]["ready_for_cap_approval"] is True
@@ -1151,6 +1295,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "complete": True,
                     "params_hash": params_hash,
                     "execution_trade_day_allowed": True,
+                    "pilot_authorization_snapshot_allowed": True,
                     "liquidity_complete": True,
                     "pre_trade_risk_complete": True,
                     "order_result_complete": True,
@@ -1843,6 +1988,67 @@ def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_p
     assert "target_weight_execution_trade_day_mismatch" in report_text
     assert manifest["current_decision"]["ready_for_cap_approval"] is False
     assert manifest["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+
+
+def test_run_pilot_readiness_audit_blocks_authorization_snapshot_mismatch(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_snapshot = twp.build_pilot_authorization_snapshot(
+        replace(plan, trade_day="2026-04-09", as_of_date="2026-04-09")
+    )
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": True,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    audit = result["audit"]
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    report_text = result["report_path"].read_text(encoding="utf-8")
+
+    assert audit["pilot_authorization_snapshot_check"]["allowed"] is False
+    assert audit["ready_for_cap_approval"] is True
+    assert audit["ready_for_capped_pilot"] is False
+    assert any("pilot_authorization_snapshot" in reason for reason in audit["blocking_reasons"])
+    assert audit["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert payload["pilot_authorization_snapshot_check"]["allowed"] is False
+    assert "Pilot auth snapshot: BLOCKED" in report_text
 
 
 def test_run_pilot_readiness_audit_blocks_liquidity_preflight(monkeypatch, tmp_path):
@@ -2705,6 +2911,76 @@ def test_run_pilot_blocks_stale_trade_day_before_order_submission(monkeypatch, t
     assert "target_weight_execution_trade_day_mismatch" in result["evidence_collection"]["reason"]
     assert payload["execution_trade_day_check"]["allowed"] is False
     assert payload["execution"]["execution_trade_day_check"]["allowed"] is False
+
+
+def test_run_pilot_blocks_authorization_snapshot_mismatch_before_order_submission(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_snapshot = twp.build_pilot_authorization_snapshot(
+        replace(plan, params_hash="old-hash")
+    )
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("stale authorization snapshot must not write runtime pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "check_execution_idempotency",
+        lambda *args, **kwargs: pytest.fail("stale authorization snapshot must block before idempotency"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("stale authorization snapshot must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("stale authorization snapshot must not read positions"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("stale authorization snapshot must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("stale authorization snapshot must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["pilot_authorization_snapshot_check"]["allowed"] is False
+    assert result["execution_idempotency"] is None
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution"]["details"][0]["status"] == "skipped_pilot_authorization_snapshot_mismatch"
+    assert result["execution_evidence"]["pilot_authorization_snapshot_allowed"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_pilot_authorization_snapshot_mismatch" in result["evidence_collection"]["reason"]
+    assert payload["pilot_authorization_snapshot_check"]["allowed"] is False
+    assert payload["execution"]["pilot_authorization_snapshot_check"]["allowed"] is False
 
 
 def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
