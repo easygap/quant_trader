@@ -1,0 +1,56 @@
+name: Safety Regression
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  safety-regression:
+    name: Paper and promotion safety checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUNBUFFERED: "1"
+      QUANT_AUTO_ENTRY: "false"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest pytest-asyncio pandas numpy scipy sqlalchemy pyyaml loguru requests click matplotlib
+
+      - name: Compile safety modules
+        run: |
+          python -m py_compile core/order_executor.py core/paper_preflight.py core/scheduler.py core/live_gate.py
+
+      - name: Run safety regression tests
+        env:
+          TMPDIR: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          python -m pytest \
+            tests/test_order_executor_paper.py \
+            tests/test_executor_state_machine.py \
+            tests/test_paper_runtime.py \
+            tests/test_paper_preflight.py \
+            tests/test_paper_pilot.py::TestPilotSchedulerIntegration \
+            tests/test_live_gate.py \
+            tests/test_paper_evidence.py \
+            tests/test_promotion_engine.py \
+            tests/test_evaluate_and_promote.py
