@@ -716,8 +716,20 @@ class Scheduler:
         if self._is_paper_like_mode():
             try:
                 from core.paper_preflight import load_preflight_status
-                pf = load_preflight_status(self.strategy_name)
-                if pf and pf.overall == "fail" and not pf.entry_allowed:
+                pf = load_preflight_status(self.strategy_name, strict=True)
+                if pf is None:
+                    logger.warning("Preflight 상태 없음 — 신규 진입 차단: {}", self.strategy_name)
+                    _log_op(
+                        "PREFLIGHT_BLOCK",
+                        "entry blocked: preflight status missing",
+                        severity="warning",
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                        detail={"strategy": self.strategy_name},
+                    )
+                    self._entry_candidates = []
+                    return
+                if pf.overall == "fail":
                     logger.warning("Preflight FAIL — 신규 진입 차단: {}", self.strategy_name)
                     _log_op(
                         "PREFLIGHT_BLOCK",
@@ -728,8 +740,18 @@ class Scheduler:
                     )
                     self._entry_candidates = []
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Preflight 상태 조회 실패 — 신규 진입 차단: {}", e)
+                _log_op(
+                    "PREFLIGHT_BLOCK",
+                    f"entry blocked: preflight status unavailable: {e}",
+                    severity="warning",
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    detail={"error": str(e), "strategy": self.strategy_name},
+                )
+                self._entry_candidates = []
+                return
 
         # Paper runtime state 체크: state에 따라 주문 허용/차단
         # pilot override: blocked_insufficient_evidence라도 pilot auth가 있으면 제한 허용
@@ -799,7 +821,17 @@ class Scheduler:
                         self._entry_candidates = []
                         return
             except Exception as e:
-                logger.debug("Paper runtime state 조회 실패 (무시): {}", e)
+                logger.warning("Paper runtime state 조회 실패 — 신규 진입 차단: {}", e)
+                _log_op(
+                    "RUNTIME_BLOCK",
+                    f"entry blocked: runtime state unavailable: {e}",
+                    severity="warning",
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    detail={"error": str(e), "strategy": self.strategy_name},
+                )
+                self._entry_candidates = []
+                return
 
         executor = self._get_or_create_executor()
         strategy = self._get_strategy()
@@ -1483,8 +1515,17 @@ class Scheduler:
                                 mode=self._mode,
                             )
                             return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Paper runtime state 조회 실패 — 재스캔 생략: {}", e)
+                    _log_op(
+                        "RUNTIME_BLOCK",
+                        f"rescan blocked: runtime state unavailable: {e}",
+                        severity="warning",
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                        detail={"error": str(e), "strategy": self.strategy_name},
+                    )
+                    return
 
             from core.data_collector import DataCollector
             from core.market_regime import check_market_regime
