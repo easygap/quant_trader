@@ -86,6 +86,95 @@ def test_run_canonical_research_candidate_rejects_unsupported_strategy():
         )
 
 
+def test_stable_payload_hash_is_order_independent():
+    from tools.evaluate_and_promote import stable_payload_hash
+
+    left = {"b": [2, 1], "a": {"x": 1, "y": 2}}
+    right = {"a": {"y": 2, "x": 1}, "b": [2, 1]}
+
+    assert stable_payload_hash(left) == stable_payload_hash(right)
+    assert stable_payload_hash(left) != stable_payload_hash({"a": {"x": 1, "y": 3}, "b": [2, 1]})
+
+
+def test_summarize_ohlcv_frame_records_deterministic_coverage():
+    from tools.evaluate_and_promote import summarize_ohlcv_frame
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2025-01-03", "2025-01-02"]),
+            "close": [20.0, 10.0],
+            "volume": [200, 100],
+        }
+    )
+
+    summary = summarize_ohlcv_frame(df)
+
+    assert summary["rows"] == 2
+    assert summary["start"] == "2025-01-02"
+    assert summary["end"] == "2025-01-03"
+    assert summary["first_close"] == 10.0
+    assert summary["last_close"] == 20.0
+    assert summary["close_non_null"] == 2
+    assert summary["volume_non_null"] == 2
+
+
+def test_build_data_snapshot_manifest_hash_changes_with_coverage():
+    from tools.evaluate_and_promote import build_data_snapshot_manifest
+
+    base_kwargs = {
+        "provider": "test-provider",
+        "universe_rule": "top liquidity",
+        "eval_start": "2025-01-01",
+        "eval_end": "2025-12-31",
+        "universe_lookback_start": "2024-10-01",
+        "universe_lookback_end": "2024-12-31",
+        "universe": ["005930", "000660"],
+        "liquidity_coverage": {
+            "000660": {"rows": 61, "start": "2024-10-01", "end": "2024-12-31"},
+            "005930": {"rows": 62, "start": "2024-10-01", "end": "2024-12-31"},
+        },
+        "benchmark_coverage": {
+            "005930": {"rows": 700, "start": "2025-01-01", "end": "2025-12-31"},
+            "000660": {"rows": 700, "start": "2025-01-01", "end": "2025-12-31"},
+        },
+        "fetch_errors": {},
+    }
+
+    first = build_data_snapshot_manifest(**base_kwargs)
+    reordered = build_data_snapshot_manifest(
+        **{
+            **base_kwargs,
+            "liquidity_coverage": dict(reversed(list(base_kwargs["liquidity_coverage"].items()))),
+        }
+    )
+    changed = build_data_snapshot_manifest(
+        **{
+            **base_kwargs,
+            "benchmark_coverage": {
+                **base_kwargs["benchmark_coverage"],
+                "000660": {"rows": 699, "start": "2025-01-01", "end": "2025-12-31"},
+            },
+        }
+    )
+
+    assert len(first["data_snapshot_hash"]) == 64
+    assert first["data_snapshot_hash"] == reordered["data_snapshot_hash"]
+    assert first["data_snapshot_hash"] != changed["data_snapshot_hash"]
+    assert list(first["liquidity_coverage"]) == ["000660", "005930"]
+
+
+def test_failed_canonical_metrics_separates_evaluation_error_from_zero_return():
+    from tools.evaluate_and_promote import failed_canonical_metrics
+
+    metrics = failed_canonical_metrics(RuntimeError("data provider unavailable"), "full_period")
+
+    assert metrics["total_return"] == 0
+    assert metrics["evaluation_status"] == "failed"
+    assert metrics["evaluation_stage"] == "full_period"
+    assert metrics["evaluation_error_type"] == "RuntimeError"
+    assert "data provider unavailable" in metrics["error"]
+
+
 def test_calculate_canonical_metrics_preserves_target_weight_diagnostics():
     from tools.evaluate_and_promote import calculate_canonical_metrics
 
