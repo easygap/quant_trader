@@ -57,26 +57,29 @@ def _write_bundle(
     evaluation_errors=None,
     walk_forward_errors=None,
     metric_overrides=None,
+    strategy_specs=None,
 ):
     allowed_modes = ["backtest", "paper", "live"] if allowed_modes is None else allowed_modes
     generated_at = generated_at or datetime(2026, 4, 29, 12, 0, 0).isoformat()
     snapshot_manifest = snapshot_manifest or _snapshot_manifest()
 
-    _write_json(
-        promotion_dir / "run_metadata.json",
-        {
-            "schema_version": LIVE_GATE_SCHEMA_VERSION,
-            "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
-            "commit_hash": commit_hash,
-            "config_yaml_hash": yaml_hash,
-            "config_resolved_hash": resolved_hash,
-            "generated_at": generated_at,
-            "data_snapshot_hash": snapshot_manifest["data_snapshot_hash"],
-            "data_snapshot_manifest": snapshot_manifest,
-            "evaluation_errors": evaluation_errors or {},
-            "walk_forward_errors": walk_forward_errors or {},
-        },
-    )
+    metadata = {
+        "schema_version": LIVE_GATE_SCHEMA_VERSION,
+        "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+        "commit_hash": commit_hash,
+        "config_yaml_hash": yaml_hash,
+        "config_resolved_hash": resolved_hash,
+        "generated_at": generated_at,
+        "data_snapshot_hash": snapshot_manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": snapshot_manifest,
+        "evaluation_errors": evaluation_errors or {},
+        "walk_forward_errors": walk_forward_errors or {},
+    }
+    if strategy_specs is not None:
+        metadata["strategy_specs"] = strategy_specs
+    elif strategy.startswith("target_weight_"):
+        metadata["strategy_specs"] = [{"candidate_id": strategy, "params_hash": "hash"}]
+    _write_json(promotion_dir / "run_metadata.json", metadata)
     metrics = {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}
     metrics.update(metric_overrides or {})
     _write_json(
@@ -404,10 +407,14 @@ def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
             "valid_pilot_days": 60,
             "invalid_days": 0,
             "invalid_reasons": {},
+            "params_hash": "hash",
+            "params_hashes": ["hash"],
+            "params_hash_consistent": True,
             "all_promotable_days_verified": True,
         },
         target_weight_verified_pilot_days=60,
         target_weight_invalid_days=0,
+        target_weight_params_hash="hash",
     )
 
     issues = validate_live_readiness(
@@ -420,3 +427,42 @@ def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
     )
 
     assert issues == []
+
+
+def test_target_weight_live_gate_blocks_params_hash_mismatch(tmp_path):
+    strategy = "target_weight_rotation_test"
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(
+        promotion_dir,
+        strategy=strategy,
+        strategy_specs=[{"candidate_id": strategy, "params_hash": "canonical-hash"}],
+    )
+    _write_evidence(
+        evidence_dir,
+        strategy=strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "params_hash": "evidence-hash",
+            "params_hashes": ["evidence-hash"],
+            "params_hash_consistent": True,
+            "all_promotable_days_verified": True,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+        target_weight_params_hash="evidence-hash",
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        strategy,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("target-weight canonical params_hash 불일치" in issue for issue in issues)
