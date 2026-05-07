@@ -28,6 +28,105 @@ CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
 )
 
 
+def stable_payload_hash(payload) -> str:
+    """JSON 직렬화 가능한 메타데이터의 순서 독립 해시를 반환."""
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "date" in out.columns:
+        out = out.set_index("date")
+    out.index = pd.to_datetime(out.index)
+    out = out.sort_index()
+    return out
+
+
+def summarize_ohlcv_frame(df: pd.DataFrame) -> dict:
+    """canonical 입력 진단을 위한 결정적 OHLCV coverage 요약."""
+    out = _normalize_ohlcv_frame(df)
+    if out.empty:
+        return {"rows": 0, "start": None, "end": None, "columns": []}
+
+    summary = {
+        "rows": int(len(out)),
+        "start": out.index.min().strftime("%Y-%m-%d"),
+        "end": out.index.max().strftime("%Y-%m-%d"),
+        "columns": sorted(str(c) for c in out.columns),
+    }
+    for col in ("open", "high", "low", "close", "volume"):
+        if col in out.columns:
+            series = pd.to_numeric(out[col], errors="coerce").dropna()
+            summary[f"{col}_non_null"] = int(len(series))
+            if col == "close" and len(series) > 0:
+                summary["first_close"] = round(float(series.iloc[0]), 6)
+                summary["last_close"] = round(float(series.iloc[-1]), 6)
+    return summary
+
+
+def build_data_snapshot_manifest(
+    *,
+    provider: str,
+    universe_rule: str,
+    eval_start: str,
+    eval_end: str,
+    universe_lookback_start: str,
+    universe_lookback_end: str,
+    universe: list[str],
+    liquidity_coverage: dict,
+    benchmark_coverage: dict,
+    fetch_errors: dict | None = None,
+) -> dict:
+    """재현성 해시를 포함한 canonical 평가 입력 manifest 생성."""
+    manifest = {
+        "provider": provider,
+        "universe_rule": universe_rule,
+        "eval_start": eval_start,
+        "eval_end": eval_end,
+        "universe_lookback_start": universe_lookback_start,
+        "universe_lookback_end": universe_lookback_end,
+        "universe": list(universe),
+        "universe_size": len(universe),
+        "liquidity_coverage": {
+            symbol: liquidity_coverage[symbol]
+            for symbol in sorted(liquidity_coverage)
+        },
+        "benchmark_coverage": {
+            symbol: benchmark_coverage[symbol]
+            for symbol in sorted(benchmark_coverage)
+        },
+        "fetch_errors": {
+            symbol: fetch_errors[symbol]
+            for symbol in sorted(fetch_errors or {})
+        },
+    }
+    manifest["data_snapshot_hash"] = stable_payload_hash(manifest)
+    return manifest
+
+
+def failed_canonical_metrics(exc: Exception, stage: str) -> dict:
+    return {
+        "total_return": 0,
+        "sharpe": 0,
+        "profit_factor": 0,
+        "mdd": 0,
+        "total_trades": 0,
+        "evaluation_status": "failed",
+        "evaluation_stage": stage,
+        "evaluation_error_type": type(exc).__name__,
+        "error": str(exc)[:120],
+    }
+
+
 def get_git_hash() -> str:
     try:
         return subprocess.check_output(
@@ -176,8 +275,11 @@ def run_canonical():
 
     EVAL_START = "2023-01-01"
     EVAL_END = "2025-12-31"
+    UNIVERSE_LOOKBACK_START = "2022-10-01"
+    UNIVERSE_LOOKBACK_END = "2022-12-31"
     INITIAL_CAPITAL = 10_000_000
     TOP_N = 20
+    UNIVERSE_RULE = "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20"
     ROTATION_DIV = {"max_positions": 2, "max_position_ratio": 0.45,
                     "max_investment_ratio": 0.85, "min_cash_ratio": 0.10}
     STRATEGIES = ["scoring", "breakout_volume", "relative_strength_rotation",
@@ -194,15 +296,25 @@ def run_canonical():
 
     # 거래대금 순위
     amounts = {}
+    liquidity_coverage = {}
+    fetch_errors = {}
     for sym in candidates[:100]:
         try:
-            df = dc.fetch_korean_stock(sym, "2022-10-01", "2022-12-31")
+            df = dc.fetch_korean_stock(sym, UNIVERSE_LOOKBACK_START, UNIVERSE_LOOKBACK_END)
             if df is not None and not df.empty:
                 if "date" in df.columns:
                     df = df.set_index("date")
-                amounts[sym] = (df["close"].astype(float) * df["volume"].astype(float)).mean()
-        except Exception:
-            pass
+                amount = (df["close"].astype(float) * df["volume"].astype(float)).mean()
+                amounts[sym] = amount
+                coverage = summarize_ohlcv_frame(df)
+                coverage["mean_trading_value"] = round(float(amount), 2)
+                liquidity_coverage[sym] = coverage
+        except Exception as exc:
+            fetch_errors[f"liquidity:{sym}"] = {
+                "stage": "universe_liquidity",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:120],
+            }
     universe = sorted(amounts, key=amounts.get, reverse=True)[:TOP_N]
 
     print(f"Universe ({len(universe)}): {universe}")
@@ -210,16 +322,34 @@ def run_canonical():
     # ── Benchmark ──
     per = INITIAL_CAPITAL / len(universe)
     parts = []
+    benchmark_coverage = {}
     for sym in universe:
-        df = dc.fetch_korean_stock(sym, EVAL_START, EVAL_END)
-        if df is None or df.empty:
-            continue
-        if "date" in df.columns:
-            df = df.set_index("date")
-        df = df[df.index >= pd.Timestamp(EVAL_START)]
-        if len(df) < 2:
-            continue
-        parts.append(per / float(df["close"].iloc[0]) * df["close"].astype(float))
+        try:
+            df = dc.fetch_korean_stock(sym, EVAL_START, EVAL_END)
+            if df is None or df.empty:
+                fetch_errors[f"benchmark:{sym}"] = {
+                    "stage": "benchmark",
+                    "error_type": "EmptyData",
+                    "error": "empty benchmark frame",
+                }
+                continue
+            df = _normalize_ohlcv_frame(df)
+            df = df[df.index >= pd.Timestamp(EVAL_START)]
+            if len(df) < 2:
+                fetch_errors[f"benchmark:{sym}"] = {
+                    "stage": "benchmark",
+                    "error_type": "InsufficientData",
+                    "error": f"rows={len(df)}",
+                }
+                continue
+            benchmark_coverage[sym] = summarize_ohlcv_frame(df)
+            parts.append(per / float(df["close"].iloc[0]) * df["close"].astype(float))
+        except Exception as exc:
+            fetch_errors[f"benchmark:{sym}"] = {
+                "stage": "benchmark",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:120],
+            }
     combined_bh = pd.concat(parts, axis=1).sum(axis=1).dropna() if parts else pd.Series()
     bh_ret = (float(combined_bh.iloc[-1]) / INITIAL_CAPITAL - 1) * 100 if len(combined_bh) > 1 else 0
     bh_dr = combined_bh.pct_change().dropna()
@@ -277,6 +407,8 @@ def run_canonical():
 
     metrics_all = {}
     wf_all = {}
+    evaluation_errors = {}
+    walk_forward_errors = {}
 
     for strat in STRATEGIES:
         print(f"  {strat}...", end=" ", flush=True)
@@ -284,8 +416,14 @@ def run_canonical():
         try:
             r = run_strat(strat, universe, INITIAL_CAPITAL, EVAL_START, EVAL_END, div)
             m = calc(r, INITIAL_CAPITAL)
+            m.setdefault("evaluation_status", "ok")
         except Exception as e:
-            m = {"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "error": str(e)[:60]}
+            m = failed_canonical_metrics(e, "full_period")
+            evaluation_errors[strat] = {
+                "stage": "full_period",
+                "error_type": type(e).__name__,
+                "error": str(e)[:120],
+            }
             print(f"ERROR")
             metrics_all[strat] = m
             wf_all[strat] = {"windows": 0, "positive": 0, "sharpe_pos": 0, "total_trades": 0, "details": []}
@@ -297,9 +435,16 @@ def run_canonical():
             try:
                 wr = run_strat(strat, universe, INITIAL_CAPITAL, ws, we, div)
                 wm = calc(wr, INITIAL_CAPITAL)
+                wm.setdefault("evaluation_status", "ok")
                 w_metrics.append(wm)
-            except Exception:
-                w_metrics.append({"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "total_trades": 0})
+            except Exception as exc:
+                w_metrics.append(failed_canonical_metrics(exc, f"walk_forward:{ws}:{we}"))
+                walk_forward_errors.setdefault(strat, []).append({
+                    "window_start": ws,
+                    "window_end": we,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:120],
+                })
 
         wf_summary = attach_canonical_walk_forward_metrics(m, w_metrics)
         metrics_all[strat] = m
@@ -313,8 +458,14 @@ def run_canonical():
         try:
             r = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, EVAL_START, EVAL_END)
             m = calc(r, INITIAL_CAPITAL)
+            m.setdefault("evaluation_status", "ok")
         except Exception as e:
-            m = {"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "error": str(e)[:60]}
+            m = failed_canonical_metrics(e, "full_period")
+            evaluation_errors[name] = {
+                "stage": "full_period",
+                "error_type": type(e).__name__,
+                "error": str(e)[:120],
+            }
             print("ERROR")
             metrics_all[name] = m
             wf_all[name] = {"windows": 0, "positive": 0, "sharpe_pos": 0, "total_trades": 0, "details": []}
@@ -325,9 +476,16 @@ def run_canonical():
             try:
                 wr = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, ws, we)
                 wm = calc(wr, INITIAL_CAPITAL)
+                wm.setdefault("evaluation_status", "ok")
                 w_metrics.append(wm)
-            except Exception:
-                w_metrics.append({"total_return": 0, "sharpe": 0, "profit_factor": 0, "mdd": 0, "total_trades": 0})
+            except Exception as exc:
+                w_metrics.append(failed_canonical_metrics(exc, f"walk_forward:{ws}:{we}"))
+                walk_forward_errors.setdefault(name, []).append({
+                    "window_start": ws,
+                    "window_end": we,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:120],
+                })
 
         wf_summary = attach_canonical_walk_forward_metrics(m, w_metrics)
         metrics_all[name] = m
@@ -378,13 +536,30 @@ def run_canonical():
     out_dir = Path("reports/promotion")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    data_snapshot_manifest = build_data_snapshot_manifest(
+        provider="FinanceDataReader/DataCollector",
+        universe_rule=UNIVERSE_RULE,
+        eval_start=EVAL_START,
+        eval_end=EVAL_END,
+        universe_lookback_start=UNIVERSE_LOOKBACK_START,
+        universe_lookback_end=UNIVERSE_LOOKBACK_END,
+        universe=universe,
+        liquidity_coverage=liquidity_coverage,
+        benchmark_coverage=benchmark_coverage,
+        fetch_errors=fetch_errors,
+    )
+
     metadata = {
         "schema_version": 1,
         "artifact_type": "canonical_promotion_bundle",
         "eval_start": EVAL_START,
         "eval_end": EVAL_END,
-        "universe_rule": "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20",
+        "universe_rule": UNIVERSE_RULE,
         "universe": universe,
+        "data_snapshot_hash": data_snapshot_manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": data_snapshot_manifest,
+        "evaluation_errors": evaluation_errors,
+        "walk_forward_errors": walk_forward_errors,
         "canonical_research_candidate_ids": [spec.candidate_id for spec in research_specs],
         "strategy_specs": [
             canonical_research_candidate_metadata(spec)
