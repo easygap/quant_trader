@@ -1004,6 +1004,146 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["no_order_safety"]["orders_submitted"] is False
 
 
+def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypatch):
+    from tools.target_weight_rotation_pilot import summarize_target_weight_evidence_progress
+
+    strategy = "target_weight_candidate"
+    params_hash = "hash"
+    records = [
+        {
+            "date": "2026-04-08",
+            "strategy": strategy,
+            "execution_backed": False,
+            "evidence_mode": "shadow_bootstrap",
+            "session_mode": "shadow_bootstrap",
+        },
+        {
+            "date": "2026-04-09",
+            "strategy": strategy,
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "pilot_caps_snapshot": {
+                "target_weight_plan": {
+                    "candidate_id": strategy,
+                    "trade_day": "2026-04-09",
+                    "params_hash": params_hash,
+                },
+                "target_weight_execution": {
+                    "complete": True,
+                    "params_hash": params_hash,
+                    "liquidity_complete": True,
+                    "pre_trade_risk_complete": True,
+                    "order_result_complete": True,
+                    "fill_complete": True,
+                    "position_reconciliation": {"complete": True},
+                },
+            },
+        },
+        {
+            "date": "2026-04-10",
+            "strategy": strategy,
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "pilot_caps_snapshot": {
+                "target_weight_plan": {
+                    "candidate_id": strategy,
+                    "trade_day": "2026-04-10",
+                    "params_hash": params_hash,
+                },
+            },
+        },
+    ]
+    monkeypatch.setattr(
+        "core.paper_evidence.get_canonical_records",
+        lambda candidate_id: records if candidate_id == strategy else [],
+    )
+
+    progress = summarize_target_weight_evidence_progress(strategy)
+
+    assert progress["verified_pilot_days"] == 1
+    assert progress["remaining_pilot_days"] == 59
+    assert progress["shadow_days"] == 1
+    assert progress["invalid_execution_days"] == 1
+    assert progress["invalid_reasons"]["missing_target_weight_execution"] == 1
+    assert progress["latest_verified_pilot_date"] == "2026-04-09"
+
+
+def test_build_target_weight_daily_ops_summary_writes_operator_view(tmp_path):
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+        write_target_weight_daily_ops_summary,
+    )
+
+    plan = _adapter_plan()
+    cap_recommendation = recommend_pilot_caps(plan)
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": True,
+        "ready_for_capped_pilot": False,
+        "next_action": "enable pilot with suggested caps, then rerun readiness audit",
+        "blocking_reasons": ["pilot_authorization: no active capped pilot authorization"],
+        "warning_reasons": ["preview_caps: current preview blocked"],
+        "operator_commands": {
+            "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --shadow-days 3",
+            "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --readiness-audit",
+            "enable_suggested_caps": cap_recommendation["enable_command"],
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 12,
+        "remaining_pilot_days": 48,
+        "progress_ratio": 0.2,
+        "shadow_days": 3,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 15,
+        "latest_record_date": "2026-04-10",
+        "latest_verified_pilot_date": "2026-04-10",
+        "latest_shadow_date": "2026-04-03",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+    json_path, md_path = write_target_weight_daily_ops_summary(summary, output_dir=tmp_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    report = md_path.read_text(encoding="utf-8")
+
+    assert summary["status"] == "READY_TO_ENABLE_CAPS"
+    assert len(summary["summary_hash"]) == 64
+    assert payload["evidence_progress"]["remaining_pilot_days"] == 48
+    assert payload["no_order_safety"]["summary_only"] is True
+    assert "Verified pilot days: 12/60" in report
+    assert "READY_TO_ENABLE_CAPS" in report
+
+
 def test_assess_plan_liquidity_blocks_large_adv_order():
     from tools.target_weight_rotation_pilot import assess_plan_liquidity
 
