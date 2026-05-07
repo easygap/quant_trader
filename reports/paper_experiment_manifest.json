@@ -54,6 +54,7 @@
       },
       "required_execution_checks": [
         "params_hash_match",
+        "execution_trade_day_allowed",
         "pre_execution_positions_complete",
         "liquidity_complete",
         "pre_trade_risk_complete",
