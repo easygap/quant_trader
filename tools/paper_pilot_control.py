@@ -101,9 +101,7 @@ def run_enable(args):
 
 
 def _target_weight_enable_guard(args):
-    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
-
-    if args.strategy != DEFAULT_TARGET_WEIGHT_CANDIDATE_ID:
+    if not str(args.strategy).startswith("target_weight_"):
         return None
 
     from tools.target_weight_rotation_pilot import build_preview_caps, run_pilot_readiness_audit
