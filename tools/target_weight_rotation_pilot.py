@@ -735,6 +735,31 @@ def blocked_execution_for_duplicate_execution(
     }
 
 
+def blocked_execution_for_pilot_validation(
+    plan: TargetWeightPlan,
+    validation: Any,
+) -> dict[str, Any]:
+    reason = (
+        "target_weight_pilot_validation_failed: "
+        f"{getattr(validation, 'reason', 'pilot plan blocked')}"
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_pilot_validation",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def blocked_execution_for_liquidity(
     plan: TargetWeightPlan,
     liquidity_check: dict[str, Any],
@@ -2550,11 +2575,9 @@ def run_pilot(
         logger.exception("target-weight pre-trade risk validation failed for {}", plan.candidate_id)
         pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
     dry_run = not execute
-    if execute and not validation.allowed:
-        raise ValueError(f"pilot plan blocked: {validation.reason}")
 
     execution_idempotency = None
-    if execute:
+    if execute and validation.allowed:
         execution_idempotency = check_execution_idempotency(
             plan,
             allow_rerun=allow_rerun,
@@ -2574,7 +2597,9 @@ def run_pilot(
             )
             pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
 
-    if execute and execution_idempotency and not execution_idempotency["allowed"]:
+    if execute and not validation.allowed:
+        execution = blocked_execution_for_pilot_validation(plan, validation)
+    elif execute and execution_idempotency and not execution_idempotency["allowed"]:
         execution = blocked_execution_for_duplicate_execution(plan, execution_idempotency)
     elif execute and pre_execution_reconciliation and not pre_execution_reconciliation["complete"]:
         execution = blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
@@ -2599,6 +2624,7 @@ def run_pilot(
     position_reconciliation = None
     if (
         execute
+        and validation.allowed
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
         and liquidity_check["complete"]
@@ -2657,7 +2683,7 @@ def run_pilot(
             "evidence_block_reason": "" if execution_evidence["complete"] else execution_evidence["reason"],
             "target_weight_execution": execution_evidence,
         }
-        if execution_idempotency is None or execution_idempotency["allowed"]:
+        if validation.allowed and (execution_idempotency is None or execution_idempotency["allowed"]):
             save_pilot_session_artifact(
                 strategy=candidate_id,
                 date=plan.trade_day,
