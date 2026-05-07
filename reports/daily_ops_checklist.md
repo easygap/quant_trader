@@ -45,6 +45,15 @@
 - [ ] MDD 확인: 누적 ___% (15% 접근 시 주의)
 - [ ] 손절/익절/트레일링 스탑 발동 건수: __건
 
+### Target-weight pilot 전용
+
+- [ ] `python tools/target_weight_rotation_pilot.py --daily-ops-summary` 실행
+- [ ] Summary status 확인: BLOCKED / READY_TO_ENABLE_CAPS / READY_TO_EXECUTE
+- [ ] Verified pilot days 확인: ____ / 60
+- [ ] Invalid execution days가 0인지 확인
+- [ ] Liquidity / Pre-trade risk가 PASS인지 확인
+- [ ] 다음 명령이 cap 승인인지, capped paper 실행인지 기록
+
 ### 기록
 
 ```
