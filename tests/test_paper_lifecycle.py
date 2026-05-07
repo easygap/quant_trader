@@ -7,13 +7,39 @@ Full Paper Lifecycle 테스트 하네스
 
 import os
 import json
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 
 import pandas as pd
 import numpy as np
 import pytest
+
+
+def _paper_guard_patches():
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "core.paper_preflight.load_preflight_status",
+        return_value=SimpleNamespace(
+            overall="pass",
+            entry_allowed=True,
+            runtime_state="normal",
+            block_reasons=[],
+        ),
+    ))
+    stack.enter_context(patch(
+        "core.paper_runtime.get_paper_runtime_state",
+        return_value=SimpleNamespace(
+            state="normal",
+            allowed_actions=["entry", "exit", "cancel", "reconcile", "finalize"],
+            reasons=[],
+            metrics={"recent_final_ratio": 1.0, "recent_anomaly_count": 0},
+            evidence_date="2026-01-01",
+        ),
+    ))
+    return stack
 
 
 def _make_price_df(n=60, base=50000):
@@ -56,7 +82,7 @@ class TestFullPaperLifecycle:
         sig_time = datetime(2024, 6, 15, 10, 30, 0)
 
         # 장 시간 체크를 모킹하여 테스트 실행 시각과 무관하게 동작
-        with patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
             result = executor.execute_buy(
                 symbol="005930",
                 price=54200,
@@ -103,12 +129,13 @@ class TestFullPaperLifecycle:
         executor = OrderExecutor(config, account_key="test")
 
         # BUY
-        executor.execute_buy(
-            symbol="005930", price=54200, capital=10_000_000,
-            available_cash=10_000_000, signal_score=2.5,
-            reason="lifecycle BUY", strategy="scoring",
-            signal_at=datetime.now(),
-        )
+        with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+            executor.execute_buy(
+                symbol="005930", price=54200, capital=10_000_000,
+                available_cash=10_000_000, signal_score=2.5,
+                reason="lifecycle BUY", strategy="scoring",
+                signal_at=datetime.now(),
+            )
 
         # SELL
         result = executor.execute_sell(
@@ -167,12 +194,13 @@ def test_generate_lifecycle_report():
     executor = OrderExecutor(config, account_key="report")
 
     sig_time = datetime.now()
-    result = executor.execute_buy(
-        symbol="005930", price=54200, capital=10_000_000,
-        available_cash=10_000_000, signal_score=2.5,
-        reason="report test BUY", strategy="scoring",
-        avg_daily_volume=500_000, signal_at=sig_time,
-    )
+    with _paper_guard_patches(), patch.object(executor, "_should_block_new_buy_volatility_window", return_value=False):
+        result = executor.execute_buy(
+            symbol="005930", price=54200, capital=10_000_000,
+            available_cash=10_000_000, signal_score=2.5,
+            reason="report test BUY", strategy="scoring",
+            avg_daily_volume=500_000, signal_at=sig_time,
+        )
 
     session = get_session()
     trades = session.query(TradeHistory).all()

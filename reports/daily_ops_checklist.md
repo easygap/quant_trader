@@ -14,6 +14,8 @@
 - [ ] 에러 로그 확인: `tail -50 logs/service_error.log`
 - [ ] 디스크 여유 확인: `df -h /home` (80% 미만)
 - [ ] (full paper만) `QUANT_AUTO_ENTRY` 환경변수 확인: `grep QUANT_AUTO_ENTRY .env`
+- [ ] (full paper만) `python tools/paper_preflight.py --strategy <strategy> --with-pilot-check` 실행 후 `preflight_status_<strategy>.json` 생성 확인
+- [ ] (full paper만) `Entry Allowed`가 YES이거나 runtime blocked 상태에서 활성 pilot authorization이 있는지 확인
 
 ## 장마감 확인 (15:35~16:00)
 

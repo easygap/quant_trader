@@ -403,6 +403,10 @@ class TestPilotSchedulerIntegration:
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         valid_to = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
         enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
+        from core.paper_preflight import run_preflight
+        run_preflight(PILOT_STRATEGY, datetime.now().strftime("%Y-%m-%d"))
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True}), encoding="utf-8")
 
         # scheduler shadow
         from core.scheduler import Scheduler
@@ -455,6 +459,45 @@ class TestPilotSchedulerIntegration:
         ).all()
         session.close()
         assert len(block_events) == 0
+
+    def test_scheduler_blocks_when_preflight_missing(self, evidence_dir, runtime_dir, fresh_db):
+        """preflight 상태가 없으면 scheduler가 executor submit 전에 후보를 폐기한다."""
+        from core.scheduler import Scheduler
+
+        sched = object.__new__(Scheduler)
+        sched.config = MagicMock()
+        sched.config.trading = {"mode": "paper"}
+        sched.strategy_name = PILOT_STRATEGY
+        sched._mode = "paper"
+        sched.discord = MagicMock()
+        sched.portfolio = MagicMock()
+        sched.trading_hours = MagicMock()
+        sched.blackswan = MagicMock()
+        sched.blackswan.is_on_cooldown.return_value = False
+        sched.auto_entry = True
+        sched._entry_candidates = [
+            {"symbol": "005930", "price": 62000, "atr": 1200, "score": 0.8, "reason": "test"},
+        ]
+
+        mock_executor = MagicMock()
+
+        with patch("core.market_regime.check_market_regime",
+                   return_value={"allow_buys": True, "position_scale": 1.0}), \
+             patch("core.data_collector.DataCollector"), \
+             patch.object(sched, "_get_or_create_executor", return_value=mock_executor):
+            sched._execute_entry_candidates()
+
+        mock_executor.execute_buy.assert_not_called()
+        assert sched._entry_candidates == []
+
+        from database.models import get_session, OperationEvent
+        session = get_session()
+        events = session.query(OperationEvent).filter(
+            OperationEvent.event_type == "PREFLIGHT_BLOCK",
+            OperationEvent.strategy == PILOT_STRATEGY,
+        ).all()
+        session.close()
+        assert any("preflight status missing" in e.message for e in events)
 
     def test_preflight_shows_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """preflight에 pilot authorization 표시."""
