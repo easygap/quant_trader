@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -62,6 +63,10 @@ def _params():
         "score_mode": "benchmark_excess",
         "benchmark_symbol": "KS11",
     }
+
+
+def _plan_execution_now():
+    return datetime(2026, 4, 10, 9, 0)
 
 
 def _adapter_plan():
@@ -194,6 +199,30 @@ def _complete_fills(plan):
     ]
 
 
+def test_validate_execution_trade_day_allows_same_kst_day():
+    from tools.target_weight_rotation_pilot import validate_execution_trade_day
+
+    check = validate_execution_trade_day(_adapter_plan(), now=_plan_execution_now())
+
+    assert check["allowed"] is True
+    assert check["execution_day"] == "2026-04-10"
+    assert check["plan_trade_day"] == "2026-04-10"
+
+
+def test_validate_execution_trade_day_blocks_stale_plan():
+    from tools.target_weight_rotation_pilot import validate_execution_trade_day
+
+    check = validate_execution_trade_day(
+        _adapter_plan(),
+        now=datetime(2026, 4, 11, 9, 0),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert check["execution_day"] == "2026-04-11"
+    assert "target_weight_execution_trade_day_mismatch" in check["reason"]
+
+
 def _existing_pilot_evidence_record(plan):
     return {
         "date": plan.trade_day,
@@ -213,6 +242,7 @@ def _existing_pilot_evidence_record(plan):
                 "params_hash": plan.params_hash,
                 "planned_orders": len(plan.orders),
                 "idempotency_allowed": True,
+                "execution_trade_day_allowed": True,
                 "pre_execution_complete": True,
                 "liquidity_complete": True,
                 "pre_trade_risk_complete": True,
@@ -992,6 +1022,24 @@ def test_verify_existing_pilot_evidence_rejects_missing_pre_trade_risk(monkeypat
     }
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_execution_trade_day_check(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    del record["pilot_caps_snapshot"]["target_weight_execution"]["execution_trade_day_allowed"]
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_execution.execution_trade_day_allowed"
+    }
+
+
 def test_preview_plan_against_caps_flags_default_pilot_caps():
     from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
 
@@ -1064,6 +1112,7 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["candidate_snapshot"]["params_hash"] == plan.params_hash
     assert manifest["evidence_policy"]["required_provenance"]["evidence_mode"] == "pilot_paper"
     assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_trade_day_allowed"] is True
     assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
     assert manifest["current_decision"]["ready_for_cap_approval"] is True
@@ -1101,6 +1150,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                 "target_weight_execution": {
                     "complete": True,
                     "params_hash": params_hash,
+                    "execution_trade_day_allowed": True,
                     "liquidity_complete": True,
                     "pre_trade_risk_complete": True,
                     "order_result_complete": True,
@@ -1914,6 +1964,7 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
 
@@ -1975,6 +2026,7 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     reconciliation = result["execution_evidence"]["position_reconciliation"]
@@ -2039,6 +2091,7 @@ def test_run_pilot_blocks_evidence_when_order_result_reconciliation_fails(monkey
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     reconciliation = result["execution_evidence"]["order_result_reconciliation"]
@@ -2106,6 +2159,7 @@ def test_run_pilot_blocks_evidence_when_fill_reconciliation_fails(monkeypatch, t
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     reconciliation = result["execution_evidence"]["fill_reconciliation"]
@@ -2174,6 +2228,7 @@ def test_run_pilot_records_artifact_when_pilot_cap_validation_blocks(monkeypatch
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     artifact = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
@@ -2240,6 +2295,7 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     pre_reconciliation = result["execution_evidence"]["pre_execution_reconciliation"]
@@ -2324,6 +2380,7 @@ def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkey
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     assert result["liquidity_check"]["complete"] is False
@@ -2398,6 +2455,7 @@ def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     assert result["pre_trade_risk_check"]["complete"] is False
@@ -2409,6 +2467,85 @@ def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_pre_trade_risk_failed" in result["evidence_collection"]["reason"]
     assert saved_sessions[0]["target_weight_execution"]["pre_trade_risk_complete"] is False
+
+
+def test_run_pilot_blocks_stale_trade_day_before_order_submission(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("stale trade day must not write runtime pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "check_execution_idempotency",
+        lambda *args, **kwargs: pytest.fail("stale trade day must block before idempotency"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("stale trade day must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("stale trade day must not read positions"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("stale trade day must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("stale trade day must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        as_of_date="2026-04-10",
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=datetime(2026, 4, 11, 9, 0),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_trade_day_check"]["allowed"] is False
+    assert result["execution_idempotency"] is None
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution"]["details"][0]["status"] == "skipped_execution_trade_day_mismatch"
+    assert result["execution_evidence"]["execution_trade_day_allowed"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_execution_trade_day_mismatch" in result["evidence_collection"]["reason"]
+    assert payload["execution_trade_day_check"]["allowed"] is False
+    assert payload["execution"]["execution_trade_day_check"]["allowed"] is False
 
 
 def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
@@ -2477,6 +2614,7 @@ def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
 
@@ -2586,6 +2724,7 @@ def test_run_pilot_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_pat
         allow_rerun=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     assert result["execution_idempotency"]["allowed"] is False
@@ -2668,6 +2807,7 @@ def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp
         allow_rerun=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     assert result["execution_idempotency"]["allowed"] is True
@@ -2735,6 +2875,7 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
 
     assert result["execution_evidence"]["complete"] is True
@@ -2806,6 +2947,7 @@ def test_run_pilot_accepts_verified_already_recorded_pilot_evidence(monkeypatch,
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
 
@@ -2867,6 +3009,7 @@ def test_run_pilot_blocks_unverified_already_recorded_evidence(monkeypatch, tmp_
         collect_evidence=True,
         output_dir=tmp_path / "sessions",
         config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
     )
     payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
 
