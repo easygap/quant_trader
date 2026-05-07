@@ -1162,6 +1162,66 @@ def generate_weekly_summary(strategy: str, week_end_date: str | None = None) -> 
 # Promotion Package (60일)
 # ═══════════════════════════════════════════════════════════════
 
+def _is_target_weight_strategy(strategy: str) -> bool:
+    return strategy.startswith("target_weight_")
+
+
+def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[bool, str]:
+    if record.get("evidence_mode") != "pilot_paper" and record.get("session_mode") != "pilot_paper":
+        return False, "not_pilot_paper"
+    if record.get("pilot_authorized") is not True:
+        return False, "pilot_not_authorized"
+
+    caps = record.get("pilot_caps_snapshot") or {}
+    plan = caps.get("target_weight_plan") or {}
+    execution = caps.get("target_weight_execution") or {}
+    if not plan:
+        return False, "missing_target_weight_plan"
+    if not execution:
+        return False, "missing_target_weight_execution"
+    if plan.get("candidate_id") != strategy:
+        return False, "target_weight_candidate_mismatch"
+
+    plan_hash = plan.get("params_hash")
+    execution_hash = execution.get("params_hash")
+    if not plan_hash or not execution_hash or plan_hash != execution_hash:
+        return False, "target_weight_params_hash_mismatch"
+
+    required_execution_flags = (
+        "complete",
+        "liquidity_complete",
+        "pre_trade_risk_complete",
+        "order_result_complete",
+        "fill_complete",
+    )
+    for field in required_execution_flags:
+        if execution.get(field) is not True:
+            return False, f"target_weight_{field}_false"
+
+    position_reconciliation = execution.get("position_reconciliation") or {}
+    if position_reconciliation.get("complete") is not True:
+        return False, "target_weight_position_reconciliation_incomplete"
+
+    return True, "verified_target_weight_pilot_execution"
+
+
+def _split_target_weight_promotion_records(
+    strategy: str,
+    records: list[dict],
+) -> tuple[list[dict], list[dict], dict[str, int]]:
+    valid_records: list[dict] = []
+    invalid_records: list[dict] = []
+    invalid_reasons: dict[str, int] = {}
+    for record in records:
+        valid, reason = _target_weight_record_proof_status(strategy, record)
+        if valid:
+            valid_records.append(record)
+        else:
+            invalid_records.append(record)
+            invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
+    return valid_records, invalid_records, invalid_reasons
+
+
 def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]:
     """
     60일 누적 evidence에서 promotion package + approval checklist 생성.
@@ -1174,19 +1234,33 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         return None, None
 
     # provenance 분리: execution_backed=True만 승격 카운트
-    records = [r for r in all_records if r.get("execution_backed", True)]
+    execution_records = [r for r in all_records if r.get("execution_backed", True)]
     shadow_records = [r for r in all_records if not r.get("execution_backed", True)]
+    target_weight_required = _is_target_weight_strategy(strategy)
+    target_weight_valid_records: list[dict] = []
+    target_weight_invalid_records: list[dict] = []
+    target_weight_invalid_reasons: dict[str, int] = {}
+    if target_weight_required:
+        (
+            target_weight_valid_records,
+            target_weight_invalid_records,
+            target_weight_invalid_reasons,
+        ) = _split_target_weight_promotion_records(strategy, execution_records)
+        records = target_weight_valid_records
+    else:
+        records = execution_records
     total_days = len(records)
     promotable_days = total_days
     shadow_days = len(shadow_records)
     shadow_only_fallback = False
 
     if total_days == 0:
-        logger.warning("Promotion package: no execution-backed evidence for {}", strategy)
-        # shadow만 있는 경우: blocked package 생성
-        records = all_records  # fallback for package generation
+        logger.warning("Promotion package: no promotable evidence for {}", strategy)
+        # blocked package 생성을 위한 fallback. target-weight는 invalid execution-backed
+        # records가 있으면 그 records를 원인 분석용 metrics source로 유지한다.
+        records = execution_records or all_records
         total_days = len(records)
-        shadow_only_fallback = True
+        shadow_only_fallback = not execution_records
 
     # aggregate metrics (execution-backed records 기준)
     daily_returns = [r.get("daily_return") for r in records if r.get("daily_return") is not None]
@@ -1240,6 +1314,11 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     if shadow_only_fallback:
         blocked = True
         block_reasons.append("no_execution_backed_evidence")
+    if target_weight_required and target_weight_invalid_records:
+        blocked = True
+        block_reasons.append(
+            "target_weight_invalid_execution_evidence=%d" % len(target_weight_invalid_records)
+        )
     if frozen_days > 0:
         blocked = True
         block_reasons.append("frozen_days=%d" % frozen_days)
@@ -1330,6 +1409,22 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
             and r.get("session_mode", "normal_paper") != "pilot_paper"
         ),
         "shadow_days": shadow_days,
+        "target_weight_evidence": {
+            "required": target_weight_required,
+            "valid_pilot_days": len(target_weight_valid_records),
+            "invalid_days": len(target_weight_invalid_records),
+            "invalid_reasons": target_weight_invalid_reasons,
+            "all_promotable_days_verified": (
+                not target_weight_required
+                or (
+                    len(target_weight_invalid_records) == 0
+                    and len(target_weight_valid_records) == promotable_days
+                    and promotable_days > 0
+                )
+            ),
+        },
+        "target_weight_verified_pilot_days": len(target_weight_valid_records),
+        "target_weight_invalid_days": len(target_weight_invalid_records),
         # backward compat aliases
         "real_paper_days": promotable_days,
         "promotable_evidence_days": promotable_days,

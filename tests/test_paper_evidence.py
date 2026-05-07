@@ -1273,6 +1273,106 @@ class TestShadowEvidenceNotPromotable:
         assert "no_execution_backed_evidence" in pkg["block_reasons"]
         assert "insufficient_days=0/60" in pkg["block_reasons"]
 
+    def test_target_weight_promotion_requires_verified_pilot_execution(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "target_weight_rotation_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": strategy,
+                "execution_backed": True,
+                "evidence_mode": "real_paper",
+                "session_mode": "normal_paper",
+                "pilot_authorized": False,
+                "daily_return": 0.1,
+                "cumulative_return": 6.0,
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.04,
+                "cash_adjusted_excess": 0.03,
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            })
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 0
+        assert pkg["target_weight_evidence"]["required"] is True
+        assert pkg["target_weight_evidence"]["valid_pilot_days"] == 0
+        assert pkg["target_weight_evidence"]["invalid_days"] == 60
+        assert "target_weight_invalid_execution_evidence=60" in pkg["block_reasons"]
+        assert "insufficient_days=0/60" in pkg["block_reasons"]
+
+    def test_target_weight_promotion_counts_verified_pilot_execution(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "target_weight_rotation_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            params_hash = f"hash-{i}"
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": strategy,
+                "execution_backed": True,
+                "evidence_mode": "pilot_paper",
+                "session_mode": "pilot_paper",
+                "pilot_authorized": True,
+                "pilot_caps_snapshot": {
+                    "target_weight_plan": {
+                        "candidate_id": strategy,
+                        "trade_day": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                        "params_hash": params_hash,
+                    },
+                    "target_weight_execution": {
+                        "complete": True,
+                        "params_hash": params_hash,
+                        "liquidity_complete": True,
+                        "pre_trade_risk_complete": True,
+                        "order_result_complete": True,
+                        "fill_complete": True,
+                        "position_reconciliation": {"complete": True},
+                    },
+                },
+                "daily_return": 0.1,
+                "cumulative_return": 6.0,
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.04,
+                "cash_adjusted_excess": 0.03,
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            })
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "ELIGIBLE"
+        assert pkg["promotable_evidence_days"] == 60
+        assert pkg["target_weight_evidence"]["required"] is True
+        assert pkg["target_weight_evidence"]["valid_pilot_days"] == 60
+        assert pkg["target_weight_evidence"]["invalid_days"] == 0
+        assert pkg["target_weight_evidence"]["all_promotable_days_verified"] is True
+        assert pkg["target_weight_verified_pilot_days"] == 60
+        assert pkg["pilot_real_paper_days"] == 60
+
     def test_shadow_same_date_cannot_replace_real_paper_record(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, get_canonical_records
 
