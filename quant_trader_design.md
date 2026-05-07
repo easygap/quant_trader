@@ -121,6 +121,7 @@
 - Follow-up pilot approval guard (2026-05-06): target-weight pilot 승인 시 `paper_pilot_control.py --enable`이 readiness audit을 재실행해 requested cap, launch readiness, 유동성 preflight, 비용 반영 pre-trade risk를 통과할 때만 auth를 기록한다.
 - Follow-up completed rerun block (2026-05-06): same-candidate/trade-day 실행 완료 세션은 `--allow-rerun`을 줘도 재실행하지 않는다. `--allow-rerun`은 부분 실행/중단 세션 복구용으로 제한한다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
+- Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
 - 60일 종료 시 `generate_promotion_package()` 자동 승격 패키지 생성
 
@@ -1421,6 +1422,7 @@ quant_trader/
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
 - [x] **target-weight cap validation artifact 추가** — pilot cap validation 차단도 session JSON artifact로 남겨 조용한 실행 실패와 원인 유실 방지
+- [x] **target-weight promotion proof guard 추가** — promotion/live gate가 verified pilot execution proof 없는 target-weight paper evidence를 승격 카운트에서 제외
 - [x] **테스트 298건 회귀 green** — live/paper/promotion/research sweep 회귀 묶음 기준
 
 ### v5.1 Paper Runtime 완성 (2026-04-09)
@@ -1524,4 +1526,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-05-07 (target-weight cap validation artifact 반영)
+> **최종 수정**: 2026-05-07 (target-weight promotion proof guard 반영)
