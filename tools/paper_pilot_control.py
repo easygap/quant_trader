@@ -74,6 +74,9 @@ def run_enable(args):
 
     try:
         target_weight_audit = _target_weight_enable_guard(args)
+        target_weight_plan_snapshot = None
+        if target_weight_audit is not None:
+            target_weight_plan_snapshot = target_weight_audit.get("target_weight_plan_snapshot")
         auth = enable_pilot(
             strategy=args.strategy,
             valid_from=args.valid_from,
@@ -83,6 +86,7 @@ def run_enable(args):
             max_notional=args.max_notional,
             max_exposure=args.max_exposure,
             reason=args.reason,
+            target_weight_plan_snapshot=target_weight_plan_snapshot,
         )
         print(f"\nPilot ENABLED: {args.strategy}")
         print(f"  Period: {auth.valid_from} ~ {auth.valid_to}")
@@ -104,7 +108,11 @@ def _target_weight_enable_guard(args):
     if not str(args.strategy).startswith("target_weight_"):
         return None
 
-    from tools.target_weight_rotation_pilot import build_preview_caps, run_pilot_readiness_audit
+    from tools.target_weight_rotation_pilot import (
+        build_pilot_authorization_snapshot,
+        build_preview_caps,
+        run_pilot_readiness_audit,
+    )
 
     requested_caps = build_preview_caps(
         max_orders=args.max_orders,
@@ -130,6 +138,12 @@ def _target_weight_enable_guard(args):
             "requested target-weight pilot caps do not satisfy the current plan: "
             f"{cap_preview.get('reason', 'cap preview blocked')}. "
             f"Use the suggested caps in {result['report_path']}"
+        )
+    plan = result.get("plan")
+    if plan is not None:
+        result["target_weight_plan_snapshot"] = build_pilot_authorization_snapshot(
+            plan,
+            readiness_audit=audit,
         )
     return result
 
