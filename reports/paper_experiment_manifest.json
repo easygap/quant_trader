@@ -37,5 +37,38 @@
     "signal_only": "python main.py --mode schedule --strategy scoring",
     "full_paper": "QUANT_AUTO_ENTRY=true python main.py --mode schedule --strategy scoring"
   },
+  "target_weight_pilot": {
+    "candidate_id": "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+    "mode": "capped paper pilot",
+    "paper_days_target": 60,
+    "status": "canonical provisional_paper_candidate",
+    "live_mode": "blocked",
+    "shadow_bootstrap_required_days": 3,
+    "evidence_policy": {
+      "promotable_evidence_mode": "pilot_paper",
+      "required_provenance": {
+        "execution_backed": true,
+        "evidence_mode": "pilot_paper",
+        "session_mode": "pilot_paper",
+        "pilot_authorized": true
+      },
+      "required_execution_checks": [
+        "params_hash_match",
+        "pre_execution_positions_complete",
+        "liquidity_complete",
+        "pre_trade_risk_complete",
+        "order_result_complete",
+        "fill_complete",
+        "position_reconciliation_complete"
+      ]
+    },
+    "run_modes": {
+      "shadow_bootstrap": "python tools/target_weight_rotation_pilot.py --shadow-days 3",
+      "readiness_audit": "python tools/target_weight_rotation_pilot.py --readiness-audit",
+      "enable_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 --enable --from YYYY-MM-DD --to YYYY-MM-DD --max-orders N --max-positions N --max-notional N --max-exposure N --reason \"target-weight capped paper pilot\"",
+      "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence"
+    },
+    "operator_notes": "기존 scoring 60영업일 실험과 별개로 target-weight 후보의 실행 증거를 누적한다. readiness audit이 생성하는 target_weight_paper_experiment_manifest_*.json의 추천 cap과 차단 사유를 기준으로 승인·실행한다."
+  },
   "operator_notes": "scoring experimental 상태. 모든 전략 검증 미통과. live 전환 불가. 60영업일 관측 후 GoLive 체크."
 }
