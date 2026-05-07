@@ -79,6 +79,166 @@ class OrderExecutor:
                 self._sector_map = {}
         return self._sector_map
 
+    def _is_paper_like_mode(self) -> bool:
+        return self.mode in ("paper", "schedule")
+
+    def _resolve_guard_strategy(self, strategy: str = "") -> str:
+        """Paper runtime/preflight 조회에 사용할 전략명을 결정한다."""
+        return str(strategy or self.account_key or "").strip()
+
+    def _runtime_block_detail(self, strategy: str, rt_state) -> str:
+        metrics = getattr(rt_state, "metrics", {}) or {}
+        allowed_actions = getattr(rt_state, "allowed_actions", []) or []
+        reasons = getattr(rt_state, "reasons", []) or []
+        parts = [
+            f"state={getattr(rt_state, 'state', 'unknown')}",
+            f"strategy={strategy}",
+            f"evidence_date={getattr(rt_state, 'evidence_date', None) or 'N/A'}",
+            f"allowed_actions={','.join(allowed_actions) or 'none'}",
+        ]
+        if "recent_final_ratio" in metrics:
+            parts.append(f"benchmark_final_ratio={metrics.get('recent_final_ratio')}")
+        if "recent_anomaly_count" in metrics:
+            parts.append(f"anomaly_count={metrics.get('recent_anomaly_count')}")
+        if reasons:
+            parts.append("reasons=" + "; ".join(str(r) for r in reasons))
+        return " | ".join(parts)
+
+    def _block_paper_entry(
+        self,
+        reason: str,
+        strategy: str = "",
+        event_type: str = "RUNTIME_BLOCK",
+        detail: dict | None = None,
+    ) -> dict:
+        logger.warning("Paper 신규 진입 차단: {}", reason)
+        try:
+            _log_op_event(
+                event_type,
+                f"entry blocked: {reason}",
+                severity="warning",
+                strategy=strategy or None,
+                mode=self.mode,
+                detail=detail or {},
+            )
+        except Exception as exc:
+            logger.debug("Paper entry block 이벤트 기록 실패: {}", exc)
+        return {"allowed": False, "reason": reason, "paper_entry_blocked": True}
+
+    def _paper_entry_pre_order_check(
+        self,
+        action: str = "BUY",
+        strategy: str = "",
+        candidate_notional: float | None = None,
+    ) -> dict:
+        """Paper/schedule 신규 진입은 runtime/preflight가 확인될 때만 허용한다."""
+        if not self._is_paper_like_mode() or str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+
+        strategy_name = self._resolve_guard_strategy(strategy)
+        if not strategy_name:
+            return self._block_paper_entry(
+                "paper entry guard requires strategy",
+                strategy=strategy_name,
+                event_type="CONFIG_ERROR",
+            )
+
+        try:
+            from core.paper_preflight import load_preflight_status
+            preflight = load_preflight_status(strategy_name, strict=True)
+        except Exception as exc:
+            return self._block_paper_entry(
+                f"paper preflight status unavailable: {exc}",
+                strategy=strategy_name,
+                event_type="PREFLIGHT_BLOCK",
+                detail={"strategy": strategy_name, "error": str(exc)},
+            )
+
+        if preflight is None:
+            return self._block_paper_entry(
+                "paper preflight status missing",
+                strategy=strategy_name,
+                event_type="PREFLIGHT_BLOCK",
+                detail={"strategy": strategy_name},
+            )
+
+        if getattr(preflight, "overall", None) == "fail":
+            block_reasons = getattr(preflight, "block_reasons", []) or []
+            reason = "; ".join(str(r) for r in block_reasons) or getattr(preflight, "overall", "fail")
+            return self._block_paper_entry(
+                f"paper preflight blocked entry: {reason}",
+                strategy=strategy_name,
+                event_type="PREFLIGHT_BLOCK",
+                detail={
+                    "strategy": strategy_name,
+                    "overall": getattr(preflight, "overall", None),
+                    "runtime_state": getattr(preflight, "runtime_state", None),
+                    "block_reasons": block_reasons,
+                },
+            )
+
+        try:
+            from core.paper_runtime import get_paper_runtime_state
+            rt_state = get_paper_runtime_state(strategy_name)
+        except Exception as exc:
+            return self._block_paper_entry(
+                f"paper runtime state unavailable: {exc}",
+                strategy=strategy_name,
+                event_type="RUNTIME_BLOCK",
+                detail={"strategy": strategy_name, "error": str(exc)},
+            )
+
+        allowed_actions = getattr(rt_state, "allowed_actions", []) or []
+        if "entry" in allowed_actions:
+            return {"allowed": True, "reason": ""}
+
+        pilot_check = None
+        try:
+            from core.paper_pilot import check_pilot_entry
+            pilot_check = check_pilot_entry(
+                strategy_name,
+                candidate_notional=float(candidate_notional or 0),
+            )
+        except Exception as exc:
+            detail = {
+                "strategy": strategy_name,
+                "runtime_state": getattr(rt_state, "state", None),
+                "pilot_error": str(exc),
+            }
+            return self._block_paper_entry(
+                f"paper runtime blocked entry and pilot check failed: {exc}",
+                strategy=strategy_name,
+                detail=detail,
+            )
+
+        if getattr(pilot_check, "allowed", False):
+            try:
+                _log_op_event(
+                    "PILOT_ENTRY_ALLOWED",
+                    f"pilot override: {getattr(pilot_check, 'reason', '')}",
+                    severity="info",
+                    strategy=strategy_name,
+                    mode=self.mode,
+                    detail=getattr(pilot_check, "caps_snapshot", None) or {},
+                )
+            except Exception as exc:
+                logger.debug("Pilot 허용 이벤트 기록 실패: {}", exc)
+            return {"allowed": True, "reason": "paper pilot allowed entry"}
+
+        block_detail = self._runtime_block_detail(strategy_name, rt_state)
+        if pilot_check is not None:
+            block_detail = f"{block_detail} | pilot={getattr(pilot_check, 'reason', '')}"
+        return self._block_paper_entry(
+            f"paper runtime blocked entry: {block_detail}",
+            strategy=strategy_name,
+            detail={
+                "strategy": strategy_name,
+                "state": getattr(rt_state, "state", None),
+                "allowed_actions": allowed_actions,
+                "reasons": getattr(rt_state, "reasons", []) or [],
+            },
+        )
+
     def execute_buy(
         self,
         symbol: str,
@@ -273,9 +433,16 @@ class OrderExecutor:
         trailing_stop = self.risk_manager.calculate_trailing_stop(price, atr)
 
         # 주문 전 안전 체크
-        pre_check = self._pre_order_check()
+        pre_check = self._pre_order_check(
+            action="BUY",
+            strategy=strategy,
+            candidate_notional=price * quantity,
+        )
         if not pre_check["allowed"]:
-            return {"success": False, "reason": pre_check["reason"]}
+            result = {"success": False, "reason": pre_check["reason"]}
+            if pre_check.get("paper_entry_blocked"):
+                result["paper_entry_blocked"] = True
+            return result
 
         # ── 상태기계 기반 주문 처리 ──
         expected_price = float(price)
@@ -463,9 +630,16 @@ class OrderExecutor:
                 "available_cash": available_cash,
             }
 
-        pre_check = self._pre_order_check(action="BUY")
+        pre_check = self._pre_order_check(
+            action="BUY",
+            strategy=strategy,
+            candidate_notional=fill_price * quantity,
+        )
         if not pre_check["allowed"]:
-            return {"success": False, "reason": pre_check["reason"]}
+            result = {"success": False, "reason": pre_check["reason"]}
+            if pre_check.get("paper_entry_blocked"):
+                result["paper_entry_blocked"] = True
+            return result
 
         stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
         tp_info = self.risk_manager.calculate_take_profit(price)
@@ -613,7 +787,7 @@ class OrderExecutor:
         actual_slippage_pct = None
 
         # 주문 전 안전 체크 (매도: 쿨다운 중에도 허용)
-        pre_check = self._pre_order_check(action="SELL")
+        pre_check = self._pre_order_check(action="SELL", strategy=strategy)
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
@@ -902,7 +1076,12 @@ class OrderExecutor:
     # 안전 체크 및 재시도
     # =============================================================
 
-    def _pre_order_check(self, action: str = "BUY") -> dict:
+    def _pre_order_check(
+        self,
+        action: str = "BUY",
+        strategy: str = "",
+        candidate_notional: float | None = None,
+    ) -> dict:
         """
         주문 전 안전 체크 (거래 시간 + 블랙스완)
 
@@ -912,9 +1091,13 @@ class OrderExecutor:
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
-        # 페이퍼/백테스트 모드에서는 시간 체크 스킵
+        # 페이퍼/스케줄 신규 진입은 runtime/preflight 확인에 실패하면 차단한다.
         if self.mode != "live":
-            return {"allowed": True, "reason": ""}
+            return self._paper_entry_pre_order_check(
+                action=action,
+                strategy=strategy,
+                candidate_notional=candidate_notional,
+            )
 
         # 거래 시간 체크
         time_check = self.trading_hours.can_place_order()
