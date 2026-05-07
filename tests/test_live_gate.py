@@ -18,6 +18,29 @@ def _write_json(path, payload):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _snapshot_manifest(*, fetch_errors=None):
+    from tools.evaluate_and_promote import build_data_snapshot_manifest
+
+    return build_data_snapshot_manifest(
+        provider="test-provider",
+        universe_rule="테스트 유동성 상위 종목",
+        eval_start="2025-01-01",
+        eval_end="2025-12-31",
+        universe_lookback_start="2024-10-01",
+        universe_lookback_end="2024-12-31",
+        universe=["005930", "000660"],
+        liquidity_coverage={
+            "005930": {"rows": 62, "start": "2024-10-01", "end": "2024-12-31"},
+            "000660": {"rows": 61, "start": "2024-10-01", "end": "2024-12-31"},
+        },
+        benchmark_coverage={
+            "005930": {"rows": 245, "start": "2025-01-01", "end": "2025-12-31"},
+            "000660": {"rows": 245, "start": "2025-01-01", "end": "2025-12-31"},
+        },
+        fetch_errors=fetch_errors or {},
+    )
+
+
 def _write_bundle(
     promotion_dir,
     *,
@@ -30,9 +53,14 @@ def _write_bundle(
     resolved_hash="resolved-ok",
     benchmark_excess=2.0,
     benchmark_excess_sharpe=0.2,
+    snapshot_manifest=None,
+    evaluation_errors=None,
+    walk_forward_errors=None,
+    metric_overrides=None,
 ):
     allowed_modes = ["backtest", "paper", "live"] if allowed_modes is None else allowed_modes
     generated_at = generated_at or datetime(2026, 4, 29, 12, 0, 0).isoformat()
+    snapshot_manifest = snapshot_manifest or _snapshot_manifest()
 
     _write_json(
         promotion_dir / "run_metadata.json",
@@ -43,11 +71,17 @@ def _write_bundle(
             "config_yaml_hash": yaml_hash,
             "config_resolved_hash": resolved_hash,
             "generated_at": generated_at,
+            "data_snapshot_hash": snapshot_manifest["data_snapshot_hash"],
+            "data_snapshot_manifest": snapshot_manifest,
+            "evaluation_errors": evaluation_errors or {},
+            "walk_forward_errors": walk_forward_errors or {},
         },
     )
+    metrics = {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}
+    metrics.update(metric_overrides or {})
     _write_json(
         promotion_dir / "metrics_summary.json",
-        {strategy: {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}},
+        {strategy: metrics},
     )
     _write_json(
         promotion_dir / "walk_forward_summary.json",
@@ -161,6 +195,107 @@ def test_stale_artifact_blocks_live_gate(tmp_path):
     )
 
     assert any("오래됨" in issue for issue in issues)
+
+
+def test_data_snapshot_hash_required_for_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+
+    metadata_path = promotion_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("data_snapshot_hash")
+    metadata.pop("data_snapshot_manifest")
+    _write_json(metadata_path, metadata)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("data_snapshot_hash" in issue for issue in issues)
+    assert any("data_snapshot_manifest" in issue for issue in issues)
+
+
+def test_data_snapshot_manifest_hash_mismatch_blocks_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    manifest = _snapshot_manifest()
+    manifest["benchmark_coverage"]["005930"]["rows"] = 0
+    _write_bundle(promotion_dir, snapshot_manifest=manifest)
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("재계산 hash 불일치" in issue for issue in issues)
+    assert any("벤치마크 coverage rows" in issue for issue in issues)
+
+
+def test_data_snapshot_fetch_errors_block_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(
+        promotion_dir,
+        snapshot_manifest=_snapshot_manifest(
+            fetch_errors={
+                "005930": {
+                    "stage": "benchmark",
+                    "error_type": "RuntimeError",
+                    "error": "provider unavailable",
+                }
+            }
+        ),
+    )
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("data snapshot 수집 오류" in issue for issue in issues)
+
+
+def test_failed_canonical_metric_blocks_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(
+        promotion_dir,
+        metric_overrides={
+            "evaluation_status": "failed",
+            "evaluation_stage": "full_period",
+            "evaluation_error_type": "RuntimeError",
+            "error": "provider unavailable",
+        },
+    )
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("canonical 평가 실패" in issue for issue in issues)
 
 
 def test_benchmark_excess_must_be_positive_and_present(tmp_path):
