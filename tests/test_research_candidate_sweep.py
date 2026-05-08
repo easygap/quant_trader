@@ -513,6 +513,65 @@ def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):
     assert "EM Excess" in md_path.read_text(encoding="utf-8")
 
 
+def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):
+    import pandas as pd
+    import config.config_loader as config_loader
+    import tools.research_candidate_sweep as sweep
+
+    class _Config:
+        yaml_hash = "yaml"
+        resolved_hash = "resolved"
+        risk_params = {
+            "liquidity_filter": {
+                "enabled": True,
+                "min_avg_trading_value_20d_krw": 5_000_000_000,
+                "strict": True,
+            }
+        }
+
+    def fake_filter(symbols, config, *, as_of_end):
+        assert symbols == ["AAA", "BBB"]
+        assert as_of_end == "2025-01-01"
+        return ["AAA"], {
+            "enabled": True,
+            "input_symbols": ["AAA", "BBB"],
+            "passed_symbols": ["AAA"],
+            "excluded_symbols": ["BBB"],
+            "min_avg_trading_value_20d_krw": 5_000_000_000,
+            "strict": True,
+            "symbols": {
+                "AAA": {"passed": True, "reason": "passed"},
+                "BBB": {"passed": False, "reason": "below_min_avg_trading_value"},
+            },
+        }
+
+    seen = {}
+
+    def fake_benchmark(symbols, start, end, capital):
+        seen["benchmark_symbols"] = list(symbols)
+        return (
+            {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": len(symbols), "benchmark_symbols": symbols},
+            pd.Series(dtype=float),
+        )
+
+    monkeypatch.setattr(config_loader.Config, "get", staticmethod(lambda: _Config()))
+    monkeypatch.setattr(sweep, "apply_research_universe_liquidity_filter", fake_filter)
+    monkeypatch.setattr(sweep, "buy_and_hold_benchmark_with_returns", fake_benchmark)
+    monkeypatch.setattr(sweep, "build_candidate_specs", lambda family: [])
+
+    bundle = sweep.run_candidate_sweep(
+        symbols=["AAA", "BBB"],
+        start="2025-01-01",
+        end="2025-12-31",
+        include_walk_forward=False,
+    )
+
+    assert seen["benchmark_symbols"] == ["AAA"]
+    assert bundle["input_universe"] == ["AAA", "BBB"]
+    assert bundle["universe"] == ["AAA"]
+    assert bundle["universe_liquidity_filter"]["excluded_symbols"] == ["BBB"]
+
+
 def test_portfolio_backtester_strategy_config_for_run_applies_overlay():
     from config.config_loader import Config
     from backtest.portfolio_backtester import PortfolioBacktester
