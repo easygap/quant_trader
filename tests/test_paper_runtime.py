@@ -168,6 +168,25 @@ class TestRuntimeStateMachine:
         assert "exit" in state.allowed_actions
         assert "finalize" in state.allowed_actions
 
+    def test_runtime_latest_date_uses_chronological_canonical_records(self, evidence_dir, runtime_dir):
+        """나중에 append된 오래된 backfill이 latest runtime state를 덮지 않음."""
+        from core.paper_runtime import get_paper_runtime_state
+
+        _seed_evidence(evidence_dir, "ordered_runtime", [
+            {"date": "2026-04-03", "status": "normal", "benchmark_status": "final"},
+            {"date": "2026-04-05", "status": "normal", "benchmark_status": "final"},
+            {
+                "date": "2026-04-01",
+                "reject_count": 5,
+                "status": "degraded",
+                "anomalies": [{"type": "repeated_reject", "severity": "warning"}],
+            },
+        ])
+
+        state = get_paper_runtime_state("ordered_runtime")
+        assert state.evidence_date == "2026-04-05"
+        assert state.state == "normal"
+
     def test_frozen_on_phantom_position(self, evidence_dir, runtime_dir):
         """phantom_position_count > 0 → frozen."""
         from core.paper_runtime import get_paper_runtime_state

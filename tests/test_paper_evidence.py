@@ -103,6 +103,39 @@ class TestJsonlIO:
         path = evidence_dir / "nonexistent.jsonl"
         assert _already_recorded(path, "2026-04-01") is False
 
+    def test_already_recorded_scans_beyond_recent_tail(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, _already_recorded
+        path = evidence_dir / "test.jsonl"
+        _append_jsonl(path, {"date": "2026-04-01"})
+        for day in range(2, 14):
+            _append_jsonl(path, {"date": f"2026-04-{day:02d}"})
+        assert _already_recorded(path, "2026-04-01") is True
+
+    def test_canonical_records_are_latest_per_date_and_chronological(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+        path = evidence_dir / "daily_evidence_ordered.jsonl"
+        _append_jsonl(path, {"date": "2026-04-03", "record_version": 1})
+        _append_jsonl(path, {"date": "2026-04-01", "record_version": 1})
+        _append_jsonl(path, {
+            "date": "2026-04-02",
+            "record_version": 1,
+            "benchmark_status": "provisional",
+        })
+        _append_jsonl(path, {
+            "date": "2026-04-02",
+            "record_version": 2,
+            "benchmark_status": "final",
+        })
+
+        records = get_canonical_records("ordered")
+        assert [r["date"] for r in records] == [
+            "2026-04-01",
+            "2026-04-02",
+            "2026-04-03",
+        ]
+        assert records[1]["record_version"] == 2
+        assert records[1]["benchmark_status"] == "final"
+
     def test_day_number_first_entry(self, evidence_dir):
         from core.paper_evidence import _compute_day_number
         path = evidence_dir / "test.jsonl"
@@ -587,6 +620,63 @@ class TestEndToEndReplay:
         assert "non_positive_same_universe_excess" in block_str
         assert "non_positive_cash_adjusted_excess" in block_str
         assert "non_positive_cumulative_return" in block_str
+
+    def test_promotion_package_uses_chronological_canonical_records(self, evidence_dir):
+        """나중에 append된 오래된 backfill이 promotion period/latest cumulative를 흔들지 않음."""
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "ordered_promotion"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 1)
+        dates = [start + timedelta(days=i) for i in range(60)]
+
+        def append_record(day_date, day_number, cumulative_return):
+            _append_jsonl(jsonl_path, {
+                "date": day_date.strftime("%Y-%m-%d"),
+                "day_number": day_number,
+                "strategy": strategy,
+                "total_value": 10_000_000 + day_number,
+                "cash": 3_000_000,
+                "invested": 7_000_000,
+                "daily_return": 0.1,
+                "cumulative_return": cumulative_return,
+                "mdd": -2.0,
+                "position_count": 2,
+                "total_trades": 2,
+                "buy_count": 1,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.03,
+                "cash_adjusted_excess": 0.02,
+                "benchmark_status": "final",
+                "benchmark_meta": {"completeness": 1.0},
+                "raw_fill_rate": 1.0,
+                "reject_count": 0,
+                "phantom_position_count": 0,
+                "stale_pending_count": 0,
+                "duplicate_blocked_count": 0,
+                "restart_recovery_count": 0,
+                "anomalies": [],
+                "cross_validation_warnings": [],
+                "status": "normal",
+                "record_version": 1,
+                "schema_version": 2,
+                "diagnostics": [],
+                "evidence_mode": "real_paper",
+                "execution_backed": True,
+            })
+
+        for i, day_date in enumerate(dates[1:], start=2):
+            append_record(day_date, i, float(i))
+        append_record(dates[0], 1, 1.0)
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["period"] == "2026-01-01 ~ 2026-03-01"
+        assert pkg["cumulative_return"] == 60.0
 
     @patch("core.paper_evidence._compute_benchmark_excess")
     @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
