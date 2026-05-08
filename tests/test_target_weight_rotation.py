@@ -46,6 +46,32 @@ class CostRiskManager:
         }
 
 
+class RecordingSlippageRiskManager:
+    def __init__(self):
+        self.calls = []
+
+    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+        self.calls.append(
+            {
+                "action": action,
+                "avg_daily_volume": avg_daily_volume,
+                "quantity": quantity,
+                "avg_price": avg_price,
+            }
+        )
+        multiplier = 2.0 if avg_daily_volume else 1.0
+        participation = quantity / avg_daily_volume if avg_daily_volume else 0
+        return {
+            "commission": 0.0,
+            "tax": 0.0,
+            "capital_gains_tax": 0.0,
+            "slippage": quantity * multiplier,
+            "execution_price": float(price),
+            "slippage_multiplier": multiplier,
+            "participation_rate": participation,
+        }
+
+
 def _ohlcv(dates, close):
     close = np.array(close, dtype=float)
     return pd.DataFrame(
@@ -352,6 +378,44 @@ def test_target_weight_rotation_delta_rebalances_and_charges_costs():
     assert "BBB" in sell_symbols
     assert "CCC" in buy_symbols
     assert with_cost["equity_curve"]["value"].iloc[-1] < no_cost["equity_curve"]["value"].iloc[-1]
+
+
+def test_target_weight_rotation_passes_avg_daily_volume_to_transaction_costs():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    recorder = RecordingSlippageRiskManager()
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=recorder,
+    )
+
+    assert recorder.calls
+    assert any(call["action"] == "SELL" for call in recorder.calls)
+    assert all(call["avg_daily_volume"] == pytest.approx(1_000_000.0) for call in recorder.calls)
+
+    trades = result["trades"]
+    metrics = result["target_weight_metrics"]
+    assert trades
+    assert all(trade["avg_daily_volume"] == pytest.approx(1_000_000.0) for trade in trades)
+    assert all(trade["slippage_multiplier"] == 2.0 for trade in trades)
+    assert metrics["dynamic_slippage_checked"] is True
+    assert metrics["trades_with_avg_daily_volume"] == len(trades)
+    assert metrics["max_slippage_multiplier"] == 2.0
+    assert metrics["slippage_cost_total"] > 0
 
 
 def test_target_weight_rotation_hold_rank_buffer_reduces_symbol_churn():

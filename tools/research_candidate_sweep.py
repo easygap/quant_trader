@@ -1106,6 +1106,22 @@ def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
     return series[series > 0].groupby(level=0).last().sort_index()
 
 
+def volume_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
+    """Normalize a fetched OHLCV frame into a volume series."""
+    if df is None or df.empty or "volume" not in df.columns:
+        return pd.Series(dtype=float)
+
+    data = df.copy()
+    if "date" in data.columns:
+        data = data.set_index("date")
+    idx = pd.to_datetime(data.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    series = data["volume"].astype(float).copy()
+    series.index = idx.normalize()
+    return series[series > 0].groupby(level=0).last().sort_index()
+
+
 def monthly_rebalance_days(index: pd.Index) -> list[pd.Timestamp]:
     """Return the first available trading day for each month in the index."""
     if len(index) == 0:
@@ -1251,8 +1267,10 @@ def _execute_target_weight_rebalance(
     targets: list[str],
     target_exposure: float,
     rebalance_tolerance: float,
+    avg_daily_volumes: dict[str, float] | None,
     risk_manager,
 ) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float]:
+    avg_daily_volumes = avg_daily_volumes or {}
     nav = cash + sum(
         pos["qty"] * prices.get(sym, 0.0)
         for sym, pos in positions.items()
@@ -1283,10 +1301,12 @@ def _execute_target_weight_rebalance(
         if abs(qty_to_sell * price) / nav < rebalance_tolerance:
             continue
         avg_price = float(positions[sym].get("avg_price", price))
+        avg_daily_volume = avg_daily_volumes.get(sym)
         costs = risk_manager.calculate_transaction_costs(
             price,
             qty_to_sell,
             "SELL",
+            avg_daily_volume=avg_daily_volume,
             avg_price=avg_price,
         )
         execution_price = float(costs["execution_price"])
@@ -1310,6 +1330,12 @@ def _execute_target_weight_rebalance(
                 "quantity": qty_to_sell,
                 "pnl": pnl,
                 "pnl_rate": ((execution_price / avg_price) - 1) * 100 if avg_price > 0 else 0,
+                "commission": commission,
+                "tax": tax,
+                "slippage_cost": float(costs.get("slippage", 0) or 0),
+                "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
+                "participation_rate": costs.get("participation_rate", 0),
+                "avg_daily_volume": avg_daily_volume,
             }
         )
 
@@ -1322,20 +1348,31 @@ def _execute_target_weight_rebalance(
             continue
         if abs(qty_to_buy * prices[sym]) / nav < rebalance_tolerance:
             continue
-        costs = risk_manager.calculate_transaction_costs(prices[sym], qty_to_buy, "BUY")
+        avg_daily_volume = avg_daily_volumes.get(sym)
+        costs = risk_manager.calculate_transaction_costs(
+            prices[sym],
+            qty_to_buy,
+            "BUY",
+            avg_daily_volume=avg_daily_volume,
+        )
         outlay = float(costs["execution_price"]) * qty_to_buy + float(costs.get("commission", 0) or 0)
-        buy_plans.append((sym, qty_to_buy, costs, outlay))
+        buy_plans.append((sym, qty_to_buy, costs, outlay, avg_daily_volume))
         total_outlay += outlay
 
     scale = 1.0
     if total_outlay > cash and total_outlay > 0:
         scale = max(cash / total_outlay * 0.998, 0.0)
 
-    for sym, qty, _costs, _outlay in buy_plans:
+    for sym, qty, _costs, _outlay, avg_daily_volume in buy_plans:
         qty *= scale
         if qty <= 1e-9:
             continue
-        costs = risk_manager.calculate_transaction_costs(prices[sym], qty, "BUY")
+        costs = risk_manager.calculate_transaction_costs(
+            prices[sym],
+            qty,
+            "BUY",
+            avg_daily_volume=avg_daily_volume,
+        )
         execution_price = float(costs["execution_price"])
         commission = float(costs.get("commission", 0) or 0)
         outlay = execution_price * qty + commission
@@ -1357,6 +1394,12 @@ def _execute_target_weight_rebalance(
                 "quantity": qty,
                 "pnl": 0,
                 "pnl_rate": 0,
+                "commission": commission,
+                "tax": 0.0,
+                "slippage_cost": float(costs.get("slippage", 0) or 0),
+                "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
+                "participation_rate": costs.get("participation_rate", 0),
+                "avg_daily_volume": avg_daily_volume,
             }
         )
 
@@ -1390,6 +1433,7 @@ def run_target_weight_rotation_backtest(
         collector.quiet_ohlcv_log = True
     try:
         close_parts = []
+        volume_parts = []
         valid_symbols = []
         for sym in symbols:
             df = collector.fetch_korean_stock(sym, fetch_start, end)
@@ -1398,6 +1442,10 @@ def run_target_weight_rotation_backtest(
                 continue
             close.name = sym
             close_parts.append(close)
+            volume = volume_series_from_ohlcv(df)
+            if not volume.empty:
+                volume.name = sym
+                volume_parts.append(volume)
             valid_symbols.append(sym)
 
         if not close_parts:
@@ -1415,6 +1463,13 @@ def run_target_weight_rotation_backtest(
         raw_close_panel = pd.concat(close_parts, axis=1).sort_index()
         raw_close_panel = raw_close_panel[~raw_close_panel.index.duplicated(keep="last")]
         close_panel = raw_close_panel.ffill()
+        raw_volume_panel = (
+            pd.concat(volume_parts, axis=1).sort_index()
+            if volume_parts
+            else pd.DataFrame(index=raw_close_panel.index)
+        )
+        raw_volume_panel = raw_volume_panel[~raw_volume_panel.index.duplicated(keep="last")]
+        avg_volume_panel = raw_volume_panel.rolling(20, min_periods=1).mean()
         benchmark_symbol = str(params.get("benchmark_symbol", "KS11"))
         benchmark_close = close_series_from_ohlcv(
             collector.fetch_korean_stock(benchmark_symbol, fetch_start, end)
@@ -1523,6 +1578,16 @@ def run_target_weight_rotation_backtest(
                 target_exposures.append(target_exposure)
                 if target_exposure < base_target_exposure - 1e-9:
                     risk_off_rebalance_count += 1
+                avg_daily_volumes: dict[str, float] = {}
+                if day in avg_volume_panel.index:
+                    volume_row = avg_volume_panel.loc[day]
+                    avg_daily_volumes = {
+                        sym: float(volume_row[sym])
+                        for sym in valid_symbols
+                        if sym in volume_row.index
+                        and pd.notna(volume_row[sym])
+                        and float(volume_row[sym]) > 0
+                    }
                 cash, positions, new_trades, turnover = _execute_target_weight_rebalance(
                     day=day,
                     cash=cash,
@@ -1531,6 +1596,7 @@ def run_target_weight_rotation_backtest(
                     targets=targets,
                     target_exposure=target_exposure,
                     rebalance_tolerance=tolerance,
+                    avg_daily_volumes=avg_daily_volumes,
                     risk_manager=risk_manager,
                 )
                 trades.extend(new_trades)
@@ -1556,6 +1622,16 @@ def run_target_weight_rotation_backtest(
 
         years = max(len(equity_rows) / 252, 1 / 252)
         avg_slots = float(np.mean(filled_slots)) if filled_slots else 0.0
+        participation_rates = [
+            float(t["participation_rate"])
+            for t in trades
+            if t.get("participation_rate") is not None
+        ]
+        slippage_multipliers = [
+            float(t["slippage_multiplier"])
+            for t in trades
+            if t.get("slippage_multiplier") is not None
+        ]
         return {
             "equity_curve": pd.DataFrame(equity_rows),
             "trades": trades,
@@ -1577,6 +1653,20 @@ def run_target_weight_rotation_backtest(
                 ) if rebalance_count else 0,
                 "price_freshness_checked": True,
                 "benchmark_freshness_checked": benchmark_freshness_checked,
+                "dynamic_slippage_checked": not avg_volume_panel.empty,
+                "trades_with_avg_daily_volume": sum(
+                    1 for t in trades if t.get("avg_daily_volume") is not None
+                ),
+                "max_participation_rate": round(max(participation_rates), 6)
+                if participation_rates
+                else 0,
+                "max_slippage_multiplier": round(max(slippage_multipliers), 2)
+                if slippage_multipliers
+                else 1.0,
+                "slippage_cost_total": round(
+                    sum(float(t.get("slippage_cost", 0) or 0) for t in trades),
+                    2,
+                ),
                 "target_weight_turnover_per_year": round(
                     total_turnover / capital / years * 100, 1
                 ) if capital > 0 else 0,
