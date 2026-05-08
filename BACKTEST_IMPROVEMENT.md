@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
 > **문서 버전**: v5.1
-> **최종 수정**: 2026-04-09
+> **최종 수정**: 2026-05-08
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -23,7 +23,7 @@
 | **수수료** | 0.015% (매수/매도 각) | `risk_params.yaml:transaction_costs.commission_rate` |
 | **거래세** | 0.20% (매도 시, 2025 이후 인하 반영) | `risk_params.yaml:transaction_costs.tax_rate` |
 | **슬리피지** | 기본 0.05% + 동적(체결량 기반) | `risk_params.yaml:transaction_costs.slippage` + `dynamic_slippage` |
-| **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오 모두 평균 거래량 기반 동적 슬리피지 적용 | `backtest/backtester.py`, `backtest/portfolio_backtester.py` |
+| **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오/target-weight research 모두 평균 거래량 기반 동적 슬리피지 적용 | `backtest/backtester.py`, `backtest/portfolio_backtester.py`, `tools/research_candidate_sweep.py` |
 | **실전 반영** | `OrderExecutor._calculate_costs()` → TradeHistory에 commission/tax/slippage 별도 저장 | `core/order_executor.py` |
 
 ### 1.3 과매매 억제
@@ -127,6 +127,7 @@
 | Paper Preflight Check | 높음 | **완료 — `core/paper_preflight.py` 운영 준비 상태 점검** |
 | Portfolio backtest event guard | 높음 | **완료 — `backtest/portfolio_backtester.py`에 gap/어닝/BlackSwan 청산·차단·recovery와 진단 카운터 추가** |
 | Portfolio backtest dynamic slippage | 높음 | **완료 — 포트폴리오 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 trade record에 participation/slippage 진단값 기록** |
+| Target-weight research dynamic slippage | 높음 | **완료 — target-weight 리서치 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 participation/slippage 진단값 기록** |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
