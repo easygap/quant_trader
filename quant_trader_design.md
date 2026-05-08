@@ -182,7 +182,7 @@
 
 | 기술 | 선정 사유 |
 |------|----------|
-| **자체 Backtester** | `backtest/backtester.py` — 수수료·세금·슬리피지·손절/익절/트레일링 스탑 반영, **strict-lookahead 기본**. 성과 지표: 샤프·**소르티노**·MDD·**MDD 회복 기간**·**VaR/CVaR(일 95%)**·**최대 연속 손실 거래 수** 등 |
+| **자체 Backtester** | `backtest/backtester.py` — 수수료·세금·슬리피지·손절/익절/트레일링 스탑, gap/어닝/BlackSwan 이벤트 guard 반영, **strict-lookahead 기본**. 성과 지표: 샤프·**소르티노**·MDD·**MDD 회복 기간**·**VaR/CVaR(일 95%)**·**최대 연속 손실 거래 수** 등 |
 | **PortfolioBacktester** | `backtest/portfolio_backtester.py` — **멀티종목** 동시 운용 시뮬레이션, 분산 제한·최대 포지션 수·투자비중 상한 반영, 종목별 성과 요약 (`--mode portfolio_backtest`) |
 | **strategy_validator** | 최소 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중) 비교, in/out-of-sample 분리 검증, **손익비 자동 경고(추세 추종 ≥ 2.0) + 디스코드 알림** |
 | **param_optimizer** | Grid Search / Bayesian(scikit-optimize) 파라미터 최적화 |
@@ -778,6 +778,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 - **데이터 소스 (우선순위)**: (1) yfinance `Ticker.calendar`의 `earningsDate` (2) yfinance에서 없거나 실패 시 **`core/dart_loader.py`의 DART Open API**로 정기공시 접수 이력 기반 차기 실적 시점 추정. `settings.yaml`의 `dart.enabled`·`dart.api_key`(또는 환경변수 `DART_API_KEY`)가 있을 때만 DART 경로가 동작합니다.
 - **한계**: DART 연동은 **한국 종목 실적일 보강**을 목표로 한 1차 구현이며, 모든 공시 유형·예정일을 완전 커버하지는 않습니다. 둘 다 없으면 기존과 같이 필터 통과(매수 허용)입니다.
 - **동작 위치**: `OrderExecutor._execute_buy_impl()` 에서 분산 투자 체크 직전에 실행됩니다.
+- **백테스트 반영**: 단일종목 `Backtester`는 과거 시점 API 조회 대신 입력 데이터의 `earnings_date`/`next_earnings_date`/`is_near_earnings`/`days_to_earnings` 컬럼을 사용해 같은 윈도우의 신규 매수를 차단합니다.
 
 ### 5.12 시장 국면 필터 (단계적 대응 — 3중 신호)
 
@@ -848,6 +849,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 - **동작**:
   - **스케줄러** `_check_exit_signals`: 전일 대비 현재가가 `gap_down_threshold` 이하이면 해당 포지션 **즉시 매도** 시도·알림.
   - **OrderExecutor** 매수 전: 당일 시가(또는 최근 봉)가 전일 종가 대비 `gap_up_entry_block` 이상이면 **신규 매수 차단**.
+  - **단일종목 Backtester**: 입력 OHLCV의 `open`/`close`로 갭다운 청산(`GAP_DOWN`)과 갭업 신규 매수 차단을 동일 임계값으로 반영합니다.
 
 ### 5.16 시장 국면 적응형 전략 파라미터 (`regime_adaptive`) — v3.0
 
@@ -956,7 +958,7 @@ quant_trader/
 │   └── circuit_breaker.py       # CLOSED → OPEN → HALF_OPEN. API 연속 5회 실패 시 60초 차단, Notifier 알림
 ├── backtest/
 │   ├── __init__.py
-│   ├── backtester.py            # 단일 종목 시뮬. strict_lookahead, 과매매 분석, **Sortino·VaR/CVaR·연속손실·MDD회복기간** 등 메트릭
+│   ├── backtester.py            # 단일 종목 시뮬. strict_lookahead, gap/어닝/BlackSwan guard, 과매매 분석, **Sortino·VaR/CVaR·연속손실·MDD회복기간** 등 메트릭
 │   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션 등)
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중), in/out-of-sample, 손익비 자동 경고+디스코드
