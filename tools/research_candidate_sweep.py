@@ -1106,6 +1106,12 @@ def _score_date_before(index: pd.Index, day: pd.Timestamp) -> pd.Timestamp | Non
     return pd.Timestamp(prior[-1]).normalize()
 
 
+def _benchmark_required_for_target_weight(params: dict[str, Any]) -> bool:
+    score_mode = str(params.get("score_mode", "absolute")).lower().strip()
+    exposure_mode = str(params.get("market_exposure_mode", "fixed")).lower().strip()
+    return score_mode == "benchmark_excess" or exposure_mode.startswith("benchmark_")
+
+
 def _target_weight_score_panel(
     close_panel: pd.DataFrame,
     benchmark_close: pd.Series,
@@ -1389,12 +1395,14 @@ def run_target_weight_rotation_backtest(
                 },
             }
 
-        close_panel = pd.concat(close_parts, axis=1).sort_index().ffill()
-        close_panel = close_panel[~close_panel.index.duplicated(keep="last")]
+        raw_close_panel = pd.concat(close_parts, axis=1).sort_index()
+        raw_close_panel = raw_close_panel[~raw_close_panel.index.duplicated(keep="last")]
+        close_panel = raw_close_panel.ffill()
         benchmark_symbol = str(params.get("benchmark_symbol", "KS11"))
         benchmark_close = close_series_from_ohlcv(
             collector.fetch_korean_stock(benchmark_symbol, fetch_start, end)
         )
+        benchmark_close = benchmark_close[benchmark_close.index <= pd.Timestamp(end)]
         score_panel = _target_weight_score_panel(close_panel, benchmark_close, params)
 
         eval_index = close_panel.loc[
@@ -1403,10 +1411,62 @@ def run_target_weight_rotation_backtest(
         if len(eval_index) == 0:
             return {"equity_curve": pd.DataFrame(), "trades": [], "target_weight_metrics": {}}
 
+        eval_raw_prices = raw_close_panel.reindex(eval_index)
+        eval_filled_prices = close_panel.reindex(eval_index)
+        stale_price_mask = eval_raw_prices.isna() & eval_filled_prices.notna()
+        stale_price_mask = stale_price_mask.reindex(columns=valid_symbols).fillna(False)
+        stale_price_days = stale_price_mask.index[stale_price_mask.any(axis=1)]
+        if len(stale_price_days) > 0:
+            stale_day = pd.Timestamp(stale_price_days[0]).normalize()
+            stale_symbols = [
+                sym
+                for sym in valid_symbols
+                if sym in stale_price_mask.columns and bool(stale_price_mask.loc[stale_day, sym])
+            ]
+            stale_details = []
+            for sym in stale_symbols:
+                history = raw_close_panel.loc[
+                    raw_close_panel.index <= stale_day,
+                    sym,
+                ].dropna()
+                latest = (
+                    pd.Timestamp(history.index[-1]).strftime("%Y-%m-%d")
+                    if not history.empty
+                    else "missing"
+                )
+                stale_details.append(f"{sym}={latest}")
+            stale_text = ", ".join(stale_details[:10])
+            raise ValueError(
+                "target_weight_research_stale_price_data: "
+                f"trade_day={stale_day.strftime('%Y-%m-%d')} stale_symbols={stale_text}; "
+                "refresh market data before target-weight research backtest"
+            )
+
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
         rebalance_days = set(monthly_rebalance_days(eval_index))
+        benchmark_freshness_checked = _benchmark_required_for_target_weight(params)
+        if benchmark_freshness_checked:
+            benchmark_actual_days = pd.DatetimeIndex(benchmark_close.dropna().index).normalize()
+            for rebalance_day in sorted(rebalance_days):
+                score_day = _score_date_before(score_panel.index, rebalance_day)
+                if score_day is None or score_day in benchmark_actual_days:
+                    continue
+                history = benchmark_close.loc[benchmark_close.index <= score_day].dropna()
+                latest = (
+                    pd.Timestamp(history.index[-1]).strftime("%Y-%m-%d")
+                    if not history.empty
+                    else "missing"
+                )
+                raise ValueError(
+                    "target_weight_research_benchmark_price_stale: "
+                    f"benchmark_symbol={benchmark_symbol} "
+                    f"trade_day={pd.Timestamp(rebalance_day).strftime('%Y-%m-%d')} "
+                    f"score_day={pd.Timestamp(score_day).strftime('%Y-%m-%d')} "
+                    f"benchmark_latest={latest}; "
+                    "refresh benchmark data before target-weight research backtest"
+                )
         cash = float(capital)
         positions: dict[str, dict[str, float]] = {}
         trades: list[dict[str, Any]] = []
@@ -1498,6 +1558,8 @@ def run_target_weight_rotation_backtest(
                 "risk_off_rebalance_pct": round(
                     risk_off_rebalance_count / rebalance_count * 100, 1
                 ) if rebalance_count else 0,
+                "price_freshness_checked": True,
+                "benchmark_freshness_checked": benchmark_freshness_checked,
                 "target_weight_turnover_per_year": round(
                     total_turnover / capital / years * 100, 1
                 ) if capital > 0 else 0,
