@@ -9,7 +9,7 @@
 > **현재 상태 (2026-05-08)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
-> - Paper Evidence 런타임: 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
+> - Paper Evidence 런타임: v2 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡 + fail-closed/audited entry guard)
 > - Paper 신규 진입 실행 경계 fail-closed: preflight 상태 누락/손상 또는 runtime 조회 실패 시 BUY 제출 전 차단, SELL 청산은 유지
@@ -179,7 +179,7 @@ pytest tests/ -q
 
 승격 규칙 v3 — `core/promotion_engine.py`에서 metrics 기반 자동 판정. `tools/evaluate_and_promote.py --canonical`로 재현하며, canonical 평가 산출물에는 종목군 구성, 데이터 범위, 수집 오류를 바탕으로 만든 `data_snapshot_hash`를 남긴다. live gate와 승격 산출물 로더는 이 해시, 데이터 범위, 수집 오류, 평가 실패 상태를 다시 검증해 손상된 산출물 사용을 차단한다.
 Research candidate sweep — `tools/research_candidate_sweep.py --quick --candidate-family all`로 promotion과 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹 artifact를 생성. Raw EW B&H gate는 유지하되, defensive/cash-heavy 후보 해석을 위해 평균 노출률과 exposure-matched B&H excess도 진단값으로 기록합니다. target-weight 후보는 `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금으로 남기고, `hold_rank_buffer`로 작은 랭킹 흔들림에 따른 불필요한 교체를 줄이며, `market_exposure_mode=benchmark_risk`로 KS11 SMA/낙폭/변동성 risk-off 구간의 부분 노출 축소를 검증합니다.
-Paper Evidence 체계 — `core/paper_evidence.py` 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정. 승격 패키지는 `execution_backed=True`와 `real_paper`/`pilot_paper` 출처가 명시된 기록만 승격 증거로 인정해 예전 형식·수작업 기록 오염을 차단한다.
+Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동 수집, `core/paper_runtime.py` entry gate, `core/paper_pilot.py` launch readiness/pilot auth 판정. scheduler는 v2 collector만 canonical 증거로 기록하며, legacy `core/evidence_collector.py`는 import 호환용 deprecated no-op입니다. 승격 패키지는 `execution_backed=True`와 `real_paper`/`pilot_paper` 출처가 명시된 기록만 승격 증거로 인정해 예전 형식·수작업 기록 오염을 차단한다.
 
 2026-04-29 all-family quick sweep: 5종목(`005930,000660,035720,051910,068270`)에서 rotation/momentum/breakout 후보 14개를 비교했지만 모두 benchmark excess return/Sharpe를 통과하지 못해 `NO_ALPHA_CANDIDATE`로 판정. 이 결과만으로 canonical promotion이나 paper/live 승격은 진행하지 않습니다.
 
