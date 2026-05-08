@@ -3,6 +3,7 @@
 - 여러 종목에 대해 동시에 매매 신호를 평가하고 포트폴리오 수준에서 자금을 관리
 - 분산 투자 제한, 업종 비중, 최대 포지션 수 등 실전 리스크 관리 반영
 - 단일 종목 백테스트와 달리 "포트폴리오 MDD", "종목 간 상관관계 영향" 등을 측정
+- gap/어닝/BlackSwan 이벤트 guard로 paper/live와 백테스트 리스크 전제 차이를 축소
 """
 
 import pandas as pd
@@ -82,6 +83,22 @@ class PortfolioBacktester:
                 if analyzed.empty or "signal" not in analyzed.columns:
                     continue
 
+                # 전략 분석 과정에서 원본 이벤트/체결 기준 컬럼이 빠지면
+                # 백테스트 guard가 paper/live보다 느슨해질 수 있어 보강한다.
+                for col in (
+                    "open",
+                    "high",
+                    "low",
+                    "volume",
+                    "earnings_date",
+                    "next_earnings_date",
+                    "is_near_earnings",
+                    "near_earnings",
+                    "days_to_earnings",
+                ):
+                    if col not in analyzed.columns and col in df.columns:
+                        analyzed[col] = df[col].reindex(analyzed.index)
+
                 all_data[symbol] = df
                 all_signals[symbol] = analyzed
             except Exception as e:
@@ -147,6 +164,12 @@ class PortfolioBacktester:
             "executed_buy_count": result.get("executed_buy_count", 0),
             "executed_sell_count": result.get("executed_sell_count", 0),
             "skipped_reasons": result.get("skipped_reasons", {}),
+            "gap_down_exits": result.get("gap_down_exits", 0),
+            "gap_up_buy_blocks": result.get("gap_up_buy_blocks", 0),
+            "earnings_buy_blocks": result.get("earnings_buy_blocks", 0),
+            "blackswan_triggers": result.get("blackswan_triggers", 0),
+            "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
+            "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
         }
 
     def _strategy_config_for_run(self, strategy_name: str, param_overrides: dict | None = None):
@@ -325,6 +348,38 @@ class PortfolioBacktester:
         regime_buy_blocks = 0
         regime_caution_buys = 0
 
+        # paper/live 진입·청산 guard와 포트폴리오 백테스트의 전제를 맞춘다.
+        gap_cfg = self.risk_params.get("gap_risk") or {}
+        gap_enabled = bool(gap_cfg.get("enabled", False))
+        gap_down_threshold = float(gap_cfg.get("gap_down_threshold", -0.03))
+        gap_up_entry_block = float(gap_cfg.get("gap_up_entry_block", 0.0) or 0.0)
+
+        trading_cfg = getattr(self.config, "trading", {}) or {}
+        skip_earnings_days = int(trading_cfg.get("skip_earnings_days", 0) or 0)
+
+        bs_cfg = self.risk_params.get("blackswan") or {}
+        bs_enabled = bool(bs_cfg.get("enabled", bool(bs_cfg)))
+        bs_single_threshold = float(bs_cfg.get("single_stock_threshold", -0.05))
+        bs_portfolio_threshold = float(bs_cfg.get("portfolio_threshold", -0.03))
+        bs_consecutive_days = max(1, int(bs_cfg.get("consecutive_days", 3)))
+        bs_consecutive_threshold = float(bs_cfg.get("consecutive_threshold", -0.02))
+        bs_cooldown_minutes = max(0, int(bs_cfg.get("cooldown_minutes", 60) or 0))
+        bs_recovery_minutes = max(0, int(bs_cfg.get("recovery_minutes", 120) or 0))
+        bs_recovery_scale = max(0.0, min(float(bs_cfg.get("recovery_scale", 0.5)), 1.0))
+        bs_cooldown_days = max(1, int(np.ceil(bs_cooldown_minutes / (24 * 60)))) if bs_cooldown_minutes else 0
+        bs_recovery_days = max(1, int(np.ceil(bs_recovery_minutes / (24 * 60)))) if bs_recovery_minutes else 0
+        bs_cooldown_until_idx = -1
+        bs_recovery_until_idx = -1
+        bs_symbol_returns: dict[str, list[float]] = {}
+        prev_portfolio_value: float | None = None
+
+        gap_down_exits = 0
+        gap_up_buy_blocks = 0
+        earnings_buy_blocks = 0
+        blackswan_triggers = 0
+        blackswan_buy_blocks = 0
+        blackswan_recovery_buys = 0
+
         # ── 진단 계측 (ablation diagnostics) ──
         exit_reason_counts = {}
         blocked_buy_examples = []
@@ -339,12 +394,106 @@ class PortfolioBacktester:
         executed_sell_count = 0   # 실제 체결된 SELL 수
         skipped_reasons = {}      # 미체결 사유별 카운트
 
-        for date in all_dates:
+        def _row_price(row: pd.Series, column: str, fallback: float) -> float:
+            value = row.get(column, fallback)
+            try:
+                if value is None or pd.isna(value):
+                    return fallback
+                price = float(value)
+            except (TypeError, ValueError):
+                return fallback
+            return price if price > 0 else fallback
+
+        def _previous_close(sym: str, date) -> float | None:
+            sig_df = signals.get(sym)
+            if sig_df is None or date not in sig_df.index or "close" not in sig_df.columns:
+                return None
+            try:
+                loc = sig_df.index.get_loc(date)
+                if isinstance(loc, slice):
+                    pos = loc.start
+                elif isinstance(loc, np.ndarray):
+                    matches = np.flatnonzero(loc) if loc.dtype == bool else loc
+                    if len(matches) == 0:
+                        return None
+                    pos = int(matches[0])
+                else:
+                    pos = int(loc)
+            except (KeyError, TypeError, ValueError):
+                return None
+            if pos <= 0:
+                return None
+            prev = sig_df["close"].iloc[pos - 1]
+            if prev is None or pd.isna(prev) or float(prev) <= 0:
+                return None
+            return float(prev)
+
+        def _is_near_backtest_earnings(row: pd.Series, date) -> bool:
+            for flag_col in ("is_near_earnings", "near_earnings"):
+                flag = row.get(flag_col)
+                if flag is not None and pd.notna(flag):
+                    if isinstance(flag, str):
+                        if flag.strip().lower() in {"true", "1", "yes", "y"}:
+                            return True
+                    elif bool(flag):
+                        return True
+
+            days = row.get("days_to_earnings")
+            if days is not None and pd.notna(days):
+                try:
+                    if abs(int(days)) <= skip_earnings_days:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+
+            for date_col in ("earnings_date", "next_earnings_date"):
+                raw = row.get(date_col)
+                if raw is None or pd.isna(raw):
+                    continue
+                try:
+                    earnings_day = pd.Timestamp(raw).normalize()
+                except (TypeError, ValueError):
+                    continue
+                if pd.isna(earnings_day):
+                    continue
+                trade_day = pd.Timestamp(date).normalize()
+                if abs((earnings_day - trade_day).days) <= skip_earnings_days:
+                    return True
+            return False
+
+        def _activate_backtest_blackswan(current_idx: int) -> None:
+            nonlocal bs_cooldown_until_idx, bs_recovery_until_idx
+            if bs_cooldown_days > 0:
+                bs_cooldown_until_idx = max(bs_cooldown_until_idx, current_idx + bs_cooldown_days)
+            if bs_recovery_days > 0:
+                bs_recovery_until_idx = max(
+                    bs_recovery_until_idx,
+                    current_idx + bs_cooldown_days + bs_recovery_days,
+                )
+
+        def _record_blocked_buy(sym: str, row: pd.Series, reason: str) -> None:
+            if len(blocked_buy_examples) >= 10:
+                return
+            blocked_buy_examples.append({
+                "date": str(date)[:10],
+                "symbol": sym,
+                "score": float(row.get("total_score", row.get("strategy_score", 0))),
+                "reason": reason,
+            })
+
+        for date_idx, date in enumerate(all_dates):
             total_pos_value = sum(
                 self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
                 for s in positions
             )
             total_equity = cash + total_pos_value
+
+            portfolio_blackswan_reason = ""
+            blackswan_activated_today = False
+            if bs_enabled and positions and prev_portfolio_value is not None and prev_portfolio_value > 0:
+                portfolio_return = (total_equity - prev_portfolio_value) / prev_portfolio_value
+                if portfolio_return <= bs_portfolio_threshold:
+                    portfolio_blackswan_reason = f"portfolio_drop {portfolio_return * 100:.2f}%"
 
             to_sell = []
             for sym in list(positions.keys()):
@@ -353,15 +502,52 @@ class PortfolioBacktester:
                     continue
                 row = sig_df.loc[date]
                 close = float(row.get("close", positions[sym]["avg_price"]))
+                open_price = _row_price(row, "open", close)
                 pos = positions[sym]
                 pos["high_water_mark"] = max(pos["high_water_mark"], close)
 
                 sell_reason = None
+                sell_price_ref = close
                 row_atr = _get_atr(sig_df, date)
                 hd = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
                 in_cooling = min_hold_days > 0 and hd < min_hold_days
+                prev_close = _previous_close(sym, date)
+                stock_daily_return = None
+                if prev_close is not None and prev_close > 0:
+                    stock_daily_return = (close - prev_close) / prev_close
+                    if bs_enabled:
+                        symbol_returns = bs_symbol_returns.setdefault(sym, [])
+                        symbol_returns.append(stock_daily_return)
+                        if len(symbol_returns) > bs_consecutive_days:
+                            bs_symbol_returns[sym] = symbol_returns[-bs_consecutive_days:]
 
-                if max_holding_days > 0 and hd >= max_holding_days:
+                if gap_enabled and prev_close is not None and prev_close > 0:
+                    gap_pct = (open_price - prev_close) / prev_close
+                    if gap_pct <= gap_down_threshold:
+                        sell_reason = "GAP_DOWN"
+                        sell_price_ref = open_price
+                        gap_down_exits += 1
+
+                if not sell_reason and bs_enabled:
+                    bs_reason = portfolio_blackswan_reason
+                    if not bs_reason and stock_daily_return is not None and stock_daily_return <= bs_single_threshold:
+                        bs_reason = f"single_stock_drop {stock_daily_return * 100:.2f}%"
+                    symbol_returns = bs_symbol_returns.get(sym, [])
+                    if (
+                        not bs_reason
+                        and len(symbol_returns) >= bs_consecutive_days
+                        and all(ret <= bs_consecutive_threshold for ret in symbol_returns[-bs_consecutive_days:])
+                    ):
+                        bs_reason = "consecutive_drop"
+                    if bs_reason:
+                        sell_reason = "BLACKSWAN"
+                        sell_price_ref = close
+                        if not blackswan_activated_today:
+                            blackswan_triggers += 1
+                            _activate_backtest_blackswan(date_idx)
+                            blackswan_activated_today = True
+
+                if not sell_reason and max_holding_days > 0 and hd >= max_holding_days:
                     sell_reason = "MAX_HOLD"
                 if not sell_reason and close <= _stop_loss_price(pos["avg_price"], row_atr):
                     sell_reason = "STOP_LOSS"
@@ -381,7 +567,7 @@ class PortfolioBacktester:
                         sell_reason = "SELL"
 
                 if sell_reason:
-                    to_sell.append((sym, close, sell_reason))
+                    to_sell.append((sym, sell_price_ref, sell_reason))
                     exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
 
             executed_sell_count += len(to_sell)
@@ -434,8 +620,32 @@ class PortfolioBacktester:
                         continue
                     row = sig_df.loc[date]
                     if row.get("signal") == "BUY":
+                        close = float(row.get("close", 0))
+                        prev_close = _previous_close(sym, date)
+                        open_price = _row_price(row, "open", close)
+
+                        if gap_enabled and gap_up_entry_block > 0 and prev_close is not None and prev_close > 0:
+                            gap_pct = (open_price - prev_close) / prev_close
+                            if gap_pct >= gap_up_entry_block:
+                                gap_up_buy_blocks += 1
+                                skipped_reasons["gap_up_entry_block"] = skipped_reasons.get("gap_up_entry_block", 0) + 1
+                                _record_blocked_buy(sym, row, "gap_up_entry_block")
+                                continue
+
+                        if skip_earnings_days > 0 and _is_near_backtest_earnings(row, date):
+                            earnings_buy_blocks += 1
+                            skipped_reasons["earnings_window"] = skipped_reasons.get("earnings_window", 0) + 1
+                            _record_blocked_buy(sym, row, "earnings_window")
+                            continue
+
+                        if bs_enabled and date_idx <= bs_cooldown_until_idx:
+                            blackswan_buy_blocks += 1
+                            skipped_reasons["blackswan_cooldown"] = skipped_reasons.get("blackswan_cooldown", 0) + 1
+                            _record_blocked_buy(sym, row, "blackswan_cooldown")
+                            continue
+
                         score = float(row.get("total_score", row.get("strategy_score", 0)))
-                        buy_candidates.append((sym, float(row.get("close", 0)), score))
+                        buy_candidates.append((sym, close, score))
             else:
                 # bearish: 모든 BUY 신호 차단. 차단 수 집계 (종목 무관하게 날짜 1회)
                 n_blocked = sum(
@@ -496,12 +706,14 @@ class PortfolioBacktester:
                 scale = self.risk_manager._signal_scale(score)
                 qty = int(qty * scale)
 
+                notional_bucket = None
+
                 # 시장국면 caution 시 포지션 축소 (TICKET-05)
                 if qty > 0 and regime_at_t == "caution":
                     original_qty = qty
                     qty = max(1, int(qty * caution_scale))
                     regime_caution_buys += 1
-                    caution_buy_notionals.append(close * qty)
+                    notional_bucket = "caution"
                     if len(scaled_buy_examples) < 10:
                         scaled_buy_examples.append({
                             "date": str(date)[:10], "symbol": sym,
@@ -509,6 +721,21 @@ class PortfolioBacktester:
                             "ratio": round(qty / original_qty, 2) if original_qty > 0 else 0,
                         })
                 elif qty > 0 and regime_at_t == "bullish":
+                    notional_bucket = "bullish"
+
+                if (
+                    qty > 0
+                    and bs_enabled
+                    and date_idx > bs_cooldown_until_idx
+                    and date_idx <= bs_recovery_until_idx
+                    and bs_recovery_scale < 1.0
+                ):
+                    qty = max(1, int(qty * bs_recovery_scale))
+                    blackswan_recovery_buys += 1
+
+                if qty > 0 and notional_bucket == "caution":
+                    caution_buy_notionals.append(close * qty)
+                elif qty > 0 and notional_bucket == "bullish":
                     bullish_buy_notionals.append(close * qty)
 
                 if qty <= 0:
@@ -558,6 +785,7 @@ class PortfolioBacktester:
                 "cash": cash,
                 "n_positions": len(positions),
             })
+            prev_portfolio_value = portfolio_value
 
         per_symbol_stats = {}
         for sym in symbols:
@@ -587,6 +815,12 @@ class PortfolioBacktester:
             "executed_buy_count": executed_buy_count,
             "executed_sell_count": executed_sell_count,
             "skipped_reasons": skipped_reasons,
+            "gap_down_exits": gap_down_exits,
+            "gap_up_buy_blocks": gap_up_buy_blocks,
+            "earnings_buy_blocks": earnings_buy_blocks,
+            "blackswan_triggers": blackswan_triggers,
+            "blackswan_buy_blocks": blackswan_buy_blocks,
+            "blackswan_recovery_buys": blackswan_recovery_buys,
         }
 
     @staticmethod
@@ -669,6 +903,12 @@ class PortfolioBacktester:
             "avg_positions": round(avg_positions, 1),
             "regime_buy_blocks": result.get("regime_buy_blocks", 0),
             "regime_caution_buys": result.get("regime_caution_buys", 0),
+            "gap_down_exits": result.get("gap_down_exits", 0),
+            "gap_up_buy_blocks": result.get("gap_up_buy_blocks", 0),
+            "earnings_buy_blocks": result.get("earnings_buy_blocks", 0),
+            "blackswan_triggers": result.get("blackswan_triggers", 0),
+            "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
+            "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
         }
 
     def print_report(self, result: dict):
@@ -720,6 +960,13 @@ class PortfolioBacktester:
         print(f"    regime_caution_buys: {result.get('regime_caution_buys', 0):>5d}건")
         print(f"    avg_bullish_notional: {result.get('avg_bullish_notional', 0):>12,.0f}원")
         print(f"    avg_caution_notional: {result.get('avg_caution_notional', 0):>12,.0f}원")
+        print(f"  [진단: 이벤트 guard 계측]")
+        print(f"    gap_down_exits       : {result.get('gap_down_exits', 0):>5d}건")
+        print(f"    gap_up_buy_blocks    : {result.get('gap_up_buy_blocks', 0):>5d}건")
+        print(f"    earnings_buy_blocks  : {result.get('earnings_buy_blocks', 0):>5d}건")
+        print(f"    blackswan_triggers   : {result.get('blackswan_triggers', 0):>5d}건")
+        print(f"    blackswan_buy_blocks : {result.get('blackswan_buy_blocks', 0):>5d}건")
+        print(f"    blackswan_recovery_buys: {result.get('blackswan_recovery_buys', 0):>5d}건")
         if result.get("blocked_buy_examples"):
             print(f"  [진단: blocked BUY 예시 (최대 10건)]")
             for ex in result["blocked_buy_examples"]:

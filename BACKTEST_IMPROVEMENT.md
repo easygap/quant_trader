@@ -94,7 +94,7 @@
 | **멀티전략 강건성** | BV50/R50 Paper 가동 중 (2026-04-01~). **debiased 재평가**: Rotation 단독 +18.09%/PF 1.62/WF 100%, BV 단독 -13.31%/PF 0.79. BV sleeve merit=research_only | Paper Evidence 체계 (`core/paper_evidence.py`) + 승격 규칙 v3 자동 판정. scoring: clean_final_days=3 달성 (2026-04-09) |
 | **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
-| **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목 backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없어 paper/live보다 낙관적인 성과가 나올 수 있음 | **부분 수정 완료** — `backtest/backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영. 포트폴리오 백테스터와 research universe 사전 제외는 별도 과제 |
+| **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목·포트폴리오 백테스터에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없으면 paper/live보다 낙관적인 성과가 나올 수 있음 | **대부분 수정 완료** — `backtest/backtester.py`와 `backtest/portfolio_backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영. research universe 사전 제외는 별도 과제 |
 
 ---
 
@@ -125,6 +125,7 @@
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
 | Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡** |
 | Paper Preflight Check | 높음 | **완료 — `core/paper_preflight.py` 운영 준비 상태 점검** |
+| Portfolio backtest event guard | 높음 | **완료 — `backtest/portfolio_backtester.py`에 gap/어닝/BlackSwan 청산·차단·recovery와 진단 카운터 추가** |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
