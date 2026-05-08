@@ -94,7 +94,7 @@
 | **멀티전략 강건성** | BV50/R50 Paper 가동 중 (2026-04-01~). **debiased 재평가**: Rotation 단독 +18.09%/PF 1.62/WF 100%, BV 단독 -13.31%/PF 0.79. BV sleeve merit=research_only | Paper Evidence 체계 (`core/paper_evidence.py`) + 승격 규칙 v3 자동 판정. scoring: clean_final_days=3 달성 (2026-04-09) |
 | **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
-| **백테스트 BlackSwan/어닝/갭 필터 미적용** | backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크 미포함. paper/live에만 존재 | 백테스트-live 성과 차이 원인. 문서화됨 |
+| **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목 backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없어 paper/live보다 낙관적인 성과가 나올 수 있음 | **부분 수정 완료** — `backtest/backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영. 포트폴리오 백테스터와 research universe 사전 제외는 별도 과제 |
 
 ---
 
