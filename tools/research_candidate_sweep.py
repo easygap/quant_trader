@@ -940,6 +940,35 @@ def apply_research_universe_liquidity_filter(
     return report.get("passed_symbols", normalized), report
 
 
+def _benchmark_result_unavailable(
+    requested_symbols: list[str],
+    benchmark_symbols: list[str],
+    missing_symbols: list[str],
+    reason: str,
+) -> dict[str, Any]:
+    requested_count = len(requested_symbols)
+    covered_count = len(benchmark_symbols)
+    return {
+        "ew_bh_return": 0,
+        "ew_bh_sharpe": 0,
+        "universe_size": 0,
+        "benchmark_symbols": benchmark_symbols,
+        "input_universe_size": requested_count,
+        "missing_benchmark_symbols": missing_symbols,
+        "benchmark_coverage_ratio": round(covered_count / requested_count * 100, 1)
+        if requested_count
+        else 0,
+        "benchmark_coverage_complete": False,
+        "benchmark_unusable_reason": reason,
+    }
+
+
+def benchmark_is_usable(benchmark: dict[str, Any]) -> bool:
+    if "universe_size" in benchmark and int(benchmark.get("universe_size", 0) or 0) <= 0:
+        return False
+    return bool(benchmark.get("benchmark_coverage_complete", True))
+
+
 def buy_and_hold_benchmark_with_returns(
     symbols: list[str],
     start: str,
@@ -948,37 +977,69 @@ def buy_and_hold_benchmark_with_returns(
 ) -> tuple[dict[str, Any], pd.Series]:
     from core.data_collector import DataCollector
 
-    if not symbols:
+    requested_symbols = normalize_symbols(symbols)
+    if not requested_symbols:
         return (
-            {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []},
+            _benchmark_result_unavailable([], [], [], "empty_benchmark_universe"),
             pd.Series(dtype=float),
         )
 
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
-    per_symbol_capital = capital / len(symbols)
+    per_symbol_capital = capital / len(requested_symbols)
     parts = []
     benchmark_symbols = []
-    for sym in symbols:
+    missing_symbols = []
+    for sym in requested_symbols:
         try:
             df = dc.fetch_korean_stock(normalize_symbol(sym), start, end)
         except Exception as e:
             logger.warning("benchmark fetch failed for {}: {}", sym, e)
+            missing_symbols.append(normalize_symbol(sym))
             continue
         if df is None or df.empty:
+            missing_symbols.append(normalize_symbol(sym))
             continue
         if "date" in df.columns:
             df = df.set_index("date")
         df = df[df.index >= pd.Timestamp(start)]
         if len(df) < 2:
+            missing_symbols.append(normalize_symbol(sym))
             continue
         parts.append(per_symbol_capital / float(df["close"].iloc[0]) * df["close"].astype(float))
         benchmark_symbols.append(normalize_symbol(sym))
 
-    combined = pd.concat(parts, axis=1).sum(axis=1).dropna() if parts else pd.Series(dtype=float)
+    if missing_symbols:
+        reason = "incomplete_benchmark_coverage"
+        logger.warning(
+            "benchmark coverage incomplete: {}/{} symbols covered; missing={}",
+            len(benchmark_symbols),
+            len(requested_symbols),
+            ", ".join(missing_symbols[:20]),
+        )
+        return (
+            _benchmark_result_unavailable(
+                requested_symbols,
+                benchmark_symbols,
+                missing_symbols,
+                reason,
+            ),
+            pd.Series(dtype=float),
+        )
+
+    combined = (
+        pd.concat(parts, axis=1, join="inner").dropna(how="any").sum(axis=1)
+        if parts
+        else pd.Series(dtype=float)
+    )
     if len(combined) <= 1:
         return (
-            {"ew_bh_return": 0, "ew_bh_sharpe": 0, "universe_size": 0, "benchmark_symbols": []},
+            _benchmark_result_unavailable(
+                requested_symbols,
+                benchmark_symbols,
+                [sym for sym in requested_symbols if sym not in benchmark_symbols],
+                "insufficient_benchmark_history",
+            ),
             pd.Series(dtype=float),
         )
 
@@ -992,6 +1053,11 @@ def buy_and_hold_benchmark_with_returns(
             "ew_bh_sharpe": round(sharpe, 2),
             "universe_size": len(benchmark_symbols),
             "benchmark_symbols": benchmark_symbols,
+            "input_universe_size": len(requested_symbols),
+            "missing_benchmark_symbols": [],
+            "benchmark_coverage_ratio": 100.0,
+            "benchmark_coverage_complete": True,
+            "benchmark_unusable_reason": "",
         },
         daily_returns,
     )
@@ -1804,14 +1870,21 @@ def build_candidate_record(
     benchmark: dict[str, Any],
 ) -> dict[str, Any]:
     metrics = dict(metrics)
-    metrics["benchmark_excess_return"] = round(
-        float(metrics.get("total_return", 0)) - float(benchmark.get("ew_bh_return", 0)),
-        2,
-    )
-    metrics["benchmark_excess_sharpe"] = round(
-        float(metrics.get("sharpe", 0)) - float(benchmark.get("ew_bh_sharpe", 0)),
-        2,
-    )
+    benchmark_usable = benchmark_is_usable(benchmark)
+    if benchmark_usable:
+        metrics["benchmark_excess_return"] = round(
+            float(metrics.get("total_return", 0)) - float(benchmark.get("ew_bh_return", 0)),
+            2,
+        )
+        metrics["benchmark_excess_sharpe"] = round(
+            float(metrics.get("sharpe", 0)) - float(benchmark.get("ew_bh_sharpe", 0)),
+            2,
+        )
+    else:
+        metrics["benchmark_excess_return"] = 0
+        metrics["benchmark_excess_sharpe"] = 0
+    metrics["benchmark_coverage_complete"] = benchmark_usable
+    metrics["benchmark_unusable_reason"] = benchmark.get("benchmark_unusable_reason", "")
     metrics["exposure_matched_excess_return"] = round(
         float(metrics.get("total_return", 0)) - float(metrics.get("exposure_matched_bh_return", 0)),
         2,
@@ -1828,7 +1901,8 @@ def build_candidate_record(
         "description": spec.description,
         "diversification": diversification_for_spec(spec),
         "alpha_pass": (
-            metrics.get("benchmark_excess_return", 0) > 0
+            benchmark_usable
+            and metrics.get("benchmark_excess_return", 0) > 0
             and metrics.get("benchmark_excess_sharpe", 0) > 0
         ),
         "rank_score": rank_score(metrics),
@@ -1840,6 +1914,9 @@ def build_candidate_record(
 
 def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
+    if not metrics.get("benchmark_coverage_complete", True):
+        reason = metrics.get("benchmark_unusable_reason") or "benchmark_data_incomplete"
+        reasons.append(f"benchmark_data_incomplete={reason}")
     if metrics.get("benchmark_excess_return", 0) <= 0:
         reasons.append("benchmark_excess_return <= 0")
     if metrics.get("benchmark_excess_sharpe", 0) <= 0:
@@ -1898,10 +1975,19 @@ def build_decision_summary(
     alpha_candidates = [r for r in candidates if r.get("alpha_pass")]
     best_id = candidates[0]["candidate_id"] if candidates else None
 
-    if int(benchmark.get("universe_size", 0) or 0) <= 0:
+    if not benchmark_is_usable(benchmark):
+        requested = int(benchmark.get("input_universe_size", 0) or 0)
+        covered = len(benchmark.get("benchmark_symbols", []) or [])
+        missing = benchmark.get("missing_benchmark_symbols", []) or []
+        reason = benchmark.get("benchmark_unusable_reason") or "Benchmark data was unavailable."
         return {
             "action": "INSUFFICIENT_BENCHMARK_DATA",
-            "reason": "Benchmark data was unavailable, so excess-return gates cannot be trusted.",
+            "reason": (
+                "Benchmark coverage is incomplete, so excess-return gates cannot be trusted "
+                f"({covered}/{requested} covered"
+                + (f"; missing: {', '.join(missing[:10])}" if missing else "")
+                + f"; reason: {reason})."
+            ),
             "best_candidate_id": best_id,
             "eligible_candidate_ids": [],
             "alpha_candidate_ids": [],
@@ -2227,6 +2313,12 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             "## Benchmark",
             f"- EW B&H return: {bundle.get('benchmark', {}).get('ew_bh_return', 0):.2f}%",
             f"- EW B&H Sharpe: {bundle.get('benchmark', {}).get('ew_bh_sharpe', 0):.2f}",
+            (
+                "- Coverage: "
+                f"{bundle.get('benchmark', {}).get('benchmark_coverage_ratio', 100.0):.1f}% "
+                f"({len(bundle.get('benchmark', {}).get('benchmark_symbols', []) or [])}/"
+                f"{bundle.get('benchmark', {}).get('input_universe_size', bundle.get('benchmark', {}).get('universe_size', 0))})"
+            ),
             "",
             "## Decision",
             f"- Action: {bundle.get('decision', {}).get('action', 'UNKNOWN')}",
@@ -2236,6 +2328,12 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             "## Next Actions",
         ]
     )
+    missing_benchmark_symbols = bundle.get("benchmark", {}).get("missing_benchmark_symbols", []) or []
+    if missing_benchmark_symbols:
+        lines.insert(
+            lines.index("## Decision") - 1,
+            f"- Missing benchmark symbols: {', '.join(missing_benchmark_symbols[:20])}",
+        )
     for action in bundle.get("decision", {}).get("next_actions", []):
         lines.append(f"- {action}")
     lines.extend([
