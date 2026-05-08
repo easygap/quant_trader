@@ -197,3 +197,232 @@ class TestExecutorUsesStateMachine:
 
         assert save_pos_line is None, \
             f"save_position이 FILLED assert(line {filled_assert_line}) 이전(line {save_pos_line})에 호출됨"
+
+    def _prepare_live_executor(self, executor, kis_api):
+        executor.mode = "live"
+        executor.kis_api = kis_api
+        executor.trading_hours = SimpleNamespace(
+            can_place_order=lambda *a, **kw: {"allowed": True, "reason": ""}
+        )
+        executor.blackswan = SimpleNamespace(
+            can_trade=lambda *a, **kw: {"allowed": True, "reason": ""}
+        )
+        executor._should_block_new_buy_volatility_window = lambda: False
+        executor._get_sector_map_cached = lambda: {}
+        executor.risk_manager.calculate_stop_loss = lambda price, atr=None, regime_multiplier=1.0: price * 0.95
+        executor.risk_manager.calculate_position_size = lambda *a, **kw: 3
+        executor.risk_manager.check_correlation_risk = lambda *a, **kw: {
+            "scale": 1.0,
+            "high_corr_symbols": [],
+            "reason": "",
+        }
+        executor.risk_manager.check_diversification = lambda *a, **kw: {
+            "can_buy": True,
+            "reason": "",
+        }
+        executor.risk_manager.check_recent_performance = lambda *a, **kw: {
+            "allowed": True,
+            "reason": "",
+        }
+        executor.risk_manager.calculate_transaction_costs = lambda price, qty, action, **kw: {
+            "execution_price": float(price),
+            "commission": 0.0,
+            "tax": 0.0,
+            "capital_gains_tax": 0.0,
+            "slippage": 0.0,
+            "total_cost": 0.0,
+        }
+        executor.risk_manager.calculate_take_profit = lambda price, regime_multiplier=1.0: {
+            "target_final": price * 1.1
+        }
+        executor.risk_manager.calculate_trailing_stop = lambda price, atr=None: price * 0.97
+        return executor
+
+    def test_live_buy_ack_without_fill_does_not_touch_position_or_trade(self):
+        """실전 BUY는 주문 ACK만 있고 체결 확인이 없으면 장부 반영을 보류한다."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position
+
+        class AckNoFillKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                return {"odno": "B123"}
+
+            def get_filled_avg_price_after_order(self, symbol, order_output):
+                return None
+
+        OrderGuard.clear("005930")
+        executor = self._prepare_live_executor(self._make_executor(), AckNoFillKIS())
+
+        result = executor.execute_buy(
+            symbol="005930",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live no fill test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["order_status"] == OrderStatus.ACKED.value
+        assert get_position("005930", account_key="test_sm") is None
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "005930"]
+        assert orders[-1].status == OrderStatus.ACKED
+        assert OrderGuard.has_pending("005930")
+
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005930").count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("005930")
+
+    def test_live_sell_ack_without_fill_keeps_position_open(self):
+        """실전 SELL도 체결 확인 전에는 보유 포지션을 줄이거나 삭제하지 않는다."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position, save_position
+
+        class AckNoFillKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def sell_order(self, symbol, quantity, price):
+                return {"odno": "S123"}
+
+            def get_filled_avg_price_after_order(self, symbol, order_output):
+                return None
+
+        OrderGuard.clear("000660")
+        save_position(
+            symbol="000660",
+            avg_price=70_000,
+            quantity=5,
+            stop_loss_price=65_000,
+            take_profit_price=80_000,
+            trailing_stop_price=68_000,
+            strategy="scoring",
+            account_key="test_sm",
+        )
+        executor = self._prepare_live_executor(self._make_executor(), AckNoFillKIS())
+
+        result = executor.execute_sell(
+            symbol="000660",
+            price=71_000,
+            reason="STOP_LOSS",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["order_status"] == OrderStatus.ACKED.value
+        position = get_position("000660", account_key="test_sm")
+        assert position is not None
+        assert position.quantity == 5
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "000660"]
+        assert orders[-1].status == OrderStatus.ACKED
+        assert OrderGuard.has_pending("000660")
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(
+                TradeHistory.symbol == "000660",
+                TradeHistory.action == "SELL",
+            ).count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("000660")
+
+    def test_live_buy_fill_lookup_exception_requires_reconcile(self):
+        """체결 조회 예외도 주문 실패가 아니라 ACK 후 reconcile 필요 상태로 남긴다."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_position
+
+        class AckLookupErrorKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                return {"odno": "B124"}
+
+            def get_filled_avg_price_after_order(self, symbol, order_output):
+                raise RuntimeError("temporary lookup failure")
+
+        OrderGuard.clear("005935")
+        executor = self._prepare_live_executor(self._make_executor(), AckLookupErrorKIS())
+
+        result = executor.execute_buy(
+            symbol="005935",
+            price=55_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live lookup exception test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["execution_check"]["reason"] == "live_fill_lookup_failed"
+        assert result["order_status"] == OrderStatus.ACKED.value
+        assert get_position("005935", account_key="test_sm") is None
+        assert OrderGuard.has_pending("005935")
+        OrderGuard.clear("005935")
+
+    def test_live_buy_partial_fill_does_not_book_full_position(self):
+        """요청 수량보다 적은 체결만 확인되면 부분체결 상태로 남기고 장부 반영을 보류한다."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position
+
+        class AckPartialFillKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                return {"odno": "B125"}
+
+            def get_order_execution_after_order(self, symbol, order_output):
+                return {
+                    "fill_price": 60_100,
+                    "filled_qty": 1,
+                    "remaining_qty": 2,
+                }
+
+        OrderGuard.clear("005380")
+        executor = self._prepare_live_executor(self._make_executor(), AckPartialFillKIS())
+
+        result = executor.execute_buy(
+            symbol="005380",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live partial fill test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["execution_check"]["reason"] == "live_partial_fill_unreconciled"
+        assert result["execution_check"]["filled_qty"] == 1
+        assert result["order_status"] == OrderStatus.PARTIAL_FILLED.value
+        assert get_position("005380", account_key="test_sm") is None
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "005380"]
+        assert orders[-1].status == OrderStatus.PARTIAL_FILLED
+        assert orders[-1].filled_qty == 1
+
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005380").count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("005380")
