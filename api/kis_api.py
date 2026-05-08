@@ -700,6 +700,50 @@ class KISApi:
                 continue
         return None
 
+    @staticmethod
+    def _number_from_ccld_row(row: Dict[str, Any], keys: tuple[str, ...]) -> Optional[float]:
+        if not row or not isinstance(row, dict):
+            return None
+        for key in keys:
+            raw = row.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return value
+        return None
+
+    @classmethod
+    def _execution_from_ccld_row(cls, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """일별체결 output1 한 행에서 체결가와 체결 수량을 함께 추출."""
+        fill_price = cls._avg_price_from_ccld_row(row)
+        if not fill_price or fill_price <= 0:
+            return None
+        filled_qty = cls._number_from_ccld_row(
+            row,
+            (
+                "tot_ccld_qty", "TOT_CCLD_QTY",
+                "ccld_qty", "CCLD_QTY",
+                "exec_qty", "EXEC_QTY",
+            ),
+        )
+        remaining_qty = cls._number_from_ccld_row(
+            row,
+            (
+                "rmn_qty", "RMN_QTY",
+                "ord_rmn_qty", "ORD_RMN_QTY",
+            ),
+        )
+        return {
+            "fill_price": float(fill_price),
+            "filled_qty": filled_qty,
+            "remaining_qty": remaining_qty,
+            "order_no": str(row.get("odno") or row.get("ODNO") or "").strip(),
+        }
+
     def _inquire_daily_ccld_rows(
         self,
         symbol: str,
@@ -745,6 +789,50 @@ class KISApi:
             logger.debug("일별체결조회 실패: {} — {}", symbol, e)
             return []
 
+    def get_order_execution_after_order(
+        self,
+        symbol: str,
+        order_output: Optional[Dict[str, Any]],
+        max_attempts: int = 6,
+        delay_seconds: float = 0.35,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        주문 직후 체결 평균가와 체결 수량 조회 (일별체결조회, 짧은 폴링).
+        order_output: order-cash 응답의 output. ODNO 없으면 None 반환.
+        """
+        odno = self._odno_from_order_output(order_output)
+        if not odno:
+            logger.debug("주문 응답에 ODNO 없음 — 체결가 조회 생략: {}", symbol)
+            return None
+        want = odno.lstrip("0") or odno
+
+        def _pick_execution(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not rows:
+                return None
+            if len(rows) == 1:
+                return self._execution_from_ccld_row(rows[0])
+            for row in rows:
+                r_od = str(row.get("odno") or row.get("ODNO") or "").strip()
+                if not r_od:
+                    continue
+                if r_od != odno and r_od.lstrip("0") != want:
+                    continue
+                execution = self._execution_from_ccld_row(row)
+                if execution and execution.get("fill_price", 0) > 0:
+                    return execution
+            return None
+
+        for attempt in range(max_attempts):
+            if attempt:
+                time.sleep(delay_seconds)
+            execution = _pick_execution(self._inquire_daily_ccld_rows(symbol, odno, ccld_dvsn="01"))
+            if execution and execution.get("fill_price", 0) > 0:
+                return execution
+            execution = _pick_execution(self._inquire_daily_ccld_rows(symbol, "", ccld_dvsn="01"))
+            if execution and execution.get("fill_price", 0) > 0:
+                return execution
+        return None
+
     def get_filled_avg_price_after_order(
         self,
         symbol: str,
@@ -754,40 +842,18 @@ class KISApi:
     ) -> Optional[float]:
         """
         주문 직후 체결 평균가 조회 (일별체결조회, 짧은 폴링).
-        order_output: order-cash 응답의 output. ODNO 없으면 None 반환.
+        기존 호출부 호환용. 신규 live 장부 반영은 체결 수량까지 확인한다.
         """
-        odno = self._odno_from_order_output(order_output)
-        if not odno:
-            logger.debug("주문 응답에 ODNO 없음 — 체결가 조회 생략: {}", symbol)
+        execution = self.get_order_execution_after_order(
+            symbol,
+            order_output,
+            max_attempts=max_attempts,
+            delay_seconds=delay_seconds,
+        )
+        if not execution:
             return None
-        want = odno.lstrip("0") or odno
-
-        def _pick_price(rows: List[Dict[str, Any]]) -> Optional[float]:
-            if not rows:
-                return None
-            if len(rows) == 1:
-                return self._avg_price_from_ccld_row(rows[0])
-            for row in rows:
-                r_od = str(row.get("odno") or row.get("ODNO") or "").strip()
-                if not r_od:
-                    continue
-                if r_od != odno and r_od.lstrip("0") != want:
-                    continue
-                px = self._avg_price_from_ccld_row(row)
-                if px and px > 0:
-                    return px
-            return None
-
-        for attempt in range(max_attempts):
-            if attempt:
-                time.sleep(delay_seconds)
-            px = _pick_price(self._inquire_daily_ccld_rows(symbol, odno, ccld_dvsn="01"))
-            if px and px > 0:
-                return px
-            px = _pick_price(self._inquire_daily_ccld_rows(symbol, "", ccld_dvsn="01"))
-            if px and px > 0:
-                return px
-        return None
+        fill_price = execution.get("fill_price")
+        return float(fill_price) if fill_price and fill_price > 0 else None
 
     # =============================================================
     # 미체결 주문 조회 (주문 중복 방지용)
