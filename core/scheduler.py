@@ -184,6 +184,7 @@ class Scheduler:
         recovery_start = datetime.now()
         pending_count = 0
         open_order_count = 0
+        open_order_status = {}
         sync_ok = False
 
         try:
@@ -212,6 +213,17 @@ class Scheduler:
 
                 executor = OrderExecutor(self.config, account_key=self.strategy_name)
                 open_orders = executor.reconcile_open_orders_after_crash()
+                open_order_status = getattr(executor, "last_open_order_reconcile_status", {}) or {}
+                if open_order_status and open_order_status.get("checked") is False:
+                    self._restart_recovery_count += 1
+                    reason = open_order_status.get("reason", "unknown")
+                    logger.warning("[복구] KIS 미체결 조회 실패 — 상태 확인 필요: {}", reason)
+                    self.discord.send_message(
+                        "⚠️ **[복구] KIS 미체결 조회 실패**\n"
+                        f"reason={reason}\n"
+                        "미체결 0건으로 간주하지 말고 KIS 잔고·미체결을 수동 확인하세요.",
+                        critical=True,
+                    )
                 open_order_count = len(open_orders) if open_orders else 0
                 if open_orders:
                     logger.warning("[복구] KIS 미체결 주문 {}건: {}", len(open_orders), open_orders)
@@ -260,6 +272,7 @@ class Scheduler:
                     detail={
                         "pending_failed_orders": pending_count,
                         "open_order_count": open_order_count,
+                        "open_order_check": open_order_status,
                         "broker_sync_ok": sync_ok,
                         "elapsed_seconds": round(elapsed_s, 1),
                     },
