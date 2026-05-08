@@ -225,6 +225,19 @@ def _score_date_before(index: pd.Index, day: pd.Timestamp) -> pd.Timestamp | Non
     return pd.Timestamp(prior[-1]).normalize()
 
 
+def _date_payload(dates: dict[str, pd.Timestamp]) -> dict[str, str]:
+    return {
+        symbol: pd.Timestamp(day).strftime("%Y-%m-%d")
+        for symbol, day in sorted(dates.items())
+    }
+
+
+def _benchmark_required_for_target_weight(params: dict[str, Any]) -> bool:
+    score_mode = str(params.get("score_mode", "absolute")).lower().strip()
+    exposure_mode = str(params.get("market_exposure_mode", "fixed")).lower().strip()
+    return score_mode == "benchmark_excess" or exposure_mode.startswith("benchmark_")
+
+
 def _target_weight_score_panel(
     close_panel: pd.DataFrame,
     benchmark_close: pd.Series,
@@ -397,13 +410,16 @@ def build_target_weight_plan(
     close_parts: list[pd.Series] = []
     valid_symbols: list[str] = []
     missing_symbols: list[str] = []
+    price_last_dates: dict[str, pd.Timestamp] = {}
     ohlcv_frames: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
         frame = _fetch_korean_stock(collector, symbol, start, end)
         close = close_series_from_ohlcv(frame)
+        close = close[close.index <= as_of_ts]
         if close.empty:
             missing_symbols.append(symbol)
             continue
+        price_last_dates[symbol] = pd.Timestamp(close.index[-1]).normalize()
         ohlcv_frames[symbol] = frame
         close.name = symbol
         close_parts.append(close)
@@ -419,6 +435,21 @@ def build_target_weight_plan(
         raise ValueError("no price rows on or before as_of_date")
 
     trade_day = pd.Timestamp(close_panel.index[-1]).normalize()
+    stale_price_dates = {
+        symbol: day
+        for symbol, day in price_last_dates.items()
+        if pd.Timestamp(day).normalize() < trade_day
+    }
+    if stale_price_dates:
+        stale_text = ", ".join(
+            f"{symbol}={day}"
+            for symbol, day in _date_payload(stale_price_dates).items()
+        )
+        raise ValueError(
+            "target_weight_stale_price_data: "
+            f"trade_day={trade_day.strftime('%Y-%m-%d')} stale_symbols={stale_text}; "
+            "refresh market data before target-weight planning"
+        )
     price_row = close_panel.loc[trade_day]
     prices = {
         sym: float(price_row[sym])
@@ -433,8 +464,25 @@ def build_target_weight_plan(
         _fetch_korean_stock(collector, benchmark_symbol, start, end)
     )
     benchmark_close = benchmark_close[benchmark_close.index <= trade_day]
+    benchmark_last_date = (
+        pd.Timestamp(benchmark_close.index[-1]).normalize()
+        if not benchmark_close.empty
+        else None
+    )
     score_panel = _target_weight_score_panel(close_panel, benchmark_close, params)
     score_day = _score_date_before(score_panel.index, trade_day)
+    if (
+        score_day is not None
+        and _benchmark_required_for_target_weight(params)
+        and (benchmark_last_date is None or benchmark_last_date < score_day)
+    ):
+        latest = benchmark_last_date.strftime("%Y-%m-%d") if benchmark_last_date is not None else "missing"
+        raise ValueError(
+            "target_weight_benchmark_price_stale: "
+            f"benchmark_symbol={benchmark_symbol} trade_day={trade_day.strftime('%Y-%m-%d')} "
+            f"score_day={score_day.strftime('%Y-%m-%d')} benchmark_latest={latest}; "
+            "refresh benchmark data before target-weight planning"
+        )
 
     targets: list[str] = []
     if score_day is not None:
@@ -597,6 +645,12 @@ def build_target_weight_plan(
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
+            "price_last_dates": _date_payload(price_last_dates),
+            "benchmark_last_date": (
+                benchmark_last_date.strftime("%Y-%m-%d")
+                if benchmark_last_date is not None
+                else None
+            ),
             "position_avg_prices_before": {
                 sym: float(pos.get("avg_price", 0.0) or 0.0)
                 for sym, pos in sorted(current_positions.items())
