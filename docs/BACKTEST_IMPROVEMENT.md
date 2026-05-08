@@ -1,6 +1,6 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.2
+> **문서 버전**: v5.3
 > **최종 수정**: 2026-05-08
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
@@ -99,6 +99,7 @@
 | **방어형 후보 raw benchmark 해석** | cash-switch처럼 평균 노출이 낮은 후보는 full B&H 대비 excess가 과도하게 나빠 보일 수 있음 | **진단 추가** — research sweep에 exposure-matched B&H return/sharpe/MDD/excess 기록. 단, promotion gate는 raw benchmark excess 유지 |
 | **회전 전략의 sparse signal 한계** | 월간 상대강도 후보가 BUY/SELL 신호만 내면 목표 top-N을 지속적으로 채우지 못해 평균 노출이 낮게 측정될 수 있음 | **검증 완료** — target-weight top-N research backtester로 avg exposure 85%대까지 개선. 5종목 smoke는 raw excess 음수였지만 canonical top-20 full sweep은 alpha 후보 확인. `hold_rank_buffer` 적용 후 turnover gate 통과, `benchmark_risk` overlay 적용 후 best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`가 return=+210.24%, raw excess=+60.85%p, Sharpe=1.60, MDD=-19.24%, turnover/year=858.0%, WF positive/Sh+ 100%로 research sweep 기준 provisional gate 통과 |
 | **target-weight 후보의 paper 연결 부재** | research-only evaluator에서 provisional 후보가 나와도 기존 canonical/paper 경로는 등록 전략만 평가 | **대부분 해결** — canonical bundle 재현 완료 + `core/target_weight_rotation.py`, `tools/target_weight_rotation_pilot.py`로 전용 paper/pilot adapter 추가. dry-run은 `--record-shadow-evidence`, `--shadow-days 3`, 또는 `--shadow-start-date/--shadow-end-date`로 non-promotable shadow readiness evidence, launch readiness artifact, pilot runbook을 남기고 cap preview와 plan 기반 최소/추천 cap + enable 명령으로 pilot 승인 전 캡 적합성을 확인. 이후 `--readiness-audit`가 주문 제출, evidence 기록, pilot session 저장 없이 clean shadow/launch readiness, active pilot auth와 cap validation, 중복 session idempotency, 실행일/장 시간, 실행 전 position drift, 추천 cap 충족 여부, 유동성 preflight, 비용 반영 pre-trade risk를 JSON artifact와 Markdown 운영 리포트로 판정한다. 유동성 preflight는 최근 20일 평균 거래대금 대비 주문 notional 비율을 계산하고 기본 5%(`--max-order-adv-pct`) 초과 주문은 readiness와 실행을 fail-closed 차단한다. pre-trade risk는 `RiskManager.calculate_transaction_costs()`의 수수료/세금/동적 슬리피지 예상 체결가를 재사용해 현금 부족, 최소 현금비중, 총투자비중, 종목별 비중, 보유 종목 수 위반을 주문 제출 전에 차단한다. Markdown 리포트는 shadow 수집, audit 재실행, 추천 cap 승인, capped paper 실행 명령을 함께 남긴다. `--shadow-days N`은 휴장/데이터 공백으로 같은 거래일에 매핑될 때 과거 평일을 추가 스캔해 N개 고유 resolved trade_day 충족을 목표로 하며, 목표 미달이나 날짜별 실패는 non-zero 종료로 fail-closed 처리한다. 실행형 `pilot_paper` evidence는 같은 candidate/trade_day의 기존 pilot session artifact가 없고, 주문 제출 직전 실제 paper position이 계획 입력 장부 `position_quantities_before`와 일치하고, KST 실행일과 KRX 정규장 주문 가능 시간을 통과하고, 유동성 preflight와 pre-trade risk를 통과하고, 계획 주문 전부 성공 및 주문 결과 payload와 당일 `TradeHistory` fill 집계가 plan과 일치하며, 실행 후 실제 paper position 전체가 리밸런싱 후 `target_quantities_after` 장부와 일치하고 계획 밖 양수 포지션이 없을 때만 수집한다. 같은 날짜가 이미 기록된 경우에도 기존 canonical evidence가 `pilot_paper`/authorized/execution-backed이고 target-weight plan hash와 complete/execution-market-session/liquidity/pre-trade-risk/order/fill/position 검증을 통과해야 재사용해 중복 실행/stale plan/장 외 실행/부분 실행/중단/주문 결과 불일치/체결 기록 불일치/기존 evidence 검증 실패/포지션 불일치일이 승격 증거로 섞이지 않게 한다. 명시 재시도는 `--allow-rerun`으로만 허용한다. 다음 과제는 shadow clean days 충족 후 정규장 capped pilot_paper execution-backed evidence 축적 |
+| **target-weight stale 가격 ffill 위험** | 일부 종목 또는 벤치마크의 최신 데이터가 비었는데 panel ffill로 오래된 종가가 `trade_day` 최신 가격처럼 쓰이면 목표 수량·리스크·승격 증거가 왜곡될 수 있음 | **수정 완료** — `build_target_weight_plan()`이 종목별 `price_last_dates`와 `benchmark_last_date`를 diagnostics에 기록하고, stale 종목 가격은 `target_weight_stale_price_data`, stale benchmark는 `target_weight_benchmark_price_stale`로 plan 생성 전 fail-closed 차단 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | backtester에 BlackSwan, 어닝 필터, 갭 리스크 체크 미포함. paper/live에만 존재 | 백테스트-live 성과 차이 원인. 문서화됨 |
 
 ---
@@ -150,6 +151,7 @@
 | Target-weight completed rerun block | 높음 | **완료 — same-candidate/trade-day session artifact가 `execution_complete=True`이고 실제 실행 주문이 있으면 `--allow-rerun`을 줘도 재실행 차단. `--allow-rerun`은 부분 실행/중단 세션 복구에만 허용해 완료된 execution-backed evidence와 실제 paper 주문이 중복되는 위험을 제거** |
 | Target-weight authorization snapshot guard | 높음 | **완료 — target-weight pilot auth 승인 시 plan snapshot을 저장하고, `--execute`, readiness audit, daily ops summary, promotion proof가 승인 snapshot과 현재 plan의 trade day/as-of date/params hash/targets/수량 장부 일치를 요구. cap 승인 후 plan drift가 생기면 주문 제출·idempotency·포지션 조회·세션 저장·evidence 수집 전에 fail-closed 차단** |
 | Target-weight market-session guard | 높음 | **완료 — `--execute`, readiness audit, daily ops summary, promotion proof가 `TradingHours.can_place_order()` 기반 KRX 정규장/휴장일 검증을 요구. 같은 trade_day라도 장마감 후·주말·휴장일이면 주문 제출 전 `target_weight_execution_market_session_closed`로 차단하고 `execution_market_session_allowed=True`가 아닌 record는 승격 증거에서 제외** |
+| Target-weight price freshness guard | 높음 | 완료 — 목표비중 plan 생성 시 종목별 마지막 실제 종가 날짜와 벤치마크 최신 날짜를 기록한다. ffill이 오래된 종가를 최신 `trade_day` 가격처럼 숨기면 stale 종목/벤치마크 오류로 fail-closed 차단해 paper 실행과 승격 증거 오염을 막는다 |
 
 ---
 
