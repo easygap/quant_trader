@@ -63,7 +63,7 @@ QUANT_AUTO_ENTRY=true python main.py --mode schedule --strategy scoring
 # 단일 종목 백테스트
 python main.py --mode backtest --strategy scoring --symbol 005930
 
-# 포트폴리오 백테스트
+# 포트폴리오 백테스트 (gap/어닝/BlackSwan guard 포함)
 python main.py --mode portfolio_backtest --strategy scoring --symbols 005930,000660 --start 2023-01-01 --end 2024-12-31
 
 # 거래량 돌파 전략 (C-4) 포트폴리오 백테스트
@@ -131,7 +131,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 - 미체결 / 중복 주문 방지
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
-- 단일종목 백테스트 gap/어닝/BlackSwan 이벤트 guard
+- 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
 - DB 백업 / 잔고 크로스체크 / 긴급 청산
 - 알림 채널 fallback
 
@@ -201,6 +201,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-04-30 follow-up: `research_candidate_sweep`에 exposure-matched benchmark diagnostics를 추가했습니다. cash-switch 후보의 평균 노출은 8.4~10.0%에 불과했고 exposure-matched excess도 -7.87%p~-0.36%p로 음수였습니다. 즉 raw benchmark gap은 낮은 노출 영향이 크지만, 같은 노출로 비교해도 신호 edge가 아직 없어 다음 연구는 단순 현금화보다 benchmark-aware 랭킹/부분 헤지/노출 유지형 alpha 설계가 우선입니다.
 
 2026-04-30 follow-up: `relative_strength_rotation`에 benchmark-aware ranked mode를 추가했습니다. `score_mode=benchmark_excess`는 종목 60/120d 복합 모멘텀에서 KS11 복합 모멘텀을 차감해 랭킹하고, `rank_entry_mode=dense_ranked`/`exit_rebalance_mode=score_floor`로 절대 추세 필터 때문에 과도하게 현금화되는 문제를 research-only로 분리 검증합니다.
+
+2026-05-08 follow-up: `backtest/portfolio_backtester.py`에도 gap-up 신규 매수 차단, gap-down `GAP_DOWN` 청산, 어닝 윈도우 신규 매수 차단, BlackSwan 청산·쿨다운·recovery 사이징을 반영했습니다. 단일종목/포트폴리오 백테스트가 같은 리스크 이벤트 전제로 비교되도록 `gap_*`, `earnings_*`, `blackswan_*` 진단 카운터와 회귀 테스트를 보강했습니다.
 
 2026-04-30 benchmark-aware rotation smoke sweep: 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced` return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p, exposure-matched excess=-16.05%p라 promotion 미진행. fast `40_100_dense`는 exposure-matched excess=+2.04%p였으나 raw excess=-163.35%p라 다음 연구 힌트로만 기록합니다. 다음 방향은 sparse BUY/SELL 신호를 넘어 monthly top-N 목표비중 리밸런싱을 별도 백테스터로 검증하는 것입니다.
 

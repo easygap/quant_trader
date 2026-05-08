@@ -183,7 +183,7 @@
 | 기술 | 선정 사유 |
 |------|----------|
 | **자체 Backtester** | `backtest/backtester.py` — 수수료·세금·슬리피지·손절/익절/트레일링 스탑, gap/어닝/BlackSwan 이벤트 guard 반영, **strict-lookahead 기본**. 성과 지표: 샤프·**소르티노**·MDD·**MDD 회복 기간**·**VaR/CVaR(일 95%)**·**최대 연속 손실 거래 수** 등 |
-| **PortfolioBacktester** | `backtest/portfolio_backtester.py` — **멀티종목** 동시 운용 시뮬레이션, 분산 제한·최대 포지션 수·투자비중 상한 반영, 종목별 성과 요약 (`--mode portfolio_backtest`) |
+| **PortfolioBacktester** | `backtest/portfolio_backtester.py` — **멀티종목** 동시 운용 시뮬레이션, 분산 제한·최대 포지션 수·투자비중 상한, gap/어닝/BlackSwan 이벤트 guard와 종목별 성과 요약 (`--mode portfolio_backtest`) |
 | **strategy_validator** | 최소 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중) 비교, in/out-of-sample 분리 검증, **손익비 자동 경고(추세 추종 ≥ 2.0) + 디스코드 알림** |
 | **param_optimizer** | Grid Search / Bayesian(scikit-optimize) 파라미터 최적화 |
 
@@ -850,6 +850,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
   - **스케줄러** `_check_exit_signals`: 전일 대비 현재가가 `gap_down_threshold` 이하이면 해당 포지션 **즉시 매도** 시도·알림.
   - **OrderExecutor** 매수 전: 당일 시가(또는 최근 봉)가 전일 종가 대비 `gap_up_entry_block` 이상이면 **신규 매수 차단**.
   - **단일종목 Backtester**: 입력 OHLCV의 `open`/`close`로 갭다운 청산(`GAP_DOWN`)과 갭업 신규 매수 차단을 동일 임계값으로 반영합니다.
+  - **PortfolioBacktester**: 종목별 OHLCV로 gap-up 신규 매수 차단과 gap-down 청산을 반영하고 `gap_down_exits`/`gap_up_buy_blocks` 진단 카운터를 남깁니다.
 
 ### 5.16 시장 국면 적응형 전략 파라미터 (`regime_adaptive`) — v3.0
 
@@ -959,7 +960,7 @@ quant_trader/
 ├── backtest/
 │   ├── __init__.py
 │   ├── backtester.py            # 단일 종목 시뮬. strict_lookahead, gap/어닝/BlackSwan guard, 과매매 분석, **Sortino·VaR/CVaR·연속손실·MDD회복기간** 등 메트릭
-│   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션 등)
+│   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션·gap/어닝/BlackSwan guard)
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중), in/out-of-sample, 손익비 자동 경고+디스코드
 │   ├── momentum_top_portfolio.py # 다종목 동일비중 모멘텀 포트폴리오 백테스트 (리밸런싱·시장 국면 필터·포트폴리오 스탑). run_momentum_top_portfolio_backtest(), print_momentum_top_portfolio_report()
@@ -1190,7 +1191,7 @@ quant_trader/
 
 - **목적**: 단일 종목 백테스트(`backtest`)와 달리, **여러 종목을 동시에** 보유·매매하며 분산·최대 포지션 한도 등을 반영한 시뮬레이션.
 - **실행**: `python main.py --mode portfolio_backtest --symbols 005930,000660,...` (`--start` / `--end` 등 기간 옵션은 `main.py`와 동일 패턴)
-- **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계.
+- **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계하며, 종목별 OHLCV/event column 기반 gap-up 매수 차단, gap-down 청산, 어닝 윈도우 매수 차단, BlackSwan 청산·쿨다운·recovery 사이징을 함께 반영.
 - **활용**: 유니버스 후보 종목 묶음에 대한 **동시 보유 시나리오** 검증, 단일 종목 백테스트와의 성과 비교.
 
 ### 8.6 멀티전략 2-Sleeve 포트폴리오 검증 — v4.0
@@ -1372,6 +1373,7 @@ quant_trader/
 - [x] **KS11 SMA200 시장 필터** — 코드 추가(`market_filter_sma200`), 테스트 후 NO_MEANINGFUL_IMPROVEMENT → false 유지
 - [x] **절대 모멘텀 필터** — 코드 추가(`abs_momentum_filter`), 테스트 후 NO_MEANINGFUL_IMPROVEMENT → none 유지
 - [x] **signal/executed/skipped 카운터** — `portfolio_backtester.py`에 모니터링 카운터 추가
+- [x] **포트폴리오 백테스트 이벤트 guard** — `portfolio_backtester.py`에 gap/어닝/BlackSwan 청산·차단·recovery와 진단 카운터 추가
 - [x] **Rolling walk-forward** — 10 windows × 12mo, 6mo step. BV50/R50 positive 60%, median +0.45%
 - [x] **BV50/R50 paper 후보 확정** — PAPER_READY_WITH_GUARDRAILS. guardrail 설정 완료
 - [x] **Paper 월간 리포트** — `scripts/c5_paper_monthly_report.py`
