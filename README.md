@@ -207,6 +207,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-08 follow-up: `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, 포트폴리오 백테스트와 `tools/research_candidate_sweep.py`가 평가 시작일 기준 20일 평균 거래대금 하한 미만 또는 strict 모드 데이터 누락 종목을 universe에서 먼저 제외하도록 보강했습니다. research artifact에는 입력 universe, 필터 통과 universe, 제외 종목/사유가 함께 남습니다.
 
+2026-05-08 follow-up: `PortfolioBacktester`도 단일종목 백테스터처럼 종목별 20일 평균 거래량을 `RiskManager.calculate_transaction_costs()`에 전달해 동적 슬리피지 배수를 반영합니다. 포트폴리오 거래 기록에는 `participation_rate`, `slippage_multiplier`, `slippage_cost`가 남아 거래비용 과소추정을 점검할 수 있습니다.
+
 2026-04-30 benchmark-aware rotation smoke sweep: 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced` return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p, exposure-matched excess=-16.05%p라 promotion 미진행. fast `40_100_dense`는 exposure-matched excess=+2.04%p였으나 raw excess=-163.35%p라 다음 연구 힌트로만 기록합니다. 다음 방향은 sparse BUY/SELL 신호를 넘어 monthly top-N 목표비중 리밸런싱을 별도 백테스터로 검증하는 것입니다.
 
 2026-04-30 target-weight top-N rotation smoke sweep: 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`target_weight_rotation_top3_40_100_excess` return=+128.44%, Sharpe=1.13, avg exposure=85.3%로 노출 부족 문제는 해결했지만 raw excess=-45.19%p, exposure-matched excess=-14.82%p라 promotion 미진행. 이 결과는 sparse 신호가 병목이었음을 확인했지만, 동일 유니버스 B&H를 이기는 alpha는 아직 아니라서 다음 연구는 더 넓은 유니버스와 부분 hedge/상대강도 필터 개선입니다.
