@@ -252,6 +252,36 @@ def test_validate_execution_trade_day_blocks_stale_plan():
     assert "target_weight_execution_trade_day_mismatch" in check["reason"]
 
 
+def test_validate_execution_market_session_allows_regular_session():
+    from tools.target_weight_rotation_pilot import validate_execution_market_session
+
+    check = validate_execution_market_session(
+        _adapter_plan(),
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        now=datetime(2026, 4, 10, 10, 0),
+    )
+
+    assert check["allowed"] is True
+    assert check["complete"] is True
+    assert check["execution_day"] == "2026-04-10"
+    assert check["execution_time"] == "10:00:00"
+
+
+def test_validate_execution_market_session_blocks_after_close():
+    from tools.target_weight_rotation_pilot import validate_execution_market_session
+
+    check = validate_execution_market_session(
+        _adapter_plan(),
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        now=datetime(2026, 4, 10, 16, 0),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert check["execution_day"] == "2026-04-10"
+    assert "target_weight_execution_market_session_closed" in check["reason"]
+
+
 def test_validate_pilot_authorization_snapshot_accepts_matching_plan():
     import tools.target_weight_rotation_pilot as twp
 
@@ -301,6 +331,12 @@ def _existing_pilot_evidence_record(plan):
                 "planned_orders": len(plan.orders),
                 "idempotency_allowed": True,
                 "execution_trade_day_allowed": True,
+                "execution_market_session_allowed": True,
+                "execution_market_session_check": {
+                    "checked": True,
+                    "allowed": True,
+                    "complete": True,
+                },
                 "pilot_authorization_snapshot_allowed": True,
                 "pilot_authorization_snapshot_check": {
                     "checked": True,
@@ -1165,6 +1201,24 @@ def test_verify_existing_pilot_evidence_rejects_missing_execution_trade_day_chec
     }
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_market_session_check(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    del record["pilot_caps_snapshot"]["target_weight_execution"]["execution_market_session_allowed"]
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_execution.execution_market_session_allowed"
+    }
+
+
 def test_verify_existing_pilot_evidence_rejects_missing_authorization_snapshot_check(monkeypatch):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
@@ -1256,6 +1310,7 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["evidence_policy"]["required_provenance"]["evidence_mode"] == "pilot_paper"
     assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_trade_day_allowed"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_market_session_allowed"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["pilot_authorization_snapshot_allowed"] is True
     assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
@@ -1295,6 +1350,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "complete": True,
                     "params_hash": params_hash,
                     "execution_trade_day_allowed": True,
+                    "execution_market_session_allowed": True,
                     "pilot_authorization_snapshot_allowed": True,
                     "liquidity_complete": True,
                     "pre_trade_risk_complete": True,
@@ -1987,6 +2043,67 @@ def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_p
     assert "Execution day check: BLOCKED" in report_text
     assert "target_weight_execution_trade_day_mismatch" in report_text
     assert manifest["current_decision"]["ready_for_cap_approval"] is False
+    assert manifest["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+
+
+def test_run_pilot_readiness_audit_blocks_after_close_execution(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": True,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=datetime(2026, 4, 10, 16, 0),
+    )
+    audit = result["audit"]
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+    report_text = result["report_path"].read_text(encoding="utf-8")
+    manifest = json.loads(result["experiment_manifest_path"].read_text(encoding="utf-8"))
+
+    assert audit["execution_trade_day_check"]["allowed"] is True
+    assert audit["execution_market_session_check"]["allowed"] is False
+    assert audit["ready_for_cap_approval"] is True
+    assert audit["ready_for_capped_pilot"] is False
+    assert any("target_weight_execution_market_session_closed" in reason for reason in audit["blocking_reasons"])
+    assert audit["next_action"] == "wait for KRX regular session, then rerun readiness audit before executing pilot"
+    assert audit["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert payload["execution_market_session_check"]["execution_time"] == "16:00:00"
+    assert "Market session check: BLOCKED" in report_text
+    assert "target_weight_execution_market_session_closed" in report_text
+    assert manifest["current_decision"]["ready_for_cap_approval"] is True
+    assert manifest["current_decision"]["ready_for_capped_pilot"] is False
     assert manifest["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
 
 
@@ -2911,6 +3028,86 @@ def test_run_pilot_blocks_stale_trade_day_before_order_submission(monkeypatch, t
     assert "target_weight_execution_trade_day_mismatch" in result["evidence_collection"]["reason"]
     assert payload["execution_trade_day_check"]["allowed"] is False
     assert payload["execution"]["execution_trade_day_check"]["allowed"] is False
+
+
+def test_run_pilot_blocks_same_trade_day_after_close_before_order_submission(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("closed market session must not write runtime pilot session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "check_execution_idempotency",
+        lambda *args, **kwargs: pytest.fail("closed market session must block before idempotency"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("closed market session must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("closed market session must not read positions"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "load_paper_trade_fills",
+        lambda plan: pytest.fail("closed market session must not reconcile fills"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("closed market session must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        as_of_date="2026-04-10",
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=datetime(2026, 4, 10, 16, 0),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_trade_day_check"]["allowed"] is True
+    assert result["execution_market_session_check"]["allowed"] is False
+    assert result["execution_idempotency"] is None
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution"]["details"][0]["status"] == "skipped_execution_market_session_closed"
+    assert result["execution_evidence"]["execution_market_session_allowed"] is False
+    assert result["execution_evidence"]["complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_execution_market_session_closed" in result["evidence_collection"]["reason"]
+    assert payload["execution_market_session_check"]["allowed"] is False
+    assert payload["execution"]["execution_market_session_check"]["allowed"] is False
 
 
 def test_run_pilot_blocks_authorization_snapshot_mismatch_before_order_submission(monkeypatch, tmp_path):
