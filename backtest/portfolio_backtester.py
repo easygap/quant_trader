@@ -131,6 +131,10 @@ class PortfolioBacktester:
                 ):
                     if col not in analyzed.columns and col in df.columns:
                         analyzed[col] = df[col].reindex(analyzed.index)
+                if "volume" in analyzed.columns:
+                    analyzed["_avg_daily_volume"] = analyzed["volume"].astype(float).rolling(20, min_periods=1).mean()
+                else:
+                    analyzed["_avg_daily_volume"] = np.nan
 
                 all_data[symbol] = df
                 all_signals[symbol] = analyzed
@@ -439,9 +443,8 @@ class PortfolioBacktester:
                 return fallback
             return price if price > 0 else fallback
 
-        def _previous_close(sym: str, date) -> float | None:
-            sig_df = signals.get(sym)
-            if sig_df is None or date not in sig_df.index or "close" not in sig_df.columns:
+        def _index_position(sig_df: pd.DataFrame, date) -> int | None:
+            if sig_df is None or date not in sig_df.index:
                 return None
             try:
                 loc = sig_df.index.get_loc(date)
@@ -456,12 +459,40 @@ class PortfolioBacktester:
                     pos = int(loc)
             except (KeyError, TypeError, ValueError):
                 return None
+            return pos
+
+        def _previous_close(sym: str, date) -> float | None:
+            sig_df = signals.get(sym)
+            if sig_df is None or "close" not in sig_df.columns:
+                return None
+            pos = _index_position(sig_df, date)
+            if pos is None:
+                return None
             if pos <= 0:
                 return None
             prev = sig_df["close"].iloc[pos - 1]
             if prev is None or pd.isna(prev) or float(prev) <= 0:
                 return None
             return float(prev)
+
+        def _avg_daily_volume(sig_df: pd.DataFrame | None, date, row: pd.Series) -> float | None:
+            avg_vol = row.get("_avg_daily_volume")
+            if avg_vol is not None and pd.notna(avg_vol) and float(avg_vol) > 0:
+                return float(avg_vol)
+
+            if sig_df is not None and "volume" in sig_df.columns and date in sig_df.index:
+                pos = _index_position(sig_df, date)
+                if pos is not None:
+                    window = sig_df["volume"].iloc[max(0, pos - 19): pos + 1].dropna()
+                    if not window.empty:
+                        mean_vol = float(window.astype(float).mean())
+                        if mean_vol > 0:
+                            return mean_vol
+
+            row_vol = row.get("volume")
+            if row_vol is not None and pd.notna(row_vol) and float(row_vol) > 0:
+                return float(row_vol)
+            return None
 
         def _is_near_backtest_earnings(row: pd.Series, date) -> bool:
             for flag_col in ("is_near_earnings", "near_earnings"):
@@ -543,6 +574,7 @@ class PortfolioBacktester:
 
                 sell_reason = None
                 sell_price_ref = close
+                avg_daily_volume = _avg_daily_volume(sig_df, date, row)
                 row_atr = _get_atr(sig_df, date)
                 hd = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
                 in_cooling = min_hold_days > 0 and hd < min_hold_days
@@ -602,24 +634,34 @@ class PortfolioBacktester:
                         sell_reason = "SELL"
 
                 if sell_reason:
-                    to_sell.append((sym, sell_price_ref, sell_reason))
+                    to_sell.append((sym, sell_price_ref, sell_reason, avg_daily_volume))
                     exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
 
             executed_sell_count += len(to_sell)
-            for sym, close, reason in to_sell:
+            for sym, close, reason, avg_daily_volume in to_sell:
                 pos = positions.pop(sym)
                 costs = self.risk_manager.calculate_transaction_costs(
-                    close, pos["qty"], "SELL", avg_price=pos["avg_price"],
+                    close,
+                    pos["qty"],
+                    "SELL",
+                    avg_daily_volume=avg_daily_volume,
+                    avg_price=pos["avg_price"],
                 )
                 sell_price = costs["execution_price"]
-                pnl = (sell_price - pos["avg_price"]) * pos["qty"] - costs["commission"] - costs["tax"]
-                cash += sell_price * pos["qty"] - costs["commission"] - costs["tax"]
+                tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
+                pnl = (sell_price - pos["avg_price"]) * pos["qty"] - costs["commission"] - tax_amt
+                cash += sell_price * pos["qty"] - costs["commission"] - tax_amt
                 per_symbol_pnl[sym] = per_symbol_pnl.get(sym, 0) + pnl
                 holding_days = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
                 trades.append({
                     "date": date, "symbol": sym, "action": reason,
                     "price": sell_price, "quantity": pos["qty"],
                     "pnl": pnl, "pnl_rate": ((sell_price / pos["avg_price"]) - 1) * 100,
+                    "commission": costs["commission"],
+                    "tax": float(tax_amt),
+                    "slippage_cost": costs.get("slippage", 0),
+                    "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
+                    "participation_rate": costs.get("participation_rate", 0),
                     "entry_score": pos.get("entry_score", 0),
                     "score_macd": pos.get("score_macd", 0),
                     "score_bollinger": pos.get("score_bollinger", 0),
@@ -780,7 +822,14 @@ class PortfolioBacktester:
                     skipped_reasons["no_cash"] = skipped_reasons.get("no_cash", 0) + 1
                     continue
 
-                costs = self.risk_manager.calculate_transaction_costs(close, qty, "BUY")
+                sig_row = signals[sym].loc[date]
+                avg_daily_volume = _avg_daily_volume(signals.get(sym), date, sig_row)
+                costs = self.risk_manager.calculate_transaction_costs(
+                    close,
+                    qty,
+                    "BUY",
+                    avg_daily_volume=avg_daily_volume,
+                )
                 buy_price = costs["execution_price"]
                 total_cost = buy_price * qty + costs["commission"]
                 if total_cost > cash:
@@ -790,7 +839,6 @@ class PortfolioBacktester:
                 cash -= total_cost
                 executed_buy_count += 1
                 # 진입 시점 개별 지표 점수 기록 (signal quality 진단용)
-                sig_row = signals[sym].loc[date]
                 entry_scores = {
                     "entry_score": score,
                     "score_macd": float(sig_row.get("score_macd", 0)),
@@ -807,6 +855,11 @@ class PortfolioBacktester:
                 trades.append({
                     "date": date, "symbol": sym, "action": "BUY",
                     "price": buy_price, "quantity": qty, "pnl": 0, "pnl_rate": 0,
+                    "commission": costs["commission"],
+                    "tax": 0.0,
+                    "slippage_cost": costs.get("slippage", 0),
+                    "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
+                    "participation_rate": costs.get("participation_rate", 0),
                     **entry_scores,
                 })
 
