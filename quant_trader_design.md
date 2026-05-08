@@ -122,6 +122,7 @@
 - Follow-up completed rerun block (2026-05-06): same-candidate/trade-day 실행 완료 세션은 `--allow-rerun`을 줘도 재실행하지 않는다. `--allow-rerun`은 부분 실행/중단 세션 복구용으로 제한한다.
 - Follow-up backtest/research liquidity universe filter (2026-05-08): `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, `PortfolioBacktester`와 `research_candidate_sweep`이 평가 시작일 기준 20일 평균 거래대금 하한 미만·strict 데이터 누락 종목을 universe에서 사전 제외한다.
 - Follow-up portfolio dynamic slippage (2026-05-08): `PortfolioBacktester`가 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade record에 `participation_rate`, `slippage_multiplier`, `slippage_cost`를 남겨 비용 과소추정 여부를 진단한다.
+- Follow-up target-weight research dynamic slippage (2026-05-08): `research_candidate_sweep` target-weight 백테스트도 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade/metrics에 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total`을 기록한다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
 - Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
@@ -1105,7 +1106,7 @@ quant_trader/
 
 - 과거 3~5년 데이터 → 훈련/검증 분리 → 파라미터 최적화 → OOS 검증 → 거래비용·슬리피지 반영 → 페이퍼 트레이딩 → 소액 실전.
 - **벤치마크 비교**: 코스피 지수(KS11) 대비 초과 수익 여부에 더해, **코스피 상위 50종목 동일비중 매수·홀딩** 대비 out-of-sample 초과 수익 여부를 검증합니다. Top50 벤치마크는 `--mode validate` 시 기본 사용하며, `--no-benchmark-top50` 으로 비활성화할 수 있습니다. 벤치마크·유니버스 종목 리스트는 **검증 시작일(as_of_date)** 기준으로 가져오며, `risk_params.backtest_universe` 설정에 따라 **생존자 편향**을 완화할 수 있습니다(아래 §8.2.1 참고).
-- **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남기고, `hold_rank_buffer`를 주면 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안에서는 유지해 과도한 교체를 줄입니다. `market_exposure_mode=benchmark_risk`는 직전 거래일까지의 KS11 SMA/rolling drawdown/realized volatility만 사용해 risk-off 리밸런싱의 부분 노출 축소와 `risk_off_rebalance_pct`를 기록합니다.
+- **Research-only target-weight top-N 검증**: `tools/research_candidate_sweep.py --candidate-family target_weight_rotation`은 live/paper 전략 등록 없이 월간 직전 거래일 점수 기준 top-N을 목표비중으로 보유/교체합니다. 당일 종가 급등을 당일 랭킹에 쓰지 않고, delta 리밸런싱 비용과 일별 cash/value/n_positions를 기록해 평균 노출과 exposure-matched benchmark excess를 함께 봅니다. `min_score_floor_pct`를 주면 benchmark 대비 초과 모멘텀이 약한 슬롯은 현금으로 남기고, `hold_rank_buffer`를 주면 기존 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안에서는 유지해 과도한 교체를 줄입니다. `market_exposure_mode=benchmark_risk`는 직전 거래일까지의 KS11 SMA/rolling drawdown/realized volatility만 사용해 risk-off 리밸런싱의 부분 노출 축소와 `risk_off_rebalance_pct`를 기록합니다. 거래비용은 종목별 20일 평균 거래량을 `RiskManager.calculate_transaction_costs()`에 넘겨 동적 슬리피지 배수를 반영하고, trade/metrics에 participation/slippage 진단값을 남깁니다.
 - **Target-weight paper/pilot 실행**: `tools/target_weight_rotation_pilot.py`는 canonical candidate id의 params를 읽어 동일 로직으로 목표 수량을 계산하고, `core.paper_pilot.check_pilot_entry()`와 plan-level cap 검증을 통과해야 paper 주문을 낼 수 있습니다. 추가로 주문별 notional이 최근 20일 평균 거래대금의 기본 5%(`--max-order-adv-pct`)를 넘으면 readiness audit과 실행을 차단합니다. 기본은 dry-run이며 `--execute`를 줘도 `trading.mode=live`에서는 거부합니다.
 
 **⚠️ 생존자 편향 (Survivorship Bias) — §8.2.1**
@@ -1427,6 +1428,7 @@ quant_trader/
 - [x] **target-weight liquidity preflight 추가** — 최근 20일 평균 거래대금 대비 주문 notional 기본 5% 초과 시 readiness/execute fail-closed 차단
 - [x] **백테스트/research universe 유동성 필터 추가** — 포트폴리오 백테스트와 research sweep이 20일 평균 거래대금 하한 미만 종목을 평가 전 제외하고 진단 기록
 - [x] **포트폴리오 백테스트 동적 슬리피지 보강** — 포트폴리오 매수/매도 비용 계산에 20일 평균 거래량을 전달하고 participation/slippage 진단 기록
+- [x] **target-weight research 동적 슬리피지 보강** — target-weight 리서치 백테스트가 20일 평균 거래량을 비용 계산에 전달하고 participation/slippage metrics 기록
 - [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
@@ -1535,4 +1537,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-05-07 (target-weight promotion proof guard 반영)
+> **최종 수정**: 2026-05-08 (target-weight research dynamic slippage 반영)
