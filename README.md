@@ -128,7 +128,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 
 - look-ahead 완화 백테스트
 - 포지션 수 / 자금 비중 제한
-- 미체결 / 중복 주문 방지
+- 미체결 / 중복 주문 방지 (live 미체결 조회 실패 시 주문 보류)
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
@@ -215,6 +215,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-08 follow-up: `research_candidate_sweep`의 EW B&H 벤치마크가 일부 종목 결측 상태에서 전체 capital 대비 낮게 계산되어 후보 초과수익이 과대평가되는 경로를 차단했습니다. 벤치마크 입력 universe 전체가 수집·검증되지 않으면 excess gate와 decision action은 `INSUFFICIENT_BENCHMARK_DATA`로 고정됩니다.
 
 2026-05-08 follow-up: `OrderExecutor` live BUY/SELL은 주문 ACK 이후 체결가·체결수량 확인이 되지 않거나 부분체결만 확인되면 더 이상 예상가 기준 전량 FILLED로 처리하지 않습니다. 이때 `success=False`는 브로커 주문 부재가 아니라 `order_pending=True`/`requires_reconcile=True`인 장부 반영 보류 상태이며, KIS 잔고 대조 전 DB 포지션·거래 기록 오염을 막습니다.
+
+2026-05-08 follow-up: KIS 미체결 조회 실패를 더 이상 “미체결 없음”으로 해석하지 않습니다. live BUY/SELL은 주문 전 미체결 조회가 실패하거나 응답 형식이 불명확하면 `live_unfilled_check.checked=False`로 주문을 보류하고, 재시작 복구에서도 KIS 미체결 조회 실패를 별도 critical 알림으로 드러냅니다.
 
 2026-04-30 benchmark-aware rotation smoke sweep: 5종목 기준 `NO_ALPHA_CANDIDATE`. best=`benchmark_aware_rotation_60_120_balanced` return=+21.65%, Sharpe=0.50, avg exposure=24.1%였지만 raw excess=-151.98%p, exposure-matched excess=-16.05%p라 promotion 미진행. fast `40_100_dense`는 exposure-matched excess=+2.04%p였으나 raw excess=-163.35%p라 다음 연구 힌트로만 기록합니다. 다음 방향은 sparse BUY/SELL 신호를 넘어 monthly top-N 목표비중 리밸런싱을 별도 백테스터로 검증하는 것입니다.
 

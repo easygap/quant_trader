@@ -238,6 +238,103 @@ class TestExecutorUsesStateMachine:
         executor.risk_manager.calculate_trailing_stop = lambda price, atr=None: price * 0.97
         return executor
 
+    def test_live_buy_blocks_when_unfilled_lookup_fails_before_api_order(self):
+        """실전 BUY는 KIS 미체결 조회 실패 시 주문 제출 전에 fail-closed 차단한다."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_position
+
+        class UnfilledLookupFailedKIS:
+            def __init__(self):
+                self.buy_called = False
+
+            def get_unfilled_order_status(self, symbol):
+                return {
+                    "checked": False,
+                    "has_unfilled": False,
+                    "reason": "kis_unfilled_query_failed",
+                    "orders": [],
+                }
+
+            def buy_order(self, symbol, quantity, price):
+                self.buy_called = True
+                return {"odno": "BFAIL"}
+
+        OrderGuard.clear("005930")
+        kis_api = UnfilledLookupFailedKIS()
+        executor = self._prepare_live_executor(self._make_executor(), kis_api)
+
+        result = executor.execute_buy(
+            symbol="005930",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live unfilled lookup fail test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert "미체결 조회" in result["reason"]
+        assert result["live_unfilled_check"]["checked"] is False
+        assert kis_api.buy_called is False
+        assert get_position("005930", account_key="test_sm") is None
+        assert not OrderGuard.has_pending("005930")
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "005930"]
+        assert orders[-1].status == OrderStatus.REJECTED
+
+    def test_live_sell_blocks_when_unfilled_lookup_fails_before_api_order(self):
+        """실전 SELL도 KIS 미체결 조회 실패 시 매도 주문을 제출하지 않는다."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_position, save_position
+
+        class UnfilledLookupFailedKIS:
+            def __init__(self):
+                self.sell_called = False
+
+            def get_unfilled_order_status(self, symbol):
+                return {
+                    "checked": False,
+                    "has_unfilled": False,
+                    "reason": "kis_unfilled_query_exception",
+                    "orders": [],
+                }
+
+            def sell_order(self, symbol, quantity, price):
+                self.sell_called = True
+                return {"odno": "SFAIL"}
+
+        OrderGuard.clear("000660")
+        save_position(
+            symbol="000660",
+            avg_price=70_000,
+            quantity=5,
+            stop_loss_price=65_000,
+            take_profit_price=80_000,
+            trailing_stop_price=68_000,
+            strategy="scoring",
+            account_key="test_sm",
+        )
+        kis_api = UnfilledLookupFailedKIS()
+        executor = self._prepare_live_executor(self._make_executor(), kis_api)
+
+        result = executor.execute_sell(
+            symbol="000660",
+            price=71_000,
+            reason="STOP_LOSS",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert "미체결 조회" in result["reason"]
+        assert result["live_unfilled_check"]["checked"] is False
+        assert kis_api.sell_called is False
+        position = get_position("000660", account_key="test_sm")
+        assert position is not None
+        assert position.quantity == 5
+        assert not OrderGuard.has_pending("000660")
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "000660"]
+        assert orders[-1].status == OrderStatus.REJECTED
+
     def test_live_buy_ack_without_fill_does_not_touch_position_or_trade(self):
         """실전 BUY는 주문 ACK만 있고 체결 확인이 없으면 장부 반영을 보류한다."""
         from core.order_guard import OrderGuard

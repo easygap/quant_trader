@@ -48,3 +48,86 @@ def test_get_order_execution_after_order_matches_order_number():
     assert execution["fill_price"] == 60100.0
     assert execution["filled_qty"] == 3.0
     assert execution["order_no"] == "000123"
+
+
+def test_unfilled_order_status_detects_uppercase_symbol_and_remaining_qty():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._is_configured = lambda: True
+    api._request = lambda *a, **kw: {
+        "rt_cd": "0",
+        "output1": [
+            {
+                "PDNO": "005930",
+                "NCCS_QTY": "2",
+                "ORD_UNPR": "70000",
+                "SLL_BUY_DVSN_CD": "02",
+                "ODNO": "000001",
+            }
+        ],
+    }
+
+    status = api.get_unfilled_order_status("005930")
+
+    assert status["checked"] is True
+    assert status["has_unfilled"] is True
+    assert status["orders"][0]["remaining_qty"] == 2
+    assert api.has_unfilled_orders("005930") is True
+
+
+def test_unfilled_order_status_exposes_query_failure():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._is_configured = lambda: True
+    api._request = lambda *a, **kw: {"rt_cd": "1", "msg1": "temporary failure"}
+
+    status = api.get_unfilled_order_status("005930")
+
+    assert status["checked"] is False
+    assert status["has_unfilled"] is False
+    assert status["reason"] == "kis_unfilled_query_failed"
+    assert api.has_unfilled_orders("005930") is False
+
+
+def test_unfilled_order_status_prefers_zero_remaining_over_original_order_qty():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._is_configured = lambda: True
+    api._request = lambda *a, **kw: {
+        "rt_cd": "0",
+        "output1": [
+            {
+                "PDNO": "005930",
+                "RMN_QTY": "0",
+                "ORD_QTY": "5",
+            }
+        ],
+    }
+
+    status = api.get_unfilled_order_status("005930")
+
+    assert status["checked"] is True
+    assert status["has_unfilled"] is False
+    assert status["orders"] == []
+
+
+def test_open_orders_status_exposes_failure_instead_of_silent_empty_list():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._is_configured = lambda: True
+    api._ensure_token = lambda: None
+    api._request = lambda *a, **kw: {"rt_cd": "1", "msg1": "temporary failure"}
+
+    status = api.get_open_orders_status()
+
+    assert status["checked"] is False
+    assert status["reason"] == "kis_open_orders_query_failed"
+    assert api.get_open_orders() == []

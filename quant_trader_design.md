@@ -126,6 +126,7 @@
 - Follow-up target-weight research dynamic slippage (2026-05-08): `research_candidate_sweep` target-weight 백테스트도 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade/metrics에 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total`을 기록한다.
 - Follow-up research benchmark coverage guard (2026-05-08): EW B&H 벤치마크 입력 universe 전체가 수집·기간 검증을 통과하지 못하면 benchmark excess를 0으로 고정하고 `INSUFFICIENT_BENCHMARK_DATA` decision으로 canonical 평가 진행을 차단한다.
 - Follow-up live execution confirmation guard (2026-05-08): `OrderExecutor` live BUY/SELL은 주문 ACK 이후 체결가·체결수량이 확인되지 않거나 부분체결만 확인되면 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`를 반환해 KIS 잔고 대조 전 DB 장부 오염을 차단한다.
+- Follow-up live unfilled check fail-closed (2026-05-08): KIS 미체결 조회 실패, `rt_cd != 0`, 응답 형식 이상을 “미체결 없음”으로 보지 않고 live BUY/SELL을 주문 전 차단한다. 재시작 복구의 전체 미체결 조회 실패도 critical 알림과 `open_order_check` detail로 남긴다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
 - Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
@@ -1404,6 +1405,7 @@ quant_trader/
 - [x] **주문 상태기계** — `core/order_state.py` (OrderStatus 9개 상태, OrderBook, OrderRecord)
 - [x] **OrderExecutor 이관** — 상태기계 기반 주문 처리, FILLED assert 후에만 DB 반영
 - [x] **live 체결 확인 guard 추가** — 주문 ACK 뒤 체결가·체결수량 미확인 또는 부분체결 시 예상가 기준 FILLED 처리 대신 `ACKED`/`PARTIAL_FILLED` pending 유지, `requires_reconcile=True` 반환, DB 장부 반영 보류
+- [x] **live 미체결 조회 fail-closed 추가** — KIS 미체결 조회 실패나 응답 이상을 주문 가능 상태로 보지 않고 BUY/SELL 제출 전 차단
 - [x] **OrderRecord DB 테이블** — `database/models.py`에 order_records 추가
 - [x] **debiased 전략 평가** — 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows
 - [x] **승격 규칙 v3** — `core/promotion_engine.py` metrics 기반 자동 판정 + artifact-driven
@@ -1435,6 +1437,7 @@ quant_trader/
 - [x] **target-weight research 동적 슬리피지 보강** — target-weight 리서치 백테스트가 20일 평균 거래량을 비용 계산에 전달하고 participation/slippage metrics 기록
 - [x] **research benchmark coverage guard 추가** — EW B&H 벤치마크 일부 종목 결측 시 후보 benchmark excess를 신뢰하지 않고 `INSUFFICIENT_BENCHMARK_DATA`로 fail-closed 차단
 - [x] **live 체결 확인 guard 추가** — KIS 주문 ACK 후 평균 체결가·체결수량 확인 실패 또는 부분체결 시 주문을 pending으로 남기고 잔고 reconcile 전 TradeHistory·Position 쓰기를 차단
+- [x] **live 미체결 조회 fail-closed 추가** — KIS 미체결 조회 실패/응답 이상을 fail-closed 차단하고 재시작 복구 조회 실패를 critical 알림으로 노출
 - [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
@@ -1543,4 +1546,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-05-08 (live execution confirmation guard 반영)
+> **최종 수정**: 2026-05-08 (live unfilled check fail-closed 반영)
