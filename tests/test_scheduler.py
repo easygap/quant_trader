@@ -104,6 +104,47 @@ def test_scheduler_startup_recovery_paper_mode_no_crash(monkeypatch):
     assert True
 
 
+def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatch):
+    """live 재시작 복구에서 KIS 미체결 조회 실패를 0건처럼 조용히 넘기지 않는다."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from core.scheduler import Scheduler
+
+    class FakeExecutor:
+        def __init__(self, config=None, account_key=""):
+            self.last_open_order_reconcile_status = {
+                "checked": False,
+                "reason": "kis_open_orders_query_failed",
+                "orders": [],
+            }
+
+        def reconcile_open_orders_after_crash(self):
+            return []
+
+    monkeypatch.setattr("core.scheduler.get_pending_failed_orders", lambda: [])
+    monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler.discord = MagicMock()
+        scheduler.portfolio = SimpleNamespace(sync_with_broker=lambda auto_correct=True: None)
+        scheduler.trading_hours = SimpleNamespace(is_market_open=lambda: False)
+        scheduler._restart_recovery_count = 0
+
+        scheduler.startup_recovery()
+
+        assert scheduler._restart_recovery_count == 1
+        scheduler.discord.send_message.assert_called()
+        message = scheduler.discord.send_message.call_args.args[0]
+        assert "KIS 미체결 조회 실패" in message
+        assert scheduler.discord.send_message.call_args.kwargs["critical"] is True
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
 def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
     from core.scheduler import Scheduler
 

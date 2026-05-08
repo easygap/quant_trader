@@ -63,6 +63,11 @@ class OrderExecutor:
 
         self._sector_map: dict | None = None
         self.order_book = OrderBook()
+        self.last_open_order_reconcile_status: dict = {
+            "checked": None,
+            "reason": "not_run",
+            "orders": [],
+        }
 
         if self.mode == "live":
             self.kis_api.authenticate()
@@ -470,9 +475,9 @@ class OrderExecutor:
             if OrderGuard.has_pending(symbol):
                 order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
                 return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
-            if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
-                order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
-                return {"success": False, "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."}
+            live_unfilled_block = self._live_unfilled_order_block(symbol, order)
+            if live_unfilled_block:
+                return live_unfilled_block
 
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
             order.transition(OrderStatus.SUBMITTED)
@@ -813,9 +818,9 @@ class OrderExecutor:
             if OrderGuard.has_pending(symbol):
                 order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
                 return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
-            if self.kis_api and self.kis_api.has_unfilled_orders(symbol):
-                order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
-                return {"success": False, "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다."}
+            live_unfilled_block = self._live_unfilled_order_block(symbol, order)
+            if live_unfilled_block:
+                return live_unfilled_block
 
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
             order.transition(OrderStatus.SUBMITTED)
@@ -1036,6 +1041,74 @@ class OrderExecutor:
     # =============================================================
     # 실전 체결가·슬리피지
     # =============================================================
+
+    def _live_unfilled_order_block(self, symbol: str, order) -> dict | None:
+        if not self.kis_api:
+            order.transition(OrderStatus.REJECTED, reason="KIS API 미설정")
+            return {
+                "success": False,
+                "reason": "KIS API가 준비되지 않아 실전 주문 전 미체결 확인을 할 수 없습니다.",
+                "symbol": symbol,
+                "mode": self.mode,
+                "live_unfilled_check": {
+                    "checked": False,
+                    "reason": "kis_api_missing",
+                    "orders": [],
+                },
+            }
+        try:
+            status_getter = getattr(self.kis_api, "get_unfilled_order_status", None)
+            if callable(status_getter):
+                status = status_getter(symbol)
+                if not status.get("checked"):
+                    order.transition(OrderStatus.REJECTED, reason="KIS 미체결 조회 실패")
+                    return {
+                        "success": False,
+                        "reason": "실전 주문 전 KIS 미체결 조회가 실패해 중복 주문 방지를 위해 주문을 보류했습니다.",
+                        "symbol": symbol,
+                        "mode": self.mode,
+                        "live_unfilled_check": status,
+                    }
+                if status.get("has_unfilled"):
+                    order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
+                    return {
+                        "success": False,
+                        "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다.",
+                        "symbol": symbol,
+                        "mode": self.mode,
+                        "live_unfilled_check": status,
+                    }
+                return None
+            if self.kis_api.has_unfilled_orders(symbol):
+                order.transition(OrderStatus.REJECTED, reason="KIS 미체결 존재")
+                return {
+                    "success": False,
+                    "reason": "해당 종목 미체결 주문이 있어 중복 주문을 보류했습니다.",
+                    "symbol": symbol,
+                    "mode": self.mode,
+                    "live_unfilled_check": {
+                        "checked": True,
+                        "has_unfilled": True,
+                        "reason": "legacy_bool_check",
+                        "orders": [],
+                    },
+                }
+        except Exception as exc:
+            logger.warning("실전 주문 전 미체결 조회 예외 — 주문 보류: {} — {}", symbol, exc)
+            order.transition(OrderStatus.REJECTED, reason="KIS 미체결 조회 예외")
+            return {
+                "success": False,
+                "reason": "실전 주문 전 KIS 미체결 조회 중 예외가 발생해 주문을 보류했습니다.",
+                "symbol": symbol,
+                "mode": self.mode,
+                "live_unfilled_check": {
+                    "checked": False,
+                    "reason": "kis_unfilled_query_exception",
+                    "error": str(exc),
+                    "orders": [],
+                },
+            }
+        return None
 
     def _resolve_live_execution(
         self,
@@ -1331,17 +1404,48 @@ class OrderExecutor:
         DB 포지션을 잔고에 맞추면 정합성이 맞춰진다(미체결 행 자체는 trades 테이블에 자동 삽입하지 않음).
         """
         if self.mode != "live":
+            self.last_open_order_reconcile_status = {
+                "checked": True,
+                "reason": "paper_mode_skipped",
+                "orders": [],
+            }
             return []
         try:
             if self.kis_api and not getattr(self.kis_api, "_access_token", None):
                 self.kis_api.authenticate()
         except Exception as e:
             logger.warning("[복구] KIS 인증 실패 — 미체결 조회 생략: {}", e)
+            self.last_open_order_reconcile_status = {
+                "checked": False,
+                "reason": "kis_auth_failed",
+                "error": str(e),
+                "orders": [],
+            }
             return []
         try:
-            open_orders = self.kis_api.get_open_orders()
+            status_getter = getattr(self.kis_api, "get_open_orders_status", None)
+            if callable(status_getter):
+                status = status_getter()
+                self.last_open_order_reconcile_status = status
+                if not status.get("checked"):
+                    logger.warning("[복구] KIS 미체결 조회 실패 상태: {}", status.get("reason"))
+                    return []
+                open_orders = status.get("orders", [])
+            else:
+                open_orders = self.kis_api.get_open_orders()
+                self.last_open_order_reconcile_status = {
+                    "checked": True,
+                    "reason": "legacy_list_check",
+                    "orders": open_orders,
+                }
         except Exception as e:
             logger.warning("[복구] get_open_orders 실패: {}", e)
+            self.last_open_order_reconcile_status = {
+                "checked": False,
+                "reason": "kis_open_orders_query_exception",
+                "error": str(e),
+                "orders": [],
+            }
             return []
         for o in open_orders:
             logger.info(
