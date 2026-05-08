@@ -79,10 +79,15 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     return dates
 
 
-def _execution_day(now: datetime | None = None) -> str:
+def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
     current = now or datetime.now(KST)
     if current.tzinfo is not None:
-        current = current.astimezone(KST)
+        current = current.astimezone(KST).replace(tzinfo=None)
+    return current
+
+
+def _execution_day(now: datetime | None = None) -> str:
+    current = _coerce_kst_datetime(now)
     return current.date().strftime("%Y-%m-%d")
 
 
@@ -118,6 +123,62 @@ def validate_execution_trade_day(
         "plan_as_of_date": plan.as_of_date,
         "execution_day": execution_day,
         "timezone": "Asia/Seoul",
+    }
+
+
+def execution_market_session_check_not_required() -> dict[str, Any]:
+    return {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution market session check not required",
+    }
+
+
+def validate_execution_market_session(
+    plan: TargetWeightPlan,
+    *,
+    config: Any | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    from config.config_loader import Config
+    from core.trading_hours import TradingHours
+
+    current = _coerce_kst_datetime(now)
+    base = {
+        "checked": True,
+        "plan_trade_day": plan.trade_day,
+        "plan_as_of_date": plan.as_of_date,
+        "execution_day": current.date().strftime("%Y-%m-%d"),
+        "execution_time": current.strftime("%H:%M:%S"),
+        "timezone": "Asia/Seoul",
+    }
+    try:
+        trading_hours = TradingHours(config or Config.get())
+        order_check = trading_hours.can_place_order(current)
+    except Exception as exc:
+        return {
+            **base,
+            "allowed": False,
+            "complete": False,
+            "reason": f"target_weight_execution_market_session_check_failed: {exc}",
+        }
+
+    allowed = bool(order_check.get("allowed", False))
+    reason = "target-weight execution market session is open"
+    if not allowed:
+        reason = (
+            "target_weight_execution_market_session_closed: "
+            f"{order_check.get('reason', 'market closed')}; "
+            "execute only during KRX regular session"
+        )
+    return {
+        **base,
+        "allowed": allowed,
+        "complete": allowed,
+        "reason": reason,
+        "market_open": trading_hours.market_open.strftime("%H:%M"),
+        "market_close": trading_hours.market_close.strftime("%H:%M"),
     }
 
 
@@ -163,6 +224,7 @@ def build_pilot_authorization_snapshot(
             "blocking_reasons": list(readiness_audit.get("blocking_reasons") or []),
             "warning_reasons": list(readiness_audit.get("warning_reasons") or []),
             "execution_trade_day_check": readiness_audit.get("execution_trade_day_check"),
+            "execution_market_session_check": readiness_audit.get("execution_market_session_check"),
         }
     return snapshot
 
@@ -1053,6 +1115,32 @@ def blocked_execution_for_trade_day_mismatch(
     }
 
 
+def blocked_execution_for_market_session(
+    plan: TargetWeightPlan,
+    execution_market_session_check: dict[str, Any],
+) -> dict[str, Any]:
+    reason = execution_market_session_check.get(
+        "reason",
+        "target_weight_execution_market_session_closed",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "execution_market_session_check": execution_market_session_check,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_execution_market_session_closed",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def blocked_execution_for_authorization_snapshot_mismatch(
     plan: TargetWeightPlan,
     pilot_authorization_snapshot_check: dict[str, Any],
@@ -1387,6 +1475,7 @@ def summarize_execution_for_evidence(
     plan: TargetWeightPlan,
     execution: dict[str, Any],
     execution_trade_day_check: dict[str, Any] | None = None,
+    execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
@@ -1425,6 +1514,11 @@ def summarize_execution_for_evidence(
         execution_trade_day_check
         or execution.get("execution_trade_day_check")
         or execution_trade_day_check_not_required()
+    )
+    market_session_check = (
+        execution_market_session_check
+        or execution.get("execution_market_session_check")
+        or execution_market_session_check_not_required()
     )
     authorization_snapshot_check = (
         pilot_authorization_snapshot_check
@@ -1468,6 +1562,7 @@ def summarize_execution_for_evidence(
     }
     idempotency_allowed = bool(idempotency.get("allowed", False))
     execution_trade_day_allowed = bool(trade_day_check.get("allowed", False))
+    execution_market_session_allowed = bool(market_session_check.get("allowed", False))
     pilot_authorization_snapshot_allowed = bool(authorization_snapshot_check.get("allowed", False))
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     liquidity_complete = bool(liquidity.get("complete", False))
@@ -1477,6 +1572,7 @@ def summarize_execution_for_evidence(
     complete = (
         idempotency_allowed
         and execution_trade_day_allowed
+        and execution_market_session_allowed
         and pilot_authorization_snapshot_allowed
         and pre_execution_complete
         and liquidity_complete
@@ -1490,6 +1586,8 @@ def summarize_execution_for_evidence(
         reason = idempotency.get("reason", "target_weight_duplicate_execution_attempt")
     elif not execution_trade_day_allowed:
         reason = trade_day_check.get("reason", "target_weight_execution_trade_day_mismatch")
+    elif not execution_market_session_allowed:
+        reason = market_session_check.get("reason", "target_weight_execution_market_session_closed")
     elif not pilot_authorization_snapshot_allowed:
         reason = authorization_snapshot_check.get(
             "reason",
@@ -1521,6 +1619,7 @@ def summarize_execution_for_evidence(
         "reason": reason,
         "idempotency_allowed": idempotency_allowed,
         "execution_trade_day_allowed": execution_trade_day_allowed,
+        "execution_market_session_allowed": execution_market_session_allowed,
         "pilot_authorization_snapshot_allowed": pilot_authorization_snapshot_allowed,
         "pre_execution_complete": pre_execution_complete,
         "liquidity_complete": liquidity_complete,
@@ -1536,6 +1635,7 @@ def summarize_execution_for_evidence(
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
         "execution_trade_day_check": trade_day_check,
+        "execution_market_session_check": market_session_check,
         "pilot_authorization_snapshot_check": authorization_snapshot_check,
         "execution_idempotency": idempotency,
         "pre_execution_reconciliation": pre_reconciliation,
@@ -1557,6 +1657,7 @@ def build_pilot_evidence_caps_snapshot(
     validation: Any,
     execution: dict[str, Any],
     execution_trade_day_check: dict[str, Any] | None = None,
+    execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
@@ -1584,6 +1685,7 @@ def build_pilot_evidence_caps_snapshot(
         plan,
         execution,
         execution_trade_day_check=execution_trade_day_check,
+        execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
@@ -1659,6 +1761,11 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
             True,
         ),
         (
+            "target_weight_execution.execution_market_session_allowed",
+            target_execution.get("execution_market_session_allowed"),
+            True,
+        ),
+        (
             "target_weight_execution.pilot_authorization_snapshot_allowed",
             target_execution.get("pilot_authorization_snapshot_allowed"),
             True,
@@ -1713,6 +1820,7 @@ def write_session_artifact(
     execution: dict[str, Any],
     dry_run: bool,
     execution_trade_day_check: dict[str, Any] | None = None,
+    execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
@@ -1737,6 +1845,9 @@ def write_session_artifact(
         "execution": execution,
         "execution_trade_day_check": (
             execution_trade_day_check or execution_trade_day_check_not_required()
+        ),
+        "execution_market_session_check": (
+            execution_market_session_check or execution_market_session_check_not_required()
         ),
         "pilot_authorization_snapshot_check": (
             pilot_authorization_snapshot_check
@@ -2271,6 +2382,7 @@ def _build_readiness_operator_commands(
     plan: TargetWeightPlan,
     cap_recommendation: dict[str, Any],
     execution_trade_day_check: dict[str, Any] | None = None,
+    execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     base = (
@@ -2282,6 +2394,15 @@ def _build_readiness_operator_commands(
         execute_command = (
             "# blocked: "
             f"{execution_trade_day_check.get('reason', 'execution trade day check failed')}"
+        )
+    elif (
+        execution_market_session_check
+        and execution_market_session_check.get("checked", False)
+        and not execution_market_session_check.get("allowed", True)
+    ):
+        execute_command = (
+            "# blocked: "
+            f"{execution_market_session_check.get('reason', 'execution market session check failed')}"
         )
     elif (
         pilot_authorization_snapshot_check
@@ -2313,6 +2434,7 @@ def build_pilot_readiness_audit(
     launch_readiness: dict[str, Any],
     execution_idempotency: dict[str, Any],
     execution_trade_day_check: dict[str, Any],
+    execution_market_session_check: dict[str, Any],
     pilot_authorization_snapshot_check: dict[str, Any],
     pre_execution_reconciliation: dict[str, Any],
     liquidity_check: dict[str, Any],
@@ -2344,6 +2466,14 @@ def build_pilot_readiness_audit(
         blockers.append(
             "execution_trade_day: "
             f"{execution_trade_day_check.get('reason', 'plan trade day does not match execution day')}"
+        )
+    if (
+        execution_market_session_check.get("checked", False)
+        and not execution_market_session_check.get("allowed", False)
+    ):
+        blockers.append(
+            "execution_market_session: "
+            f"{execution_market_session_check.get('reason', 'market session is closed')}"
         )
     if (
         pilot_authorization_snapshot_check.get("checked", False)
@@ -2399,6 +2529,7 @@ def build_pilot_readiness_audit(
         ready_for_cap_approval
         and bool(launch_readiness.get("launch_ready", False))
         and bool(getattr(validation, "allowed", False))
+        and bool(execution_market_session_check.get("allowed", False))
         and bool(pilot_authorization_snapshot_check.get("allowed", False))
         and not blockers
     )
@@ -2407,10 +2538,22 @@ def build_pilot_readiness_audit(
         execution_trade_day_check.get("checked", False)
         and not execution_trade_day_check.get("allowed", False)
     )
+    market_session_closed = (
+        execution_market_session_check.get("checked", False)
+        and not execution_market_session_check.get("allowed", False)
+    )
     if ready_for_capped_pilot:
         next_action = "execute capped paper pilot with --execute --collect-evidence"
     elif trade_day_mismatch:
         next_action = "rerun readiness audit with current market data before enabling or executing pilot"
+    elif (
+        market_session_closed
+        and ready_for_cap_approval
+        and bool(launch_readiness.get("launch_ready", False))
+        and bool(getattr(validation, "allowed", False))
+        and bool(pilot_authorization_snapshot_check.get("allowed", False))
+    ):
+        next_action = "wait for KRX regular session, then rerun readiness audit before executing pilot"
     elif ready_for_cap_approval:
         next_action = "enable pilot with suggested caps, then rerun readiness audit"
     else:
@@ -2431,6 +2574,7 @@ def build_pilot_readiness_audit(
             plan,
             cap_recommendation,
             execution_trade_day_check=execution_trade_day_check,
+            execution_market_session_check=execution_market_session_check,
             pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         ),
         "plan_summary": _plan_summary(plan),
@@ -2441,6 +2585,7 @@ def build_pilot_readiness_audit(
         "launch_readiness": launch_readiness,
         "execution_idempotency": execution_idempotency,
         "execution_trade_day_check": execution_trade_day_check,
+        "execution_market_session_check": execution_market_session_check,
         "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
         "pre_execution_reconciliation": pre_execution_reconciliation,
         "liquidity_check": liquidity_check,
@@ -2504,6 +2649,7 @@ def build_target_weight_experiment_manifest(
             "target_weight_execution_required": {
                 "params_hash_match": True,
                 "execution_trade_day_allowed": True,
+                "execution_market_session_allowed": True,
                 "pilot_authorization_snapshot_allowed": True,
                 "pre_execution_positions_complete": True,
                 "liquidity_complete": True,
@@ -2525,6 +2671,7 @@ def build_target_weight_experiment_manifest(
             "cap_buffer_pct": cap_recommendation.get("buffer_pct"),
             "liquidity_max_order_adv_pct": float(max_order_adv_pct),
             "pre_trade_cost_check": True,
+            "execution_market_session_check": True,
             "idempotency_check": True,
             "live_mode_refused": True,
         },
@@ -2640,9 +2787,26 @@ def build_target_weight_daily_ops_summary(
     evidence_progress: dict[str, Any],
 ) -> dict[str, Any]:
     """readiness audit와 evidence progress를 하루 운영 판단용 artifact로 묶는다."""
+    execution_market_session_check = (
+        audit.get("execution_market_session_check")
+        or execution_market_session_check_not_required()
+    )
+    capped_launch_ready = (
+        bool((audit.get("launch_readiness") or {}).get("launch_ready", False))
+        and bool((audit.get("plan_validation") or {}).get("allowed", False))
+        and bool((audit.get("pilot_authorization_snapshot_check") or {}).get("allowed", False))
+    )
     if audit.get("ready_for_capped_pilot"):
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
+    elif (
+        audit.get("ready_for_cap_approval")
+        and capped_launch_ready
+        and execution_market_session_check.get("checked", False)
+        and not execution_market_session_check.get("allowed", False)
+    ):
+        status = "WAITING_FOR_MARKET_SESSION"
+        next_step = "KRX 정규장 시간에 readiness audit 재실행 후 capped paper 실행"
     elif audit.get("ready_for_cap_approval"):
         status = "READY_TO_ENABLE_CAPS"
         next_step = "추천 cap 승인 후 readiness audit 재실행"
@@ -2675,6 +2839,7 @@ def build_target_weight_daily_ops_summary(
             "blocking_reasons": list(audit.get("blocking_reasons") or []),
             "warning_reasons": list(audit.get("warning_reasons") or []),
             "execution_trade_day_check": execution_trade_day_check,
+            "execution_market_session_check": execution_market_session_check,
             "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
         },
         "risk_snapshot": {
@@ -2688,6 +2853,8 @@ def build_target_weight_daily_ops_summary(
             "pre_trade_risk_reason": pre_trade_risk.get("reason", "not checked"),
             "execution_trade_day_allowed": bool(execution_trade_day_check.get("allowed", False)),
             "execution_trade_day_reason": execution_trade_day_check.get("reason", "not checked"),
+            "execution_market_session_allowed": bool(execution_market_session_check.get("allowed", False)),
+            "execution_market_session_reason": execution_market_session_check.get("reason", "not checked"),
             "pilot_authorization_snapshot_allowed": bool(
                 pilot_authorization_snapshot_check.get("allowed", False)
             ),
@@ -2716,6 +2883,10 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
     risk = summary["risk_snapshot"]
     commands = summary.get("operator_commands", {})
     execution_day = decision.get("execution_trade_day_check") or execution_trade_day_check_not_required()
+    market_session = (
+        decision.get("execution_market_session_check")
+        or execution_market_session_check_not_required()
+    )
     authorization_snapshot = decision.get(
         "pilot_authorization_snapshot_check"
     ) or _authorization_snapshot_not_required(
@@ -2727,6 +2898,7 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         f"- Candidate: `{summary['candidate_id']}`",
         f"- Trade day: `{summary['trade_day']}`",
         f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
+        f"- Execution time (KST): `{market_session.get('execution_time', 'N/A')}`",
         f"- Status: **{summary['status']}**",
         f"- Next step: {summary['next_step']}",
         "",
@@ -2756,6 +2928,11 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
             f"- Execution day check: "
             f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
             f"{execution_day.get('reason', 'not checked')}"
+        ),
+        (
+            f"- Market session check: "
+            f"{'PASS' if market_session.get('allowed') else 'BLOCKED'} - "
+            f"{market_session.get('reason', 'not checked')}"
         ),
         (
             f"- Pilot auth snapshot: "
@@ -2822,6 +2999,19 @@ def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
 def _audit_display_status(audit: dict[str, Any]) -> str:
     if audit.get("ready_for_capped_pilot"):
         return "READY"
+    market_session = (
+        audit.get("execution_market_session_check")
+        or execution_market_session_check_not_required()
+    )
+    if (
+        audit.get("ready_for_cap_approval")
+        and bool((audit.get("launch_readiness") or {}).get("launch_ready", False))
+        and bool((audit.get("plan_validation") or {}).get("allowed", False))
+        and bool((audit.get("pilot_authorization_snapshot_check") or {}).get("allowed", False))
+        and market_session.get("checked", False)
+        and not market_session.get("allowed", False)
+    ):
+        return "WAITING_FOR_MARKET_SESSION"
     if audit.get("ready_for_cap_approval"):
         return "CAP_APPROVAL_READY"
     return "BLOCKED"
@@ -2834,6 +3024,10 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     liquidity = audit.get("liquidity_check", {})
     pre_trade_risk = audit.get("pre_trade_risk_check", {})
     execution_day = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
+    market_session = (
+        audit.get("execution_market_session_check")
+        or execution_market_session_check_not_required()
+    )
     authorization_snapshot = audit.get(
         "pilot_authorization_snapshot_check"
     ) or _authorization_snapshot_not_required(
@@ -2852,10 +3046,16 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         "## Plan",
         f"- Score day: `{plan['score_day']}`",
         f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
+        f"- Execution time (KST): `{market_session.get('execution_time', 'N/A')}`",
         (
             f"- Execution day check: "
             f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
             f"{execution_day.get('reason', 'not checked')}"
+        ),
+        (
+            f"- Market session check: "
+            f"{'PASS' if market_session.get('allowed') else 'BLOCKED'} - "
+            f"{market_session.get('reason', 'not checked')}"
         ),
         (
             f"- Pilot auth snapshot: "
@@ -2999,6 +3199,11 @@ def run_pilot_readiness_audit(
     launch_readiness = compute_launch_readiness(plan.candidate_id, as_of_date=plan.trade_day)
     execution_idempotency = check_execution_idempotency(plan, allow_rerun=allow_rerun)
     execution_trade_day_check = validate_execution_trade_day(plan, now=execution_now)
+    execution_market_session_check = validate_execution_market_session(
+        plan,
+        config=config,
+        now=execution_now,
+    )
     try:
         liquidity_check = assess_plan_liquidity(plan, max_order_adv_pct=max_order_adv_pct)
     except Exception as exc:
@@ -3035,6 +3240,7 @@ def run_pilot_readiness_audit(
         launch_readiness=launch_readiness,
         execution_idempotency=execution_idempotency,
         execution_trade_day_check=execution_trade_day_check,
+        execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
@@ -3441,14 +3647,21 @@ def run_pilot(
     dry_run = not execute
 
     execution_trade_day_check = execution_trade_day_check_not_required()
+    execution_market_session_check = execution_market_session_check_not_required()
     if execute:
         execution_trade_day_check = validate_execution_trade_day(plan, now=execution_now)
+        execution_market_session_check = validate_execution_market_session(
+            plan,
+            config=config,
+            now=execution_now,
+        )
 
     execution_idempotency = None
     if (
         execute
         and validation.allowed
         and execution_trade_day_check["allowed"]
+        and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
     ):
         execution_idempotency = check_execution_idempotency(
@@ -3460,6 +3673,7 @@ def run_pilot(
     if (
         execute
         and execution_trade_day_check["allowed"]
+        and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
         and execution_idempotency
         and execution_idempotency["allowed"]
@@ -3480,6 +3694,8 @@ def run_pilot(
         execution = blocked_execution_for_pilot_validation(plan, validation)
     elif execute and not execution_trade_day_check["allowed"]:
         execution = blocked_execution_for_trade_day_mismatch(plan, execution_trade_day_check)
+    elif execute and not execution_market_session_check["allowed"]:
+        execution = blocked_execution_for_market_session(plan, execution_market_session_check)
     elif execute and not pilot_authorization_snapshot_check["allowed"]:
         execution = blocked_execution_for_authorization_snapshot_mismatch(
             plan,
@@ -3512,6 +3728,7 @@ def run_pilot(
         execute
         and validation.allowed
         and execution_trade_day_check["allowed"]
+        and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
@@ -3538,6 +3755,7 @@ def run_pilot(
         plan,
         execution,
         execution_trade_day_check=execution_trade_day_check,
+        execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
         pre_execution_reconciliation=pre_execution_reconciliation,
@@ -3554,6 +3772,7 @@ def run_pilot(
             validation,
             execution,
             execution_trade_day_check=execution_trade_day_check,
+            execution_market_session_check=execution_market_session_check,
             pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
             execution_idempotency=execution_idempotency,
             pre_execution_reconciliation=pre_execution_reconciliation,
@@ -3578,6 +3797,7 @@ def run_pilot(
         if (
             validation.allowed
             and execution_trade_day_check["allowed"]
+            and execution_market_session_check["allowed"]
             and pilot_authorization_snapshot_check["allowed"]
             and (execution_idempotency is None or execution_idempotency["allowed"])
         ):
@@ -3664,6 +3884,7 @@ def run_pilot(
         execution=execution,
         dry_run=dry_run,
         execution_trade_day_check=execution_trade_day_check,
+        execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
         fill_reconciliation=fill_reconciliation,
@@ -3683,6 +3904,7 @@ def run_pilot(
         "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
         "execution_trade_day_check": execution_trade_day_check,
+        "execution_market_session_check": execution_market_session_check,
         "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
         "execution_idempotency": execution_idempotency,
         "fill_reconciliation": fill_reconciliation,
@@ -3883,6 +4105,12 @@ def main() -> None:
             f"{execution_day.get('execution_day', 'N/A')} "
             f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
         )
+        market_session = summary["decision"].get("execution_market_session_check", {})
+        print(
+            "  market session: "
+            f"{market_session.get('execution_time', 'N/A')} "
+            f"({'PASS' if market_session.get('allowed') else 'BLOCKED'})"
+        )
         print(f"  status: {summary['status']}")
         print(
             "  evidence: "
@@ -3901,7 +4129,7 @@ def main() -> None:
         print(f"  experiment manifest: {result['experiment_manifest_path']}")
         print(f"  summary artifact: {result['daily_ops_summary_path']}")
         print(f"  summary report: {result['daily_ops_summary_report_path']}")
-        if summary["status"] == "BLOCKED":
+        if summary["status"] in {"BLOCKED", "WAITING_FOR_MARKET_SESSION"}:
             raise SystemExit(1)
         return
 
@@ -3936,6 +4164,12 @@ def main() -> None:
             "  execution day: "
             f"{execution_day.get('execution_day', 'N/A')} "
             f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
+        )
+        market_session = audit.get("execution_market_session_check", {})
+        print(
+            "  market session: "
+            f"{market_session.get('execution_time', 'N/A')} "
+            f"({'PASS' if market_session.get('allowed') else 'BLOCKED'})"
         )
         print(f"  status: {status}")
         print(
@@ -3985,7 +4219,7 @@ def main() -> None:
         print(f"  artifact: {result['artifact_path']}")
         print(f"  report: {result['report_path']}")
         print(f"  experiment manifest: {result['experiment_manifest_path']}")
-        if not audit["ready_for_cap_approval"]:
+        if not audit["ready_for_cap_approval"] or status == "WAITING_FOR_MARKET_SESSION":
             raise SystemExit(1)
         return
 
