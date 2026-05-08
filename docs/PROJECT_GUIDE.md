@@ -153,7 +153,7 @@ quant_trader/
 │   └── circuit_breaker.py       # CLOSED → OPEN → HALF_OPEN, API 연속 5회 실패 시 60초 차단
 ├── backtest/
 │   ├── __init__.py
-│   ├── backtester.py            # 시뮬레이션: strict_lookahead 기본, 수수료·세금·동적 슬리피지·손절/익절/트레일링, 과매매 분석
+│   ├── backtester.py            # 시뮬레이션: strict_lookahead 기본, 수수료·세금·동적 슬리피지·손절/익절/트레일링, gap/어닝/BlackSwan guard, 과매매 분석
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: KS11·코스피 상위 50 동일비중 벤치마크, 손익비 자동 경고+디스코드
 │   ├── momentum_top_portfolio.py # 다종목 동일비중 모멘텀 포트폴리오 백테스트 (리밸런싱·시장 국면·포트폴리오 스탑)
@@ -316,7 +316,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **backtester.py** | OHLCV + 전략 시뮬레이션. 수수료·세금·슬리피지·1% 룰·손절/익절/트레일링 스탑. **strict_lookahead 기본 True**. 성과 지표 + **과매매 분석**(평균 보유 기간, 총 수수료). |
+| **backtester.py** | OHLCV + 전략 시뮬레이션. 수수료·세금·슬리피지·1% 룰·손절/익절/트레일링 스탑, gap/어닝/BlackSwan 이벤트 guard. **strict_lookahead 기본 True**. 성과 지표 + **과매매 분석**(평균 보유 기간, 총 수수료). |
 | **strategy_validator.py** | 최소 3~5년, 샤프·MDD·벤치마크(KS11 + **코스피 상위 50 동일비중**). in/out-of-sample. `run()`, `run_walk_forward()`. `--no-benchmark-top50` 으로 Top50 비활성화. **손익비 자동 경고**: 추세 추종 < 2.0, 기타 < 1.0 시 WARN + 디스코드 알림. |
 | **report_generator.py** | txt·html 리포트. 거래 내역, 성과 지표, 자본 곡선, **과매매 분석**(평균 보유 기간, 총 수수료). `--output-dir`. |
 | **paper_compare.py** | 지정 기간 paper 성과 vs 동일 기간·전략 백테스트. divergence 시 경고·디스코드(설정 시). **`check_live_readiness()`**: 방향성 일치율 ≥70%, 수익률 차이 ≤5%, 최소 거래일·거래건 충족 시 "실전 전환 준비 완료" 신호 + 디스코드 알림. paper 모드 장마감 시 자동 평가. |
