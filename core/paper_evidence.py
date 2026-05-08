@@ -1194,6 +1194,7 @@ def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[boo
     required_execution_flags = (
         "complete",
         "execution_trade_day_allowed",
+        "execution_market_session_allowed",
         "pilot_authorization_snapshot_allowed",
         "liquidity_complete",
         "pre_trade_risk_complete",
