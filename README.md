@@ -17,7 +17,7 @@
 > - Research sweep: 기존 top-20 all-family 후보 재검증도 `NO_ALPHA_CANDIDATE`; `pullback`, benchmark-relative momentum, risk-budget, cash-switch, benchmark-aware rotation, target-weight top-N rotation/score-floor 후보군과 exposure-matched benchmark 진단을 research-only로 추가
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
-> - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간 guard 추가 (live 미연결)
+> - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가 (live 미연결)
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
@@ -230,5 +230,7 @@ Generic paper entry도 동일한 실행 경계 원칙을 따른다. `main.py --m
 Target-weight pilot 승인/재시도 보강: `tools/paper_pilot_control.py --enable`은 `target_weight_*` 후보의 pilot auth를 쓰기 전에 target-weight readiness audit을 다시 실행해 운영자가 요청한 cap이 현재 plan, launch readiness, 유동성 preflight, 비용 반영 pre-trade risk를 만족하는지 검증합니다. 승인 auth에는 당시 plan의 `trade_day`, `as_of_date`, `params_hash`, targets, 시작/목표 수량 snapshot을 함께 저장해 cap 승인과 실행 계획을 묶습니다. 유동성 diagnostics가 없으면 fail-closed로 차단하고, 이미 주문이 완료된 same-candidate/trade-day 세션은 `--allow-rerun`을 줘도 재실행하지 않습니다. `--allow-rerun`은 부분 실행이나 중단된 세션 복구용으로만 사용합니다.
 
 Target-weight 실행 차단 기록: `--execute`가 pilot cap validation에서 막히면 주문·체결·증거 수집 없이 session JSON artifact에 차단 사유를 남깁니다. runtime pilot session은 쓰지 않아 cap을 고친 뒤 같은 거래일 계획을 다시 점검할 수 있습니다. 또한 `plan.trade_day`와 KST 기준 실제 실행일이 다르거나, 현재 시간이 KRX 정규장 주문 가능 시간이 아니거나, 활성 pilot auth의 승인 snapshot이 현재 plan의 `params_hash`/trade day/targets/수량 장부와 다르면 주문, idempotency, 포지션 조회, 체결 대조, session 저장, 승격 증거 수집 전에 fail-closed로 차단합니다. no-order `--readiness-audit`와 `--daily-ops-summary`도 실행일 check, 장 시간 check, 승인 snapshot check를 blocker로 표시해 오래되었거나 장 외 실행 명령을 READY 상태로 노출하지 않습니다.
+
+Target-weight 가격 최신성 guard: 목표비중 plan 생성 시 종목별 마지막 실제 종가 날짜(`price_last_dates`)와 벤치마크 최신 날짜(`benchmark_last_date`)를 diagnostics에 남깁니다. ffill로 보정된 낡은 종목 가격이 `trade_day` 최신 가격처럼 쓰이면 `target_weight_stale_price_data`로 차단하고, `benchmark_excess` 점수나 benchmark risk overlay에 필요한 벤치마크 가격이 score day보다 오래되면 `target_weight_benchmark_price_stale`로 plan 생성 자체를 중단합니다. stale 가격으로 만든 수량·리스크·승격 증거가 pilot 흐름에 섞이지 않게 하는 운영 안전장치입니다.
 
 Target-weight 승격 증거 보강: target-weight 계열 전략은 일반 `execution_backed=True` paper record만으로 promotion evidence day를 채우지 않습니다. `pilot_paper`/authorized record가 target-weight plan과 execution proof를 포함하고, record date와 plan trade day가 일치하며, `execution_trade_day_allowed=True`, `execution_market_session_allowed=True`, `pilot_authorization_snapshot_allowed=True`, liquidity/pre-trade risk/order result/fill/position reconciliation complete 및 plan/execution params hash 일치를 만족한 날만 승격 카운트에 들어갑니다. 60영업일 전체 verified pilot evidence는 하나의 params hash로 고정되어야 하며, live gate도 canonical metadata의 params hash와 paper evidence params hash가 다르면 target-weight live 전환을 차단합니다.
