@@ -95,6 +95,7 @@
 | **cash-only day 처리** (v5.1) | blocked/no-position 상태에서 당일 PortfolioSnapshot 없으면 daily_return=None → benchmark_status=failed → clean day 불인정 deadlock | **수정 완료** — 직전 snapshot + 거래 0건이면 daily_return=0.0 추론. 진짜 데이터 부재만 failed |
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목·포트폴리오 백테스터에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없으면 paper/live보다 낙관적인 성과가 나올 수 있음 | **수정 완료** — `backtest/backtester.py`와 `backtest/portfolio_backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영 |
+| **리서치 벤치마크 부분 결측** | EW B&H 벤치마크 일부 종목 수집 실패 시 누락 종목 몫의 capital이 빠진 채 전체 capital 대비 수익률을 계산하면 후보 초과수익이 과대평가될 수 있음 | **수정 완료** — `research_candidate_sweep`이 벤치마크 입력 universe 전체 수집·기간 검증을 요구하고, 결측 시 `INSUFFICIENT_BENCHMARK_DATA`로 excess gate를 fail-closed 차단 |
 
 ---
 
@@ -128,6 +129,7 @@
 | Portfolio backtest event guard | 높음 | **완료 — `backtest/portfolio_backtester.py`에 gap/어닝/BlackSwan 청산·차단·recovery와 진단 카운터 추가** |
 | Portfolio backtest dynamic slippage | 높음 | **완료 — 포트폴리오 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 trade record에 participation/slippage 진단값 기록** |
 | Target-weight research dynamic slippage | 높음 | **완료 — target-weight 리서치 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 participation/slippage 진단값 기록** |
+| Research sweep benchmark coverage guard | 높음 | 완료 — 벤치마크 일부 종목 결측 시 초과수익 계산을 신뢰하지 않고 artifact/Markdown에 결측 종목과 coverage ratio를 남김 |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
