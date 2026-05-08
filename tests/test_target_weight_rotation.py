@@ -209,6 +209,67 @@ def test_target_weight_plan_blocks_stale_benchmark_price_for_excess_scores():
     assert "benchmark_latest=2025-03-06" in message
 
 
+def test_target_weight_rotation_backtest_blocks_stale_symbol_price_after_ffill():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    frames["BBB"] = frames["BBB"][frames["BBB"]["date"] != pd.Timestamp("2025-02-03")]
+
+    with pytest.raises(ValueError, match="target_weight_research_stale_price_data") as exc:
+        run_target_weight_rotation_backtest(
+            symbols=["AAA", "BBB", "CCC"],
+            start="2025-02-03",
+            end="2025-02-05",
+            capital=100_000.0,
+            params={
+                "target_top_n": 2,
+                "target_exposure": 0.80,
+                "short_lookback": 2,
+                "long_lookback": 3,
+                "short_weight": 0.5,
+                "score_mode": "benchmark_excess",
+                "benchmark_symbol": "KS11",
+            },
+            collector=FakeCollector(frames),
+            risk_manager=NoCostRiskManager(),
+        )
+
+    message = str(exc.value)
+    assert "trade_day=2025-02-03" in message
+    assert "BBB=2025-01-31" in message
+
+
+def test_target_weight_rotation_backtest_blocks_stale_benchmark_price_for_excess_scores():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    frames["KS11"] = frames["KS11"][frames["KS11"]["date"] != pd.Timestamp("2025-01-31")]
+
+    with pytest.raises(ValueError, match="target_weight_research_benchmark_price_stale") as exc:
+        run_target_weight_rotation_backtest(
+            symbols=["AAA", "BBB", "CCC"],
+            start="2025-02-03",
+            end="2025-02-05",
+            capital=100_000.0,
+            params={
+                "target_top_n": 2,
+                "target_exposure": 0.80,
+                "short_lookback": 2,
+                "long_lookback": 3,
+                "short_weight": 0.5,
+                "score_mode": "benchmark_excess",
+                "benchmark_symbol": "KS11",
+            },
+            collector=FakeCollector(frames),
+            risk_manager=NoCostRiskManager(),
+        )
+
+    message = str(exc.value)
+    assert "trade_day=2025-02-03" in message
+    assert "score_day=2025-01-31" in message
+    assert "benchmark_latest=2025-01-30" in message
+
+
 def test_target_weight_rotation_uses_prior_day_scores_for_rebalance():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
