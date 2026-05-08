@@ -1068,29 +1068,6 @@ class Scheduler:
 
             # paper 모드: 장마감 시 Paper Evidence 수집 + 실전 전환 준비 자동 평가 + 주간 리포트
             if self._is_paper_like_mode():
-                # [DEPRECATED] Legacy evidence_collector (v1 schema).
-                # v1 record는 runtime/promotion 계산에서 quarantine되어 미반영됨.
-                # 현재는 하위 paper_evidence (v2) 호출이 canonical evidence를 생성함.
-                # TODO: legacy evidence_collector 완전 제거 (운영상 무해하나 중복 호출)
-                try:
-                    from core.evidence_collector import collect_daily_evidence
-                    ob = self._order_executor.order_book if self._order_executor else None
-                    executor_stats = ob.get_stats() if ob else {}
-                    initial_capital = self.config.risk_params.get(
-                        "position_sizing", {}
-                    ).get("initial_capital", 10_000_000)
-                    collect_daily_evidence(
-                        strategy=self.strategy_name,
-                        portfolio_summary=summary,
-                        trade_summary=trade_summary,
-                        order_book=ob,
-                        initial_capital=initial_capital,
-                        executor_stats=executor_stats,
-                        restart_recovery_count=self._restart_recovery_count,
-                    )
-                except Exception as ev_err:
-                    logger.warning("Paper Evidence 수집 실패 (legacy): {}", ev_err)
-
                 self._check_live_readiness()
                 # 금요일이면 주간 리포트 자동 생성
                 if datetime.now().weekday() == 4:
