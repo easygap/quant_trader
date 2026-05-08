@@ -131,6 +131,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 - 미체결 / 중복 주문 방지
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
+- 단일종목 백테스트 gap/어닝/BlackSwan 이벤트 guard
 - DB 백업 / 잔고 크로스체크 / 긴급 청산
 - 알림 채널 fallback
 

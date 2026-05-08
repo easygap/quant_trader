@@ -13,7 +13,7 @@ from config.config_loader import Config
 from core.risk_manager import RiskManager
 
 _FULL_EXIT_SELL_ACTIONS = frozenset(
-    ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD")
+    ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD", "GAP_DOWN", "BLACKSWAN")
 )
 _PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
 
@@ -138,6 +138,21 @@ class Backtester:
         if df_analyzed.empty or "signal" not in df_analyzed.columns:
             logger.error("백테스팅 실패: 신호 생성 불가")
             return {}
+
+        # 실전 진입/청산 guard와 비교 가능한 원본 OHLCV·이벤트 컬럼 보존.
+        for col in (
+            "open",
+            "high",
+            "low",
+            "volume",
+            "earnings_date",
+            "next_earnings_date",
+            "is_near_earnings",
+            "near_earnings",
+            "days_to_earnings",
+        ):
+            if col not in df_analyzed.columns and col in df.columns:
+                df_analyzed[col] = df[col].values
 
         # 거래량 기반 동적 슬리피지: 일평균 거래량(20일 롤링) 추가. 1% 이상 주문 시 슬리피지 자동 상향
         if "volume" not in df_analyzed.columns and "volume" in df.columns:
@@ -370,15 +385,168 @@ class Backtester:
         regime_buy_blocks = 0   # bearish에서 차단된 매수 신호 수 (메트릭용)
         regime_caution_buys = 0  # caution에서 축소된 매수 수 (메트릭용)
 
+        # paper/live 진입·청산 guard와 백테스트의 차이를 줄이기 위한 리스크 필터.
+        gap_cfg = self.risk_params.get("gap_risk") or {}
+        gap_enabled = bool(gap_cfg.get("enabled", False))
+        gap_down_threshold = float(gap_cfg.get("gap_down_threshold", -0.03))
+        gap_up_entry_block = float(gap_cfg.get("gap_up_entry_block", 0.0) or 0.0)
+
+        trading_cfg = getattr(self.config, "trading", {}) or {}
+        skip_earnings_days = int(trading_cfg.get("skip_earnings_days", 0) or 0)
+
+        bs_cfg = self.risk_params.get("blackswan") or {}
+        bs_enabled = bool(bs_cfg.get("enabled", bool(bs_cfg)))
+        bs_single_threshold = float(bs_cfg.get("single_stock_threshold", -0.05))
+        bs_portfolio_threshold = float(bs_cfg.get("portfolio_threshold", -0.03))
+        bs_consecutive_days = max(1, int(bs_cfg.get("consecutive_days", 3)))
+        bs_consecutive_threshold = float(bs_cfg.get("consecutive_threshold", -0.02))
+        bs_cooldown_minutes = max(0, int(bs_cfg.get("cooldown_minutes", 60) or 0))
+        bs_recovery_minutes = max(0, int(bs_cfg.get("recovery_minutes", 120) or 0))
+        bs_recovery_scale = max(0.0, min(float(bs_cfg.get("recovery_scale", 0.5)), 1.0))
+        bs_cooldown_days = max(1, int(np.ceil(bs_cooldown_minutes / (24 * 60)))) if bs_cooldown_minutes else 0
+        bs_recovery_days = max(1, int(np.ceil(bs_recovery_minutes / (24 * 60)))) if bs_recovery_minutes else 0
+        bs_cooldown_until_idx = -1
+        bs_recovery_until_idx = -1
+        bs_daily_returns: list[float] = []
+        prev_portfolio_value: float | None = None
+
+        gap_down_exits = 0
+        gap_up_buy_blocks = 0
+        earnings_buy_blocks = 0
+        blackswan_triggers = 0
+        blackswan_buy_blocks = 0
+        blackswan_recovery_buys = 0
+
+        def _is_near_backtest_earnings(row: pd.Series, date) -> bool:
+            for flag_col in ("is_near_earnings", "near_earnings"):
+                flag = row.get(flag_col)
+                if flag is not None and pd.notna(flag):
+                    if isinstance(flag, str):
+                        if flag.strip().lower() in {"true", "1", "yes", "y"}:
+                            return True
+                    elif bool(flag):
+                        return True
+
+            for days_col in ("days_to_earnings",):
+                days = row.get(days_col)
+                if days is not None and pd.notna(days):
+                    try:
+                        if abs(int(days)) <= skip_earnings_days:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+
+            for date_col in ("earnings_date", "next_earnings_date"):
+                raw = row.get(date_col)
+                if raw is None or pd.isna(raw):
+                    continue
+                try:
+                    earnings_day = pd.Timestamp(raw).normalize()
+                except (TypeError, ValueError):
+                    continue
+                if pd.isna(earnings_day):
+                    continue
+                trade_day = pd.Timestamp(date).normalize()
+                if abs((earnings_day - trade_day).days) <= skip_earnings_days:
+                    return True
+            return False
+
+        def _activate_backtest_blackswan(current_idx: int) -> None:
+            nonlocal bs_cooldown_until_idx, bs_recovery_until_idx
+            if bs_cooldown_days > 0:
+                bs_cooldown_until_idx = max(bs_cooldown_until_idx, current_idx + bs_cooldown_days)
+            if bs_recovery_days > 0:
+                bs_recovery_until_idx = max(
+                    bs_recovery_until_idx,
+                    current_idx + bs_cooldown_days + bs_recovery_days,
+                )
+
+        def _execute_full_exit(action: str, execution_ref_price: float, ref_close: float, reason: str) -> bool:
+            nonlocal cash, position, avg_price, partial_exit_done, high_water_mark, buy_date, sold_today
+            if position <= 0 or execution_ref_price <= 0:
+                return False
+            costs = self.risk_manager.calculate_transaction_costs(
+                execution_ref_price,
+                position,
+                "SELL",
+                avg_daily_volume=row_volume,
+                avg_price=avg_price,
+            )
+            sell_price = costs["execution_price"]
+            sell_amount = sell_price * position
+            commission = costs["commission"]
+            tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
+            pnl = (sell_price - avg_price) * position - commission - tax_amt
+            cash += sell_amount - commission - tax_amt
+            trades.append({
+                "date": date, "action": action, "price": sell_price,
+                "quantity": position, "pnl": pnl,
+                "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                "commission": commission,
+                "tax": float(tax_amt),
+                "slippage_cost": _slippage_cost_vs_close(sell_price, ref_close, position),
+                "reason": reason,
+            })
+            position = 0
+            avg_price = 0
+            partial_exit_done = False
+            high_water_mark = 0.0
+            buy_date = None
+            sold_today = True
+            return True
+
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
             signal = row.get("signal", "HOLD")
+            open_price = row.get("open", close)
+            if pd.isna(open_price) or float(open_price) <= 0:
+                open_price = close
             row_atr = row.get("atr")
             avg_daily_vol = row.get("_avg_daily_volume")
             if pd.isna(avg_daily_vol) or avg_daily_vol <= 0:
                 avg_daily_vol = row.get("volume")
             row_volume = avg_daily_vol
             sold_today = False
+            previous_close = float(df["close"].iloc[i - 1]) if i > 0 else None
+            stock_daily_return = None
+            if previous_close is not None and previous_close > 0:
+                stock_daily_return = (float(close) - previous_close) / previous_close
+                if bs_enabled:
+                    bs_daily_returns.append(stock_daily_return)
+                    if len(bs_daily_returns) > bs_consecutive_days:
+                        bs_daily_returns = bs_daily_returns[-bs_consecutive_days:]
+
+            if position > 0 and previous_close is not None and previous_close > 0:
+                if gap_enabled:
+                    gap_pct = (float(open_price) - previous_close) / previous_close
+                    if gap_pct <= gap_down_threshold:
+                        if _execute_full_exit(
+                            "GAP_DOWN",
+                            float(open_price),
+                            float(close),
+                            f"gap_down {gap_pct * 100:.2f}%",
+                        ):
+                            gap_down_exits += 1
+
+                if bs_enabled and position > 0:
+                    bs_reason = ""
+                    if stock_daily_return is not None and stock_daily_return <= bs_single_threshold:
+                        bs_reason = f"single_stock_drop {stock_daily_return * 100:.2f}%"
+                    elif (
+                        len(bs_daily_returns) >= bs_consecutive_days
+                        and all(ret <= bs_consecutive_threshold for ret in bs_daily_returns[-bs_consecutive_days:])
+                    ):
+                        bs_reason = "consecutive_drop"
+                    elif prev_portfolio_value is not None and prev_portfolio_value > 0:
+                        mark_to_market = cash + (position * float(close))
+                        portfolio_return = (mark_to_market - prev_portfolio_value) / prev_portfolio_value
+                        if portfolio_return <= bs_portfolio_threshold:
+                            bs_reason = f"portfolio_drop {portfolio_return * 100:.2f}%"
+
+                    if bs_reason:
+                        if _execute_full_exit("BLACKSWAN", float(close), float(close), bs_reason):
+                            blackswan_triggers += 1
+                            _activate_backtest_blackswan(i)
 
             if position > 0:
                 high_water_mark = max(high_water_mark, close)
@@ -545,6 +713,20 @@ class Backtester:
                 signal = "HOLD"
                 regime_buy_blocks += 1
 
+            if signal == "BUY" and gap_enabled and gap_up_entry_block > 0 and previous_close is not None and previous_close > 0:
+                gap_pct = (float(open_price) - previous_close) / previous_close
+                if gap_pct >= gap_up_entry_block:
+                    signal = "HOLD"
+                    gap_up_buy_blocks += 1
+
+            if signal == "BUY" and skip_earnings_days > 0 and _is_near_backtest_earnings(row, date):
+                signal = "HOLD"
+                earnings_buy_blocks += 1
+
+            if signal == "BUY" and bs_enabled and i <= bs_cooldown_until_idx:
+                signal = "HOLD"
+                blackswan_buy_blocks += 1
+
             # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
             if signal == "BUY" and position == 0 and not sold_today:
                 costs = self.risk_manager.calculate_transaction_costs(
@@ -573,6 +755,16 @@ class Backtester:
                 if quantity > 0 and regime_at_t == "caution":
                     quantity = max(1, int(quantity * caution_scale))
                     regime_caution_buys += 1
+
+                if (
+                    quantity > 0
+                    and bs_enabled
+                    and i > bs_cooldown_until_idx
+                    and i <= bs_recovery_until_idx
+                    and bs_recovery_scale < 1.0
+                ):
+                    quantity = max(1, int(quantity * bs_recovery_scale))
+                    blackswan_recovery_buys += 1
 
                 # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
                 if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
@@ -648,12 +840,19 @@ class Backtester:
                 "cash": cash,
                 "position_value": position * close,
             })
+            prev_portfolio_value = portfolio_value
 
         return {
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve),
             "regime_buy_blocks": regime_buy_blocks,
             "regime_caution_buys": regime_caution_buys,
+            "gap_down_exits": gap_down_exits,
+            "gap_up_buy_blocks": gap_up_buy_blocks,
+            "earnings_buy_blocks": earnings_buy_blocks,
+            "blackswan_triggers": blackswan_triggers,
+            "blackswan_buy_blocks": blackswan_buy_blocks,
+            "blackswan_recovery_buys": blackswan_recovery_buys,
         }
 
     def _calculate_metrics(self, result: dict, initial_capital: float) -> dict:
@@ -688,7 +887,19 @@ class Backtester:
             sortino = sharpe
 
         # 매매 기준 성과
-        sell_trades = [t for t in trades if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")]
+        sell_trades = [
+            t
+            for t in trades
+            if t["action"] in (
+                "SELL",
+                "STOP_LOSS",
+                "TAKE_PROFIT",
+                "TAKE_PROFIT_PARTIAL",
+                "TRAILING_STOP",
+                "GAP_DOWN",
+                "BLACKSWAN",
+            )
+        ]
 
         # 꼬리 리스크: VaR 95%, CVaR 95% (일일 기준)
         if len(daily_returns) >= 20:
@@ -763,13 +974,13 @@ class Backtester:
         for t in trades:
             if t["action"] == "BUY":
                 position_open_date = t["date"]
-            elif t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP") and position_open_date is not None:
+            elif t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN") and position_open_date is not None:
                 try:
                     delta = t["date"] - position_open_date
                     holding_days_list.append(delta.days if hasattr(delta, "days") else 0)
                 except (TypeError, ValueError):
                     pass
-                if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP"):
+                if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN"):
                     position_open_date = None
         avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0.0
 
@@ -863,6 +1074,12 @@ class Backtester:
             "cost_drag_pct": cost_drag,
             "regime_buy_blocks": result.get("regime_buy_blocks", 0),
             "regime_caution_buys": result.get("regime_caution_buys", 0),
+            "gap_down_exits": result.get("gap_down_exits", 0),
+            "gap_up_buy_blocks": result.get("gap_up_buy_blocks", 0),
+            "earnings_buy_blocks": result.get("earnings_buy_blocks", 0),
+            "blackswan_triggers": result.get("blackswan_triggers", 0),
+            "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
+            "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
         }
 
     @staticmethod
@@ -887,6 +1104,14 @@ class Backtester:
             "monthly_returns": {},
             "gross_return": 0,
             "cost_drag_pct": 0,
+            "regime_buy_blocks": 0,
+            "regime_caution_buys": 0,
+            "gap_down_exits": 0,
+            "gap_up_buy_blocks": 0,
+            "earnings_buy_blocks": 0,
+            "blackswan_triggers": 0,
+            "blackswan_buy_blocks": 0,
+            "blackswan_recovery_buys": 0,
         }
 
     def print_report(self, result: dict):
