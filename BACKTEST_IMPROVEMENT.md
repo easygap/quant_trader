@@ -1,6 +1,6 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.1
+> **문서 버전**: v5.3
 > **최종 수정**: 2026-05-08
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
@@ -24,7 +24,7 @@
 | **거래세** | 0.20% (매도 시, 2025 이후 인하 반영) | `risk_params.yaml:transaction_costs.tax_rate` |
 | **슬리피지** | 기본 0.05% + 동적(체결량 기반) | `risk_params.yaml:transaction_costs.slippage` + `dynamic_slippage` |
 | **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오/target-weight research 모두 평균 거래량 기반 동적 슬리피지 적용 | `backtest/backtester.py`, `backtest/portfolio_backtester.py`, `tools/research_candidate_sweep.py` |
-| **실전 반영** | `OrderExecutor._calculate_costs()` → TradeHistory에 commission/tax/slippage 별도 저장 | `core/order_executor.py` |
+| **실전 반영** | `OrderExecutor._calculate_costs()` → TradeHistory에 commission/tax/slippage 별도 저장. live 주문은 체결가·체결수량 확인 후에만 거래·포지션 DB 반영 | `core/order_executor.py` |
 
 ### 1.3 과매매 억제
 
@@ -96,6 +96,7 @@
 | **벤치마크 비용 미반영** (v5.0 수정) | `_buy_and_hold_metrics`에 거래비용 미적용 → 전략 alpha 0.2~0.5%p 과대평가 | **수정 완료** — commission/tax/slippage 반영 |
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목·포트폴리오 백테스터에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없으면 paper/live보다 낙관적인 성과가 나올 수 있음 | **수정 완료** — `backtest/backtester.py`와 `backtest/portfolio_backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영 |
 | **리서치 벤치마크 부분 결측** | EW B&H 벤치마크 일부 종목 수집 실패 시 누락 종목 몫의 capital이 빠진 채 전체 capital 대비 수익률을 계산하면 후보 초과수익이 과대평가될 수 있음 | **수정 완료** — `research_candidate_sweep`이 벤치마크 입력 universe 전체 수집·기간 검증을 요구하고, 결측 시 `INSUFFICIENT_BENCHMARK_DATA`로 excess gate를 fail-closed 차단 |
+| **live ACK 미체결 장부 오염 위험** | KIS 주문 ACK만 있고 평균 체결가·체결수량 조회가 실패했거나 부분체결인데 예상가 기준 전량 체결로 기록하면 실제 잔고와 DB 포지션이 어긋날 수 있음 | **수정 완료** — live BUY/SELL은 체결 확인 실패 시 `ACKED`/pending, 부분체결 시 `PARTIAL_FILLED`/pending과 `requires_reconcile=True`를 반환하고, KIS 잔고 대조 전 TradeHistory·Position 반영을 보류 |
 
 ---
 
@@ -130,6 +131,7 @@
 | Portfolio backtest dynamic slippage | 높음 | **완료 — 포트폴리오 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 trade record에 participation/slippage 진단값 기록** |
 | Target-weight research dynamic slippage | 높음 | **완료 — target-weight 리서치 백테스터가 20일 평균 거래량을 거래비용 계산에 전달하고 participation/slippage 진단값 기록** |
 | Research sweep benchmark coverage guard | 높음 | 완료 — 벤치마크 일부 종목 결측 시 초과수익 계산을 신뢰하지 않고 artifact/Markdown에 결측 종목과 coverage ratio를 남김 |
+| Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |

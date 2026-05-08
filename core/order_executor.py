@@ -488,9 +488,19 @@ class OrderExecutor:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
 
             order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
-            fill_price, actual_slippage_pct = self._resolve_live_execution(
+            execution = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
+                requested_qty=quantity,
             )
+            if not execution["confirmed"]:
+                self._mark_partial_live_execution(order, execution)
+                return self._pending_live_execution_result(
+                    order=order,
+                    action="BUY",
+                    execution=execution,
+                )
+            fill_price = float(execution["fill_price"])
+            actual_slippage_pct = execution["actual_slippage_pct"]
             self._report_execution_slippage(symbol, "BUY", expected_price, fill_price, actual_slippage_pct)
             # FILLED 전이 — 이 시점에서만 position/trade 반영
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
@@ -821,9 +831,19 @@ class OrderExecutor:
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
 
             order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
-            fill_price, actual_slippage_pct = self._resolve_live_execution(
+            execution = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
+                requested_qty=sell_qty,
             )
+            if not execution["confirmed"]:
+                self._mark_partial_live_execution(order, execution)
+                return self._pending_live_execution_result(
+                    order=order,
+                    action="SELL",
+                    execution=execution,
+                )
+            fill_price = float(execution["fill_price"])
+            actual_slippage_pct = execution["actual_slippage_pct"]
             self._report_execution_slippage(symbol, "SELL", expected_price, fill_price, actual_slippage_pct)
             order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
             OrderGuard.clear(symbol)
@@ -1022,23 +1042,164 @@ class OrderExecutor:
         symbol: str,
         expected_price: float,
         order_output: dict | None,
-    ) -> tuple[float, float | None]:
+        requested_qty: int | None = None,
+    ) -> dict:
         """
-        체결가 조회 후 (체결가, actual_slippage_pct) 반환.
-        조회 실패 시 (expected_price, None). 슬리피지 % = (체결가 - 예상가) / 예상가 * 100.
+        체결가 조회 후 confirmed/fill_price/actual_slippage_pct를 반환한다.
+        조회 실패 시 live 장부 반영을 보류하기 위해 confirmed=False로 둔다.
         """
         if not order_output:
-            return expected_price, None
-        fill = self.kis_api.get_filled_avg_price_after_order(symbol, order_output)
+            return {
+                "confirmed": False,
+                "fill_price": None,
+                "actual_slippage_pct": None,
+                "reason": "live_order_output_missing",
+            }
+        try:
+            detail_getter = getattr(self.kis_api, "get_order_execution_after_order", None)
+            if callable(detail_getter):
+                execution = detail_getter(symbol, order_output)
+                fill = (execution or {}).get("fill_price")
+                filled_qty = (execution or {}).get("filled_qty")
+                remaining_qty = (execution or {}).get("remaining_qty")
+                qty_contract_checked = True
+            else:
+                fill = self.kis_api.get_filled_avg_price_after_order(symbol, order_output)
+                filled_qty = None
+                remaining_qty = None
+                qty_contract_checked = False
+        except Exception as exc:
+            logger.warning("실전 체결가 조회 예외 — DB 반영 보류: {} — {}", symbol, exc)
+            return {
+                "confirmed": False,
+                "fill_price": None,
+                "actual_slippage_pct": None,
+                "reason": "live_fill_lookup_failed",
+                "error": str(exc),
+            }
+        try:
+            fill = float(fill) if fill is not None else None
+        except (TypeError, ValueError):
+            fill = None
         if fill is None or fill <= 0:
             logger.warning(
-                "실전 체결가 조회 실패 — 기록은 예상가 기준: {}", symbol,
+                "실전 체결가 조회 실패 — DB 반영 보류: {}", symbol,
             )
-            return expected_price, None
+            return {
+                "confirmed": False,
+                "fill_price": None,
+                "actual_slippage_pct": None,
+                "reason": "live_fill_unconfirmed",
+            }
+        try:
+            filled_qty = int(float(filled_qty)) if filled_qty is not None else None
+        except (TypeError, ValueError):
+            filled_qty = None
+        try:
+            remaining_qty = int(float(remaining_qty)) if remaining_qty is not None else None
+        except (TypeError, ValueError):
+            remaining_qty = None
         if expected_price <= 0:
-            return fill, None
-        pct = (fill - expected_price) / expected_price * 100.0
-        return fill, pct
+            actual_slippage_pct = None
+        else:
+            actual_slippage_pct = (fill - expected_price) / expected_price * 100.0
+        if requested_qty and qty_contract_checked and filled_qty is None:
+            logger.warning(
+                "실전 체결 수량 확인 실패 — DB 반영 보류: {} requested_qty={}",
+                symbol,
+                requested_qty,
+            )
+            return {
+                "confirmed": False,
+                "fill_price": fill,
+                "actual_slippage_pct": actual_slippage_pct,
+                "reason": "live_filled_qty_unconfirmed",
+                "filled_qty": None,
+                "requested_qty": requested_qty,
+                "remaining_qty": remaining_qty,
+            }
+        if requested_qty and filled_qty is not None and filled_qty <= 0:
+            logger.warning(
+                "실전 체결 수량 0 확인 — DB 반영 보류: {} requested_qty={}",
+                symbol,
+                requested_qty,
+            )
+            return {
+                "confirmed": False,
+                "fill_price": fill,
+                "actual_slippage_pct": actual_slippage_pct,
+                "reason": "live_fill_unconfirmed",
+                "filled_qty": filled_qty,
+                "requested_qty": requested_qty,
+                "remaining_qty": remaining_qty,
+            }
+        if requested_qty and filled_qty is not None and filled_qty < requested_qty:
+            logger.warning(
+                "실전 부분체결 확인 — 장부 반영 보류: {} filled_qty={} requested_qty={}",
+                symbol,
+                filled_qty,
+                requested_qty,
+            )
+            return {
+                "confirmed": False,
+                "fill_price": fill,
+                "actual_slippage_pct": actual_slippage_pct,
+                "reason": "live_partial_fill_unreconciled",
+                "filled_qty": filled_qty,
+                "requested_qty": requested_qty,
+                "remaining_qty": remaining_qty,
+            }
+        return {
+            "confirmed": True,
+            "fill_price": fill,
+            "actual_slippage_pct": actual_slippage_pct,
+            "reason": "",
+            "filled_qty": filled_qty,
+            "requested_qty": requested_qty,
+            "remaining_qty": remaining_qty,
+        }
+
+    def _mark_partial_live_execution(self, order, execution: dict) -> None:
+        try:
+            filled_qty = int(execution.get("filled_qty") or 0)
+            fill_price = float(execution.get("fill_price") or 0)
+        except (TypeError, ValueError):
+            return
+        if 0 < filled_qty < order.requested_qty and fill_price > 0:
+            order.transition(
+                OrderStatus.PARTIAL_FILLED,
+                fill_qty=filled_qty,
+                fill_price=fill_price,
+            )
+
+    def _pending_live_execution_result(
+        self,
+        *,
+        order,
+        action: str,
+        execution: dict,
+    ) -> dict:
+        logger.warning(
+            "실전 주문 체결 미확인 — 장부 반영 보류: {} {} order_id={} broker_order_id={} reason={}",
+            action,
+            order.symbol,
+            order.order_id,
+            order.broker_order_id,
+            execution.get("reason", "unknown"),
+        )
+        return {
+            "success": False,
+            "reason": "실전 주문은 접수됐지만 체결 확인 전이라 DB 반영을 보류했습니다.",
+            "symbol": order.symbol,
+            "action": action,
+            "mode": self.mode,
+            "order_pending": True,
+            "requires_reconcile": True,
+            "order_id": order.order_id,
+            "broker_order_id": order.broker_order_id,
+            "order_status": order.status.value,
+            "execution_check": execution,
+        }
 
     def _report_execution_slippage(
         self,
