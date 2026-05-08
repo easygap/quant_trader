@@ -39,6 +39,7 @@ class PortfolioBacktester:
         end_date: str = None,
         trade_start_date: str = None,
         param_overrides: dict = None,
+        apply_liquidity_filter: bool = True,
     ) -> dict:
         """
         멀티종목 포트폴리오 백테스트 실행.
@@ -52,6 +53,7 @@ class PortfolioBacktester:
             trade_start_date: 데이터 warmup과 별도로 실제 거래/평가를 시작할 날짜
             param_overrides: 전략 파라미터 덮어쓰기. 예:
                 {"relative_strength_rotation": {"short_lookback": 40}}
+            apply_liquidity_filter: true면 run 진입 시점에 20일 평균 거래대금 기준으로 universe 사전 제외
 
         Returns:
             포트폴리오 수준 백테스트 결과
@@ -63,6 +65,37 @@ class PortfolioBacktester:
             initial_capital = self.risk_params.get(
                 "position_sizing", {}
             ).get("initial_capital", 10000000)
+
+        original_symbols = list(symbols)
+        if apply_liquidity_filter:
+            from core.watchlist_manager import WatchlistManager
+
+            liquidity_as_of = trade_start_date or start_date
+            liquidity_filter = WatchlistManager(self.config).liquidity_filter_report(
+                original_symbols,
+                as_of_end=liquidity_as_of,
+            )
+            symbols = liquidity_filter.get("passed_symbols", list(original_symbols))
+            if liquidity_filter.get("enabled") and len(symbols) < len(original_symbols):
+                logger.info(
+                    "포트폴리오 백테스트 유동성 universe 필터: {}개 중 {}개 통과 (as_of={})",
+                    len(original_symbols),
+                    len(symbols),
+                    liquidity_as_of or "latest",
+                )
+            if not symbols:
+                logger.error("유동성 필터 통과 종목이 없어 포트폴리오 백테스트를 중단합니다.")
+                return {}
+        else:
+            symbols = list(original_symbols)
+            liquidity_filter = {
+                "enabled": False,
+                "reason": "pre_filtered_by_caller",
+                "input_symbols": list(original_symbols),
+                "passed_symbols": list(original_symbols),
+                "excluded_symbols": [],
+                "symbols": {},
+            }
 
         collector = DataCollector()
         strategy_config = self._strategy_config_for_run(strategy_name, param_overrides)
@@ -148,6 +181,8 @@ class PortfolioBacktester:
             "equity_curve": result["equity_curve"],
             "strategy": strategy_name,
             "symbols": valid_symbols,
+            "input_symbols": original_symbols,
+            "liquidity_filter": liquidity_filter,
             "initial_capital": initial_capital,
             "per_symbol_stats": result.get("per_symbol_stats", {}),
             # 진단 계측 전달
