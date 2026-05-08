@@ -9,7 +9,7 @@
 > **현재 상태 (2026-05-08)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
-> - Paper Evidence 런타임: 일별 자동 수집 → benchmark finalization → promotion package → launch readiness
+> - Paper Evidence 런타임: 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡 + fail-closed/audited entry guard)
 > - Paper 신규 진입 실행 경계 fail-closed: preflight 상태 누락/손상 또는 runtime 조회 실패 시 BUY 제출 전 차단, SELL 청산은 유지
