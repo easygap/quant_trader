@@ -121,6 +121,7 @@
 - Follow-up pilot approval guard (2026-05-06): target-weight pilot 승인 시 `paper_pilot_control.py --enable`이 readiness audit을 재실행해 requested cap, launch readiness, 유동성 preflight, 비용 반영 pre-trade risk를 통과할 때만 auth를 기록한다.
 - Follow-up completed rerun block (2026-05-06): same-candidate/trade-day 실행 완료 세션은 `--allow-rerun`을 줘도 재실행하지 않는다. `--allow-rerun`은 부분 실행/중단 세션 복구용으로 제한한다.
 - Follow-up backtest/research liquidity universe filter (2026-05-08): `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, `PortfolioBacktester`와 `research_candidate_sweep`이 평가 시작일 기준 20일 평균 거래대금 하한 미만·strict 데이터 누락 종목을 universe에서 사전 제외한다.
+- Follow-up portfolio dynamic slippage (2026-05-08): `PortfolioBacktester`가 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade record에 `participation_rate`, `slippage_multiplier`, `slippage_cost`를 남겨 비용 과소추정 여부를 진단한다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
 - Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
@@ -962,7 +963,7 @@ quant_trader/
 ├── backtest/
 │   ├── __init__.py
 │   ├── backtester.py            # 단일 종목 시뮬. strict_lookahead, gap/어닝/BlackSwan guard, 과매매 분석, **Sortino·VaR/CVaR·연속손실·MDD회복기간** 등 메트릭
-│   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션·gap/어닝/BlackSwan guard)
+│   ├── portfolio_backtester.py  # 멀티종목 포트폴리오 시뮬(분산·최대 포지션·동적 슬리피지·gap/어닝/BlackSwan guard)
 │   ├── report_generator.py      # txt·html 리포트 (거래 내역, 성과 지표, 자본 곡선, 과매매 분석)
 │   ├── strategy_validator.py    # validate: 3~5년 데이터, 샤프·MDD·벤치마크(KS11·코스피 상위 50 동일비중), in/out-of-sample, 손익비 자동 경고+디스코드
 │   ├── momentum_top_portfolio.py # 다종목 동일비중 모멘텀 포트폴리오 백테스트 (리밸런싱·시장 국면 필터·포트폴리오 스탑). run_momentum_top_portfolio_backtest(), print_momentum_top_portfolio_report()
@@ -1193,7 +1194,7 @@ quant_trader/
 
 - **목적**: 단일 종목 백테스트(`backtest`)와 달리, **여러 종목을 동시에** 보유·매매하며 분산·최대 포지션 한도 등을 반영한 시뮬레이션.
 - **실행**: `python main.py --mode portfolio_backtest --symbols 005930,000660,...` (`--start` / `--end` 등 기간 옵션은 `main.py`와 동일 패턴)
-- **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계하며, 종목별 OHLCV/event column 기반 gap-up 매수 차단, gap-down 청산, 어닝 윈도우 매수 차단, BlackSwan 청산·쿨다운·recovery 사이징을 함께 반영.
+- **구현**: `backtest/portfolio_backtester.py` — `Backtester`와 별도 모듈. 리스크 파라미터의 포트폴리오·분산 관련 설정과 정합되도록 설계하며, 종목별 20일 평균 거래량 기반 동적 슬리피지, OHLCV/event column 기반 gap-up 매수 차단, gap-down 청산, 어닝 윈도우 매수 차단, BlackSwan 청산·쿨다운·recovery 사이징을 함께 반영.
 - **활용**: 유니버스 후보 종목 묶음에 대한 **동시 보유 시나리오** 검증, 단일 종목 백테스트와의 성과 비교.
 
 ### 8.6 멀티전략 2-Sleeve 포트폴리오 검증 — v4.0
@@ -1425,6 +1426,7 @@ quant_trader/
 - [x] **target-weight paper/pilot adapter 추가** — portfolio-level plan, pilot cap validation, paper-only exact quantity order path 추가. Live gate는 변경 없음
 - [x] **target-weight liquidity preflight 추가** — 최근 20일 평균 거래대금 대비 주문 notional 기본 5% 초과 시 readiness/execute fail-closed 차단
 - [x] **백테스트/research universe 유동성 필터 추가** — 포트폴리오 백테스트와 research sweep이 20일 평균 거래대금 하한 미만 종목을 평가 전 제외하고 진단 기록
+- [x] **포트폴리오 백테스트 동적 슬리피지 보강** — 포트폴리오 매수/매도 비용 계산에 20일 평균 거래량을 전달하고 participation/slippage 진단 기록
 - [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
