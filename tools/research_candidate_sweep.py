@@ -923,6 +923,23 @@ def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
     return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:top_n])
 
 
+def apply_research_universe_liquidity_filter(
+    symbols: list[str],
+    config,
+    *,
+    as_of_end: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """research/backtest universe를 20일 평균 거래대금 기준으로 사전 제외한다."""
+    from core.watchlist_manager import WatchlistManager
+
+    normalized = normalize_symbols(symbols)
+    report = WatchlistManager(config).liquidity_filter_report(
+        normalized,
+        as_of_end=as_of_end,
+    )
+    return report.get("passed_symbols", normalized), report
+
+
 def buy_and_hold_benchmark_with_returns(
     symbols: list[str],
     start: str,
@@ -1894,6 +1911,7 @@ def evaluate_candidate(
             end_date=end,
             trade_start_date=start,
             param_overrides={spec.strategy: spec.params},
+            apply_liquidity_filter=False,
         )
 
     if result.get("equity_curve") is not None and not result["equity_curve"].empty:
@@ -1961,7 +1979,19 @@ def run_candidate_sweep(
     from config.config_loader import Config
 
     config = Config.get()
-    symbols = normalize_symbols(symbols or select_canonical_universe(top_n))
+    input_universe = normalize_symbols(symbols or select_canonical_universe(top_n))
+    symbols, liquidity_filter = apply_research_universe_liquidity_filter(
+        input_universe,
+        config,
+        as_of_end=start,
+    )
+    if liquidity_filter.get("enabled") and len(symbols) < len(input_universe):
+        logger.info(
+            "research universe 유동성 필터: {}개 중 {}개 통과 (as_of={})",
+            len(input_universe),
+            len(symbols),
+            start,
+        )
     benchmark, benchmark_daily_returns = buy_and_hold_benchmark_with_returns(symbols, start, end, capital)
     windows = make_windows(start, end) if include_walk_forward else []
     records = []
@@ -2015,6 +2045,8 @@ def run_candidate_sweep(
         "eval_end": end,
         "initial_capital": capital,
         "candidate_family": candidate_family,
+        "input_universe": input_universe,
+        "universe_liquidity_filter": liquidity_filter,
         "universe": symbols,
         "benchmark": benchmark,
         "walk_forward": {
@@ -2081,19 +2113,39 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         f"Generated: {bundle.get('generated_at', '')[:19]}",
         f"Period: {bundle.get('eval_start')} ~ {bundle.get('eval_end')}",
         f"Candidate family: {bundle.get('candidate_family', 'rotation')}",
+        f"Input universe size: {len(bundle.get('input_universe', bundle.get('universe', [])))}",
         f"Universe size: {len(bundle.get('universe', []))}",
-        "",
-        "## Benchmark",
-        f"- EW B&H return: {bundle.get('benchmark', {}).get('ew_bh_return', 0):.2f}%",
-        f"- EW B&H Sharpe: {bundle.get('benchmark', {}).get('ew_bh_sharpe', 0):.2f}",
-        "",
-        "## Decision",
-        f"- Action: {bundle.get('decision', {}).get('action', 'UNKNOWN')}",
-        f"- Reason: {bundle.get('decision', {}).get('reason', '')}",
-        f"- Best candidate: {bundle.get('decision', {}).get('best_candidate_id')}",
-        "",
-        "## Next Actions",
     ]
+    liquidity_filter = bundle.get("universe_liquidity_filter") or {}
+    if liquidity_filter.get("enabled"):
+        excluded = liquidity_filter.get("excluded_symbols", [])
+        lines.extend(
+            [
+                (
+                    "Liquidity filter: "
+                    f"{len(liquidity_filter.get('passed_symbols', []))}/"
+                    f"{len(liquidity_filter.get('input_symbols', []))} passed, "
+                    f"min20d={float(liquidity_filter.get('min_avg_trading_value_20d_krw', 0)) / 1e8:.0f}억 원, "
+                    f"strict={liquidity_filter.get('strict', True)}"
+                ),
+                f"Liquidity exclusions: {', '.join(excluded[:20]) if excluded else 'none'}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Benchmark",
+            f"- EW B&H return: {bundle.get('benchmark', {}).get('ew_bh_return', 0):.2f}%",
+            f"- EW B&H Sharpe: {bundle.get('benchmark', {}).get('ew_bh_sharpe', 0):.2f}",
+            "",
+            "## Decision",
+            f"- Action: {bundle.get('decision', {}).get('action', 'UNKNOWN')}",
+            f"- Reason: {bundle.get('decision', {}).get('reason', '')}",
+            f"- Best candidate: {bundle.get('decision', {}).get('best_candidate_id')}",
+            "",
+            "## Next Actions",
+        ]
+    )
     for action in bundle.get("decision", {}).get("next_actions", []):
         lines.append(f"- {action}")
     lines.extend([

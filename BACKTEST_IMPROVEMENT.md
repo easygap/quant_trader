@@ -106,7 +106,7 @@
 | Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | 미실행 |
 | 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
-| 유동성 필터 (일평균 거래대금 기준 종목 제외) | 높음 | 미구현 |
+| 유동성 필터 (일평균 거래대금 기준 종목 제외) | 높음 | **완료 — watchlist 진입 대상, 포트폴리오 백테스트 입력 universe, research candidate sweep universe에 20일 평균 거래대금 하한 필터 적용. target-weight pilot 주문 전 ADV preflight도 유지** |
 | Sortino Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
 | Calmar Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
 | Rotation 하락장 방어 (시장 국면 필터) | 높음 | **완료 — KS11 SMA200 필터, abs momentum 필터 테스트 후 NO_MEANINGFUL_IMPROVEMENT 판정. trailing stop 제거(승률 18-29%)로 DEV -4.99% -> -0.96% 개선** |
