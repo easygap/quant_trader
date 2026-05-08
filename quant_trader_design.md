@@ -2,7 +2,7 @@
 
 > **문서 버전**: v5.2
 > **작성일**: 2026-03-11
-> **최종 수정**: 2026-04-30
+> **최종 수정**: 2026-05-08
 > **목적**: 데이터 기반 알고리즘 트레이딩 시스템의 전체 아키텍처, **실제 파일/구조/알고리즘**, 구현 가이드 및 **시스템 상태 진단·개선 로드맵**
 
 ---
@@ -95,7 +95,7 @@
 - Strategy Universe (`core/strategy_universe.py`): paper 대상 전략 canonical 목록
 - Zero-return semantics: blocked/cash-only day에서 daily_return=0.0 추론 (deadlock 해소)
 - Paper 운영 도구: `tools/run_paper_evidence_pipeline.py` (backfill/finalize/package), `tools/paper_preflight.py`, `tools/paper_launch_readiness.py`, `tools/paper_pilot_control.py`, `tools/target_weight_rotation_pilot.py`
-- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹과 decision action을 생성하고 raw benchmark excess 음수 후보를 상위 alpha 후보에서 배제. defensive/cash-heavy 후보 해석을 위해 exposure-matched B&H 진단값도 기록. target-weight 후보는 `min_score_floor_pct` score-floor와 `hold_rank_buffer` rank-hysteresis 변형을 지원
+- Research candidate sweep: `tools/research_candidate_sweep.py`가 promotion/live artifact와 분리된 rotation/momentum/breakout/pullback/benchmark-relative/risk-budget/cash-switch/benchmark-aware rotation/target-weight top-N rotation 후보 랭킹과 decision action을 생성하고 raw benchmark excess 음수 후보를 상위 alpha 후보에서 배제. defensive/cash-heavy 후보 해석을 위해 exposure-matched B&H 진단값도 기록. EW B&H 벤치마크 일부 종목 결측은 `INSUFFICIENT_BENCHMARK_DATA`로 fail-closed 처리해 초과수익 착시를 차단. target-weight 후보는 `min_score_floor_pct` score-floor와 `hold_rank_buffer` rank-hysteresis 변형을 지원
 - Latest research decision (2026-04-29): 5종목 all-family quick sweep에서 후보 14개 모두 benchmark excess return/Sharpe 미달. decision=`NO_ALPHA_CANDIDATE`; canonical promotion은 진행하지 않고 유니버스 확장 또는 새 후보군 설계를 우선
 - Latest research decision (2026-04-30): canonical liquidity top-20 all-family quick sweep에서도 `NO_ALPHA_CANDIDATE`. best=`momentum_factor_120d`는 +118.56%였지만 benchmark excess=-30.83%p, MDD=-40.08%; promotion 미진행
 - Follow-up research implementation (2026-04-30): 외부 재무 데이터 의존이 없는 `trend_pullback` 기반 `pullback` 후보군 4개를 추가해 다음 benchmark-aware sweep 대상으로 지정
@@ -123,6 +123,7 @@
 - Follow-up backtest/research liquidity universe filter (2026-05-08): `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, `PortfolioBacktester`와 `research_candidate_sweep`이 평가 시작일 기준 20일 평균 거래대금 하한 미만·strict 데이터 누락 종목을 universe에서 사전 제외한다.
 - Follow-up portfolio dynamic slippage (2026-05-08): `PortfolioBacktester`가 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade record에 `participation_rate`, `slippage_multiplier`, `slippage_cost`를 남겨 비용 과소추정 여부를 진단한다.
 - Follow-up target-weight research dynamic slippage (2026-05-08): `research_candidate_sweep` target-weight 백테스트도 종목별 20일 평균 거래량을 매수/매도 비용 계산에 전달하고, trade/metrics에 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total`을 기록한다.
+- Follow-up research benchmark coverage guard (2026-05-08): EW B&H 벤치마크 입력 universe 전체가 수집·기간 검증을 통과하지 못하면 benchmark excess를 0으로 고정하고 `INSUFFICIENT_BENCHMARK_DATA` decision으로 canonical 평가 진행을 차단한다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
 - Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
@@ -1429,6 +1430,7 @@ quant_trader/
 - [x] **백테스트/research universe 유동성 필터 추가** — 포트폴리오 백테스트와 research sweep이 20일 평균 거래대금 하한 미만 종목을 평가 전 제외하고 진단 기록
 - [x] **포트폴리오 백테스트 동적 슬리피지 보강** — 포트폴리오 매수/매도 비용 계산에 20일 평균 거래량을 전달하고 participation/slippage 진단 기록
 - [x] **target-weight research 동적 슬리피지 보강** — target-weight 리서치 백테스트가 20일 평균 거래량을 비용 계산에 전달하고 participation/slippage metrics 기록
+- [x] **research benchmark coverage guard 추가** — EW B&H 벤치마크 일부 종목 결측 시 후보 benchmark excess를 신뢰하지 않고 `INSUFFICIENT_BENCHMARK_DATA`로 fail-closed 차단
 - [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
@@ -1537,4 +1539,4 @@ quant_trader/
 
 > 📌 **이 문서는 개발 진행에 따라 지속적으로 업데이트됩니다.**  
 > 상세 파일별 역할·데이터 흐름은 `docs/PROJECT_GUIDE.md` 참고.
-> **최종 수정**: 2026-05-08 (target-weight research dynamic slippage 반영)
+> **최종 수정**: 2026-05-08 (research benchmark coverage guard 반영)
