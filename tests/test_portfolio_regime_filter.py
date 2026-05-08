@@ -310,3 +310,43 @@ class TestPortfolioRiskEventGuards:
         assert result["blackswan_buy_blocks"] == 1
         assert result["blackswan_recovery_buys"] == 1
         assert result["skipped_reasons"]["blackswan_cooldown"] == 1
+
+
+def test_portfolio_backtester_aborts_when_liquidity_filter_removes_all_symbols(monkeypatch):
+    from backtest.portfolio_backtester import PortfolioBacktester
+    from core.watchlist_manager import WatchlistManager
+
+    class _Config:
+        strategies = {}
+        risk_params = {
+            "liquidity_filter": {
+                "enabled": True,
+                "min_avg_trading_value_20d_krw": 5_000_000_000,
+                "strict": True,
+            }
+        }
+
+    monkeypatch.setattr(
+        WatchlistManager,
+        "liquidity_filter_report",
+        lambda self, symbols, as_of_end=None, data_collector=None: {
+            "enabled": True,
+            "input_symbols": list(symbols),
+            "passed_symbols": [],
+            "excluded_symbols": list(symbols),
+            "symbols": {
+                symbol: {"passed": False, "reason": "below_min_avg_trading_value"}
+                for symbol in symbols
+            },
+        },
+    )
+
+    result = PortfolioBacktester(_Config()).run(
+        symbols=["LOW01", "LOW02"],
+        strategy_name="scoring",
+        initial_capital=100_000.0,
+        start_date="2025-01-01",
+        end_date="2025-12-31",
+    )
+
+    assert result == {}
