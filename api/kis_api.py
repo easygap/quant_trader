@@ -859,15 +859,70 @@ class KISApi:
     # 미체결 주문 조회 (주문 중복 방지용)
     # =============================================================
 
-    def has_unfilled_orders(self, symbol: str) -> bool:
-        """
-        해당 종목에 대한 미체결 주문이 있는지 조회.
-        주문 전 중복 방지·타이밍 리스크 대응용. 실패(API 오류/타임아웃/응답 형식 상이) 시 False 반환하여
-        OrderGuard(TTL)에만 의존(주문 차단하지 않음).
+    @staticmethod
+    def _symbol_from_order_row(row: Dict[str, Any]) -> str:
+        if not row or not isinstance(row, dict):
+            return ""
+        return str(
+            row.get("pdno")
+            or row.get("PDNO")
+            or row.get("shtn_pdno")
+            or row.get("SHTN_PDNO")
+            or ""
+        ).strip()
 
-        Returns:
-            True: 미체결 주문이 있음(주문 보류 권장). False: 없음 또는 조회 실패.
+    @staticmethod
+    def _remaining_qty_from_order_row(row: Dict[str, Any]) -> int:
+        if not row or not isinstance(row, dict):
+            return 0
+        remaining_fields = (
+            ("rmn_qty", row.get("rmn_qty")),
+            ("RMN_QTY", row.get("RMN_QTY")),
+            ("nccs_qty", row.get("nccs_qty")),
+            ("NCCS_QTY", row.get("NCCS_QTY")),
+        )
+        saw_remaining_field = False
+        for _, value in remaining_fields:
+            if value is None or value == "":
+                continue
+            saw_remaining_field = True
+            try:
+                qty = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                return qty
+        if saw_remaining_field:
+            return 0
+
+        ordered_qty_fields = (
+            ("ord_qty", row.get("ord_qty")),
+            ("ORD_QTY", row.get("ORD_QTY")),
+        )
+        for _, value in ordered_qty_fields:
+            if value is None or value == "":
+                continue
+            try:
+                qty = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                return qty
+        return 0
+
+    def get_unfilled_order_status(self, symbol: str) -> Dict[str, Any]:
         """
+        해당 종목 미체결 주문 조회 상태를 반환한다.
+        checked=False면 API 실패/응답 이상이라 live 주문은 fail-closed로 막아야 한다.
+        """
+        target_symbol = str(symbol or "").strip()
+        if not self._is_configured() or not self.cano:
+            return {
+                "checked": False,
+                "has_unfilled": False,
+                "reason": "kis_not_configured",
+                "orders": [],
+            }
         try:
             tr_id = "VTTC8001R" if self.use_mock else "TTTC8001R"
             today = datetime.now().strftime("%Y%m%d")
@@ -878,7 +933,7 @@ class KISApi:
                 "INQR_END_DT": today,
                 "SLL_BUY_DVSN_CD": "00",  # 전체
                 "CCLD_DVSN": "02",        # 미체결
-                "PDNO": symbol,
+                "PDNO": target_symbol,
                 "ORD_NO": "",
                 "INQR_DVSN": "00",
             }
@@ -889,34 +944,89 @@ class KISApi:
                 params=params,
             )
             if not data or data.get("rt_cd") != "0":
-                return False
+                return {
+                    "checked": False,
+                    "has_unfilled": False,
+                    "reason": "kis_unfilled_query_failed",
+                    "message": (data or {}).get("msg1") if isinstance(data, dict) else "API 응답 없음",
+                    "orders": [],
+                }
             output = data.get("output1") or data.get("output") or []
             if isinstance(output, dict):
                 output = [output] if output else []
-            for item in output:
-                if isinstance(item, dict) and item.get("pdno", "").strip() == symbol.strip():
-                    try:
-                        qty = int(item.get("ord_qty", 0) or item.get("rmn_qty", 0) or 0)
-                    except (TypeError, ValueError):
-                        qty = 0
-                    if qty > 0:
-                        logger.info("종목 {} 미체결 주문 존재 — 중복 주문 방지를 위해 이번 주문을 보류합니다.", symbol)
-                        return True
-            return False
-        except Exception as e:
-            logger.debug("미체결 조회 실패(OrderGuard만 적용): {} — {}", symbol, e)
-            return False
+            if not isinstance(output, list):
+                return {
+                    "checked": False,
+                    "has_unfilled": False,
+                    "reason": "kis_unfilled_output_invalid",
+                    "orders": [],
+                }
 
-    def get_open_orders(self) -> list:
+            orders = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                row_symbol = self._symbol_from_order_row(item)
+                if row_symbol != target_symbol:
+                    continue
+                remaining_qty = self._remaining_qty_from_order_row(item)
+                if remaining_qty <= 0:
+                    continue
+                orders.append({
+                    "symbol": row_symbol,
+                    "remaining_qty": remaining_qty,
+                    "order_price": item.get("ord_unpr") or item.get("ORD_UNPR") or "",
+                    "buy_sell": item.get("sll_buy_dvsn_cd") or item.get("SLL_BUY_DVSN_CD") or "",
+                    "order_no": item.get("odno") or item.get("ODNO") or item.get("ord_no") or "",
+                    "order_time": item.get("ord_tmd") or item.get("ORD_TMD") or "",
+                })
+            return {
+                "checked": True,
+                "has_unfilled": bool(orders),
+                "reason": "ok",
+                "orders": orders,
+            }
+        except Exception as e:
+            logger.warning("미체결 조회 실패 — live 주문은 보류 필요: {} — {}", target_symbol, e)
+            return {
+                "checked": False,
+                "has_unfilled": False,
+                "reason": "kis_unfilled_query_exception",
+                "error": str(e),
+                "orders": [],
+            }
+
+    def has_unfilled_orders(self, symbol: str) -> bool:
         """
-        당일 계좌 전체 미체결 주문 조회 (재시작 복구·운영 점검용).
+        해당 종목에 대한 미체결 주문이 있는지 조회.
+        호환용 bool API. live 주문 전에는 get_unfilled_order_status()로 조회 성공 여부까지 확인한다.
+
+        Returns:
+            True: 미체결 주문이 있음. False: 없음 또는 조회 실패.
+        """
+        status = self.get_unfilled_order_status(symbol)
+        if not status.get("checked"):
+            logger.debug("미체결 조회 상태 불명(호환 API는 False 반환): {} — {}", symbol, status.get("reason"))
+            return False
+        if status.get("has_unfilled"):
+            logger.info("종목 {} 미체결 주문 존재 — 중복 주문 방지를 위해 이번 주문을 보류합니다.", symbol)
+            return True
+        return False
+
+    def get_open_orders_status(self) -> Dict[str, Any]:
+        """
+        당일 계좌 전체 미체결 주문 조회 상태 (재시작 복구·운영 점검용).
         inquire-daily-ccld + CCLD_DVSN=02. PDNO 비우면 전체(증권사 스펙에 따라 전종목 또는 오류 시 []).
 
         Returns:
-            정규화된 dict 목록(symbol, remaining_qty, order_price, buy_sell, order_no 등). 실패 시 [].
+            checked=False면 조회 실패/응답 이상. checked=True면 orders가 정상 조회 결과.
         """
         if not self._is_configured() or not self.cano:
-            return []
+            return {
+                "checked": False,
+                "reason": "kis_not_configured",
+                "orders": [],
+            }
         try:
             self._ensure_token()
             tr_id = "VTTC8001R" if self.use_mock else "TTTC8001R"
@@ -939,32 +1049,27 @@ class KISApi:
                 params=params,
             )
             if not data or data.get("rt_cd") != "0":
-                return []
+                return {
+                    "checked": False,
+                    "reason": "kis_open_orders_query_failed",
+                    "message": (data or {}).get("msg1") if isinstance(data, dict) else "API 응답 없음",
+                    "orders": [],
+                }
             output = data.get("output1") or data.get("output") or []
             if isinstance(output, dict):
                 output = [output] if output else []
             if not isinstance(output, list):
-                return []
+                return {
+                    "checked": False,
+                    "reason": "kis_open_orders_output_invalid",
+                    "orders": [],
+                }
             normalized = []
             for item in output:
                 if not isinstance(item, dict):
                     continue
-                sym = str(
-                    item.get("pdno") or item.get("PDNO") or item.get("shtn_pdno") or ""
-                ).strip()
-                raw_rmn = (
-                    item.get("rmn_qty")
-                    or item.get("RMN_QTY")
-                    or item.get("nccs_qty")
-                    or item.get("NCCS_QTY")
-                    or item.get("ord_qty")
-                    or item.get("ORD_QTY")
-                    or 0
-                )
-                try:
-                    rmn = int(float(raw_rmn))
-                except (TypeError, ValueError):
-                    rmn = 0
+                sym = self._symbol_from_order_row(item)
+                rmn = self._remaining_qty_from_order_row(item)
                 if rmn <= 0:
                     continue
                 normalized.append({
@@ -975,10 +1080,27 @@ class KISApi:
                     "order_no": item.get("odno") or item.get("ODNO") or item.get("ord_no") or "",
                     "order_time": item.get("ord_tmd") or item.get("ORD_TMD") or "",
                 })
-            return normalized
+            return {
+                "checked": True,
+                "reason": "ok",
+                "orders": normalized,
+            }
         except Exception as e:
             logger.warning("미체결 전체 조회 실패: {}", e)
-            return []
+            return {
+                "checked": False,
+                "reason": "kis_open_orders_query_exception",
+                "error": str(e),
+                "orders": [],
+            }
+
+    def get_open_orders(self) -> list:
+        """
+        당일 계좌 전체 미체결 주문 조회 (재시작 복구·운영 점검용).
+        호환용 list API. 실패 시 []를 반환하므로 복구 로직은 get_open_orders_status()를 우선 사용한다.
+        """
+        status = self.get_open_orders_status()
+        return status.get("orders", []) if status.get("checked") else []
 
     # =============================================================
     # 잔고 조회
