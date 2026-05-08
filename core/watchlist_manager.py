@@ -269,44 +269,128 @@ class WatchlistManager:
           데이터 없는 종목을 통과시키면 거래대금 1억 미만 종목이 진입 대상에 포함될 위험.
         strict=false: 데이터 없는 종목은 통과(기존 동작). 수동 watchlist에서 직접 지정한 종목 유지용.
         """
-        risk_params = getattr(self.config, "risk_params", {}) or {}
-        liq = risk_params.get("liquidity_filter") or {}
-        if not liq.get("enabled", False):
-            return list(symbols) if symbols else []
-        min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5_000_000_000))
-        if min_krw <= 0:
-            return list(symbols) if symbols else []
-        strict = liq.get("strict", True)
+        report = self.liquidity_filter_report(
+            symbols,
+            as_of_end=as_of_end,
+            data_collector=data_collector,
+        )
+        if not report.get("enabled", False):
+            return report["passed_symbols"]
 
-        collector = data_collector if data_collector is not None else DataCollector(self.config)
-        passed = []
-        skipped_no_data = []
-        for sym in symbols:
-            avg_val = self._compute_avg_trading_value_20d(collector, sym, as_of_end=as_of_end)
-            if avg_val is not None and avg_val >= min_krw:
-                passed.append(sym)
-            elif avg_val is None:
-                if strict:
-                    skipped_no_data.append(sym)
-                else:
-                    passed.append(sym)
-            else:
-                logger.debug(
-                    "유동성 필터 제외: {} (20일 평균 거래대금 {:.0f}억 원 < {:.0f}억 원)",
-                    sym, avg_val / 1e8, min_krw / 1e8,
-                )
+        skipped_no_data = [
+            sym
+            for sym, detail in report.get("symbols", {}).items()
+            if detail.get("reason") == "missing_liquidity_data"
+        ]
         if skipped_no_data:
             logger.warning(
                 "유동성 필터(strict): 거래대금 데이터 없어 제외된 종목 {}개: {}",
                 len(skipped_no_data), skipped_no_data[:10],
             )
-        excluded = len(symbols) - len(passed)
+
+        excluded = len(report["input_symbols"]) - len(report["passed_symbols"])
         if excluded > 0:
             logger.info(
                 "유동성 필터 적용: {}개 중 {}개 통과 (20일 평균 거래대금 >= {:.0f}억 원, strict={})",
-                len(symbols), len(passed), min_krw / 1e8, strict,
+                len(report["input_symbols"]),
+                len(report["passed_symbols"]),
+                report.get("min_avg_trading_value_20d_krw", 0) / 1e8,
+                report.get("strict", True),
             )
-        return passed
+        return report["passed_symbols"]
+
+    def liquidity_filter_report(
+        self,
+        symbols: list[str],
+        as_of_end: str | None = None,
+        data_collector: DataCollector | None = None,
+    ) -> dict:
+        """20일 평균 거래대금 기준 통과/제외 결과와 사유를 반환한다."""
+        normalized = self._normalize_symbols(symbols)
+        risk_params = getattr(self.config, "risk_params", {}) or {}
+        liq = risk_params.get("liquidity_filter") or {}
+        min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5_000_000_000))
+        strict = bool(liq.get("strict", True))
+
+        report = {
+            "enabled": bool(liq.get("enabled", False)),
+            "as_of_end": as_of_end,
+            "min_avg_trading_value_20d_krw": min_krw,
+            "strict": strict,
+            "input_symbols": normalized,
+            "passed_symbols": [],
+            "excluded_symbols": [],
+            "symbols": {},
+        }
+
+        if not liq.get("enabled", False):
+            report["passed_symbols"] = list(normalized)
+            report["symbols"] = {
+                sym: {
+                    "passed": True,
+                    "avg_trading_value_20d_krw": None,
+                    "reason": "liquidity_filter_disabled",
+                }
+                for sym in normalized
+            }
+            return report
+
+        if min_krw <= 0:
+            report["passed_symbols"] = list(normalized)
+            report["symbols"] = {
+                sym: {
+                    "passed": True,
+                    "avg_trading_value_20d_krw": None,
+                    "reason": "non_positive_liquidity_threshold",
+                }
+                for sym in normalized
+            }
+            return report
+
+        collector = data_collector if data_collector is not None else DataCollector(self.config)
+        passed = []
+        excluded = []
+        details = {}
+        for sym in normalized:
+            avg_val = self._compute_avg_trading_value_20d(collector, sym, as_of_end=as_of_end)
+            if avg_val is not None and avg_val >= min_krw:
+                passed.append(sym)
+                details[sym] = {
+                    "passed": True,
+                    "avg_trading_value_20d_krw": round(float(avg_val), 2),
+                    "reason": "passed",
+                }
+            elif avg_val is None:
+                if strict:
+                    excluded.append(sym)
+                    details[sym] = {
+                        "passed": False,
+                        "avg_trading_value_20d_krw": None,
+                        "reason": "missing_liquidity_data",
+                    }
+                else:
+                    passed.append(sym)
+                    details[sym] = {
+                        "passed": True,
+                        "avg_trading_value_20d_krw": None,
+                        "reason": "missing_liquidity_data_allowed",
+                    }
+            else:
+                excluded.append(sym)
+                details[sym] = {
+                    "passed": False,
+                    "avg_trading_value_20d_krw": round(float(avg_val), 2),
+                    "reason": "below_min_avg_trading_value",
+                }
+                logger.debug(
+                    "유동성 필터 제외: {} (20일 평균 거래대금 {:.0f}억 원 < {:.0f}억 원)",
+                    sym, avg_val / 1e8, min_krw / 1e8,
+                )
+
+        report["passed_symbols"] = passed
+        report["excluded_symbols"] = excluded
+        report["symbols"] = details
+        return report
 
     @staticmethod
     def _compute_avg_trading_value_20d(
