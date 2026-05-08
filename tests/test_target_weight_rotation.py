@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 
 class FakeCollector:
@@ -146,7 +147,66 @@ def test_target_weight_plan_records_liquidity_diagnostics():
     assert liquidity["symbols"]["AAA"]["complete"] is True
     assert liquidity["symbols"]["AAA"]["observations"] == 20
     assert liquidity["symbols"]["AAA"]["avg_daily_value"] > 0
+    assert plan.diagnostics["price_last_dates"]["AAA"] == "2025-03-10"
+    assert plan.diagnostics["benchmark_last_date"] == "2025-03-10"
+    assert plan.to_dict()["diagnostics"]["price_last_dates"]["AAA"] == "2025-03-10"
     assert plan.diagnostics["position_avg_prices_before"] == {"AAA": 95.0}
+
+
+def test_target_weight_plan_blocks_stale_symbol_price_after_ffill():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    frames = _frames_for_rotation()
+    frames["BBB"] = frames["BBB"][frames["BBB"]["date"] < pd.Timestamp("2025-03-10")]
+
+    with pytest.raises(ValueError, match="target_weight_stale_price_data") as exc:
+        build_target_weight_plan(
+            symbols=["AAA", "BBB", "CCC"],
+            params={
+                "target_top_n": 2,
+                "target_exposure": 0.80,
+                "short_lookback": 2,
+                "long_lookback": 3,
+                "short_weight": 0.5,
+                "score_mode": "benchmark_excess",
+                "benchmark_symbol": "KS11",
+            },
+            cash=100_000.0,
+            as_of_date="2025-03-10",
+            collector=FakeCollector(frames),
+        )
+
+    message = str(exc.value)
+    assert "trade_day=2025-03-10" in message
+    assert "BBB=2025-03-07" in message
+
+
+def test_target_weight_plan_blocks_stale_benchmark_price_for_excess_scores():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    frames = _frames_for_rotation()
+    frames["KS11"] = frames["KS11"][frames["KS11"]["date"] < pd.Timestamp("2025-03-07")]
+
+    with pytest.raises(ValueError, match="target_weight_benchmark_price_stale") as exc:
+        build_target_weight_plan(
+            symbols=["AAA", "BBB", "CCC"],
+            params={
+                "target_top_n": 2,
+                "target_exposure": 0.80,
+                "short_lookback": 2,
+                "long_lookback": 3,
+                "short_weight": 0.5,
+                "score_mode": "benchmark_excess",
+                "benchmark_symbol": "KS11",
+            },
+            cash=100_000.0,
+            as_of_date="2025-03-10",
+            collector=FakeCollector(frames),
+        )
+
+    message = str(exc.value)
+    assert "score_day=2025-03-07" in message
+    assert "benchmark_latest=2025-03-06" in message
 
 
 def test_target_weight_rotation_uses_prior_day_scores_for_rebalance():
