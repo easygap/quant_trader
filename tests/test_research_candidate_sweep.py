@@ -234,6 +234,41 @@ def test_buy_and_hold_benchmark_tolerates_failed_symbol_fetch(monkeypatch):
 
     assert benchmark["universe_size"] == 0
     assert benchmark["benchmark_symbols"] == []
+    assert benchmark["benchmark_coverage_complete"] is False
+
+
+def test_buy_and_hold_benchmark_blocks_partial_symbol_coverage(monkeypatch):
+    import pandas as pd
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import buy_and_hold_benchmark_with_returns
+
+    class PartialCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            if symbol == "005930":
+                return pd.DataFrame(
+                    {"close": [100.0, 110.0]},
+                    index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                )
+            raise RuntimeError(f"missing {symbol}")
+
+    monkeypatch.setattr(data_collector, "DataCollector", PartialCollector)
+
+    benchmark, daily_returns = buy_and_hold_benchmark_with_returns(
+        ["005930", "000660"],
+        "2024-01-01",
+        "2024-01-05",
+        10_000_000,
+    )
+
+    assert daily_returns.empty
+    assert benchmark["universe_size"] == 0
+    assert benchmark["benchmark_symbols"] == ["005930"]
+    assert benchmark["missing_benchmark_symbols"] == ["000660"]
+    assert benchmark["benchmark_coverage_ratio"] == 50.0
+    assert benchmark["benchmark_coverage_complete"] is False
+    assert benchmark["benchmark_unusable_reason"] == "incomplete_benchmark_coverage"
 
 
 def test_candidate_to_strategy_metrics_maps_research_fields():
@@ -324,6 +359,45 @@ def test_build_candidate_record_keeps_exposure_matched_excess_diagnostic():
     assert rec["metrics"]["exposure_matched_excess_sharpe"] == 0.4
 
 
+def test_build_candidate_record_blocks_alpha_when_benchmark_incomplete():
+    from tools.research_candidate_sweep import CandidateSpec, build_candidate_record
+
+    rec = build_candidate_record(
+        CandidateSpec("strong_but_untrusted", "relative_strength_rotation", {}, "strong"),
+        {
+            "total_return": 50.0,
+            "sharpe": 1.2,
+            "profit_factor": 2.0,
+            "mdd": -5.0,
+            "total_trades": 60,
+            "wf_positive_rate": 1.0,
+            "wf_sharpe_positive_rate": 1.0,
+            "wf_windows": 5,
+            "wf_total_trades": 60,
+            "ev_per_trade": 10_000,
+            "cost_adjusted_cagr": 12.0,
+            "turnover_per_year": 300.0,
+            "exposure_matched_bh_return": 20.0,
+            "exposure_matched_bh_sharpe": 0.5,
+        },
+        {
+            "ew_bh_return": 0,
+            "ew_bh_sharpe": 0,
+            "universe_size": 0,
+            "benchmark_symbols": ["005930"],
+            "input_universe_size": 2,
+            "missing_benchmark_symbols": ["000660"],
+            "benchmark_coverage_complete": False,
+            "benchmark_unusable_reason": "incomplete_benchmark_coverage",
+        },
+    )
+
+    assert rec["alpha_pass"] is False
+    assert rec["metrics"]["benchmark_excess_return"] == 0
+    assert rec["metrics"]["benchmark_excess_sharpe"] == 0
+    assert "benchmark_data_incomplete=incomplete_benchmark_coverage" in rec["rejection_reasons"]
+
+
 def test_sort_candidates_prefers_alpha_pass_over_high_non_alpha_score():
     from tools.research_candidate_sweep import sort_candidate_records
 
@@ -363,6 +437,36 @@ def test_decision_summary_blocks_no_alpha_candidate():
 
     assert decision["action"] == "NO_ALPHA_CANDIDATE"
     assert decision["eligible_candidate_ids"] == []
+
+
+def test_decision_summary_blocks_incomplete_benchmark_coverage():
+    from tools.research_candidate_sweep import build_decision_summary
+
+    decision = build_decision_summary(
+        [
+            {
+                "candidate_id": "looks_good",
+                "alpha_pass": True,
+                "promotion": {"status": "provisional_paper_candidate"},
+            }
+        ],
+        walk_forward_enabled=True,
+        benchmark={
+            "ew_bh_return": 0,
+            "ew_bh_sharpe": 0,
+            "universe_size": 0,
+            "benchmark_symbols": ["005930"],
+            "input_universe_size": 2,
+            "missing_benchmark_symbols": ["000660"],
+            "benchmark_coverage_complete": False,
+            "benchmark_unusable_reason": "incomplete_benchmark_coverage",
+        },
+    )
+
+    assert decision["action"] == "INSUFFICIENT_BENCHMARK_DATA"
+    assert decision["eligible_candidate_ids"] == []
+    assert decision["alpha_candidate_ids"] == []
+    assert "000660" in decision["reason"]
 
 
 def test_decision_summary_sends_quick_alpha_to_full_walk_forward():
