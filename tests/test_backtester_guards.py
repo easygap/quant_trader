@@ -29,6 +29,80 @@ def _make_df(n=60, volume=1000):
     )
 
 
+class _BacktestGuardConfig:
+    settings = {}
+    strategies = {}
+
+    def __init__(
+        self,
+        *,
+        gap_enabled=True,
+        skip_earnings_days=0,
+        blackswan_enabled=False,
+        recovery_scale=0.5,
+    ):
+        self._trading = {"skip_earnings_days": skip_earnings_days}
+        self._risk_params = {
+            "transaction_costs": {
+                "commission_rate": 0.0,
+                "tax_rate": 0.0,
+                "slippage": 0.0,
+                "slippage_ticks": 0,
+                "dynamic_slippage": {"enabled": False},
+            },
+            "stop_loss": {"type": "fixed", "fixed_rate": 0.03},
+            "take_profit": {"fixed_rate": 0.50, "partial_exit": False},
+            "trailing_stop": {"enabled": False},
+            "position_sizing": {"max_risk_per_trade": 0.01, "initial_capital": 100_000_000},
+            "diversification": {"max_position_ratio": 0.20, "max_investment_ratio": 0.70},
+            "position_limits": {"min_holding_days": 0, "max_holding_days": 0},
+            "liquidity_filter": {"backtest_max_participation_rate": 1.0},
+            "gap_risk": {
+                "enabled": gap_enabled,
+                "gap_down_threshold": -0.03,
+                "gap_up_entry_block": 0.05,
+            },
+            "blackswan": {
+                "enabled": blackswan_enabled,
+                "single_stock_threshold": -0.05,
+                "portfolio_threshold": -0.03,
+                "consecutive_days": 3,
+                "consecutive_threshold": -0.02,
+                "cooldown_minutes": 60,
+                "recovery_minutes": 60,
+                "recovery_scale": recovery_scale,
+            },
+            "backtest_regime_filter": {"enabled": False},
+        }
+
+    @property
+    def risk_params(self):
+        return self._risk_params
+
+    @property
+    def trading(self):
+        return self._trading
+
+
+def _make_guard_df(close, *, open_=None, signals=None, volume=1_000_000):
+    dates = pd.bdate_range("2024-01-01", periods=len(close))
+    close = np.array(close, dtype=float)
+    open_ = close if open_ is None else np.array(open_, dtype=float)
+    df = pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close),
+            "low": np.minimum(open_, close),
+            "close": close,
+            "volume": [volume] * len(close),
+            "signal": signals or ["HOLD"] * len(close),
+        },
+        index=dates,
+    )
+    df["_avg_daily_volume"] = df["volume"]
+    return df
+
+
 class TestLiquidityFilter:
     """백테스터 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소."""
 
@@ -162,3 +236,78 @@ class TestZScoreSafety:
         assert not z_scores.isna().all(), "전부 NaN"
         # 표준편차 0이면 z_score는 0이어야 함
         assert (z_scores.dropna() == 0).all(), f"z_score가 0이 아님: {z_scores.dropna().unique()}"
+
+
+class TestBacktestRiskEventGuards:
+    """paper/live 리스크 이벤트를 단일종목 백테스트에도 반영."""
+
+    def test_gap_up_blocks_new_buy(self):
+        from backtest.backtester import Backtester
+
+        bt = Backtester(_BacktestGuardConfig(gap_enabled=True))
+        df = _make_guard_df(
+            [100.0, 100.0, 100.0],
+            open_=[100.0, 106.0, 100.0],
+            signals=["HOLD", "BUY", "HOLD"],
+        )
+
+        result = bt._simulate(df, initial_capital=100_000.0)
+
+        assert [t["action"] for t in result["trades"]] == []
+        assert result["gap_up_buy_blocks"] == 1
+
+    def test_earnings_window_blocks_new_buy(self):
+        from backtest.backtester import Backtester
+
+        bt = Backtester(_BacktestGuardConfig(skip_earnings_days=3))
+        df = _make_guard_df(
+            [100.0, 100.0, 100.0],
+            signals=["HOLD", "BUY", "HOLD"],
+        )
+        df["earnings_date"] = pd.NaT
+        df.loc[df.index[1], "earnings_date"] = df.index[1]
+
+        result = bt._simulate(df, initial_capital=100_000.0)
+
+        assert [t["action"] for t in result["trades"]] == []
+        assert result["earnings_buy_blocks"] == 1
+
+    def test_gap_down_exit_preempts_close_stop_loss(self):
+        from backtest.backtester import Backtester
+
+        bt = Backtester(_BacktestGuardConfig(gap_enabled=True))
+        df = _make_guard_df(
+            [100.0, 96.0, 96.0],
+            open_=[100.0, 95.0, 96.0],
+            signals=["BUY", "HOLD", "HOLD"],
+        )
+
+        result = bt._simulate(df, initial_capital=100_000.0)
+        actions = [t["action"] for t in result["trades"]]
+
+        assert actions == ["BUY", "GAP_DOWN"]
+        assert result["gap_down_exits"] == 1
+
+    def test_blackswan_exit_blocks_cooldown_and_scales_recovery_buy(self):
+        from backtest.backtester import Backtester
+
+        bt = Backtester(
+            _BacktestGuardConfig(
+                gap_enabled=False,
+                blackswan_enabled=True,
+                recovery_scale=0.5,
+            )
+        )
+        df = _make_guard_df(
+            [100.0, 94.0, 94.0, 100.0],
+            open_=[100.0, 100.0, 94.0, 100.0],
+            signals=["BUY", "HOLD", "BUY", "BUY"],
+        )
+
+        result = bt._simulate(df, initial_capital=100_000.0)
+        actions = [t["action"] for t in result["trades"]]
+
+        assert actions == ["BUY", "BLACKSWAN", "BUY"]
+        assert result["blackswan_triggers"] == 1
+        assert result["blackswan_buy_blocks"] == 1
+        assert result["blackswan_recovery_buys"] == 1
