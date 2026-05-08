@@ -350,3 +350,74 @@ def test_portfolio_backtester_aborts_when_liquidity_filter_removes_all_symbols(m
     )
 
     assert result == {}
+
+
+def test_portfolio_backtester_passes_avg_daily_volume_to_transaction_costs():
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    class RecordingRiskManager:
+        def __init__(self):
+            self.calls = []
+
+        def _signal_scale(self, score):
+            return 1.0
+
+        def calculate_transaction_costs(
+            self,
+            price,
+            quantity,
+            action="BUY",
+            avg_daily_volume=None,
+            avg_price=None,
+        ):
+            self.calls.append(
+                {
+                    "action": action,
+                    "avg_daily_volume": avg_daily_volume,
+                    "quantity": quantity,
+                    "avg_price": avg_price,
+                }
+            )
+            participation = quantity / avg_daily_volume if avg_daily_volume else 0
+            multiplier = 4.0 if participation >= 1.0 else 1.0
+            return {
+                "commission": 0.0,
+                "tax": 0.0,
+                "capital_gains_tax": 0.0,
+                "slippage": quantity * multiplier,
+                "execution_price": price,
+                "slippage_multiplier": multiplier,
+                "participation_rate": participation,
+            }
+
+    sym = "SLIP01"
+    df = _make_portfolio_guard_df(
+        [100.0, 101.0, 102.0],
+        signals=["BUY", "HOLD", "SELL"],
+    )
+    df["volume"] = [100.0, 200.0, 300.0]
+
+    pbt = PortfolioBacktester(_PortfolioGuardConfig(gap_enabled=False))
+    recorder = RecordingRiskManager()
+    pbt.risk_manager = recorder
+
+    result = pbt._simulate_portfolio(
+        symbols=[sym],
+        signals={sym: df},
+        data={},
+        all_dates=list(df.index),
+        initial_capital=100_000.0,
+    )
+
+    actions = [call["action"] for call in recorder.calls]
+    assert actions == ["BUY", "SELL"]
+    assert recorder.calls[0]["avg_daily_volume"] == 100.0
+    assert recorder.calls[1]["avg_daily_volume"] == 200.0
+    buy_trade, sell_trade = result["trades"]
+    assert [buy_trade["action"], sell_trade["action"]] == ["BUY", "SELL"]
+    assert buy_trade["participation_rate"] == pytest.approx(2.0)
+    assert sell_trade["participation_rate"] == pytest.approx(1.0)
+    assert buy_trade["slippage_multiplier"] == 4.0
+    assert sell_trade["slippage_multiplier"] == 4.0
+    assert buy_trade["slippage_cost"] == 800.0
+    assert sell_trade["slippage_cost"] == 800.0
