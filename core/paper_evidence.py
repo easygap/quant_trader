@@ -163,20 +163,11 @@ def _already_recorded(jsonl_path: Path, date_str: str, *, allow_provisional: boo
     if not jsonl_path.exists():
         return False
     try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        for line in lines[-10:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-                if rec.get("date") == date_str:
-                    if allow_provisional and rec.get("benchmark_status") == "provisional":
-                        return False  # provisional이면 finalize 가능
-                    return True
-            except json.JSONDecodeError:
-                continue
+        for rec in reversed(_read_all_evidence(jsonl_path)):
+            if rec.get("date") == date_str:
+                if allow_provisional and rec.get("benchmark_status") == "provisional":
+                    return False  # provisional이면 finalize 가능
+                return True
     except Exception:
         pass
     return False
@@ -231,7 +222,9 @@ def get_canonical_records(strategy: str) -> list[dict]:
     all_records = _read_all_evidence(jsonl_path)
     by_date: dict[str, dict] = {}
     for r in all_records:
-        date = r["date"]
+        date = r.get("date")
+        if not date:
+            continue
         prev = by_date.get(date)
         if prev is not None:
             prev_exec = prev.get("execution_backed", True)
@@ -239,7 +232,7 @@ def get_canonical_records(strategy: str) -> list[dict]:
             if prev_exec and not curr_exec:
                 continue
         by_date[date] = r  # later entry wins unless it would downgrade real paper to shadow
-    return list(by_date.values())
+    return [by_date[date] for date in sorted(by_date)]
 
 
 # ═══════════════════════════════════════════════════════════════
