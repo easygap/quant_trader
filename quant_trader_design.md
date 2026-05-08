@@ -120,6 +120,7 @@
 - Follow-up pre-trade risk validation (2026-05-06): target-weight pilot adapter가 주문 제출 전에 수수료/세금/동적 슬리피지 예상 체결가를 반영해 projected cash, cash ratio, investment ratio, position ratio, max positions를 검증한다. 위반 시 `target_weight_pre_trade_risk_failed`로 readiness/execute/evidence 재사용을 fail-closed 차단한다.
 - Follow-up pilot approval guard (2026-05-06): target-weight pilot 승인 시 `paper_pilot_control.py --enable`이 readiness audit을 재실행해 requested cap, launch readiness, 유동성 preflight, 비용 반영 pre-trade risk를 통과할 때만 auth를 기록한다.
 - Follow-up completed rerun block (2026-05-06): same-candidate/trade-day 실행 완료 세션은 `--allow-rerun`을 줘도 재실행하지 않는다. `--allow-rerun`은 부분 실행/중단 세션 복구용으로 제한한다.
+- Follow-up backtest/research liquidity universe filter (2026-05-08): `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, `PortfolioBacktester`와 `research_candidate_sweep`이 평가 시작일 기준 20일 평균 거래대금 하한 미만·strict 데이터 누락 종목을 universe에서 사전 제외한다.
 - Follow-up cap validation artifact (2026-05-07): target-weight `--execute`가 pilot cap validation에서 막혀도 주문 없이 session JSON artifact를 남기고, runtime pilot session/evidence/fill reconciliation은 쓰지 않는다.
 - Follow-up promotion proof guard (2026-05-07): target-weight promotion package/live gate는 verified `pilot_paper` execution proof만 promotable day로 인정한다. liquidity/pre-trade/order/fill/position complete와 plan/execution params hash 일치를 요구한다.
 - 운영 체크리스트: `reports/daily_ops_checklist.md`, `reports/weekly_ops_checklist.md`, `reports/experiment_stop_conditions.md`
@@ -674,11 +675,12 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 **⚠️ 유동성 필터 (저유동 종목 진입 제외)**
 
 - **문제**: 시가총액 필터만 있으면 **일평균 거래대금**이 매우 낮은 종목(예: 하루 거래량 1억 원 미만)이 watchlist에 포함될 수 있습니다. 이런 종목은 실전에서 포지션 진입/청산 시 **슬리피지**가 백테스트 가정(0.05%)보다 훨씬 커져, **백테스트 수익이 실전에서 손실**로 바뀌는 대표 원인입니다. `dynamic_slippage`로 일부 보정은 가능하지만, 아예 **진입 대상에서 제외**하는 것이 더 안전합니다.
-- **대응 (2단계 필터)**:
+- **대응 (3단계 필터)**:
   1. **Watchlist 구축 시점**: `WatchlistManager.resolve()` 시 20일 평균 거래대금(`close × volume`) 하한 미만 종목을 제외합니다.
      - **strict 모드** (기본 true): 거래대금 데이터를 조회할 수 없는 종목도 제외. 데이터 없는 종목이 자동 포함되는 위험을 방지합니다.
      - strict=false: 데이터 없으면 통과 (수동 watchlist에서 직접 지정한 종목 유지 용도).
   2. **주문 직전 재검증**: `OrderExecutor._execute_buy_impl()`에서 매수 직전에 `avg_daily_volume × price`로 추정 일평균 거래대금을 재확인합니다. watchlist 구축 이후 유동성이 변했을 수 있으므로, 하한 미만이면 매수를 거부합니다. `check_on_entry: true`(기본)로 활성화.
+  3. **백테스트/research universe 사전 제외**: `PortfolioBacktester.run()`과 `tools/research_candidate_sweep.py`가 평가 시작일 기준 `liquidity_filter_report()`를 사용해 저유동·데이터 누락 종목을 먼저 제외하고, research artifact에 입력 universe, 통과 universe, 제외 사유를 기록합니다.
 - **설정**: `config/risk_params.yaml` → `liquidity_filter`:
   - `enabled: true` (권장)
   - `min_avg_trading_value_20d_krw: 5e9` (50억 원)
@@ -1422,6 +1424,7 @@ quant_trader/
 - [x] **target-weight canonical bridge 추가** — `evaluate_and_promote.py --canonical`이 risk60_35를 canonical promotion bundle에 포함하고 `promotion_result.json`에서 provisional 상태 재현
 - [x] **target-weight paper/pilot adapter 추가** — portfolio-level plan, pilot cap validation, paper-only exact quantity order path 추가. Live gate는 변경 없음
 - [x] **target-weight liquidity preflight 추가** — 최근 20일 평균 거래대금 대비 주문 notional 기본 5% 초과 시 readiness/execute fail-closed 차단
+- [x] **백테스트/research universe 유동성 필터 추가** — 포트폴리오 백테스트와 research sweep이 20일 평균 거래대금 하한 미만 종목을 평가 전 제외하고 진단 기록
 - [x] **target-weight 비용 반영 pre-trade risk 추가** — 수수료/세금/동적 슬리피지 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 주문 전 차단하고 evidence snapshot에 기록
 - [x] **target-weight pilot enable guard 추가** — pilot auth 기록 전에 requested cap과 readiness audit을 재검증해 stale/undersized 승인 차단
 - [x] **target-weight completed rerun block 추가** — 완료된 same-candidate/trade-day 실행은 `--allow-rerun`으로도 재실행하지 않고, recovery rerun은 부분 실행/중단 세션으로 제한
