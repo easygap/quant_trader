@@ -215,7 +215,7 @@ def test_scheduler_startup_recovery_paper_mode_no_crash(monkeypatch):
 
 
 def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatch):
-    """live 재시작 복구에서 KIS 미체결 조회 실패를 0건처럼 조용히 넘기지 않는다."""
+    """live 재시작 복구에서 KIS 미체결 조회 실패 시 자동 보정을 건너뛴다."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -234,23 +234,41 @@ def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatc
 
     monkeypatch.setattr("core.scheduler.get_pending_failed_orders", lambda: [])
     monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+    op_events = []
+    sync_calls = []
+
+    def fake_log_op(*args, **kwargs):
+        op_events.append((args, kwargs))
+
+    def fake_sync_with_broker(auto_correct=True):
+        sync_calls.append(auto_correct)
+        return {"ok": True, "mismatches": [], "corrected": [], "message": "일치"}
+
+    monkeypatch.setattr("core.scheduler._log_op", fake_log_op)
     scheduler = Scheduler(strategy_name="scoring")
     old_mode = scheduler.config.trading.get("mode")
     try:
         scheduler.config.trading["mode"] = "live"
         scheduler._mode = "live"
         scheduler.discord = MagicMock()
-        scheduler.portfolio = SimpleNamespace(sync_with_broker=lambda auto_correct=True: None)
+        scheduler.portfolio = SimpleNamespace(sync_with_broker=fake_sync_with_broker)
         scheduler.trading_hours = SimpleNamespace(is_market_open=lambda: False)
         scheduler._restart_recovery_count = 0
 
         scheduler.startup_recovery()
 
+        assert sync_calls == [False]
         assert scheduler._restart_recovery_count == 1
         scheduler.discord.send_message.assert_called()
         message = scheduler.discord.send_message.call_args.args[0]
         assert "KIS 미체결 조회 실패" in message
         assert scheduler.discord.send_message.call_args.kwargs["critical"] is True
+        assert op_events
+        detail = op_events[-1][1]["detail"]
+        assert detail["broker_sync_ok"] is True
+        assert detail["broker_sync_mode"] == "check_only_auto_correct_skipped"
+        assert detail["broker_sync_auto_correct"] is False
+        assert detail["broker_sync_skip_reason"] == "kis_open_orders_query_failed"
     finally:
         scheduler.config.trading["mode"] = old_mode
 
