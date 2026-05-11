@@ -104,6 +104,34 @@ def _stable_payload_hash(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _material_fetch_error_keys(fetch_errors: dict[str, Any], universe: list[Any]) -> list[str]:
+    """Return fetch errors that affect the final canonical universe.
+
+    Universe discovery can probe many liquidity candidates before selecting the
+    final top-N universe. A failed liquidity probe for a symbol outside that
+    final universe is audit context, not a reason to invalidate the artifact.
+    """
+    universe_set = {str(symbol) for symbol in universe}
+    material: list[str] = []
+    for key, payload in fetch_errors.items():
+        key_text = str(key)
+        stage = payload.get("stage") if isinstance(payload, dict) else None
+        if key_text.startswith("liquidity:"):
+            symbol = key_text.split(":", 1)[1]
+            if symbol not in universe_set:
+                continue
+        elif stage == "universe_liquidity":
+            symbol = (
+                str(payload.get("symbol") or key_text)
+                if isinstance(payload, dict)
+                else key_text
+            )
+            if symbol not in universe_set:
+                continue
+        material.append(key_text)
+    return material
+
+
 def validate_canonical_metadata_integrity(metadata: dict[str, Any]) -> list[str]:
     """canonical metadata의 입력 snapshot과 평가 오류 상태를 검증한다."""
     issues: list[str] = []
@@ -176,7 +204,9 @@ def validate_canonical_metadata_integrity(metadata: dict[str, Any]) -> list[str]
     if not isinstance(fetch_errors, dict):
         issues.append("data_snapshot_manifest.fetch_errors 형식 오류.")
     elif fetch_errors:
-        issues.append(f"data snapshot 수집 오류 존재: {list(fetch_errors)[:5]}.")
+        material_fetch_errors = _material_fetch_error_keys(fetch_errors, universe)
+        if material_fetch_errors:
+            issues.append(f"data snapshot 수집 오류 존재: {material_fetch_errors[:5]}.")
 
     evaluation_errors = metadata.get("evaluation_errors")
     if not isinstance(evaluation_errors, dict):
