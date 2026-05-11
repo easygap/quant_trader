@@ -471,6 +471,7 @@ def validate_live_readiness(
             )
         promotable_days = _as_int(evidence.get("promotable_evidence_days")) or 0
         benchmark_final_ratio = _as_float(evidence.get("benchmark_final_ratio")) or 0
+        paper_sharpe = _as_float(evidence.get("paper_sharpe"))
         same_excess = _as_float(evidence.get("avg_same_universe_excess")) or 0
         cash_excess = _as_float(evidence.get("avg_cash_adjusted_excess")) or 0
         cumulative_return = _as_float(evidence.get("cumulative_return")) or 0
@@ -481,6 +482,8 @@ def validate_live_readiness(
             issues.append("paper evidence 60영업일 미달.")
         if benchmark_final_ratio < 0.8:
             issues.append("paper evidence benchmark_final_ratio 80% 미달.")
+        if paper_sharpe is None or paper_sharpe < 0.3:
+            issues.append("paper evidence paper_sharpe 0.3 미달 또는 누락.")
         if same_excess <= 0:
             issues.append("paper evidence same-universe excess가 양수가 아님.")
         if cash_excess <= 0:
