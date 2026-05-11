@@ -1894,6 +1894,30 @@ def test_assess_plan_pre_trade_risk_blocks_cash_shortfall_after_costs():
     assert risk["projected_cash_after_costs"] < 0
 
 
+def test_assess_plan_pre_trade_risk_uses_execution_price_for_position_limits():
+    from tools.target_weight_rotation_pilot import assess_plan_pre_trade_risk
+
+    plan = _adapter_plan()
+    risk = assess_plan_pre_trade_risk(
+        plan,
+        risk_manager=SimpleCostRiskManager(
+            slippage_per_share=100.0,
+            max_position_ratio=0.20,
+            max_investment_ratio=1.0,
+            min_cash_ratio=0.0,
+        ),
+    )
+
+    aaa_ratio = next(row for row in risk["position_ratios"] if row["symbol"] == "AAA")
+
+    assert risk["complete"] is False
+    assert risk["projected_position_prices"]["AAA"] == 200.0
+    assert risk["projected_gross_exposure_after_costs"] == 5_150_000.0
+    assert aaa_ratio["valuation_price"] == 200.0
+    assert aaa_ratio["value"] == 2_200_000.0
+    assert any("AAA: projected position ratio" in item for item in risk["violations"])
+
+
 def test_execute_plan_blocks_liquidity_before_order_submission(monkeypatch):
     from tools.target_weight_rotation_pilot import assess_plan_liquidity, execute_plan
 
