@@ -1,6 +1,6 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.3
+> **문서 버전**: v5.4
 > **최종 수정**: 2026-05-08
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
@@ -23,7 +23,7 @@
 | **수수료** | 0.015% (매수/매도 각) | `risk_params.yaml:transaction_costs.commission_rate` |
 | **거래세** | 0.20% (매도 시, 2025 이후 인하 반영) | `risk_params.yaml:transaction_costs.tax_rate` |
 | **슬리피지** | 기본 0.05% + 동적(체결량 기반) | `risk_params.yaml:transaction_costs.slippage` + `dynamic_slippage` |
-| **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오/target-weight research 모두 평균 거래량 기반 동적 슬리피지 적용 | `backtest/backtester.py`, `backtest/portfolio_backtester.py`, `tools/research_candidate_sweep.py` |
+| **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오/target-weight research 모두 평균 거래량 기반 동적 슬리피지 적용. target-weight research는 직전 거래일 신호 기준 다음 거래일 시가 체결, 종가 평가 | `backtest/backtester.py`, `backtest/portfolio_backtester.py`, `tools/research_candidate_sweep.py` |
 | **실전 반영** | `OrderExecutor._calculate_costs()` → TradeHistory에 commission/tax/slippage 별도 저장. live 주문은 체결가·체결수량 확인 후에만 거래·포지션 DB 반영 | `core/order_executor.py` |
 
 ### 1.3 과매매 억제
@@ -106,6 +106,7 @@
 | **리서치 벤치마크 부분 결측** | EW B&H 벤치마크 일부 종목 수집 실패 시 누락 종목 몫의 capital이 빠진 채 전체 capital 대비 수익률을 계산하면 후보의 raw benchmark excess가 과대평가될 수 있음 | **수정 완료** — `buy_and_hold_benchmark_with_returns()`가 입력 universe 전체 수집·기간 검증을 요구하고, 결측이 있으면 `benchmark_coverage_complete=false`, 결측 종목, coverage ratio를 artifact/Markdown에 남긴 뒤 `INSUFFICIENT_BENCHMARK_DATA`로 excess gate를 fail-closed 차단 |
 | **live ACK 미체결 장부 오염 위험** | KIS 주문 ACK만 있고 평균 체결가·체결수량 조회가 실패했거나 부분체결인데 예상가 기준 전량 체결로 기록하면 실제 잔고와 DB 포지션이 어긋날 수 있음 | **수정 완료** — live BUY/SELL은 체결 확인 실패 시 `ACKED`/pending, 부분체결 시 `PARTIAL_FILLED`/pending과 `requires_reconcile=True`를 반환하고, KIS 잔고 대조 전 TradeHistory·Position 반영을 보류 |
 | **live 미체결 조회 fail-open 위험** | KIS 미체결 조회 API 실패나 응답 형식 오류를 “미체결 없음”으로 처리하면 재시작/통신 장애 상황에서 중복 주문이 제출될 수 있음 | **수정 완료** — `get_unfilled_order_status()`가 조회 성공 여부를 분리하고, live BUY/SELL은 `checked=False`면 주문 전 fail-closed 차단. 재시작 복구의 전체 미체결 조회 실패도 critical 알림으로 노출 |
+| **target-weight research 당일 종가 체결 착시** | 직전 거래일 점수로 리밸런싱하면서 체결가를 리밸런싱 당일 종가로 쓰면 장중 변동을 이미 알고 체결한 것처럼 성과가 과대평가될 수 있음 | **수정 완료** — target-weight research는 원본 `open` panel을 별도 보존해 리밸런싱을 다음 거래일 시가로 체결하고, 일말 평가는 `close`로 분리. 리밸런싱일 `open` 누락은 `target_weight_research_execution_price_missing`으로 fail-closed 차단 |
 
 ---
 
@@ -144,7 +145,8 @@
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 | Research sweep exposure-matched benchmark | 중간 | **완료 — 후보별 평균 노출/현금비중과 exposure-matched B&H excess 진단 추가. promotion gate는 raw benchmark 기준 유지** |
-| Target-weight top-N rotation backtester | 높음 | **완료 — 월간 직전일 점수 기준 top-N 목표비중 리밸런싱, delta 거래비용, 노출 진단 구현. 원본 close panel 기준 가격 최신성 검증을 포함해 ffill된 stale 종목/벤치마크 가격이 연구 성과에 섞이면 fail-closed 중단. 5종목 smoke best +128.44%/Sharpe 1.13/avg exposure 85.3%지만 raw excess=-45.19%p. canonical top-20 full sweep best 기존 후보는 +212.21%/raw excess=+62.82%p였으나 turnover/year=1412.1%로 research-only** |
+| Target-weight top-N rotation backtester | 높음 | **완료 — 월간 직전일 점수 기준 top-N 목표비중 리밸런싱, 다음 거래일 시가 체결, 종가 평가, delta 거래비용, 노출 진단 구현. 원본 close/open panel 기준 가격 최신성 검증을 포함해 ffill된 stale 종목/벤치마크 가격이나 리밸런싱일 시가 누락이 연구 성과에 섞이면 fail-closed 중단. 기존 종가 체결 기반 target-weight research artifact는 재생성 또는 execution price mode 확인 후 사용** |
+| Target-weight research next-open execution guard | 높음 | 완료 — 리서치 백테스트의 리밸런싱 체결가를 당일 종가에서 원본 `open` 기반 다음 거래일 시가로 변경하고, trade/metrics에 `execution_price_mode=next_open`, `execution_price_freshness_checked`, `avg_volume_lookback_lag_days=1`을 기록 |
 | Target-weight score-floor 후보 | 중간 | **완료 — `min_score_floor_pct`로 약한 초과 모멘텀 슬롯을 현금으로 남김. best=`target_weight_rotation_top5_60_120_floor0`, +210.21%/Sharpe 1.41/WF positive 100%였으나 turnover/year=1081.5%라 다음 과제는 turnover-aware 리밸런싱** |
 | Target-weight rank-hysteresis 후보 | 높음 | **완료 — `hold_rank_buffer`로 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, +278.57%/Sharpe 1.65/WF positive 100%/turnover 807.8%. 남은 병목은 MDD=-28.25%** |
 | Target-weight shadow proof | 높음 | **완료 — dry-run plan을 `shadow_bootstrap` evidence로 기록하되 `execution_backed=False`, excess=null로 유지해 promotion을 오염시키지 않음. `--shadow-days` 기반 자동 날짜 선택은 N개 평일이 아니라 N개 고유 resolved trade_day를 목표로 과거 평일을 보충 스캔하며, 명시적 날짜 범위 batch도 지원. 목표 미달/날짜별 실패는 CLI non-zero 종료로 자동화가 불완전한 shadow proof를 성공 처리하지 못하게 차단. artifact와 runbook에 cap preview, plan 기반 최소/추천 cap, enable 명령, launch artifact 경로를 기록해 기본 pilot cap 부족(주문 수/포지션/1건 금액/총노출), clean day 부족, notifier/auth 누락을 사전 확인** |
