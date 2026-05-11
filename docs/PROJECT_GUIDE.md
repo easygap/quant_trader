@@ -57,7 +57,7 @@
 | **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
 | **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용). 기본 signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. runtime state가 entry만 차단해도 exit/finalize/evidence는 유지 |
 | **live** | `run_live_trading(args)` | 4중 보안(전략 상태·환경변수·CLI 플래그·hard gate 5조건) → KISApi, PortfolioManager(sync), Scheduler |
-| **liquidate** | `run_emergency_liquidate(args)` | DB 포지션 조회 → 종목별 매도(KIS 현재가 주문) |
+| **liquidate** | `run_emergency_liquidate(args)` | DB 포지션 조회 → 종목별 매도(KIS 현재가 주문). `trading.mode=live`에서는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수 |
 | **compare** | `run_compare_paper_backtest(args)` | backtest.paper_compare (run_compare + **check_live_readiness**), divergence 경고 + **실전 전환 준비 자동 평가·디스코드 알림** |
 | **optimize** | `run_param_optimize(args)` | backtest.param_optimizer (Grid/Bayesian), Backtester.run(param_overrides=) |
 | **dashboard** | `run_dashboard(args)` | monitoring.web_dashboard (aiohttp), PortfolioManager, get_portfolio_snapshots |
@@ -230,7 +230,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / **portfolio_backtest** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (14종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전: `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
+| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / **portfolio_backtest** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (14종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전 live와 live 설정의 긴급 청산은 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
 | **test_integration.py** | 설정·DB·지표·신호·리스크·백테스트·리포트·디스코드 등 전체 파이프라인 일괄 검증(14단계). 단일 실행 스크립트 (pytest 아님). |
 | **pyproject.toml** | 프로젝트 메타데이터: name=`quant_trader`, version=`0.1.0`, Python `>=3.11,<3.13`, 패키지 구성, pytest 설정 (`tests/` 대상, pandas 경고 필터). |
 | **requirements.txt** | pip 의존성 목록. pandas, numpy, scipy, pandas-ta, pykrx, finance-datareader, yfinance, requests, aiohttp, websockets, sqlalchemy, pyyaml, loguru, click, pytest 등. |
@@ -508,7 +508,7 @@ main.py (--mode live --confirm-live)
 
 | 방법 | 사용 |
 |------|------|
-| **CLI** | `python main.py --mode liquidate` — DB 포지션 조회 후 종목별 매도(실전 시 KIS 현재가). |
+| **CLI** | `python main.py --mode liquidate` — DB 포지션 조회 후 종목별 매도. `trading.mode=live`이면 `ENABLE_LIVE_TRADING=true`와 `--confirm-live`를 요구한 뒤 KIS 현재가를 사용한다. |
 | **HTTP** | `LIQUIDATE_TRIGGER_TOKEN`·`LIQUIDATE_TRIGGER_PORT` 설정 후 `python -m monitoring.liquidate_trigger`, POST /liquidate. |
 
 ### DB 백업·KIS 크로스체크

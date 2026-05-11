@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 from unittest.mock import patch, MagicMock, call
 from datetime import datetime
+from types import SimpleNamespace
 
 
 # ── 1. --force-live 제거 확인 ──
@@ -53,6 +54,48 @@ class TestForceLiveRemoved:
             source = f.read()
         # 파일 미존재 시 에러 추가 코드가 있어야 함
         assert '승인 파일 없음' in source, "파일 미존재 시 에러 메시지가 없음"
+
+    def test_live_liquidate_requires_env_confirmation(self, monkeypatch):
+        """live 설정의 liquidate는 환경변수 확인 없이는 포지션 조회 전 종료해야 한다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        monkeypatch.setattr(
+            main_mod.Config,
+            "get",
+            lambda: SimpleNamespace(trading={"mode": "live"}),
+        )
+        monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+        get_positions = MagicMock(return_value=[
+            SimpleNamespace(symbol="005930", avg_price=60_000, account_key="")
+        ])
+        monkeypatch.setattr(repositories, "get_all_positions", get_positions)
+
+        with pytest.raises(SystemExit):
+            main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=False))
+
+        get_positions.assert_not_called()
+
+    def test_live_liquidate_requires_confirm_flag(self, monkeypatch):
+        """ENABLE_LIVE_TRADING=true여도 --confirm-live 없이는 live liquidate를 막는다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        monkeypatch.setattr(
+            main_mod.Config,
+            "get",
+            lambda: SimpleNamespace(trading={"mode": "live"}),
+        )
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+        get_positions = MagicMock(return_value=[
+            SimpleNamespace(symbol="005930", avg_price=60_000, account_key="")
+        ])
+        monkeypatch.setattr(repositories, "get_all_positions", get_positions)
+
+        with pytest.raises(SystemExit):
+            main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=False))
+
+        get_positions.assert_not_called()
 
 
 # ── 2. OrderGuard 타이밍 ──
