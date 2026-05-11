@@ -96,8 +96,8 @@ quant_trader/
 │   ├── watchlist_manager.py     # 관심 종목: manual/top_market_cap/kospi200/momentum_top/low_vol_top/momentum_lowvol + 유동성 필터 + 리밸런싱 캐시 + as_of_date
 │   ├── indicator_engine.py      # pandas-ta: RSI, MACD, 볼린저, MA(SMA/EMA), 스토캐스틱, ADX, ATR, OBV, volume_ratio
 │   ├── signal_generator.py      # 멀티 지표 스코어링 → BUY/SELL/HOLD, collinearity_mode(representative_only 권장)
-│   ├── risk_manager.py          # 포지션 사이징(1% 룰), 분산(업종 비중 포함), 성과 열화, 손절/익절/트레일링, 거래 비용
-│   ├── order_executor.py        # 매수/매도 (paper: DB만, live: KIS), paper BUY/SELL 모델 슬리피지 체결가 반영, PositionLock, OrderGuard, 유동성·어닝 필터, 매수 직전 재검증, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
+│   ├── risk_manager.py          # 포지션 사이징(1% 룰), 분산(업종 비중 포함), 성과 열화, 손절/익절/트레일링, MDD/일일 손실, 거래 비용
+│   ├── order_executor.py        # 매수/매도 (paper: DB만, live: KIS), paper BUY/SELL 모델 슬리피지 체결가 반영, 운영 손실 한도 신규 BUY 차단, PositionLock, OrderGuard, 유동성·어닝 필터, 매수 직전 재검증, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
 │   ├── portfolio_manager.py     # 포지션·잔고·수익률, 체결가 기준 현금 요약, sync_with_broker(KIS↔DB 크로스체크), save_daily_snapshot()
 │   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
 │   ├── scheduler.py             # 무한 루프: 장전/장중(10분)/장마감, 시장 국면 필터, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전전환 자동 평가
@@ -260,8 +260,8 @@ quant_trader/
 | **watchlist_manager.py** | manual / top_market_cap / kospi200 / momentum_top / low_vol_top / momentum_lowvol. **유동성 필터**(20일 거래대금 하한, strict 모드: 데이터 없는 종목도 제외)와 `liquidity_filter_report()` 진단 API. **리밸런싱 캐시**: 팩터 모드는 `rebalance_interval_days`(기본 20)마다 재계산, 사이에는 `data/watchlist_cache.json` 사용. **as_of_date** 지원: 백테스트 시 과거 시점 유니버스 사용 가능. |
 | **indicator_engine.py** | pandas-ta로 RSI, MACD, 볼린저, MA, 스토캐스틱, ADX, ATR, OBV, volume_ratio. `calculate_all(df)`로 지표 컬럼 추가. |
 | **signal_generator.py** | `strategies.yaml` 스코어링 가중치로 점수 합산 → BUY/SELL/HOLD. `generate(df)`, `get_latest_signal(df)`. **`collinearity_mode`**: `max_per_direction`(방향별 최대 1개) 또는 `representative_only`(3그룹 대표 1개씩=MACD+볼린저+거래량만 사용, 권장). 초기화 시 가격 모멘텀 그룹 다중공선성 경고 자동 출력. |
-| **risk_manager.py** | 포지션 사이징(1% 룰), `check_diversification`(**업종 비중 포함**: `max_sector_ratio`, FDR Sector), `check_recent_performance`, 손절/익절/트레일링, MDD 한도. `calculate_transaction_costs`. |
-| **order_executor.py** | `trading.mode`: paper면 DB만, live면 KIS API. 거래 시간·블랙스완 쿨다운·**실적 발표일 필터**(`skip_earnings_days`) 검사, 재시도(지수 백오프+지터). PositionLock, OrderGuard·KIS 미체결 조회. `max_monthly_roundtrips`로 종목·모드·계좌별 월간 신규 BUY 횟수를 운영 주문에서도 제한한다. live 주문 전 미체결 조회 실패는 `live_unfilled_check.checked=False`로 fail-closed 차단한다. live 주문 ACK 뒤 체결가·체결수량 확인이 안 되거나 부분체결이면 `ACKED`/`PARTIAL_FILLED` pending으로 `order_records`에 저장하고 DB 거래·포지션 반영을 보류한다. `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태가 남아 있으면 OrderGuard TTL이 지나도 같은 종목 신규 주문을 차단한다. 이때 반환값의 `success=False`는 브로커 주문 없음이 아니라 reconcile 필요 상태다. **Dead-letter 큐**: 모든 재시도 실패 시 `FailedOrder` 테이블에 영구 저장. |
+| **risk_manager.py** | 포지션 사이징(1% 룰), `check_diversification`(**업종 비중 포함**: `max_sector_ratio`, FDR Sector), `check_recent_performance`, 손절/익절/트레일링, MDD·일일 손실 한도 계산. `calculate_transaction_costs`. |
+| **order_executor.py** | `trading.mode`: paper면 DB만, live면 KIS API. 거래 시간·블랙스완 쿨다운·**실적 발표일 필터**(`skip_earnings_days`) 검사, 재시도(지수 백오프+지터). PositionLock, OrderGuard·KIS 미체결 조회. `max_monthly_roundtrips`로 종목·모드·계좌별 월간 신규 BUY 횟수를 운영 주문에서도 제한하고, `drawdown.max_portfolio_mdd`/`max_daily_loss`에 닿으면 신규 BUY만 fail-closed 차단한다. SELL/exit는 손실 축소 경로라 월간 cap·손실 한도와 무관하게 계속 허용한다. live 주문 전 미체결 조회 실패는 `live_unfilled_check.checked=False`로 fail-closed 차단한다. live 주문 ACK 뒤 체결가·체결수량 확인이 안 되거나 부분체결이면 `ACKED`/`PARTIAL_FILLED` pending으로 `order_records`에 저장하고 DB 거래·포지션 반영을 보류한다. `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태가 남아 있으면 OrderGuard TTL이 지나도 같은 종목 신규 주문을 차단한다. 이때 반환값의 `success=False`는 브로커 주문 없음이 아니라 reconcile 필요 상태다. **Dead-letter 큐**: 모든 재시도 실패 시 `FailedOrder` 테이블에 영구 저장. |
 | **portfolio_manager.py** | 보유 포지션·잔고·수익률. `sync_with_broker()`로 KIS 잔고↔DB 크로스체크. 자동보정 시 KIS 기준 수량을 절대값으로 반영하고, 복구 포지션에는 손절·익절·트레일링 스탑을 재생성한다. `get_portfolio_summary()`. |
 | **basket_rebalancer.py** | 바스켓 리밸런싱 엔진. `baskets.yaml`에서 바스켓 로드. `get_target_weights()`(신호 가중 지원), `get_current_weights()`, `calculate_drift()`, `should_rebalance()`(drift/weekly/monthly 트리거), `plan_rebalance()`(SELL→BUY 순서, max_turnover 제한), `execute()`(dry_run 지원). `get_status_report()`로 현황 리포트 생성. |
 | **scheduler.py** | 실전 무한 루프. 장전/장중/장마감. **시장 국면 필터**(단계적: bearish→매수 중단, caution→사이징 축소). 장중 10분 간격. 루프 10분 초과 시 다음 사이클 스킵. 장전 단계에서 **바스켓 리밸런싱 자동 체크** (`_run_basket_rebalance_check`). live 신규 진입 중 `requires_reconcile` 또는 `order_pending` 결과가 나오면 남은 BUY 후보와 같은 루프 재스캔을 중단하고, 다음 성공적인 KIS↔DB 동기화 전까지 미확정 체결분을 무시한 추가 진입을 막는다. **전략 레지스트리** 기반 `_get_strategy()`. |
@@ -358,7 +358,7 @@ quant_trader/
 | **test_discord_bot.py** | 디스코드 알림(모킹). |
 | **test_integration_smoke.py** | 설정·DB·지표·신호 등 연동 스모크. |
 | **test_kis_websocket_e2e.py** | KIS 웹소켓 모의 E2E. |
-| **test_order_executor_paper.py** | OrderExecutor paper 모드, 운영 월간 BUY cap, 청산 경로 허용 검증. |
+| **test_order_executor_paper.py** | OrderExecutor paper 모드, 운영 월간 BUY cap, MDD/일일 손실 신규 BUY 차단, 청산 경로 허용 검증. |
 | **test_portfolio_manager.py** | 포트폴리오·sync. |
 | **test_risk_manager.py** | 리스크 매니저(포지션·손절·거래 비용 등). |
 | **test_scheduler.py** | 스케줄러 구간·동작. |
