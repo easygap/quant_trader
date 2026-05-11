@@ -342,6 +342,118 @@ class OrderExecutor:
             }
         return {"allowed": True, "reason": ""}
 
+    def _daily_loss_baseline_value(self) -> float | None:
+        """최근 포트폴리오 스냅샷에서 당일 손실 비교 기준값을 가져온다."""
+        from database.repositories import get_portfolio_snapshots
+
+        snapshots = get_portfolio_snapshots(
+            days=10,
+            account_key=self.account_key if self.account_key else None,
+        )
+        if snapshots.empty:
+            return None
+
+        baseline_rows = snapshots
+        if "date" in snapshots.columns:
+            try:
+                today = datetime.now().date()
+                dated = snapshots.copy()
+                dated["_snapshot_date"] = dated["date"].apply(
+                    lambda value: value.date() if hasattr(value, "date") else value
+                )
+                previous_rows = dated[dated["_snapshot_date"] < today]
+                if not previous_rows.empty:
+                    baseline_rows = previous_rows
+            except Exception as exc:
+                logger.debug("일일 손실 기준 스냅샷 날짜 해석 실패: {}", exc)
+
+        latest = baseline_rows.iloc[-1]
+        baseline_value = float(latest.get("total_value") or 0)
+        return baseline_value if baseline_value > 0 else None
+
+    def _drawdown_pre_order_check(self, action: str = "BUY") -> dict:
+        """MDD/일일 손실 한도 도달 시 신규 BUY만 차단한다."""
+        if str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+
+        drawdown_cfg = (self.config.risk_params or {}).get("drawdown") or {}
+        max_mdd = float(drawdown_cfg.get("max_portfolio_mdd") or 0)
+        max_daily_loss = float(drawdown_cfg.get("max_daily_loss") or 0)
+        if max_mdd <= 0 and max_daily_loss <= 0:
+            return {"allowed": True, "reason": ""}
+
+        try:
+            from core.portfolio_manager import PortfolioManager
+
+            summary = PortfolioManager(
+                self.config,
+                account_key=self.account_key,
+            ).get_portfolio_summary()
+            total_value = float(summary.get("total_value") or 0)
+            if total_value <= 0:
+                reason = "손실 한도 확인 실패: 포트폴리오 평가금액 없음"
+                logger.warning("신규 매수 차단: {}", reason)
+                return {
+                    "allowed": False,
+                    "reason": reason,
+                    "drawdown_guard_blocked": True,
+                    "drawdown_guard_type": "unavailable",
+                    "mode": self.mode,
+                }
+
+            mdd_pct = abs(float(summary.get("mdd") or 0))
+            mdd_limit_pct = max_mdd * 100
+            if max_mdd > 0 and mdd_pct >= mdd_limit_pct:
+                reason = f"MDD 한도 도달: {mdd_pct:.2f}% >= {mdd_limit_pct:.2f}%"
+                logger.warning("신규 매수 차단: {}", reason)
+                return {
+                    "allowed": False,
+                    "reason": reason,
+                    "drawdown_guard_blocked": True,
+                    "drawdown_guard_type": "mdd",
+                    "mdd": round(mdd_pct, 2),
+                    "mdd_limit": round(mdd_limit_pct, 2),
+                    "mode": self.mode,
+                }
+
+            baseline_value = self._daily_loss_baseline_value()
+            if max_daily_loss > 0 and baseline_value:
+                daily_pnl = total_value - baseline_value
+                daily_allowed = self.risk_manager.check_daily_loss(
+                    daily_pnl,
+                    baseline_value,
+                )
+                if not daily_allowed:
+                    daily_loss_pct = abs(daily_pnl) / baseline_value * 100
+                    daily_limit_pct = max_daily_loss * 100
+                    reason = (
+                        f"일일 손실 한도 도달: "
+                        f"{daily_loss_pct:.2f}% >= {daily_limit_pct:.2f}%"
+                    )
+                    logger.warning("신규 매수 차단: {}", reason)
+                    return {
+                        "allowed": False,
+                        "reason": reason,
+                        "drawdown_guard_blocked": True,
+                        "drawdown_guard_type": "daily_loss",
+                        "daily_loss": round(daily_loss_pct, 2),
+                        "daily_loss_limit": round(daily_limit_pct, 2),
+                        "daily_loss_baseline": round(baseline_value, 0),
+                        "mode": self.mode,
+                    }
+        except Exception as exc:
+            reason = f"손실 한도 확인 실패: {exc}"
+            logger.exception("신규 매수 차단: {}", reason)
+            return {
+                "allowed": False,
+                "reason": reason,
+                "drawdown_guard_blocked": True,
+                "drawdown_guard_type": "unavailable",
+                "mode": self.mode,
+            }
+
+        return {"allowed": True, "reason": ""}
+
     @staticmethod
     def _is_emergency_sell_reason(reason: str) -> bool:
         """손실 방어용 청산은 최소 보유 기간보다 우선한다."""
@@ -1655,6 +1767,10 @@ class OrderExecutor:
         monthly_cap = self._monthly_buy_cap_check(symbol, action)
         if not monthly_cap["allowed"]:
             return monthly_cap
+
+        drawdown_check = self._drawdown_pre_order_check(action)
+        if not drawdown_check["allowed"]:
+            return drawdown_check
 
         # 페이퍼/스케줄 신규 진입은 runtime/preflight 확인에 실패하면 차단한다.
         if self.mode != "live":
