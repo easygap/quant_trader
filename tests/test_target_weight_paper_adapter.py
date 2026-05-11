@@ -181,6 +181,29 @@ def _pilot_check_for_plan(plan, *, snapshot=None):
     )
 
 
+@pytest.fixture(autouse=True)
+def _target_weight_preflight_refresh_ok(monkeypatch):
+    import tools.target_weight_rotation_pilot as twp
+
+    def _ok(strategy, date):
+        return {
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+            "strategy": strategy,
+            "date": date,
+            "overall": "pass",
+            "entry_allowed": True,
+            "runtime_state": "normal",
+            "notifier_health": "configured",
+            "pilot_authorized": True,
+            "blocking_requirements": [],
+            "block_reasons": [],
+        }
+
+    monkeypatch.setattr(twp, "refresh_paper_preflight_status", _ok)
+
+
 def _complete_execution(plan):
     details = []
     for order in plan.orders:
@@ -2123,6 +2146,135 @@ def test_run_pilot_readiness_audit_refreshes_preflight_before_gate_checks(monkey
     assert refresh_calls == [(plan.candidate_id, plan.trade_day)]
     assert result["audit"]["preflight_refresh"]["notifier_health"] == "configured"
     assert result["audit"]["preflight_refresh"]["pilot_authorized"] is True
+
+
+def test_run_pilot_readiness_audit_blocks_failed_preflight_refresh(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+    monkeypatch.setattr(
+        twp,
+        "refresh_paper_preflight_status",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": False,
+            "reason": "paper preflight failed: DB error",
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "overall": "fail",
+            "entry_allowed": False,
+            "runtime_state": "normal",
+            "notifier_health": "configured",
+            "pilot_authorized": True,
+        },
+    )
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": True,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    audit = result["audit"]
+    report_text = result["report_path"].read_text(encoding="utf-8")
+    manifest = json.loads(result["experiment_manifest_path"].read_text(encoding="utf-8"))
+
+    assert audit["ready_for_cap_approval"] is False
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["preflight_refresh"]["complete"] is False
+    assert any("preflight_refresh" in reason for reason in audit["blocking_reasons"])
+    assert "paper preflight failed: DB error" in report_text
+    assert manifest["current_decision"]["ready_for_cap_approval"] is False
+
+
+def test_run_pilot_blocks_order_submission_when_preflight_refresh_fails(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    saved_sessions = []
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        twp,
+        "refresh_paper_preflight_status",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": False,
+            "reason": "paper preflight failed: DB error",
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "overall": "fail",
+            "entry_allowed": False,
+        },
+    )
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("failed preflight must block before order submission"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("failed preflight must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["preflight_refresh"]["complete"] is False
+    assert result["execution"]["halted"] is True
+    assert result["execution"]["halt_reason"] == "paper preflight failed: DB error"
+    assert result["execution_evidence"]["complete"] is False
+    assert result["execution_evidence"]["preflight_refresh_complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert result["evidence_collection"]["reason"] == "paper preflight failed: DB error"
+    assert saved_sessions == []
+    assert payload["preflight_refresh"]["complete"] is False
+    assert payload["execution"]["details"][0]["status"] == "skipped_preflight_refresh"
 
 
 def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_path):
