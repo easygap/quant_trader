@@ -208,6 +208,9 @@ class Scheduler:
         open_order_count = 0
         open_order_status = {}
         sync_ok = False
+        broker_sync_mode = "not_run"
+        broker_sync_skip_reason = ""
+        open_order_lookup_failed = False
 
         try:
             pending_orders = get_pending_failed_orders()
@@ -237,8 +240,10 @@ class Scheduler:
                 open_orders = executor.reconcile_open_orders_after_crash()
                 open_order_status = getattr(executor, "last_open_order_reconcile_status", {}) or {}
                 if open_order_status and open_order_status.get("checked") is False:
+                    open_order_lookup_failed = True
                     self._restart_recovery_count += 1
                     reason = open_order_status.get("reason", "unknown")
+                    broker_sync_skip_reason = reason
                     logger.warning("[복구] KIS 미체결 조회 실패 — 상태 확인 필요: {}", reason)
                     self.discord.send_message(
                         "⚠️ **[복구] KIS 미체결 조회 실패**\n"
@@ -264,13 +269,23 @@ class Scheduler:
                     )
 
                 try:
-                    self.portfolio.sync_with_broker(auto_correct=True)
-                    sync_ok = True
+                    if open_order_lookup_failed:
+                        logger.warning(
+                            "[복구] KIS 미체결 조회 실패로 잔고 자동 보정 생략 — 대조만 수행"
+                        )
+                        result = self.portfolio.sync_with_broker(auto_correct=False)
+                        broker_sync_mode = "check_only_auto_correct_skipped"
+                    else:
+                        result = self.portfolio.sync_with_broker(auto_correct=True)
+                        broker_sync_mode = "auto_correct"
+                    sync_ok = bool(result and result.get("ok"))
                 except Exception as e:
                     logger.warning("[복구] KIS 잔고↔DB 동기화 실패: {}", e)
+                    broker_sync_mode = "failed"
             else:
                 logger.info("[복구] paper 모드 — KIS 미체결·잔고 동기화 생략")
                 sync_ok = True  # paper에서는 동기화 불필요
+                broker_sync_mode = "not_required"
 
             if self.trading_hours.is_market_open():
                 self._last_monitor_time = None
@@ -296,6 +311,9 @@ class Scheduler:
                         "open_order_count": open_order_count,
                         "open_order_check": open_order_status,
                         "broker_sync_ok": sync_ok,
+                        "broker_sync_mode": broker_sync_mode,
+                        "broker_sync_auto_correct": broker_sync_mode == "auto_correct",
+                        "broker_sync_skip_reason": broker_sync_skip_reason,
                         "elapsed_seconds": round(elapsed_s, 1),
                     },
                 )
