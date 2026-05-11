@@ -12,6 +12,7 @@ import sys
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -614,6 +615,11 @@ def execute_plan(
     config: Any | None = None,
     dry_run: bool = True,
     stop_on_failure: bool = True,
+    pilot_validation: Any | None = None,
+    preflight_refresh: dict[str, Any] | None = None,
+    execution_trade_day_check: dict[str, Any] | None = None,
+    execution_market_session_check: dict[str, Any] | None = None,
+    pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
@@ -643,6 +649,87 @@ def execute_plan(
                 "status": "dry_run",
             })
         return results
+
+    if pilot_validation is None:
+        return blocked_execution_for_pilot_validation(
+            plan,
+            SimpleNamespace(
+                allowed=False,
+                reason=(
+                    "target_weight_pilot_validation_required: "
+                    "execute_plan requires run_pilot validation before order submission"
+                ),
+            ),
+        )
+    if not getattr(pilot_validation, "allowed", False):
+        return blocked_execution_for_pilot_validation(plan, pilot_validation)
+
+    if preflight_refresh is None:
+        return blocked_execution_for_preflight_refresh(
+            plan,
+            {
+                "checked": False,
+                "complete": False,
+                "reason": (
+                    "target_weight_preflight_refresh_required: "
+                    "execute_plan requires refreshed paper preflight before order submission"
+                ),
+            },
+        )
+    if not preflight_refresh.get("complete", False):
+        return blocked_execution_for_preflight_refresh(plan, preflight_refresh)
+
+    if execution_trade_day_check is None:
+        return blocked_execution_for_trade_day_mismatch(
+            plan,
+            {
+                "checked": False,
+                "allowed": False,
+                "complete": False,
+                "reason": (
+                    "target_weight_execution_trade_day_check_required: "
+                    "execute_plan requires current trade-day validation before order submission"
+                ),
+            },
+        )
+    if not execution_trade_day_check.get("allowed", False):
+        return blocked_execution_for_trade_day_mismatch(plan, execution_trade_day_check)
+
+    if execution_market_session_check is None:
+        return blocked_execution_for_market_session(
+            plan,
+            {
+                "checked": False,
+                "allowed": False,
+                "complete": False,
+                "reason": (
+                    "target_weight_execution_market_session_check_required: "
+                    "execute_plan requires market-session validation before order submission"
+                ),
+            },
+        )
+    if not execution_market_session_check.get("allowed", False):
+        return blocked_execution_for_market_session(plan, execution_market_session_check)
+
+    if pilot_authorization_snapshot_check is None:
+        return blocked_execution_for_authorization_snapshot_mismatch(
+            plan,
+            {
+                "checked": False,
+                "allowed": False,
+                "complete": False,
+                "reason": (
+                    "target_weight_pilot_authorization_snapshot_check_required: "
+                    "execute_plan requires pilot authorization snapshot validation before order submission"
+                ),
+                "mismatches": [],
+            },
+        )
+    if not pilot_authorization_snapshot_check.get("allowed", False):
+        return blocked_execution_for_authorization_snapshot_mismatch(
+            plan,
+            pilot_authorization_snapshot_check,
+        )
 
     if execution_idempotency is None:
         execution_idempotency = check_execution_idempotency(
@@ -3839,6 +3926,11 @@ def run_pilot(
             plan,
             config=config,
             dry_run=dry_run,
+            pilot_validation=validation,
+            preflight_refresh=preflight_refresh,
+            execution_trade_day_check=execution_trade_day_check,
+            execution_market_session_check=execution_market_session_check,
+            pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
             execution_idempotency=execution_idempotency,
             allow_rerun=allow_rerun,
             pre_execution_reconciliation=pre_execution_reconciliation,
