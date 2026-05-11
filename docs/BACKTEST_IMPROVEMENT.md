@@ -166,6 +166,7 @@
 | Live 미완료 주문 상태 영속화 | 높음 | 완료 — live 주문 `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태를 `order_records`에 저장하고, 재시작 또는 OrderGuard TTL 만료 후에도 DB에 미완료 주문이 남아 있으면 같은 종목 신규 주문을 fail-closed 차단 |
 | Live 미체결 조회 fail-closed | 높음 | 완료 — KIS 미체결 조회 실패, `rt_cd != 0`, 응답 형식 이상을 주문 가능 상태로 보지 않고 live BUY/SELL을 제출 전 차단 |
 | KIS 잔고 오류 응답 fail-closed | 높음 | 완료 — 잔고 조회 응답도 `rt_cd == 0`일 때만 정상 잔고로 해석한다. 오류 body는 빈 포지션/0원 잔고가 아니라 조회 실패로 반환해 연결 검증·포지션 동기화가 fail-closed 처리된다 |
+| Live 시작 전 연결·잔고 동기화 차단 | 높음 | 완료 — `main.py --mode live`가 canonical live gate를 통과해도 KIS 연결 검증 또는 초기 KIS↔DB 잔고 동기화가 실패하면 실전 스케줄러를 시작하지 않고 종료. 불안정한 브로커 상태에서 live 루프가 뜨는 경로를 fail-closed 처리 |
 | 빈 KIS 잔고 자동보정 보호 | 높음 | 완료 — KIS 보유 목록이 빈 응답인데 DB 포지션이 남아 있으면 자동보정이 전체 포지션을 삭제하지 않도록 기본 보류. 확실한 무보유 계좌 정리만 `position_mismatch_allow_empty_broker_delete=true`로 명시 허용 |
 | 브로커 포지션 자동보정 방어값 복구 | 높음 | 완료 — KIS-only 포지션을 DB에 복구하거나 수량 불일치를 KIS 기준으로 맞출 때 수량을 추가 매수처럼 더하지 않고 절대값으로 보정하며, 평균가 기준 손절·익절·트레일링 스탑을 함께 재생성 |
 | Target-weight pre-trade risk | 높음 | **완료 — `RiskManager.calculate_transaction_costs()`를 plan-level로 재사용해 주문별 예상 체결가, 수수료, 거래세, 슬리피지, 선택 양도세를 반영한 projected cash/total value/exposure를 계산. 현금 부족, `min_cash_ratio`, `max_investment_ratio`, `max_position_ratio`, `max_positions` 위반은 `target_weight_pre_trade_risk_failed`로 readiness/execute를 fail-closed 차단하고 session/readiness/pilot evidence snapshot에 cost summary를 남김** |
