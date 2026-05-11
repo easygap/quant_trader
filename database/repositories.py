@@ -1123,6 +1123,59 @@ def get_open_order_records(
 
 
 @with_retry
+def reconcile_order_record(
+    order_id: str,
+    *,
+    status: str = "RECONCILED",
+    filled_qty: int | None = None,
+    filled_price: float | None = None,
+    remaining_qty: int | None = 0,
+    reason: str = "",
+) -> dict | None:
+    """브로커 대조가 끝난 order_records 행을 open 상태에서 제외한다."""
+    session = get_session()
+    try:
+        record = session.query(DbOrderRecord).filter(
+            DbOrderRecord.order_id == order_id
+        ).first()
+        if record is None:
+            return None
+
+        record.status = str(status)
+        if filled_qty is not None:
+            record.filled_qty = int(filled_qty)
+        if filled_price is not None:
+            record.filled_price = float(filled_price)
+        if remaining_qty is not None:
+            record.remaining_qty = int(remaining_qty)
+        if reason:
+            record.reject_reason = reason
+        if record.status == "RECONCILED" and record.filled_qty and not record.filled_at:
+            record.filled_at = datetime.now()
+        record.updated_at = datetime.now()
+        session.commit()
+        return {
+            "order_id": record.order_id,
+            "account_key": record.account_key,
+            "symbol": record.symbol,
+            "action": record.action,
+            "status": record.status,
+            "broker_order_id": record.broker_order_id,
+            "requested_qty": record.requested_qty,
+            "filled_qty": record.filled_qty or 0,
+            "filled_price": record.filled_price or 0,
+            "remaining_qty": record.remaining_qty or 0,
+            "reason": record.reject_reason or "",
+        }
+    except Exception as e:
+        session.rollback()
+        logger.error("주문 상태 대조 완료 처리 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
+@with_retry
 def has_open_order_record(symbol: str, account_key: str = "", mode: str | None = "live") -> bool:
     """미완료 주문 상태가 DB에 남아 있으면 True. 조회 실패는 fail-closed 처리한다."""
     try:
