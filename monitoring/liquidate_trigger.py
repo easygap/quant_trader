@@ -2,9 +2,12 @@
 긴급 전체 청산 HTTP 트리거.
 - 수동 개입·디스코드 봇 등에서 원격으로 전 종목 매도를 걸 수 있도록 HTTP 서버 제공.
 - 환경변수 LIQUIDATE_TRIGGER_TOKEN 필수(미설정 시 서버 미가동). LIQUIDATE_TRIGGER_PORT(기본 8765).
+- live 설정에서 실제 청산을 허용하려면 ENABLE_LIVE_TRADING=true 와
+  LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 를 둘 다 설정해야 한다.
 
 사용:
     set LIQUIDATE_TRIGGER_TOKEN=your_secret
+    set LIQUIDATE_TRIGGER_CONFIRM_LIVE=true
     python -m monitoring.liquidate_trigger
 
     POST http://localhost:8765/liquidate
@@ -34,6 +37,11 @@ def _get_token_from_request(handler: BaseHTTPRequestHandler) -> Optional[str]:
     return (qs.get("token") or [None])[0]
 
 
+def _env_truthy(name: str) -> bool:
+    """환경변수 truthy 값 해석."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _run_liquidate() -> tuple[bool, str]:
     """긴급 청산 실행. (success, message) 반환."""
     from database.models import init_database
@@ -44,7 +52,17 @@ def _run_liquidate() -> tuple[bool, str]:
 
     from main import run_emergency_liquidate
 
-    run_emergency_liquidate(Namespace())
+    args = Namespace(confirm_live=_env_truthy("LIQUIDATE_TRIGGER_CONFIRM_LIVE"))
+    try:
+        run_emergency_liquidate(args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        return (
+            False,
+            "긴급 청산 실행이 차단되었습니다. "
+            f"종료 코드={code}. live 설정이면 ENABLE_LIVE_TRADING=true 및 "
+            "LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 설정을 확인하세요.",
+        )
     return True, "전 종목 청산 요청 처리 완료."
 
 
@@ -72,7 +90,7 @@ class LiquidateHandler(BaseHTTPRequestHandler):
             return
         try:
             ok, msg = _run_liquidate()
-            self._send(200, {"ok": ok, "message": msg})
+            self._send(200 if ok else 409, {"ok": ok, "message": msg})
         except Exception as e:
             self._send(500, {"ok": False, "error": str(e)})
 
