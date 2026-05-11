@@ -2,6 +2,8 @@
 긴급 전체 청산 HTTP 트리거.
 - 수동 개입·디스코드 봇 등에서 원격으로 전 종목 매도를 걸 수 있도록 HTTP 서버 제공.
 - 환경변수 LIQUIDATE_TRIGGER_TOKEN 필수(미설정 시 서버 미가동). LIQUIDATE_TRIGGER_PORT(기본 8765).
+- 기본 바인드 주소는 127.0.0.1 이며, 외부에서 호출해야 할 때만
+  LIQUIDATE_TRIGGER_HOST=0.0.0.0 처럼 명시한다.
 - live 설정에서 실제 청산을 허용하려면 ENABLE_LIVE_TRADING=true 와
   LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 를 둘 다 설정해야 한다.
 - 청산 실행은 POST만 허용한다. 인증 토큰은 기본적으로 X-Token 또는
@@ -28,6 +30,9 @@ from urllib.parse import parse_qs, urlparse
 # 프로젝트 루트
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+
 
 def _get_token_from_request(handler: BaseHTTPRequestHandler) -> Optional[str]:
     """Header X-Token 또는 Authorization: Bearer 토큰 추출."""
@@ -49,6 +54,16 @@ def _get_token_from_request(handler: BaseHTTPRequestHandler) -> Optional[str]:
 def _env_truthy(name: str) -> bool:
     """환경변수 truthy 값 해석."""
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _get_bind_host() -> str:
+    """긴급 청산 HTTP 서버 바인드 주소."""
+    return os.environ.get("LIQUIDATE_TRIGGER_HOST", "").strip() or DEFAULT_HOST
+
+
+def _get_bind_port() -> int:
+    """긴급 청산 HTTP 서버 바인드 포트."""
+    return int(os.environ.get("LIQUIDATE_TRIGGER_PORT", str(DEFAULT_PORT)))
 
 
 def _run_liquidate() -> tuple[bool, str]:
@@ -135,9 +150,10 @@ def main():
     if not token:
         print("LIQUIDATE_TRIGGER_TOKEN 환경변수가 없습니다. 서버를 시작하지 않습니다.")
         sys.exit(1)
-    port = int(os.environ.get("LIQUIDATE_TRIGGER_PORT", "8765"))
-    server = HTTPServer(("", port), LiquidateHandler)
-    print(f"긴급 청산 HTTP 트리거: POST http://0.0.0.0:{port}/liquidate (X-Token)")
+    host = _get_bind_host()
+    port = _get_bind_port()
+    server = HTTPServer((host, port), LiquidateHandler)
+    print(f"긴급 청산 HTTP 트리거: POST http://{host}:{port}/liquidate (X-Token)")
     server.serve_forever()
 
 
