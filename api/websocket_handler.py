@@ -161,6 +161,15 @@ class WebSocketHandler:
             "recent_gaps": recent,
         }
 
+    def _publish_gap_snapshot(self) -> None:
+        """현재 웹소켓 갭 상태를 대시보드 런타임 파일에 반영."""
+        try:
+            from monitoring.dashboard_runtime_state import merge_ws_gap
+
+            merge_ws_gap(self.gap_snapshot())
+        except Exception as e:
+            logger.debug("[WebSocket] 갭 스냅샷 대시보드 반영 실패: {}", e)
+
     def _update_price_cache_from_ws(self, price_data: dict) -> None:
         sym = price_data.get("symbol")
         if not sym:
@@ -286,19 +295,20 @@ class WebSocketHandler:
         gap: timedelta,
         api: Any,
         detector: Any,
-    ) -> int:
+    ) -> tuple[int, Dict[str, float]]:
         """
         갭이 1분 초과 시 REST 분봉 보충 후 변동률 검사(기존 로직).
         Returns:
-            보충 조회를 시도한 종목 수.
+            보충 조회를 시도한 종목 수와 종목별 갭 구간 swing%.
         """
         gap_sec = gap.total_seconds()
         if gap_sec <= self._GAP_MINUTE_BACKFILL.total_seconds():
-            return 0
+            return 0, {}
         gap_min = max(1, int(gap_sec / 60))
         minutes_fetch = gap_min + 5
 
         n_queried = 0
+        observed_swings: Dict[str, float] = {}
         for symbol in symbols:
             n_queried += 1
             try:
@@ -308,12 +318,13 @@ class WebSocketHandler:
                 swing = self._gap_range_swing_pct(bars)
                 if swing is None:
                     continue
+                observed_swings[symbol] = round(swing, 2)
                 if swing >= 3.0:
                     logger.warning("[WebSocket] {} 갭 중 {:.1f}% 급변 감지", symbol, swing)
                     detector.report_websocket_gap_volatility(symbol, swing)
             except Exception as e:
                 logger.debug("[WebSocket] 갭 보충 조회 실패 {}: {}", symbol, e)
-        return n_queried
+        return n_queried, observed_swings
 
     async def _after_websocket_reconnected(
         self,
@@ -396,14 +407,18 @@ class WebSocketHandler:
             )
 
         n_backfill = 0
+        observed_gap_swings: Dict[str, float] = {}
         if gap_td > self._GAP_MINUTE_BACKFILL and kis:
-            n_backfill = await self._minute_bar_gap_backfill(
+            n_backfill, observed_gap_swings = await self._minute_bar_gap_backfill(
                 symbols, gap_td, kis, _detector()
             )
         gap_event["minute_bar_backfill_count"] = n_backfill
 
         # 갭 구간 관측 변동률 수집 (price_cache에서 추출)
         for sym in symbols:
+            if sym in observed_gap_swings:
+                gap_event["observed_volatility"][sym] = observed_gap_swings[sym]
+                continue
             entry = self._price_cache.get(sym)
             if entry and isinstance(entry, dict):
                 q = entry.get("quote")
@@ -423,12 +438,7 @@ class WebSocketHandler:
         self._current_gap_start = None
 
         # 대시보드 런타임 상태에 gap 스냅샷 즉시 반영
-        try:
-            from monitoring.dashboard_runtime_state import merge_ws_gap
-
-            merge_ws_gap(self.gap_snapshot())
-        except Exception as e:
-            logger.debug("[WebSocket] 갭 스냅샷 대시보드 반영 실패: {}", e)
+        self._publish_gap_snapshot()
 
         logger.info(
             "[WebSocket] 갭 후속 처리 완료 (분봉 보충 시도 종목 수: {})",
@@ -464,6 +474,13 @@ class WebSocketHandler:
             try:
                 # ping_interval=None (수동 Ping-Pong 처리를 위해)
                 async with websockets.connect(self.ws_url, ping_interval=None) as ws:
+                    self._ws = ws
+                    self._is_connected = True
+                    retry_count = 0  # 성공 시 재시도 카운트 리셋
+
+                    self._last_ping_time = asyncio.get_event_loop().time()
+                    self._last_pong_time = self._last_ping_time
+
                     reconnect_time = datetime.now()
                     if self._disconnect_time is not None:
                         gap_td = reconnect_time - self._disconnect_time
@@ -472,13 +489,6 @@ class WebSocketHandler:
 
                     await self._after_websocket_reconnected(symbols, reconnect_time, gap_td)
                     self._disconnect_time = None
-
-                    self._ws = ws
-                    self._is_connected = True
-                    retry_count = 0  # 성공 시 재시도 카운트 리셋
-                    
-                    self._last_ping_time = asyncio.get_event_loop().time()
-                    self._last_pong_time = self._last_ping_time
 
                     logger.info(
                         "웹소켓 연결 성공 (url: {}, 구독 종목: {})",
@@ -520,12 +530,7 @@ class WebSocketHandler:
                     now = datetime.now()
                     self._disconnect_time = now
                     self._current_gap_start = now
-                    try:
-                        from monitoring.dashboard_runtime_state import merge_ws_gap
-
-                        merge_ws_gap(self.gap_snapshot())
-                    except Exception:
-                        pass
+                    self._publish_gap_snapshot()
                 retry_count += 1
                 wait_time = min(60, 2 ** min(retry_count, 6))
                 logger.warning("웹소켓 끊김 — {}초 후 재연결 시도", wait_time)
@@ -686,6 +691,7 @@ class WebSocketHandler:
             await ws_temp.close()
             self._is_connected = False
             logger.info("웹소켓 명시적 연결 종료")
+            self._publish_gap_snapshot()
 
     @property
     def is_connected(self) -> bool:
