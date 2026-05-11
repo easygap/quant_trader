@@ -1080,6 +1080,32 @@ def blocked_execution_for_duplicate_execution(
     }
 
 
+def blocked_execution_for_preflight_refresh(
+    plan: TargetWeightPlan,
+    preflight_refresh: dict[str, Any],
+) -> dict[str, Any]:
+    reason = preflight_refresh.get(
+        "reason",
+        "target_weight_preflight_refresh_failed",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "preflight_refresh": preflight_refresh,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_preflight_refresh",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def blocked_execution_for_pilot_validation(
     plan: TargetWeightPlan,
     validation: Any,
@@ -1494,6 +1520,7 @@ def summarize_execution_for_evidence(
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
+    preflight_refresh: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
     pre_trade_risk_check: dict[str, Any] | None = None,
@@ -1543,6 +1570,11 @@ def summarize_execution_for_evidence(
             "pilot authorization snapshot check not required"
         )
     )
+    preflight = preflight_refresh or execution.get("preflight_refresh") or {
+        "checked": False,
+        "complete": True,
+        "reason": "preflight refresh not required",
+    }
     pre_reconciliation = pre_execution_reconciliation or execution.get("pre_execution_reconciliation") or {
         "checked": False,
         "complete": True,
@@ -1580,6 +1612,9 @@ def summarize_execution_for_evidence(
     execution_trade_day_allowed = bool(trade_day_check.get("allowed", False))
     execution_market_session_allowed = bool(market_session_check.get("allowed", False))
     pilot_authorization_snapshot_allowed = bool(authorization_snapshot_check.get("allowed", False))
+    preflight_refresh_complete = bool(
+        preflight.get("complete", not preflight.get("checked", False))
+    )
     pre_execution_complete = bool(pre_reconciliation.get("complete", False))
     liquidity_complete = bool(liquidity.get("complete", False))
     pre_trade_risk_complete = bool(pre_trade_risk.get("complete", False))
@@ -1590,6 +1625,7 @@ def summarize_execution_for_evidence(
         and execution_trade_day_allowed
         and execution_market_session_allowed
         and pilot_authorization_snapshot_allowed
+        and preflight_refresh_complete
         and pre_execution_complete
         and liquidity_complete
         and pre_trade_risk_complete
@@ -1609,6 +1645,8 @@ def summarize_execution_for_evidence(
             "reason",
             "target_weight_pilot_authorization_snapshot_mismatch",
         )
+    elif not preflight_refresh_complete:
+        reason = preflight.get("reason", "target_weight_preflight_refresh_failed")
     elif not pre_execution_complete:
         reason = pre_reconciliation.get("reason", "target_weight_pre_execution_position_drift")
     elif not liquidity_complete:
@@ -1637,6 +1675,7 @@ def summarize_execution_for_evidence(
         "execution_trade_day_allowed": execution_trade_day_allowed,
         "execution_market_session_allowed": execution_market_session_allowed,
         "pilot_authorization_snapshot_allowed": pilot_authorization_snapshot_allowed,
+        "preflight_refresh_complete": preflight_refresh_complete,
         "pre_execution_complete": pre_execution_complete,
         "liquidity_complete": liquidity_complete,
         "pre_trade_risk_complete": pre_trade_risk_complete,
@@ -1654,6 +1693,7 @@ def summarize_execution_for_evidence(
         "execution_market_session_check": market_session_check,
         "pilot_authorization_snapshot_check": authorization_snapshot_check,
         "execution_idempotency": idempotency,
+        "preflight_refresh": preflight,
         "pre_execution_reconciliation": pre_reconciliation,
         "liquidity_check": liquidity,
         "pre_trade_risk_check": pre_trade_risk,
@@ -1676,6 +1716,7 @@ def build_pilot_evidence_caps_snapshot(
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
+    preflight_refresh: dict[str, Any] | None = None,
     pre_execution_reconciliation: dict[str, Any] | None = None,
     liquidity_check: dict[str, Any] | None = None,
     pre_trade_risk_check: dict[str, Any] | None = None,
@@ -1704,6 +1745,7 @@ def build_pilot_evidence_caps_snapshot(
         execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
+        preflight_refresh=preflight_refresh,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
         pre_trade_risk_check=pre_trade_risk_check,
@@ -1839,6 +1881,7 @@ def write_session_artifact(
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
+    preflight_refresh: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     shadow_evidence: dict[str, Any] | None = None,
     evidence_collection: dict[str, Any] | None = None,
@@ -1872,6 +1915,7 @@ def write_session_artifact(
             )
         ),
         "execution_idempotency": execution_idempotency or {"checked": False},
+        "preflight_refresh": preflight_refresh or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
         "evidence_collection": evidence_collection or {"attempted": False, "recorded": False},
@@ -2208,10 +2252,16 @@ def refresh_paper_preflight_status(strategy: str, date: str) -> dict[str, Any]:
             result = paper_preflight.run_preflight(strategy, date)
         finally:
             paper_preflight.RUNTIME_DIR = previous_runtime_dir
+        preflight_complete = str(result.overall).lower() != "fail"
+        reason = (
+            "paper preflight refreshed"
+            if preflight_complete
+            else f"paper preflight failed: {'; '.join(result.block_reasons) or result.overall}"
+        )
         return {
             "checked": True,
-            "complete": True,
-            "reason": "paper preflight refreshed",
+            "complete": preflight_complete,
+            "reason": reason,
             "strategy": result.strategy,
             "date": result.date,
             "overall": result.overall,
@@ -2576,6 +2626,7 @@ def build_pilot_readiness_audit(
     warnings = _unique_reasons(warnings)
     ready_for_cap_approval = (
         trading_mode != "live"
+        and bool(preflight_refresh.get("complete", False))
         and bool(launch_readiness.get("infra_ready", False))
         and bool(execution_idempotency.get("allowed", False))
         and bool(execution_trade_day_check.get("allowed", False))
@@ -3683,6 +3734,14 @@ def run_pilot(
         collector=collector,
     )
 
+    preflight_refresh = {
+        "checked": False,
+        "complete": True,
+        "reason": "paper preflight refresh not required for dry-run",
+    }
+    if execute:
+        preflight_refresh = refresh_paper_preflight_status(plan.candidate_id, plan.trade_day)
+
     pilot_check = check_pilot_entry(
         candidate_id,
         candidate_notional=plan.max_order_notional,
@@ -3725,6 +3784,7 @@ def run_pilot(
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
+        and preflight_refresh["complete"]
     ):
         execution_idempotency = check_execution_idempotency(
             plan,
@@ -3737,6 +3797,7 @@ def run_pilot(
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
+        and preflight_refresh["complete"]
         and execution_idempotency
         and execution_idempotency["allowed"]
     ):
@@ -3752,7 +3813,9 @@ def run_pilot(
             )
             pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
 
-    if execute and not validation.allowed:
+    if execute and not preflight_refresh["complete"]:
+        execution = blocked_execution_for_preflight_refresh(plan, preflight_refresh)
+    elif execute and not validation.allowed:
         execution = blocked_execution_for_pilot_validation(plan, validation)
     elif execute and not execution_trade_day_check["allowed"]:
         execution = blocked_execution_for_trade_day_mismatch(plan, execution_trade_day_check)
@@ -3792,6 +3855,7 @@ def run_pilot(
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
+        and preflight_refresh["complete"]
         and (execution_idempotency is None or execution_idempotency["allowed"])
         and (pre_execution_reconciliation is None or pre_execution_reconciliation["complete"])
         and liquidity_check["complete"]
@@ -3820,6 +3884,7 @@ def run_pilot(
         execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
+        preflight_refresh=preflight_refresh,
         pre_execution_reconciliation=pre_execution_reconciliation,
         liquidity_check=liquidity_check,
         pre_trade_risk_check=pre_trade_risk_check,
@@ -3837,6 +3902,7 @@ def run_pilot(
             execution_market_session_check=execution_market_session_check,
             pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
             execution_idempotency=execution_idempotency,
+            preflight_refresh=preflight_refresh,
             pre_execution_reconciliation=pre_execution_reconciliation,
             liquidity_check=liquidity_check,
             pre_trade_risk_check=pre_trade_risk_check,
@@ -3861,6 +3927,7 @@ def run_pilot(
             and execution_trade_day_check["allowed"]
             and execution_market_session_check["allowed"]
             and pilot_authorization_snapshot_check["allowed"]
+            and preflight_refresh["complete"]
             and (execution_idempotency is None or execution_idempotency["allowed"])
         ):
             save_pilot_session_artifact(
@@ -3949,6 +4016,7 @@ def run_pilot(
         execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
+        preflight_refresh=preflight_refresh,
         fill_reconciliation=fill_reconciliation,
         shadow_evidence=shadow_evidence_summary,
         evidence_collection=evidence_collection,
@@ -3962,6 +4030,7 @@ def run_pilot(
         "validation": validation,
         "cap_preview": cap_preview,
         "cap_recommendation": cap_recommendation,
+        "preflight_refresh": preflight_refresh,
         "liquidity_check": liquidity_check,
         "pre_trade_risk_check": pre_trade_risk_check,
         "execution": execution,
