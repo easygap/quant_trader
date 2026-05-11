@@ -293,6 +293,43 @@ def test_validate_pilot_authorization_snapshot_accepts_matching_plan():
     assert check["mismatches"] == []
 
 
+def test_validate_pilot_authorization_snapshot_allows_small_money_drift():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    snapshot = twp.build_pilot_authorization_snapshot(plan)
+    snapshot["gross_exposure_after"] += 1_000.0
+    snapshot["max_order_notional"] += 1_000.0
+
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=snapshot),
+    )
+
+    assert check["allowed"] is True
+    assert check["complete"] is True
+    assert check["mismatches"] == []
+
+
+def test_validate_pilot_authorization_snapshot_blocks_large_money_drift():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    snapshot = twp.build_pilot_authorization_snapshot(plan)
+    snapshot["gross_exposure_after"] += twp.AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW + 1.0
+
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=snapshot),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert "target_weight_pilot_authorization_snapshot_mismatch" in check["reason"]
+    assert check["mismatches"][0]["field"] == "gross_exposure_after"
+    assert check["mismatches"][0]["tolerance"] == twp.AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW
+
+
 def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
     import tools.target_weight_rotation_pilot as twp
 
@@ -930,6 +967,58 @@ def test_execute_plan_dry_run_preserves_sell_before_buy_ordering():
     assert execution["skipped"] == len(plan.orders)
 
 
+def test_execute_plan_uses_portfolio_current_capital_for_buy_orders():
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    capital_values = []
+
+    class FakeExecutor:
+        def __init__(self, config, account_key=""):
+            pass
+
+        def execute_sell(self, **kwargs):
+            return {"success": True}
+
+        def execute_buy_quantity(self, **kwargs):
+            capital_values.append(kwargs["capital"])
+            return {
+                "success": True,
+                "symbol": kwargs["symbol"],
+                "action": "BUY",
+                "quantity": kwargs["quantity"],
+                "price": kwargs["price"],
+                "mode": "paper",
+            }
+
+    class FakePortfolio:
+        def __init__(self, config, account_key=""):
+            pass
+
+        def get_available_cash(self):
+            return 10_000_000.0
+
+        def get_current_capital(self):
+            return 11_000_000.0
+
+    with patch("core.order_executor.OrderExecutor", FakeExecutor), \
+         patch("core.portfolio_manager.PortfolioManager", FakePortfolio):
+        execution = execute_plan(
+            plan,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            dry_run=False,
+            execution_idempotency={"allowed": True},
+            pre_execution_reconciliation={"complete": True},
+            liquidity_check={"checked": True, "complete": True, "reason": "ok"},
+            pre_trade_risk_check={"checked": True, "complete": True, "reason": "ok"},
+        )
+
+    assert execution["executed"] == len(plan.orders)
+    assert execution["failed"] == 0
+    assert execution["halted"] is False
+    assert capital_values == [11_000_000.0] * len(plan.orders)
+
+
 def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
     from core.target_weight_rotation import TargetWeightOrder, TargetWeightPlan
     from tools.target_weight_rotation_pilot import execute_plan
@@ -1001,7 +1090,7 @@ def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
         def get_available_cash(self):
             return 10_000.0
 
-        def get_total_value(self):
+        def get_current_capital(self):
             return 10_000.0
 
     with patch("core.order_executor.OrderExecutor", FakeExecutor), \
