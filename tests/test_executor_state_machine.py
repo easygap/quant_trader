@@ -452,6 +452,121 @@ class TestExecutorUsesStateMachine:
         assert "재조정되지 않은 실전 주문 상태" in second_result["reason"]
         assert second_kis.buy_called == 0
 
+    def test_recovery_reconciles_persistent_order_when_broker_open_order_disappears(self):
+        """KIS 미체결 목록에서 사라진 DB open order는 복구 대조 후 중복 차단에서 제외한다."""
+        from core.order_guard import OrderGuard
+        from core.order_state import OrderRecord
+        from database.models import OrderRecord as DbOrderRecord, get_session
+        from database.repositories import get_open_order_records, save_order_record
+
+        order = OrderRecord(
+            "ORD-PERSIST",
+            "005930",
+            "BUY",
+            3,
+            60_000,
+            strategy="scoring",
+            account_key="test_sm",
+            mode="live",
+        )
+        order.transition(OrderStatus.SUBMITTED)
+        order.transition(OrderStatus.ACKED, broker_order_id="000123")
+        save_order_record(order)
+        OrderGuard.mark_pending("005930", ttl_seconds=600)
+
+        class NoOpenOrderKIS:
+            _access_token = "token"
+
+            def get_open_orders_status(self):
+                return {"checked": True, "reason": "ok", "orders": []}
+
+            def get_order_execution_after_order(self, symbol, order_output, **kwargs):
+                return {
+                    "fill_price": 60_100,
+                    "filled_qty": 3,
+                    "remaining_qty": 0,
+                    "order_no": "000123",
+                }
+
+        executor = self._prepare_live_executor(self._make_executor(), NoOpenOrderKIS())
+
+        open_orders = executor.reconcile_open_orders_after_crash()
+
+        assert open_orders == []
+        assert get_open_order_records("005930", account_key="test_sm", mode="live") == []
+        assert not OrderGuard.has_pending("005930")
+        reconciled = executor.last_open_order_reconcile_status["persistent_order_reconciliations"]
+        assert reconciled[0]["order_id"] == "ORD-PERSIST"
+        assert reconciled[0]["status"] == OrderStatus.RECONCILED.value
+        assert reconciled[0]["filled_qty"] == 3
+        assert reconciled[0]["filled_price"] == 60_100
+        assert reconciled[0]["execution_checked"] is True
+
+        session = get_session()
+        try:
+            record = session.query(DbOrderRecord).filter_by(order_id="ORD-PERSIST").one()
+            assert record.status == OrderStatus.RECONCILED.value
+            assert record.remaining_qty == 0
+            assert record.reject_reason == "broker_execution_confirmed_after_recovery_check"
+        finally:
+            session.close()
+
+    def test_recovery_keeps_persistent_order_open_when_broker_still_reports_unfilled(self):
+        """KIS 미체결 목록에 같은 주문번호가 남아 있으면 DB open order를 닫지 않는다."""
+        from core.order_guard import OrderGuard
+        from core.order_state import OrderRecord
+        from database.models import OrderRecord as DbOrderRecord, get_session
+        from database.repositories import get_open_order_records, save_order_record
+
+        order = OrderRecord(
+            "ORD-STILL-OPEN",
+            "005930",
+            "BUY",
+            3,
+            60_000,
+            strategy="scoring",
+            account_key="test_sm",
+            mode="live",
+        )
+        order.transition(OrderStatus.SUBMITTED)
+        order.transition(OrderStatus.ACKED, broker_order_id="000124")
+        save_order_record(order)
+        OrderGuard.mark_pending("005930", ttl_seconds=600)
+
+        class StillOpenKIS:
+            _access_token = "token"
+
+            def get_open_orders_status(self):
+                return {
+                    "checked": True,
+                    "reason": "ok",
+                    "orders": [{
+                        "symbol": "005930",
+                        "remaining_qty": 3,
+                        "order_no": "124",
+                    }],
+                }
+
+            def get_order_execution_after_order(self, *args, **kwargs):
+                pytest.fail("미체결 주문번호가 남아 있으면 체결 조회로 닫으면 안 됨")
+
+        executor = self._prepare_live_executor(self._make_executor(), StillOpenKIS())
+
+        open_orders = executor.reconcile_open_orders_after_crash()
+
+        assert len(open_orders) == 1
+        assert get_open_order_records("005930", account_key="test_sm", mode="live")
+        assert OrderGuard.has_pending("005930")
+        assert executor.last_open_order_reconcile_status["persistent_order_reconciliations"] == []
+
+        session = get_session()
+        try:
+            record = session.query(DbOrderRecord).filter_by(order_id="ORD-STILL-OPEN").one()
+            assert record.status == OrderStatus.ACKED.value
+        finally:
+            session.close()
+            OrderGuard.clear("005930")
+
     def test_live_sell_ack_without_fill_keeps_position_open(self):
         """실전 SELL도 체결 확인 전에는 보유 포지션을 줄이거나 삭제하지 않는다."""
         from core.order_guard import OrderGuard
