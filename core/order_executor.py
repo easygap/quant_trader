@@ -18,7 +18,7 @@ from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position,
     get_position, get_all_positions, save_failed_order, count_monthly_buy_trades,
-    save_order_record, get_open_order_records,
+    save_order_record, get_open_order_records, reconcile_order_record,
 )
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
@@ -1453,6 +1453,116 @@ class OrderExecutor:
             "execution_check": execution,
         }
 
+    @staticmethod
+    def _normalize_broker_order_id(value) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        return raw.lstrip("0") or raw
+
+    def _broker_open_order_keys(self, open_orders: list[dict]) -> set[tuple[str, str]]:
+        keys: set[tuple[str, str]] = set()
+        for item in open_orders or []:
+            symbol = str(item.get("symbol") or "").strip()
+            order_no = self._normalize_broker_order_id(item.get("order_no"))
+            if symbol and order_no:
+                keys.add((symbol, order_no))
+        return keys
+
+    def _lookup_persistent_order_execution(self, record: dict) -> dict | None:
+        detail_getter = getattr(self.kis_api, "get_order_execution_after_order", None)
+        broker_order_id = record.get("broker_order_id")
+        if not callable(detail_getter) or not broker_order_id:
+            return None
+        try:
+            return detail_getter(
+                record.get("symbol", ""),
+                {"odno": broker_order_id},
+                max_attempts=1,
+                delay_seconds=0,
+            )
+        except TypeError:
+            return detail_getter(record.get("symbol", ""), {"odno": broker_order_id})
+        except Exception as exc:
+            logger.warning(
+                "[복구] DB 미완료 주문 체결 조회 실패: {} {} — {}",
+                record.get("symbol"),
+                broker_order_id,
+                exc,
+            )
+            return None
+
+    def _reconcile_persistent_open_order_records(self, open_orders: list[dict]) -> list[dict]:
+        """KIS 미체결 목록에서 사라진 DB open order record를 대조 완료로 닫는다."""
+        if self.mode != "live":
+            return []
+        try:
+            records = get_open_order_records(account_key=self.account_key, mode=self.mode)
+        except Exception as exc:
+            logger.warning("[복구] DB 미완료 주문 조회 실패 — 대조 완료 처리 생략: {}", exc)
+            return []
+
+        broker_open_keys = self._broker_open_order_keys(open_orders)
+        reconciled: list[dict] = []
+        for record in records:
+            broker_order_id = self._normalize_broker_order_id(record.get("broker_order_id"))
+            if not broker_order_id:
+                continue
+            symbol = str(record.get("symbol") or "").strip()
+            if (symbol, broker_order_id) in broker_open_keys:
+                continue
+
+            execution = self._lookup_persistent_order_execution(record) or {}
+            filled_qty = execution.get("filled_qty")
+            filled_price = execution.get("fill_price")
+            remaining_qty = execution.get("remaining_qty")
+
+            try:
+                resolved_filled_qty = int(float(filled_qty)) if filled_qty is not None else int(record.get("filled_qty") or 0)
+            except (TypeError, ValueError):
+                resolved_filled_qty = int(record.get("filled_qty") or 0)
+            try:
+                resolved_filled_price = (
+                    float(filled_price)
+                    if filled_price is not None
+                    else float(record.get("filled_price") or 0)
+                )
+            except (TypeError, ValueError):
+                resolved_filled_price = float(record.get("filled_price") or 0)
+            try:
+                resolved_remaining_qty = int(float(remaining_qty)) if remaining_qty is not None else 0
+            except (TypeError, ValueError):
+                resolved_remaining_qty = 0
+
+            reason = (
+                "broker_open_order_absent_after_recovery_check"
+                if not execution
+                else "broker_execution_confirmed_after_recovery_check"
+            )
+            updated = reconcile_order_record(
+                record["order_id"],
+                status=OrderStatus.RECONCILED.value,
+                filled_qty=resolved_filled_qty,
+                filled_price=resolved_filled_price,
+                remaining_qty=max(resolved_remaining_qty, 0),
+                reason=reason,
+            )
+            if updated:
+                OrderGuard.clear(symbol)
+                reconciled.append({
+                    **updated,
+                    "execution_checked": bool(execution),
+                })
+                logger.info(
+                    "[복구] DB 미완료 주문 대조 완료: {} {} status={} filled={}/{}",
+                    symbol,
+                    record.get("broker_order_id"),
+                    updated["status"],
+                    updated["filled_qty"],
+                    record.get("requested_qty"),
+                )
+        return reconciled
+
     def _report_execution_slippage(
         self,
         symbol: str,
@@ -1622,6 +1732,8 @@ class OrderExecutor:
                     "reason": "legacy_list_check",
                     "orders": open_orders,
                 }
+            reconciled_records = self._reconcile_persistent_open_order_records(open_orders)
+            self.last_open_order_reconcile_status["persistent_order_reconciliations"] = reconciled_records
         except Exception as e:
             logger.warning("[복구] get_open_orders 실패: {}", e)
             self.last_open_order_reconcile_status = {
