@@ -85,6 +85,92 @@ def test_run_live_trading_keeps_unregistered_strategy_blocked(monkeypatch):
     assert gate_called is False
 
 
+def test_run_live_trading_blocks_when_kis_connection_check_fails(monkeypatch):
+    import main as main_mod
+
+    config = DummyConfig()
+    calls = {}
+
+    monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setattr(main_mod, "_check_live_readiness_gate", lambda cfg, strategy: [])
+
+    class DummyKIS:
+        def authenticate(self):
+            return True
+
+        def verify_connection(self):
+            calls["verify_connection"] = True
+            return False
+
+    class DummyPortfolio:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("KIS 연결 검증 실패 시 포트폴리오 동기화를 시도하면 안 됨")
+
+    class DummyScheduler:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("KIS 연결 검증 실패 시 실전 스케줄러를 시작하면 안 됨")
+
+    monkeypatch.setattr("api.kis_api.KISApi", DummyKIS)
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", DummyPortfolio)
+    monkeypatch.setattr("core.scheduler.Scheduler", DummyScheduler)
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod.run_live_trading(SimpleNamespace(strategy="scoring", confirm_live=True))
+
+    assert exc.value.code == 1
+    assert calls == {"verify_connection": True}
+    assert config.trading["mode"] == "paper"
+
+
+def test_run_live_trading_blocks_when_initial_broker_sync_fails(monkeypatch):
+    import main as main_mod
+
+    config = DummyConfig()
+    calls = {}
+
+    monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setattr(main_mod, "_check_live_readiness_gate", lambda cfg, strategy: [])
+
+    class DummyKIS:
+        def authenticate(self):
+            return True
+
+        def verify_connection(self):
+            return True
+
+    class DummyPortfolio:
+        def __init__(self, cfg, account_key):
+            calls["portfolio_account_key"] = account_key
+
+        def sync_with_broker(self):
+            calls["sync_with_broker"] = True
+            return {"ok": False, "message": "broker/db mismatch"}
+
+    class DummyScheduler:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("초기 잔고 동기화 실패 시 실전 스케줄러를 시작하면 안 됨")
+
+    monkeypatch.setattr("api.kis_api.KISApi", DummyKIS)
+    monkeypatch.setattr(
+        "core.blackswan_detector.BlackSwanDetector",
+        lambda cfg: SimpleNamespace(is_on_cooldown=lambda: False),
+    )
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", DummyPortfolio)
+    monkeypatch.setattr("core.scheduler.Scheduler", DummyScheduler)
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod.run_live_trading(SimpleNamespace(strategy="scoring", confirm_live=True))
+
+    assert exc.value.code == 1
+    assert calls == {
+        "portfolio_account_key": "scoring",
+        "sync_with_broker": True,
+    }
+    assert config.trading["mode"] == "paper"
+
+
 def test_scheduler_live_requires_explicit_live_gate_validation(monkeypatch):
     import core.scheduler as scheduler_mod
 

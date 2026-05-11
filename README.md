@@ -126,7 +126,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 
 Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + 현재 commit/config와 일치하는 canonical promotion bundle + `ELIGIBLE` paper evidence package가 모두 필요합니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + 현재 commit/config와 일치하는 canonical promotion bundle + `ELIGIBLE` paper evidence package가 모두 필요합니다. live 스케줄러 시작 전 KIS 연결 검증과 KIS↔DB 잔고 동기화도 반드시 통과해야 하며, 실패하면 경고로 넘기지 않고 시작을 차단합니다.
 현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
 `reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json` 파일은 더 이상 live 근거가 아닙니다. `--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다.
 
@@ -138,6 +138,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - 포지션 수 / 자금 비중 제한
 - 미체결 / 중복 주문 방지 (live 미체결 조회 실패 시 주문 보류)
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
+- live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
 - 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
