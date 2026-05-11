@@ -266,6 +266,61 @@ def attach_canonical_walk_forward_metrics(metrics, window_metrics):
     }
 
 
+def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence"):
+    from core.promotion_engine import (
+        StrategyMetrics,
+        attach_paper_evidence_metrics,
+        load_paper_evidence_package,
+        paper_evidence_metrics_from_package,
+        promote,
+    )
+
+    promotions = {}
+    paper_fields = (
+        "paper_days",
+        "paper_sharpe",
+        "paper_excess",
+        "paper_evidence_recommendation",
+        "paper_benchmark_final_ratio",
+        "paper_sell_count",
+        "paper_win_rate",
+        "paper_frozen_days",
+        "paper_cumulative_return",
+    )
+    for name, m in metrics_all.items():
+        paper_metrics = paper_evidence_metrics_from_package(
+            load_paper_evidence_package(name, evidence_dir)
+        )
+        for key in paper_fields:
+            value = paper_metrics.get(key)
+            if value is not None:
+                m[key] = value
+
+        sm = attach_paper_evidence_metrics(StrategyMetrics(
+            name=name,
+            total_return=m.get("total_return", 0),
+            profit_factor=m.get("profit_factor", 0),
+            mdd=m.get("mdd", 0),
+            wf_positive_rate=m.get("wf_positive_rate", 0),
+            wf_sharpe_positive_rate=m.get("wf_sharpe_positive_rate", 0),
+            wf_windows=m.get("wf_windows", 0),
+            wf_total_trades=m.get("wf_total_trades", 0),
+            sharpe=m.get("sharpe", 0),
+            benchmark_excess_return=m.get("benchmark_excess_return"),
+            benchmark_excess_sharpe=m.get("benchmark_excess_sharpe"),
+            ev_per_trade=m.get("ev_per_trade"),
+            cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
+            turnover_per_year=m.get("turnover_per_year"),
+        ), {key: m.get(key) for key in paper_fields})
+        result = promote(sm)
+        promotions[name] = {
+            "status": result.status,
+            "allowed_modes": result.allowed_modes,
+            "reason": result.reason,
+        }
+    return promotions
+
+
 def run_canonical():
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
@@ -505,32 +560,7 @@ def run_canonical():
         m["benchmark_excess_sharpe"] = benchmark["strategy_excess_sharpe"].get(name)
 
     # ── Promotion 계산 ──
-    from core.promotion_engine import StrategyMetrics, promote
-
-    promotions = {}
-    for name, m in metrics_all.items():
-        sm = StrategyMetrics(
-            name=name,
-            total_return=m.get("total_return", 0),
-            profit_factor=m.get("profit_factor", 0),
-            mdd=m.get("mdd", 0),
-            wf_positive_rate=m.get("wf_positive_rate", 0),
-            wf_sharpe_positive_rate=m.get("wf_sharpe_positive_rate", 0),
-            wf_windows=m.get("wf_windows", 0),
-            wf_total_trades=m.get("wf_total_trades", 0),
-            sharpe=m.get("sharpe", 0),
-            benchmark_excess_return=m.get("benchmark_excess_return"),
-            benchmark_excess_sharpe=m.get("benchmark_excess_sharpe"),
-            ev_per_trade=m.get("ev_per_trade"),
-            cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
-            turnover_per_year=m.get("turnover_per_year"),
-        )
-        result = promote(sm)
-        promotions[name] = {
-            "status": result.status,
-            "allowed_modes": result.allowed_modes,
-            "reason": result.reason,
-        }
+    promotions = build_promotion_results(metrics_all)
 
     # ── Artifact 저장 ──
     out_dir = Path("reports/promotion")

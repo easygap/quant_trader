@@ -453,3 +453,73 @@ class TestArtifactLoading:
             )
             result = load_promotion_artifact(str(base))
             assert result is None
+
+    def test_load_metrics_from_artifact_attaches_paper_evidence_package(self):
+        """artifact metrics 로드 시 eligible paper evidence를 StrategyMetrics에 반영."""
+        import tempfile, json
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        from core.promotion_engine import load_metrics_from_artifact
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = root / "promotion"
+            evidence_dir = root / "paper_evidence"
+            base.mkdir()
+            evidence_dir.mkdir()
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    "scoring": {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 6,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({"scoring": {"total_trades": 120}}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": 2.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+            (evidence_dir / "promotion_evidence_scoring.json").write_text(
+                json.dumps({
+                    "strategy": "scoring",
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                    "paper_sharpe": 0.55,
+                    "avg_same_universe_excess": 0.2,
+                    "benchmark_final_ratio": 0.9,
+                    "sell_count": 8,
+                    "win_rate": 55.0,
+                    "frozen_days": 0,
+                    "cumulative_return": 4.0,
+                }),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics_from_artifact(str(base), evidence_dir=str(evidence_dir))
+
+        assert metrics["scoring"].paper_days == 60
+        assert metrics["scoring"].paper_sharpe == 0.55
+        assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"

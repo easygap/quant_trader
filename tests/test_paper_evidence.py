@@ -1474,7 +1474,7 @@ class TestShadowEvidenceNotPromotable:
                         "position_reconciliation": {"complete": True},
                     },
                 },
-                "daily_return": 0.1,
+                "daily_return": 0.15 if i % 2 == 0 else 0.05,
                 "cumulative_return": 6.0,
                 "mdd": -2.0,
                 "total_trades": 2,
@@ -1494,6 +1494,8 @@ class TestShadowEvidenceNotPromotable:
 
         assert pkg["recommendation"] == "ELIGIBLE"
         assert pkg["promotable_evidence_days"] == 60
+        assert pkg["paper_sharpe"] is not None
+        assert pkg["paper_sharpe"] > 0.3
         assert pkg["target_weight_evidence"]["required"] is True
         assert pkg["target_weight_evidence"]["valid_pilot_days"] == 60
         assert pkg["target_weight_evidence"]["invalid_days"] == 0
