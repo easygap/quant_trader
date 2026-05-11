@@ -147,6 +147,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - HTTP 긴급 청산 서버는 기본적으로 127.0.0.1에만 바인드
 - HTTP 긴급 청산 토큰은 기본 최소 16자와 placeholder 차단 검증 적용
 - 긴급 청산 결과는 성공/실패 summary를 통합 알림으로 전파
+- paper/live 현금 정산은 실제 체결가 기준이며 슬리피지를 현금 흐름에서 중복 차감하지 않음
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
 - 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
@@ -232,6 +233,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-08 follow-up: `research_candidate_sweep`의 EW B&H 벤치마크가 일부 종목 결측 상태에서 전체 capital 대비 낮게 계산되어 후보 초과수익이 과대평가되는 경로를 차단했습니다. 벤치마크 입력 universe 전체가 수집·검증되지 않으면 excess gate와 decision action은 `INSUFFICIENT_BENCHMARK_DATA`로 고정됩니다.
 
 2026-05-08 follow-up: `OrderExecutor` live BUY/SELL은 주문 ACK 이후 체결가·체결수량 확인이 되지 않거나 부분체결만 확인되면 더 이상 예상가 기준 전량 FILLED로 처리하지 않습니다. 이때 `success=False`는 브로커 주문 부재가 아니라 `order_pending=True`/`requires_reconcile=True`인 장부 반영 보류 상태이며, KIS 잔고 대조 전 DB 포지션·거래 기록 오염을 막습니다.
+
+2026-05-11 follow-up: paper BUY 수량·손절·익절·트레일링 기준을 예상 체결가로 보수화하고, paper SELL도 매수처럼 모델 슬리피지를 체결가에 반영합니다. `TradeHistory.price`는 실제 체결가로 보고, `get_trade_cash_summary()`는 슬리피지를 진단값으로 집계하되 현금 흐름에서는 수수료·세금만 별도 차감해 체결가에 이미 들어간 비용이 중복 반영되지 않게 했습니다.
 
 2026-05-08 follow-up: KIS 미체결 조회 실패를 더 이상 “미체결 없음”으로 해석하지 않습니다. live BUY/SELL은 주문 전 미체결 조회가 실패하거나 응답 형식이 불명확하면 `live_unfilled_check.checked=False`로 주문을 보류하고, 재시작 복구에서도 KIS 미체결 조회 실패를 별도 critical 알림으로 드러냅니다.
 
