@@ -333,6 +333,47 @@ class TestForceLiveRemoved:
             "reason": "paper sell rejected",
         }]
 
+    def test_liquidate_summary_sends_critical_notification(self, monkeypatch):
+        """긴급 청산 결과는 통합 알림으로 전파된다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        notifications = []
+        config = SimpleNamespace(trading={"mode": "paper"})
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(
+            repositories,
+            "get_all_positions",
+            lambda: [
+                SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+            ],
+        )
+
+        class FakeExecutor:
+            def __init__(self, cfg, account_key=""):
+                pass
+
+            def execute_sell(self, symbol, price, quantity=None, reason="", strategy=""):
+                return {"success": True}
+
+        class FakeNotifier:
+            def __init__(self, cfg):
+                self.cfg = cfg
+
+            def send_message(self, text, critical=False):
+                notifications.append({"text": text, "critical": critical})
+
+        monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+        monkeypatch.setattr("core.notifier.Notifier", FakeNotifier)
+
+        summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=False))
+
+        assert summary["succeeded"] == 1
+        assert notifications == [{
+            "text": "긴급 청산 완료\n- mode: paper\n- 대상: 1건\n- 성공: 1건\n- 실패: 0건",
+            "critical": True,
+        }]
+
     def test_http_liquidate_reports_failed_summary_as_failure(self, monkeypatch):
         """HTTP 긴급 청산은 반환 summary에 실패가 있으면 성공 응답으로 포장하지 않는다."""
         import main as main_mod
