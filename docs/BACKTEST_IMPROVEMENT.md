@@ -30,7 +30,7 @@
 
 | 항목 | 구현 | 파일 |
 |------|------|------|
-| **월간 왕복 제한** | `max_monthly_roundtrips: 8` (종목당) | `risk_params.yaml`, `core/order_executor.py` |
+| **월간 BUY 제한** | `max_monthly_roundtrips: 8` (종목당). 백테스트와 paper/live 신규 BUY 주문에 동일하게 적용 | `risk_params.yaml`, `core/order_executor.py` |
 | **최소 보유 기간** | `min_holding_days: 5` | `risk_params.yaml`, `core/order_executor.py` |
 | **히스터리시스** | BUY 진입 임계값과 SELL 청산 임계값 분리 | `strategies.yaml:scoring.hysteresis` |
 | **장 초반/종반 매수 차단** | 09:00~09:30, 15:00~15:30 신규 매수 불가 | `core/order_executor.py` |

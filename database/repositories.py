@@ -226,6 +226,39 @@ def get_recent_sell_trades(
 
 
 @with_retry
+def count_monthly_buy_trades(
+    symbol: str,
+    *,
+    mode: Optional[str] = None,
+    account_key: Optional[str] = None,
+    at: Optional[datetime] = None,
+) -> int:
+    """해당 월의 동일 종목 BUY 체결 기록 수를 반환한다."""
+    dt = at or datetime.now()
+    month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        next_month = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month = month_start.replace(month=month_start.month + 1)
+
+    session = get_session()
+    try:
+        query = session.query(TradeHistory).filter(
+            TradeHistory.symbol == symbol,
+            TradeHistory.action == "BUY",
+            TradeHistory.executed_at >= month_start,
+            TradeHistory.executed_at < next_month,
+        )
+        if mode:
+            query = query.filter(TradeHistory.mode == mode)
+        if account_key is not None:
+            query = query.filter(TradeHistory.account_key == (account_key or ""))
+        return int(query.count())
+    finally:
+        session.close()
+
+
+@with_retry
 def get_trade_cash_summary(
     mode: Optional[str] = None,
     start_date: Optional[datetime] = None,
