@@ -97,6 +97,155 @@ class TestForceLiveRemoved:
 
         get_positions.assert_not_called()
 
+    def test_live_liquidate_syncs_broker_positions_before_loading_db_positions(self, monkeypatch):
+        """live 긴급 청산은 KIS-only 포지션을 DB에 보정한 뒤 청산 대상을 읽는다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        calls = []
+        sells = []
+        config = SimpleNamespace(
+            trading={"mode": "live"},
+            kis_api={"accounts": {}},
+            get_account_no=lambda account_key="": "12345678-01",
+        )
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        class FakePortfolio:
+            def __init__(self, cfg, account_key=""):
+                self.account_key = account_key
+
+            def sync_with_broker(self, auto_correct=True):
+                calls.append(("sync", self.account_key, auto_correct))
+                return {
+                    "ok": False,
+                    "corrected": [{"symbol": "005930", "type": "kis_only"}],
+                    "message": "KIS-only 포지션 DB 반영",
+                }
+
+        def fake_get_all_positions():
+            calls.append(("positions",))
+            assert calls[0] == ("sync", "", True)
+            return [
+                SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+            ]
+
+        class FakeKIS:
+            def __init__(self, account_no=None):
+                self.account_no = account_no
+
+            def get_current_price(self, symbol):
+                calls.append(("price", symbol, self.account_no))
+                return {"price": 61_000}
+
+        class FakeExecutor:
+            def __init__(self, cfg, account_key=""):
+                self.account_key = account_key
+
+            def execute_sell(self, symbol, price, quantity=None, reason="", strategy=""):
+                sells.append({
+                    "account_key": self.account_key,
+                    "symbol": symbol,
+                    "price": price,
+                    "quantity": quantity,
+                    "reason": reason,
+                    "strategy": strategy,
+                })
+                return {"success": True}
+
+        monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolio)
+        monkeypatch.setattr(repositories, "get_all_positions", fake_get_all_positions)
+        monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
+        monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+
+        main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
+
+        assert calls[:2] == [("sync", "", True), ("positions",)]
+        assert sells == [{
+            "account_key": "",
+            "symbol": "005930",
+            "price": 61_000.0,
+            "quantity": None,
+            "reason": "긴급 전량 청산 (--mode liquidate)",
+            "strategy": "emergency_liquidate",
+        }]
+
+    def test_live_liquidate_aborts_when_broker_sync_fails_before_position_load(self, monkeypatch):
+        """live 긴급 청산 전 KIS↔DB 동기화 실패가 남으면 stale DB 포지션만으로 진행하지 않는다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        config = SimpleNamespace(
+            trading={"mode": "live"},
+            kis_api={"accounts": {}},
+            get_account_no=lambda account_key="": "12345678-01",
+        )
+        get_positions = MagicMock(return_value=[
+            SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+        ])
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        class FakePortfolio:
+            def __init__(self, cfg, account_key=""):
+                pass
+
+            def sync_with_broker(self, auto_correct=True):
+                return {"ok": False, "corrected": [], "message": "잔고 조회 실패"}
+
+        monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolio)
+        monkeypatch.setattr(repositories, "get_all_positions", get_positions)
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
+
+        assert exc.value.code == 1
+        get_positions.assert_not_called()
+
+    def test_live_liquidate_aborts_when_broker_sync_partially_corrects_positions(self, monkeypatch):
+        """일부 보정만 성공한 잔고 동기화 결과로는 live 긴급 청산을 시작하지 않는다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        config = SimpleNamespace(
+            trading={"mode": "live"},
+            kis_api={"accounts": {}},
+            get_account_no=lambda account_key="": "12345678-01",
+        )
+        get_positions = MagicMock(return_value=[
+            SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+        ])
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        class FakePortfolio:
+            def __init__(self, cfg, account_key=""):
+                pass
+
+            def sync_with_broker(self, auto_correct=True):
+                return {
+                    "ok": False,
+                    "mismatches": [
+                        {"symbol": "005930", "type": "kis_only"},
+                        {"symbol": "000660", "type": "kis_only"},
+                    ],
+                    "corrected": [{"symbol": "005930", "action": "added"}],
+                    "message": "일부 포지션 보정 실패",
+                }
+
+        monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolio)
+        monkeypatch.setattr(repositories, "get_all_positions", get_positions)
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
+
+        assert exc.value.code == 1
+        get_positions.assert_not_called()
+
 
 # ── 2. OrderGuard 타이밍 ──
 

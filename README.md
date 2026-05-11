@@ -140,6 +140,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문 상태 대조 완료 처리
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
+- live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
 - 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
