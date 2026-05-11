@@ -2060,6 +2060,71 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert manifest["no_order_safety"]["manifest_only"] is True
 
 
+def test_run_pilot_readiness_audit_refreshes_preflight_before_gate_checks(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    refresh_calls = []
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+
+    def fake_refresh(strategy, date):
+        refresh_calls.append((strategy, date))
+        return {
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+            "strategy": strategy,
+            "date": date,
+            "overall": "warn",
+            "entry_allowed": True,
+            "runtime_state": "blocked_insufficient_evidence",
+            "notifier_health": "configured",
+            "pilot_authorized": True,
+        }
+
+    monkeypatch.setattr(twp, "refresh_paper_preflight_status", fake_refresh)
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": True,
+            "strategy_eligible": True,
+            "runtime_state": "blocked_insufficient_evidence",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+        },
+    )
+
+    result = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+
+    assert refresh_calls == [(plan.candidate_id, plan.trade_day)]
+    assert result["audit"]["preflight_refresh"]["notifier_health"] == "configured"
+    assert result["audit"]["preflight_refresh"]["pilot_authorized"] is True
+
+
 def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_path):
     import core.paper_pilot as pp
     import tools.target_weight_rotation_pilot as twp
