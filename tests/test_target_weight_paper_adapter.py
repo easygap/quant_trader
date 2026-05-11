@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -4125,6 +4126,286 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
     assert caps["target_weight_plan"]["position_quantities_before"] == {}
     assert saved_sessions[0]["execution_complete"] is True
+
+
+def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.paper_pilot_control as ppc
+    import tools.target_weight_rotation_pilot as twp
+    from core.live_gate import (
+        LIVE_GATE_ARTIFACT_TYPE,
+        LIVE_GATE_SCHEMA_VERSION,
+        validate_live_readiness,
+    )
+    from core.promotion_engine import load_metrics_from_artifact, promote
+    from tools.evaluate_and_promote import build_data_snapshot_manifest
+
+    def write_json(path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    plan = _adapter_plan()
+    evidence_dir = tmp_path / "paper_evidence"
+    promotion_dir = tmp_path / "promotion"
+    runtime_dir = tmp_path / "paper_runtime"
+    collected = []
+    saved_sessions = []
+
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", evidence_dir)
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(pp, "PILOT_AUTH_FILE", runtime_dir / "pilot_authorizations.jsonl")
+    monkeypatch.setattr(pp, "PILOT_AUDIT_FILE", runtime_dir / "pilot_audit.jsonl")
+    monkeypatch.setattr(pp, "check_pilot_prerequisites", lambda strategy: (True, "ok"))
+    monkeypatch.setattr(pp, "_check_pilot_eligibility", lambda strategy: None)
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=False,
+            reason="no active pilot authorization",
+            remaining_orders=None,
+            remaining_exposure=None,
+            caps_snapshot=None,
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "compute_launch_readiness",
+        lambda *args, **kwargs: {
+            "strategy": plan.candidate_id,
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "remaining_clean_days": 0,
+            "evidence_fresh": True,
+            "benchmark_ready": True,
+            "notifier_ready": True,
+            "pilot_authorization_present": False,
+            "strategy_eligible": True,
+            "runtime_state": "normal",
+            "real_paper_days": 0,
+            "shadow_days": 3,
+            "eligible_records": 3,
+            "quarantined_records": 0,
+            "infra_ready": True,
+            "launch_ready": False,
+            "blocking_requirements": [],
+        },
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
+
+    readiness = twp.run_pilot_readiness_audit(
+        output_dir=tmp_path / "readiness",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    audit = readiness["audit"]
+    assert audit["ready_for_cap_approval"] is True
+    assert audit["ready_for_capped_pilot"] is False
+    assert "--execute --collect-evidence" in audit["operator_commands"]["execute_capped_paper"]
+
+    enabled_snapshot = twp.build_pilot_authorization_snapshot(
+        plan,
+        readiness_audit=audit,
+    )
+    monkeypatch.setattr(
+        ppc,
+        "_target_weight_enable_guard",
+        lambda args: {
+            **readiness,
+            "target_weight_plan_snapshot": enabled_snapshot,
+        },
+    )
+    ppc.run_enable(SimpleNamespace(
+        strategy=plan.candidate_id,
+        valid_from=plan.trade_day,
+        valid_to="2026-04-30",
+        max_orders=10,
+        max_positions=10,
+        max_notional=2_000_000,
+        max_exposure=10_000_000,
+        reason="target-weight e2e fixture",
+    ))
+    active_auth = pp.get_active_pilot(plan.candidate_id, plan.trade_day)
+    assert active_auth is not None
+    assert active_auth.target_weight_plan_snapshot["candidate_id"] == plan.candidate_id
+    assert active_auth.target_weight_plan_snapshot["trade_day"] == plan.trade_day
+    assert active_auth.target_weight_plan_snapshot["params_hash"] == plan.params_hash
+
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: _pilot_check_for_plan(
+            plan,
+            snapshot=active_auth.target_weight_plan_snapshot,
+        ),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+
+    def capture_daily_evidence(**kwargs):
+        collected.append(kwargs)
+        return SimpleNamespace(date=kwargs["date"].strftime("%Y-%m-%d"))
+
+    monkeypatch.setattr(pe, "collect_daily_evidence", capture_daily_evidence)
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+
+    assert result["execution_evidence"]["complete"] is True
+    assert result["evidence_collection"]["status"] == "recorded"
+    assert saved_sessions[0]["execution_complete"] is True
+    assert len(collected) == 1
+
+    proof_caps = collected[0]["pilot_caps_snapshot"]
+    jsonl_path = evidence_dir / f"daily_evidence_{plan.candidate_id}.jsonl"
+    for index, day in enumerate(pd.bdate_range("2026-01-05", periods=60)):
+        record_date = day.strftime("%Y-%m-%d")
+        caps = deepcopy(proof_caps)
+        caps["target_weight_plan"]["trade_day"] = record_date
+        pe._append_jsonl(jsonl_path, {
+            "date": record_date,
+            "day_number": index + 1,
+            "strategy": plan.candidate_id,
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "pilot_caps_snapshot": caps,
+            "daily_return": 0.2 if index % 2 == 0 else 0.1,
+            "cumulative_return": round((index + 1) * 0.15, 2),
+            "mdd": -3.0,
+            "total_trades": len(plan.orders),
+            "sell_count": 1,
+            "winning_trades": 1,
+            "losing_trades": 0,
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.04,
+            "cash_adjusted_excess": 0.03,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+    pkg_path, _ = pe.generate_promotion_package(plan.candidate_id)
+    pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+    assert pkg["recommendation"] == "ELIGIBLE"
+    assert pkg["target_weight_verified_pilot_days"] == 60
+    assert pkg["target_weight_invalid_days"] == 0
+    assert pkg["target_weight_evidence"]["params_hash"] == plan.params_hash
+    assert pkg["target_weight_evidence"]["all_promotable_days_verified"] is True
+
+    snapshot_manifest = build_data_snapshot_manifest(
+        provider="test-provider",
+        universe_rule="target-weight e2e fixture",
+        eval_start="2026-01-05",
+        eval_end="2026-03-27",
+        universe_lookback_start="2025-10-01",
+        universe_lookback_end="2025-12-31",
+        universe=plan.symbols,
+        liquidity_coverage={
+            symbol: {"rows": 62, "start": "2025-10-01", "end": "2025-12-31"}
+            for symbol in plan.symbols
+        },
+        benchmark_coverage={
+            symbol: {"rows": 60, "start": "2026-01-05", "end": "2026-03-27"}
+            for symbol in plan.symbols
+        },
+        fetch_errors={},
+    )
+    write_json(
+        promotion_dir / "run_metadata.json",
+        {
+            "schema_version": LIVE_GATE_SCHEMA_VERSION,
+            "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+            "commit_hash": "abc123",
+            "config_yaml_hash": "yaml-ok",
+            "config_resolved_hash": "resolved-ok",
+            "generated_at": datetime(2026, 4, 10, 12, 0, 0).isoformat(),
+            "data_snapshot_hash": snapshot_manifest["data_snapshot_hash"],
+            "data_snapshot_manifest": snapshot_manifest,
+            "evaluation_errors": {},
+            "walk_forward_errors": {},
+            "strategy_specs": [{
+                "candidate_id": plan.candidate_id,
+                "params_hash": plan.params_hash,
+            }],
+        },
+    )
+    write_json(
+        promotion_dir / "metrics_summary.json",
+        {
+            plan.candidate_id: {
+                "total_return": 24.0,
+                "profit_factor": 1.55,
+                "mdd": -8.0,
+                "wf_positive_rate": 0.8,
+                "wf_sharpe_positive_rate": 0.8,
+                "wf_windows": 6,
+                "wf_total_trades": 120,
+                "sharpe": 0.75,
+                "ev_per_trade": 5000,
+                "cost_adjusted_cagr": 9.0,
+                "turnover_per_year": 350.0,
+            }
+        },
+    )
+    write_json(
+        promotion_dir / "walk_forward_summary.json",
+        {plan.candidate_id: {"windows": 6, "positive": 5, "sharpe_pos": 5, "total_trades": 120}},
+    )
+    write_json(
+        promotion_dir / "benchmark_comparison.json",
+        {
+            "strategy_excess_return_pct": {plan.candidate_id: 4.0},
+            "strategy_excess_sharpe": {plan.candidate_id: 0.25},
+        },
+    )
+
+    metrics = load_metrics_from_artifact(str(promotion_dir), evidence_dir=str(evidence_dir))
+    promotion = promote(metrics[plan.candidate_id])
+    assert promotion.status == "live_candidate"
+    write_json(
+        promotion_dir / "promotion_result.json",
+        {
+            plan.candidate_id: {
+                "status": promotion.status,
+                "allowed_modes": promotion.allowed_modes,
+                "reason": promotion.reason,
+            }
+        },
+    )
+
+    issues = validate_live_readiness(
+        SimpleNamespace(yaml_hash="yaml-ok", resolved_hash="resolved-ok"),
+        plan.candidate_id,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 10, 12, 0, 0),
+    )
+
+    assert issues == []
 
 
 def test_run_pilot_accepts_verified_already_recorded_pilot_evidence(monkeypatch, tmp_path):
