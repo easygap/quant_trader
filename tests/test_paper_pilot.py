@@ -114,6 +114,29 @@ def _read_pilot_audit(runtime_dir):
     ]
 
 
+def _write_notifier_health(
+    runtime_dir,
+    *,
+    configured=True,
+    reachable=True,
+    checked_at=None,
+):
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    checked_at = checked_at or datetime.now().isoformat()
+    payload = {
+        "discord_configured": configured,
+        "discord_reachable": reachable,
+        "checked_at": checked_at,
+    }
+    if reachable is True:
+        payload["last_success_at"] = checked_at
+        payload["test_sent_at"] = checked_at
+    (runtime_dir / "notifier_health.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
 class TestPilotBasic:
 
     def test_no_pilot_entry_blocked(self, evidence_dir, runtime_dir, fresh_db):
@@ -141,10 +164,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        # notifier 설정 (pilot requires discord)
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30",
                      max_orders=2, max_notional=1_000_000, reason="test pilot")
@@ -162,9 +182,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30", max_orders=1)
 
@@ -192,9 +210,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-03-01", "2026-03-31")  # 이미 만료
 
@@ -209,9 +225,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": False}), encoding="utf-8")
+        _write_notifier_health(runtime_dir, configured=False, reachable=None)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -227,17 +241,46 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True, "discord_reachable": False}),
-            encoding="utf-8",
-        )
+        _write_notifier_health(runtime_dir, reachable=False)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
         result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
         assert result.allowed is False
         assert "notifier unreachable" in result.reason.lower()
+
+    def test_notifier_configured_but_unverified_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """webhook URL만 설정되고 test send 성공 증거가 없으면 pilot entry 차단."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        _write_notifier_health(runtime_dir, reachable=None)
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "notifier unverified" in result.reason.lower()
+
+    def test_stale_notifier_success_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """오래된 test send 성공 증거는 pilot entry 승인에 쓰지 않는다."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        old_checked_at = (datetime.now() - timedelta(hours=25)).isoformat()
+        _write_notifier_health(runtime_dir, checked_at=old_checked_at)
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "notifier stale" in result.reason.lower()
 
     def test_missing_notifier_health_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """notifier health artifact 부재 → pilot entry blocked."""
@@ -262,9 +305,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -283,9 +324,7 @@ class TestPilotBasic:
         """evidence guard 예외는 fail-closed."""
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -324,9 +363,7 @@ class TestPilotBasic:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -416,17 +453,14 @@ class TestPilotSchedulerIntegration:
 
         from core.paper_pilot import enable_pilot
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         valid_to = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
         enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
         from core.paper_preflight import run_preflight
         run_preflight(PILOT_STRATEGY, datetime.now().strftime("%Y-%m-%d"))
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         # scheduler shadow
         from core.scheduler import Scheduler
@@ -525,9 +559,7 @@ class TestPilotSchedulerIntegration:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import enable_pilot
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
@@ -648,9 +680,7 @@ class TestPilotSchedulerIntegration:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import enable_pilot, disable_pilot
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
@@ -671,9 +701,7 @@ class TestPilotEvidenceFreshness:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry, compute_launch_readiness
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-01-01", "2026-02-28")
 
@@ -693,9 +721,7 @@ class TestPilotEvidenceFreshness:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -715,9 +741,7 @@ class TestPilotEvidenceFreshness:
 
         from core.paper_pilot import enable_pilot, check_pilot_entry
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -767,9 +791,7 @@ class TestPilotSessionE2E:
             {"date": latest.strftime("%Y-%m-%d"), "same_universe_excess": 0.05, "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import enable_pilot
         valid_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -777,8 +799,7 @@ class TestPilotSessionE2E:
         enable_pilot(PILOT_STRATEGY, valid_from, valid_to, max_orders=5)
         from core.paper_preflight import run_preflight
         run_preflight(PILOT_STRATEGY, datetime.now().strftime("%Y-%m-%d"))
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         sched = self._make_scheduler(PILOT_STRATEGY, evidence_dir, runtime_dir)
         sched._entry_candidates = [
@@ -958,9 +979,7 @@ class TestPilotSessionE2E:
             save_pilot_session_artifact,
         )
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
 
@@ -1007,9 +1026,7 @@ class TestLaunchReadiness:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import enable_pilot, compute_launch_readiness
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
@@ -1031,11 +1048,7 @@ class TestLaunchReadiness:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True, "discord_reachable": False}),
-            encoding="utf-8",
-        )
+        _write_notifier_health(runtime_dir, reachable=False)
 
         from core.paper_pilot import enable_pilot, compute_launch_readiness
         enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
@@ -1047,6 +1060,47 @@ class TestLaunchReadiness:
         assert lr["launch_ready"] is False
         assert any("webhook test failed" in b.lower() for b in lr["blocking_requirements"])
 
+    def test_launch_readiness_blocks_unverified_notifier(self, evidence_dir, runtime_dir, fresh_db):
+        """설정만 된 webhook은 launch readiness 인프라 통과 조건이 아니다."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-03", "benchmark_status": "final"},
+            {"date": "2026-04-04", "benchmark_status": "final"},
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        _write_notifier_health(runtime_dir, reachable=None)
+
+        from core.paper_pilot import enable_pilot, compute_launch_readiness
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
+        assert lr["notifier_ready"] is False
+        assert lr["notifier_status"] == "unverified"
+        assert lr["infra_ready"] is False
+        assert any("not verified" in b.lower() for b in lr["blocking_requirements"])
+
+    def test_launch_readiness_blocks_stale_notifier_success(self, evidence_dir, runtime_dir, fresh_db):
+        """최근 성공이 아닌 webhook 테스트 증거는 launch readiness에서 stale로 본다."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-03", "benchmark_status": "final"},
+            {"date": "2026-04-04", "benchmark_status": "final"},
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        _write_notifier_health(
+            runtime_dir,
+            checked_at=(datetime.now() - timedelta(hours=25)).isoformat(),
+        )
+
+        from core.paper_pilot import enable_pilot, compute_launch_readiness
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
+        assert lr["notifier_ready"] is False
+        assert lr["notifier_status"] == "stale"
+        assert lr["infra_ready"] is False
+        assert any("stale" in b.lower() for b in lr["blocking_requirements"])
+
     def test_infra_ready_but_no_pilot_auth(self, evidence_dir, runtime_dir, fresh_db):
         """모든 인프라 조건 충족, pilot auth만 없음 → infra_ready=true, launch_ready=false."""
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
@@ -1055,9 +1109,7 @@ class TestLaunchReadiness:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import compute_launch_readiness
         lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
@@ -1084,9 +1136,7 @@ class TestLaunchReadiness:
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
 
-        (runtime_dir).mkdir(parents=True, exist_ok=True)
-        (runtime_dir / "notifier_health.json").write_text(
-            json.dumps({"discord_configured": True}), encoding="utf-8")
+        _write_notifier_health(runtime_dir)
 
         from core.paper_pilot import compute_launch_readiness
         lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
