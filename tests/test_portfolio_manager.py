@@ -2,6 +2,7 @@
 
 import api.kis_api
 import core.notifier
+import pytest
 from core.portfolio_manager import PortfolioManager
 
 
@@ -14,11 +15,50 @@ class _MockPosition:
 
 class _MockConfig:
     trading = {"mode": "paper"}
-    risk_params = {"position_sizing": {"initial_capital": 1000000}}
+    risk_params = {
+        "position_sizing": {"initial_capital": 1000000},
+        "stop_loss": {"type": "fixed", "fixed_rate": 0.03},
+        "take_profit": {"type": "fixed", "fixed_rate": 0.08, "partial_exit": True},
+        "trailing_stop": {"enabled": True, "type": "fixed", "fixed_rate": 0.05},
+    }
     database = {"sqlite_path": "data/quant_trader.db"}
 
     def get_account_no(self, key=""):
         return "00000000-00"
+
+
+@pytest.fixture
+def fresh_db():
+    from database.models import (
+        DailyReport,
+        FailedOrder,
+        OperationEvent,
+        PendingOrderGuard,
+        PortfolioSnapshot,
+        Position,
+        TradeHistory,
+        get_session,
+        init_database,
+    )
+
+    init_database()
+    session = get_session()
+    for model in [
+        TradeHistory,
+        OperationEvent,
+        PortfolioSnapshot,
+        Position,
+        FailedOrder,
+        PendingOrderGuard,
+        DailyReport,
+    ]:
+        try:
+            session.query(model).delete()
+        except Exception:
+            pass
+    session.commit()
+    session.close()
+    return True
 
 
 def test_portfolio_summary_uses_trade_cash_flow(monkeypatch):
@@ -119,3 +159,77 @@ def test_sync_with_broker_skips_auto_correct_when_kis_positions_empty(monkeypatc
     assert "자동 보정 보류" in result["message"]
     assert auto_correct_calls == []
     assert messages
+
+
+def test_auto_correct_adds_kis_only_position_with_risk_targets(fresh_db):
+    from database.repositories import get_position
+
+    pm = PortfolioManager(_MockConfig(), account_key="sync_recover_test")
+
+    corrected = pm._auto_correct_positions([
+        {
+            "symbol": "005930",
+            "type": "kis_only",
+            "kis_qty": 3,
+            "kis_avg_price": 60_000,
+            "kis_current_price": 61_000,
+        }
+    ])
+
+    position = get_position("005930", account_key="sync_recover_test")
+
+    assert corrected == [{
+        "symbol": "005930",
+        "action": "added",
+        "qty": 3,
+        "risk_targets_recovered": True,
+    }]
+    assert position.quantity == 3
+    assert position.avg_price == 60_000
+    assert position.stop_loss_price == 58_200
+    assert position.take_profit_price == 64_800
+    assert position.trailing_stop_price == 57_000
+    assert position.strategy == "broker_sync_recovered"
+
+
+def test_auto_correct_qty_mismatch_sets_broker_quantity_without_adding(fresh_db):
+    from database.repositories import get_position, save_position
+
+    save_position(
+        symbol="005930",
+        avg_price=50_000,
+        quantity=2,
+        stop_loss_price=48_500,
+        take_profit_price=54_000,
+        trailing_stop_price=47_500,
+        strategy="scoring",
+        account_key="sync_qty_test",
+    )
+    pm = PortfolioManager(_MockConfig(), account_key="sync_qty_test")
+
+    corrected = pm._auto_correct_positions([
+        {
+            "symbol": "005930",
+            "type": "qty_mismatch",
+            "kis_qty": 5,
+            "kis_avg_price": 60_000,
+            "kis_current_price": 61_000,
+            "db_qty": 2,
+        }
+    ])
+
+    position = get_position("005930", account_key="sync_qty_test")
+
+    assert corrected == [{
+        "symbol": "005930",
+        "action": "qty_updated",
+        "old_qty": 2,
+        "new_qty": 5,
+        "risk_targets_recovered": True,
+    }]
+    assert position.quantity == 5
+    assert position.avg_price == 60_000
+    assert position.total_invested == 300_000
+    assert position.stop_loss_price == 58_200
+    assert position.take_profit_price == 64_800
+    assert position.trailing_stop_price == 57_000
