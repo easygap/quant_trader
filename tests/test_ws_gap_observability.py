@@ -5,6 +5,7 @@
 - dashboard_runtime_state.merge_ws_gap() 통합 검증
 """
 
+import asyncio
 import json
 import threading
 from collections import deque
@@ -284,3 +285,44 @@ class TestGapEventFields:
         assert isinstance(event["affected_symbols"], list)
         assert isinstance(event["rest_backfill_performed"], bool)
         assert isinstance(event["observed_volatility"], dict)
+
+
+class TestGapBackfillVolatility:
+    """재연결 갭 중 분봉 swing을 gap event에 남기는지 검증."""
+
+    def test_minute_bar_swing_is_recorded_as_observed_volatility(self):
+        with patch("api.websocket_handler.Config") as MockConfig:
+            MockConfig.get.return_value = MagicMock(
+                kis_api={"app_key": "", "app_secret": "", "use_mock": True}
+            )
+            from api.websocket_handler import WebSocketHandler
+
+            handler = WebSocketHandler(config=MockConfig.get())
+
+        fake_api = MagicMock()
+        fake_api.authenticate.return_value = True
+        fake_api.get_price_history.return_value = [
+            {"low": 100.0, "high": 102.0},
+            {"low": 99.0, "high": 104.0},
+        ]
+
+        fake_detector = MagicMock()
+
+        handler._disconnect_time = datetime(2026, 4, 10, 9, 0, 0)
+        handler._notify_websocket_gap_discord = MagicMock()
+
+        with patch("api.kis_api.KISApi", return_value=fake_api), \
+             patch("core.blackswan_detector.BlackSwanDetector", return_value=fake_detector), \
+             patch("monitoring.dashboard_runtime_state.merge_ws_gap"):
+            asyncio.run(
+                handler._after_websocket_reconnected(
+                    ["005930"],
+                    datetime(2026, 4, 10, 9, 1, 30),
+                    timedelta(seconds=90),
+                )
+            )
+
+        event = handler.gap_snapshot()["recent_gaps"][-1]
+        assert event["minute_bar_backfill_count"] == 1
+        assert event["observed_volatility"]["005930"] == 5.05
+        fake_detector.report_websocket_gap_volatility.assert_called_once()
