@@ -145,6 +145,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - HTTP 긴급 청산은 개별 매도 실패가 있으면 실패 응답으로 노출
 - HTTP 긴급 청산 실행은 POST 전용이며 query token 인증은 기본 비활성
 - HTTP 긴급 청산 서버는 기본적으로 127.0.0.1에만 바인드
+- HTTP 긴급 청산 토큰은 기본 최소 16자와 placeholder 차단 검증 적용
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
 - 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
