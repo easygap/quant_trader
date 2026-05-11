@@ -181,6 +181,38 @@ def _pilot_check_for_plan(plan, *, snapshot=None):
     )
 
 
+def _execute_plan_submit_guards_ok(plan):
+    return {
+        "pilot_validation": SimpleNamespace(allowed=True, reason="ok"),
+        "preflight_refresh": {
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+        },
+        "execution_trade_day_check": {
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight execution trade day matches current KST date",
+            "plan_trade_day": plan.trade_day,
+            "execution_day": plan.trade_day,
+        },
+        "execution_market_session_check": {
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight execution market session is open",
+        },
+        "pilot_authorization_snapshot_check": {
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight pilot authorization snapshot matches current plan",
+            "mismatches": [],
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def _target_weight_preflight_refresh_ok(monkeypatch):
     import tools.target_weight_rotation_pilot as twp
@@ -990,6 +1022,103 @@ def test_execute_plan_dry_run_preserves_sell_before_buy_ordering():
     assert execution["skipped"] == len(plan.orders)
 
 
+def test_execute_plan_blocks_direct_submit_without_wrapper_guards(monkeypatch):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("missing wrapper guards must block before order submission"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert "target_weight_pilot_validation_required" in execution["halt_reason"]
+    assert execution["details"][0]["status"] == "skipped_pilot_validation"
+
+
+def test_execute_plan_requires_preflight_refresh_before_order_submission(monkeypatch):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    guards = _execute_plan_submit_guards_ok(plan)
+    del guards["preflight_refresh"]
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("missing preflight refresh must block before order submission"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+        **guards,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert "target_weight_preflight_refresh_required" in execution["halt_reason"]
+    assert execution["details"][0]["status"] == "skipped_preflight_refresh"
+
+
+@pytest.mark.parametrize(
+    ("guard_name", "reason_text", "status"),
+    [
+        (
+            "execution_trade_day_check",
+            "target_weight_execution_trade_day_check_required",
+            "skipped_execution_trade_day_mismatch",
+        ),
+        (
+            "execution_market_session_check",
+            "target_weight_execution_market_session_check_required",
+            "skipped_execution_market_session_closed",
+        ),
+        (
+            "pilot_authorization_snapshot_check",
+            "target_weight_pilot_authorization_snapshot_check_required",
+            "skipped_pilot_authorization_snapshot_mismatch",
+        ),
+    ],
+)
+def test_execute_plan_requires_submission_guard_inputs(
+    monkeypatch,
+    guard_name,
+    reason_text,
+    status,
+):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    guards = _execute_plan_submit_guards_ok(plan)
+    del guards[guard_name]
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail(f"missing {guard_name} must block before order submission"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+        **guards,
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert reason_text in execution["halt_reason"]
+    assert execution["details"][0]["status"] == status
+
+
 def test_execute_plan_uses_portfolio_current_capital_for_buy_orders():
     from tools.target_weight_rotation_pilot import execute_plan
 
@@ -1030,6 +1159,7 @@ def test_execute_plan_uses_portfolio_current_capital_for_buy_orders():
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
             dry_run=False,
+            **_execute_plan_submit_guards_ok(plan),
             execution_idempotency={"allowed": True},
             pre_execution_reconciliation={"complete": True},
             liquidity_check={"checked": True, "complete": True, "reason": "ok"},
@@ -1127,6 +1257,7 @@ def test_execute_plan_stops_after_failed_sell_before_buy(tmp_path):
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
             dry_run=False,
+            **_execute_plan_submit_guards_ok(plan),
             liquidity_check={"checked": True, "complete": True, "reason": "ok"},
             pre_trade_risk_check={"checked": True, "complete": True, "reason": "ok"},
         )
@@ -1151,6 +1282,7 @@ def test_execute_plan_blocks_stale_starting_positions_before_order_submission(mo
         plan,
         config=SimpleNamespace(trading={"mode": "paper"}),
         dry_run=False,
+        **_execute_plan_submit_guards_ok(plan),
     )
 
     assert execution["executed"] == 0
@@ -1191,6 +1323,7 @@ def test_execute_plan_blocks_duplicate_session_before_order_submission(monkeypat
         plan,
         config=SimpleNamespace(trading={"mode": "paper"}),
         dry_run=False,
+        **_execute_plan_submit_guards_ok(plan),
     )
 
     assert execution["executed"] == 0
@@ -1773,6 +1906,7 @@ def test_execute_plan_blocks_liquidity_before_order_submission(monkeypatch):
         plan,
         config=SimpleNamespace(trading={"mode": "paper"}),
         dry_run=False,
+        **_execute_plan_submit_guards_ok(plan),
         execution_idempotency={"allowed": True},
         pre_execution_reconciliation={"complete": True},
         liquidity_check=assess_plan_liquidity(plan, max_order_adv_pct=5.0),
@@ -1807,6 +1941,7 @@ def test_execute_plan_blocks_pre_trade_risk_before_order_submission(monkeypatch)
         plan,
         config=SimpleNamespace(trading={"mode": "paper"}),
         dry_run=False,
+        **_execute_plan_submit_guards_ok(plan),
         execution_idempotency={"allowed": True},
         pre_execution_reconciliation={"complete": True},
         liquidity_check={"checked": True, "complete": True, "reason": "ok"},
