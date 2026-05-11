@@ -34,6 +34,7 @@ DEFAULT_INITIAL_CAPITAL = 10_000_000
 DEFAULT_TOP_N = 20
 DEFAULT_CANDIDATE_FAMILY = "rotation"
 DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
+TARGET_WEIGHT_EXECUTION_PRICE_MODE = "next_open"
 DEFAULT_RESEARCH_DIVERSIFICATION = {
     "max_positions": 2,
     "max_position_ratio": 0.45,
@@ -1156,9 +1157,9 @@ def exposure_matched_benchmark_metrics(
     }
 
 
-def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
-    """Normalize a fetched OHLCV frame into a close series."""
-    if df is None or df.empty or "close" not in df.columns:
+def price_series_from_ohlcv(df: pd.DataFrame | None, column: str) -> pd.Series:
+    """Normalize a fetched OHLCV frame into a positive price series."""
+    if df is None or df.empty or column not in df.columns:
         return pd.Series(dtype=float)
 
     data = df.copy()
@@ -1167,9 +1168,19 @@ def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
     idx = pd.to_datetime(data.index)
     if getattr(idx, "tz", None) is not None:
         idx = idx.tz_localize(None)
-    series = data["close"].astype(float).copy()
+    series = data[column].astype(float).copy()
     series.index = idx.normalize()
     return series[series > 0].groupby(level=0).last().sort_index()
+
+
+def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
+    """Normalize a fetched OHLCV frame into a close series."""
+    return price_series_from_ohlcv(df, "close")
+
+
+def open_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
+    """Normalize a fetched OHLCV frame into an open series."""
+    return price_series_from_ohlcv(df, "open")
 
 
 def volume_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
@@ -1335,6 +1346,7 @@ def _execute_target_weight_rebalance(
     rebalance_tolerance: float,
     avg_daily_volumes: dict[str, float] | None,
     risk_manager,
+    execution_price_mode: str = "rebalance_day_price",
 ) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float]:
     avg_daily_volumes = avg_daily_volumes or {}
     nav = cash + sum(
@@ -1402,6 +1414,7 @@ def _execute_target_weight_rebalance(
                 "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
                 "participation_rate": costs.get("participation_rate", 0),
                 "avg_daily_volume": avg_daily_volume,
+                "execution_price_mode": execution_price_mode,
             }
         )
 
@@ -1466,6 +1479,7 @@ def _execute_target_weight_rebalance(
                 "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
                 "participation_rate": costs.get("participation_rate", 0),
                 "avg_daily_volume": avg_daily_volume,
+                "execution_price_mode": execution_price_mode,
             }
         )
 
@@ -1499,6 +1513,7 @@ def run_target_weight_rotation_backtest(
         collector.quiet_ohlcv_log = True
     try:
         close_parts = []
+        open_parts = []
         volume_parts = []
         valid_symbols = []
         for sym in symbols:
@@ -1508,6 +1523,10 @@ def run_target_weight_rotation_backtest(
                 continue
             close.name = sym
             close_parts.append(close)
+            open_price = open_series_from_ohlcv(df)
+            if not open_price.empty:
+                open_price.name = sym
+                open_parts.append(open_price)
             volume = volume_series_from_ohlcv(df)
             if not volume.empty:
                 volume.name = sym
@@ -1523,19 +1542,29 @@ def run_target_weight_rotation_backtest(
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
+                    "execution_price_mode": TARGET_WEIGHT_EXECUTION_PRICE_MODE,
                 },
             }
 
         raw_close_panel = pd.concat(close_parts, axis=1).sort_index()
         raw_close_panel = raw_close_panel[~raw_close_panel.index.duplicated(keep="last")]
+        raw_close_panel = raw_close_panel.reindex(columns=valid_symbols)
         close_panel = raw_close_panel.ffill()
+        raw_open_panel = (
+            pd.concat(open_parts, axis=1).sort_index()
+            if open_parts
+            else pd.DataFrame(index=raw_close_panel.index)
+        )
+        raw_open_panel = raw_open_panel[~raw_open_panel.index.duplicated(keep="last")]
+        raw_open_panel = raw_open_panel.reindex(columns=valid_symbols)
         raw_volume_panel = (
             pd.concat(volume_parts, axis=1).sort_index()
             if volume_parts
             else pd.DataFrame(index=raw_close_panel.index)
         )
         raw_volume_panel = raw_volume_panel[~raw_volume_panel.index.duplicated(keep="last")]
-        avg_volume_panel = raw_volume_panel.rolling(20, min_periods=1).mean()
+        raw_volume_panel = raw_volume_panel.reindex(columns=valid_symbols)
+        avg_volume_panel = raw_volume_panel.rolling(20, min_periods=1).mean().shift(1)
         benchmark_symbol = str(params.get("benchmark_symbol", "KS11"))
         benchmark_close = close_series_from_ohlcv(
             collector.fetch_korean_stock(benchmark_symbol, fetch_start, end)
@@ -1580,10 +1609,31 @@ def run_target_weight_rotation_backtest(
                 "refresh market data before target-weight research backtest"
             )
 
+        rebalance_days = set(monthly_rebalance_days(eval_index))
+        if rebalance_days:
+            rebalance_index = pd.DatetimeIndex(sorted(rebalance_days))
+            rebalance_open_prices = raw_open_panel.reindex(rebalance_index).reindex(columns=valid_symbols)
+            rebalance_raw_prices = raw_close_panel.reindex(rebalance_index).reindex(columns=valid_symbols)
+            missing_open_mask = rebalance_raw_prices.notna() & rebalance_open_prices.isna()
+            missing_open_days = missing_open_mask.index[missing_open_mask.any(axis=1)]
+            if len(missing_open_days) > 0:
+                missing_day = pd.Timestamp(missing_open_days[0]).normalize()
+                missing_symbols = [
+                    sym
+                    for sym in valid_symbols
+                    if sym in missing_open_mask.columns and bool(missing_open_mask.loc[missing_day, sym])
+                ]
+                missing_text = ", ".join(missing_symbols[:10])
+                raise ValueError(
+                    "target_weight_research_execution_price_missing: "
+                    f"trade_day={missing_day.strftime('%Y-%m-%d')} "
+                    f"missing_open_symbols={missing_text}; "
+                    "refresh OHLCV open data before target-weight research backtest"
+                )
+
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
-        rebalance_days = set(monthly_rebalance_days(eval_index))
         benchmark_freshness_checked = _benchmark_required_for_target_weight(params)
         if benchmark_freshness_checked:
             benchmark_actual_days = pd.DatetimeIndex(benchmark_close.dropna().index).normalize()
@@ -1618,12 +1668,24 @@ def run_target_weight_rotation_backtest(
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
-            price_row = close_panel.loc[day]
-            prices = {
-                sym: float(price_row[sym])
+            close_price_row = close_panel.loc[day]
+            close_prices = {
+                sym: float(close_price_row[sym])
                 for sym in valid_symbols
-                if sym in price_row.index and pd.notna(price_row[sym]) and float(price_row[sym]) > 0
+                if sym in close_price_row.index
+                and pd.notna(close_price_row[sym])
+                and float(close_price_row[sym]) > 0
             }
+            execution_prices: dict[str, float] = {}
+            if day in raw_open_panel.index:
+                open_price_row = raw_open_panel.loc[day]
+                execution_prices = {
+                    sym: float(open_price_row[sym])
+                    for sym in valid_symbols
+                    if sym in open_price_row.index
+                    and pd.notna(open_price_row[sym])
+                    and float(open_price_row[sym]) > 0
+                }
 
             if day in rebalance_days:
                 score_day = _score_date_before(score_panel.index, day)
@@ -1635,7 +1697,7 @@ def run_target_weight_rotation_backtest(
                         score_row = score_row[score_row >= float(min_score_floor) / 100.0]
                     targets = _select_target_weight_targets(
                         score_row,
-                        prices,
+                        execution_prices,
                         positions,
                         top_n,
                         hold_rank_buffer,
@@ -1658,12 +1720,13 @@ def run_target_weight_rotation_backtest(
                     day=day,
                     cash=cash,
                     positions=positions,
-                    prices=prices,
+                    prices=execution_prices,
                     targets=targets,
                     target_exposure=target_exposure,
                     rebalance_tolerance=tolerance,
                     avg_daily_volumes=avg_daily_volumes,
                     risk_manager=risk_manager,
+                    execution_price_mode=TARGET_WEIGHT_EXECUTION_PRICE_MODE,
                 )
                 trades.extend(new_trades)
                 total_turnover += turnover
@@ -1671,9 +1734,9 @@ def run_target_weight_rotation_backtest(
                 filled_slots.append(len([sym for sym in targets if sym in positions]))
 
             market_value = sum(
-                float(pos["qty"]) * prices.get(sym, 0.0)
+                float(pos["qty"]) * close_prices.get(sym, 0.0)
                 for sym, pos in positions.items()
-                if prices.get(sym, 0.0) > 0
+                if close_prices.get(sym, 0.0) > 0
             )
             value = cash + market_value
             equity_rows.append(
@@ -1718,8 +1781,11 @@ def run_target_weight_rotation_backtest(
                     risk_off_rebalance_count / rebalance_count * 100, 1
                 ) if rebalance_count else 0,
                 "price_freshness_checked": True,
+                "execution_price_mode": TARGET_WEIGHT_EXECUTION_PRICE_MODE,
+                "execution_price_freshness_checked": True,
                 "benchmark_freshness_checked": benchmark_freshness_checked,
-                "dynamic_slippage_checked": not avg_volume_panel.empty,
+                "dynamic_slippage_checked": not avg_volume_panel.dropna(how="all").empty,
+                "avg_volume_lookback_lag_days": 1,
                 "trades_with_avg_daily_volume": sum(
                     1 for t in trades if t.get("avg_daily_volume") is not None
                 ),
