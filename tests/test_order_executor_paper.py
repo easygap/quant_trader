@@ -474,6 +474,58 @@ def test_paper_sell_remains_allowed_when_runtime_unavailable(fresh_db, monkeypat
     assert get_position("005930", account_key="exit_safe_test") is None
 
 
+def test_gap_down_sell_bypasses_min_holding_days(fresh_db):
+    """갭다운 즉시 청산은 신규 보유 포지션이어도 최소 보유 기간에 막히지 않는다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="gap_down_exit_test")
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 5
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        strategy="scoring",
+        account_key="gap_down_exit_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=55_000,
+        reason="갭다운 -8.3% 즉시 청산",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert get_position("005930", account_key="gap_down_exit_test") is None
+
+
+def test_manual_liquidate_sell_bypasses_min_holding_days(fresh_db):
+    """수동 긴급 전량 청산은 최소 보유 기간보다 우선한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="manual_liquidate_test")
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 5
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        strategy="scoring",
+        account_key="manual_liquidate_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=59_000,
+        reason="긴급 전량 청산 (--mode liquidate)",
+        strategy="emergency_liquidate",
+    )
+
+    assert result["success"] is True
+    assert get_position("005930", account_key="manual_liquidate_test") is None
+
+
 def test_paper_sell_rejects_quantity_above_position(fresh_db):
     """보유 수량보다 큰 매도 요청은 paper 체결/손익 기록 전에 차단한다."""
     from core.order_executor import OrderExecutor
