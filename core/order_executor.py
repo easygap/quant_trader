@@ -257,6 +257,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         signal_at: "datetime | None" = None,
+        execution_session_id: str = "",
     ) -> dict:
         """
         매수 주문 실행
@@ -276,7 +277,7 @@ class OrderExecutor:
         """
         with PositionLock():
             return self._execute_buy_impl(
-                symbol, price, capital, available_cash, current_invested, atr, signal_score, reason, strategy, avg_daily_volume, signal_at=signal_at
+                symbol, price, capital, available_cash, current_invested, atr, signal_score, reason, strategy, avg_daily_volume, signal_at=signal_at, execution_session_id=execution_session_id
             )
 
     def _execute_buy_impl(
@@ -292,6 +293,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         signal_at: "datetime | None" = None,
+        execution_session_id: str = "",
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
         if self._should_block_new_buy_volatility_window():
@@ -538,6 +540,8 @@ class OrderExecutor:
             signal_at=signal_at or _order_at, order_at=_order_at,
             expected_price=expected_price,
             actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
+            execution_session_id=execution_session_id,
+            order_id=order.order_id,
         )
         _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
                        symbol=symbol, strategy=strategy, mode=self.mode)
@@ -564,6 +568,8 @@ class OrderExecutor:
             "trailing_stop": trailing_stop,
             "costs": costs,
             "mode": self.mode,
+            "execution_session_id": execution_session_id,
+            "order_id": order.order_id,
         }
 
         logger.info(
@@ -585,6 +591,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         atr: float = None,
+        execution_session_id: str = "",
     ) -> dict:
         """Execute a fixed-quantity paper buy.
 
@@ -604,6 +611,7 @@ class OrderExecutor:
                 strategy=strategy,
                 avg_daily_volume=avg_daily_volume,
                 atr=atr,
+                execution_session_id=execution_session_id,
             )
 
     def _execute_buy_quantity_impl(
@@ -618,6 +626,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         atr: float = None,
+        execution_session_id: str = "",
     ) -> dict:
         if self.mode == "live":
             return {"success": False, "reason": "fixed-quantity buy is paper-only"}
@@ -700,6 +709,8 @@ class OrderExecutor:
             order_at=_order_at,
             expected_price=expected_price,
             actual_slippage_pct=None,
+            execution_session_id=execution_session_id,
+            order_id=order.order_id,
         )
         _log_op_event(
             "SIGNAL",
@@ -733,6 +744,8 @@ class OrderExecutor:
             "costs": costs,
             "mode": self.mode,
             "paper_fixed_quantity": True,
+            "execution_session_id": execution_session_id,
+            "order_id": order.order_id,
         }
         logger.info(
             "✅ 고정수량 paper 매수 완료: {} {}주 @ {:,.0f}원",
@@ -749,6 +762,7 @@ class OrderExecutor:
         reason: str = "",
         strategy: str = "",
         avg_daily_volume: float = None,
+        execution_session_id: str = "",
     ) -> dict:
         """
         매도 주문 실행
@@ -766,7 +780,7 @@ class OrderExecutor:
             주문 결과 딕셔너리
         """
         with PositionLock():
-            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy, avg_daily_volume)
+            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy, avg_daily_volume, execution_session_id)
 
     def _execute_sell_impl(
         self,
@@ -777,6 +791,7 @@ class OrderExecutor:
         reason: str = "",
         strategy: str = "",
         avg_daily_volume: float = None,
+        execution_session_id: str = "",
     ) -> dict:
         """매도 주문 실제 로직 (Lock 내부에서 호출)."""
         position = get_position(symbol, account_key=self.account_key)
@@ -895,6 +910,8 @@ class OrderExecutor:
             mode=self.mode, account_key=self.account_key,
             expected_price=expected_price if self.mode == "live" else None,
             actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
+            execution_session_id=execution_session_id,
+            order_id=order.order_id,
         )
 
         if sell_qty >= position.quantity:
@@ -924,6 +941,8 @@ class OrderExecutor:
             "pnl_rate": round(pnl_rate, 2),
             "costs": costs,
             "mode": self.mode,
+            "execution_session_id": execution_session_id,
+            "order_id": order.order_id,
         }
 
         emoji = "📈" if pnl >= 0 else "📉"
