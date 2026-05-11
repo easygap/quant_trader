@@ -4,6 +4,8 @@ Scheduler 장전/장중/장마감 시뮬레이션 테스트.
 """
 
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pandas as pd
 
@@ -31,6 +33,29 @@ class _MockConfig:
     """테스트용 설정: watchlist만 주고 나머지는 최소."""
     watchlist = ["005930"]
     trading = {"mode": "paper", "auto_entry": False}
+
+
+class _NoopLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeKIS:
+    def __init__(self, account_no=None, *args, **kwargs):
+        pass
+
+    def get_current_price(self, symbol):
+        return None
+
+    def get_rate_limit_stats(self):
+        return {
+            "requests_last_60s": 0,
+            "minute_utilization_pct": 0.0,
+            "max_per_min": 300,
+        }
 
 
 def test_scheduler_pre_market_runs_without_network(monkeypatch):
@@ -83,6 +108,91 @@ def test_scheduler_monitoring_runs_without_api(monkeypatch):
 
     scheduler._run_monitoring()
     assert True
+
+
+def test_live_monitoring_blocks_new_entries_when_broker_sync_fails(monkeypatch):
+    """live 장중 KIS↔DB 동기화가 미통과하면 신규 진입만 보류하고 exit 점검은 유지한다."""
+    from core.scheduler import Scheduler
+
+    monkeypatch.setattr("api.kis_api.KISApi", _FakeKIS)
+    monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    exit_checked = {"value": False}
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler.auto_entry = True
+        scheduler._entry_candidates = [{"symbol": "005930", "price": 50000}]
+        scheduler.portfolio = SimpleNamespace(
+            sync_with_broker=lambda: {
+                "ok": False,
+                "mismatches": [{"symbol": "005930"}],
+                "message": "포지션 불일치 1건",
+            }
+        )
+        scheduler.blackswan = SimpleNamespace(
+            consume_cooldown_ended_flag=lambda: False,
+            is_on_cooldown=lambda: False,
+        )
+        scheduler.discord = MagicMock()
+        scheduler._maybe_recheck_market_regime = lambda: None
+        scheduler._execute_entry_candidates = lambda: pytest.fail(
+            "broker sync failure must block entry execution"
+        )
+        scheduler._rescan_for_new_entries = lambda: pytest.fail(
+            "broker sync failure must block entry rescan"
+        )
+        scheduler._check_exit_signals = lambda kis=None: exit_checked.__setitem__("value", True)
+        scheduler._update_dynamic_stop_losses = lambda: None
+        scheduler._publish_dashboard_runtime_state = lambda kis=None: None
+
+        scheduler._run_monitoring()
+
+        assert exit_checked["value"] is True
+        assert scheduler._last_broker_sync_ok is False
+        assert "포지션 불일치" in scheduler._last_broker_sync_message
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
+def test_live_monitoring_allows_entries_after_broker_sync_ok(monkeypatch):
+    """live 장중 KIS↔DB 동기화가 통과하면 신규 진입 실행과 재스캔을 진행한다."""
+    from core.scheduler import Scheduler
+
+    monkeypatch.setattr("api.kis_api.KISApi", _FakeKIS)
+    monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    calls = {"entry": 0, "rescan": 0, "exit": 0}
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler.auto_entry = True
+        scheduler._entry_candidates = [{"symbol": "005930", "price": 50000}]
+        scheduler.portfolio = SimpleNamespace(
+            sync_with_broker=lambda: {"ok": True, "mismatches": [], "message": "일치"}
+        )
+        scheduler.blackswan = SimpleNamespace(
+            consume_cooldown_ended_flag=lambda: False,
+            is_on_cooldown=lambda: False,
+        )
+        scheduler.discord = MagicMock()
+        scheduler._maybe_recheck_market_regime = lambda: None
+        scheduler._execute_entry_candidates = lambda: calls.__setitem__("entry", calls["entry"] + 1)
+        scheduler._rescan_for_new_entries = lambda: calls.__setitem__("rescan", calls["rescan"] + 1)
+        scheduler._check_exit_signals = lambda kis=None: calls.__setitem__("exit", calls["exit"] + 1)
+        scheduler._update_dynamic_stop_losses = lambda: None
+        scheduler._publish_dashboard_runtime_state = lambda kis=None: None
+
+        scheduler._run_monitoring()
+
+        assert calls == {"entry": 1, "rescan": 1, "exit": 1}
+        assert scheduler._last_broker_sync_ok is True
+    finally:
+        scheduler.config.trading["mode"] = old_mode
 
 
 def test_scheduler_post_market_runs():
