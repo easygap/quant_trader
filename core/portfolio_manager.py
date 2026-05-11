@@ -304,6 +304,7 @@ class PortfolioManager:
                     "reason": "KIS에는 있으나 DB에 없음",
                     "kis_qty": kp["quantity"],
                     "kis_avg_price": kp.get("avg_price", 0),
+                    "kis_current_price": kp.get("current_price", 0),
                     "db_qty": None,
                 })
             elif db_pos.quantity != kp["quantity"]:
@@ -313,6 +314,7 @@ class PortfolioManager:
                     "reason": "수량 불일치",
                     "kis_qty": kp["quantity"],
                     "kis_avg_price": kp.get("avg_price", db_pos.avg_price),
+                    "kis_current_price": kp.get("current_price", 0),
                     "db_qty": db_pos.quantity,
                 })
         for symbol in db_positions:
@@ -368,6 +370,29 @@ class PortfolioManager:
         logger.info("sync_with_broker: DB와 KIS 잔고 일치")
         return {"ok": True, "mismatches": [], "corrected": [], "message": "일치"}
 
+    def _broker_reference_price(self, mismatch: dict) -> float:
+        for key in ("kis_avg_price", "kis_current_price"):
+            try:
+                price = float(mismatch.get(key) or 0)
+            except (TypeError, ValueError):
+                price = 0
+            if price > 0:
+                return price
+        return 0.0
+
+    def _broker_recovered_targets(self, reference_price: float) -> dict:
+        if reference_price <= 0:
+            return {}
+        from core.risk_manager import RiskManager
+
+        risk_manager = RiskManager(self.config)
+        take_profit = risk_manager.calculate_take_profit(reference_price)
+        return {
+            "stop_loss_price": risk_manager.calculate_stop_loss(reference_price),
+            "take_profit_price": take_profit.get("target_final"),
+            "trailing_stop_price": risk_manager.calculate_trailing_stop(reference_price),
+        }
+
     def _auto_correct_positions(self, mismatches: list) -> list:
         """
         불일치 목록을 기반으로 DB 포지션을 KIS 잔고에 맞춰 보정합니다.
@@ -379,7 +404,7 @@ class PortfolioManager:
         Returns:
             보정된 항목 리스트
         """
-        from database.repositories import save_position, delete_position
+        from database.repositories import delete_position, replace_position_from_broker
 
         corrected = []
         ak = self.account_key or ""
@@ -388,13 +413,24 @@ class PortfolioManager:
             symbol = m["symbol"]
             try:
                 if m["type"] == "kis_only":
-                    save_position(
+                    reference_price = self._broker_reference_price(m)
+                    if reference_price <= 0:
+                        raise ValueError("KIS-only 포지션 기준 가격이 없어 자동 추가 보정 불가")
+                    targets = self._broker_recovered_targets(reference_price)
+                    replace_position_from_broker(
                         symbol=symbol,
-                        avg_price=float(m.get("kis_avg_price", 0)),
+                        avg_price=reference_price,
                         quantity=int(m["kis_qty"]),
+                        strategy="broker_sync_recovered",
                         account_key=ak,
+                        **targets,
                     )
-                    corrected.append({"symbol": symbol, "action": "added", "qty": m["kis_qty"]})
+                    corrected.append({
+                        "symbol": symbol,
+                        "action": "added",
+                        "qty": m["kis_qty"],
+                        "risk_targets_recovered": True,
+                    })
                     logger.info("자동 보정: {} DB에 추가 ({}주)", symbol, m["kis_qty"])
 
                 elif m["type"] == "db_only":
@@ -408,17 +444,24 @@ class PortfolioManager:
                         delete_position(symbol, account_key=ak)
                         corrected.append({"symbol": symbol, "action": "deleted", "qty": 0})
                     else:
-                        save_position(
+                        reference_price = self._broker_reference_price(m)
+                        if reference_price <= 0:
+                            raise ValueError("수량 불일치 포지션 기준 가격이 없어 자동 수량 보정 불가")
+                        targets = self._broker_recovered_targets(reference_price)
+                        replace_position_from_broker(
                             symbol=symbol,
-                            avg_price=float(m.get("kis_avg_price", 0)),
+                            avg_price=reference_price,
                             quantity=kis_qty,
+                            strategy="broker_sync_recovered",
                             account_key=ak,
+                            **targets,
                         )
                         corrected.append({
                             "symbol": symbol,
                             "action": "qty_updated",
                             "old_qty": m["db_qty"],
                             "new_qty": kis_qty,
+                            "risk_targets_recovered": True,
                         })
                     logger.info("자동 보정: {} 수량 {}→{}", symbol, m["db_qty"], kis_qty)
 
