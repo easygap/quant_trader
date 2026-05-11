@@ -90,8 +90,12 @@ class DataValidator:
             logger.error(f"[{symbol}] 필수 컬럼 누락. (현재: {df.columns})")
             return pd.DataFrame()
 
-        # 2. NaN 결측치 처리 (이전 값으로 채움)
-        df = df.ffill().bfill()
+        # 2. 인덱스(날짜) 중복 제거 및 시간순 정렬 후 결측치 처리
+        #    미래 값을 과거 행에 채우지 않도록 backward fill은 사용하지 않는다.
+        df = df[~df.index.duplicated(keep="last")]
+        df = df.sort_index()
+        df = df.ffill()
+        df = df.dropna(subset=sorted(required_cols))
         
         # 3. 비정상 주가(음수 또는 0) 필터링
         mask = (df["open"] > 0) & (df["high"] > 0) & (df["low"] > 0) & (df["close"] > 0)
@@ -106,13 +110,8 @@ class DataValidator:
                      (df["low"] <= df["open"]) & (df["low"] <= df["close"])
         df = df[logic_mask]
 
-        # 5. 인덱스(날짜) 중복 제거 및 시간순 정렬
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.sort_index()
-
         cleaned_len = len(df)
         if initial_len != cleaned_len:
             logger.debug(f"[{symbol}] 이상 데이터 정제 완료: {initial_len} -> {cleaned_len}")
 
         return df
-
