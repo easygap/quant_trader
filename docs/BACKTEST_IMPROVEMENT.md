@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
 > **문서 버전**: v5.4
-> **최종 수정**: 2026-05-08
+> **최종 수정**: 2026-05-11
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -151,6 +151,7 @@
 | Target-weight rank-hysteresis 후보 | 높음 | **완료 — `hold_rank_buffer`로 보유 종목이 top-N 밖으로 소폭 밀려도 버퍼 안이면 유지. best=`target_weight_rotation_top5_60_120_floor0_hold3`, +278.57%/Sharpe 1.65/WF positive 100%/turnover 807.8%. 남은 병목은 MDD=-28.25%** |
 | Target-weight shadow proof | 높음 | **완료 — dry-run plan을 `shadow_bootstrap` evidence로 기록하되 `execution_backed=False`, excess=null로 유지해 promotion을 오염시키지 않음. `--shadow-days` 기반 자동 날짜 선택은 N개 평일이 아니라 N개 고유 resolved trade_day를 목표로 과거 평일을 보충 스캔하며, 명시적 날짜 범위 batch도 지원. 목표 미달/날짜별 실패는 CLI non-zero 종료로 자동화가 불완전한 shadow proof를 성공 처리하지 못하게 차단. artifact와 runbook에 cap preview, plan 기반 최소/추천 cap, enable 명령, launch artifact 경로를 기록해 기본 pilot cap 부족(주문 수/포지션/1건 금액/총노출), clean day 부족, notifier/auth 누락을 사전 확인** |
 | Target-weight readiness audit | 높음 | **완료 — `--readiness-audit`로 주문 제출/evidence 기록 없이 capped pilot 직전 상태를 JSON artifact와 Markdown 운영 리포트로 점검. clean shadow/launch readiness, active pilot auth와 cap validation, 추천 cap, 중복 session idempotency, 실행일/장 시간, 실행 전 position drift, 유동성 preflight, 비용 반영 pre-trade risk, 다음 조치를 함께 판정하고 shadow 수집/audit 재실행/추천 cap 승인/capped paper 실행 명령을 남긴다. cap 승인 준비가 안 됐거나 장 외 실행이면 non-zero 종료** |
+| Target-weight preflight/notifier 동기화 | 높음 | 완료 — readiness audit 시작 시 paper preflight를 먼저 갱신해 `preflight_refresh` artifact를 남긴다. Discord webhook 미설정이나 notifier health 비정상은 pilot auth/cap 상태와 별개로 주문 전 `BLOCKED` 처리하며, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight/audit 재실행이 필요 |
 | Target-weight pilot enable guard | 높음 | **완료 — `tools/paper_pilot_control.py --enable`이 target-weight 후보 승인 전에 readiness audit을 재실행하고, 운영자가 요청한 cap이 현재 plan/launch readiness/유동성 preflight/비용 반영 pre-trade risk를 만족할 때만 pilot auth를 기록. 승인 auth에는 plan의 trade day/as-of date/params hash/targets/시작·목표 수량 snapshot을 함께 저장한다. 추천 cap 미충족, stale plan, audit blocker가 있으면 승인 자체를 fail-closed 차단** |
 | Target-weight cap validation artifact | 중간 | **완료 — `run_pilot(execute=True)`가 pilot cap validation에서 막혀도 주문 제출 전 session JSON artifact에 차단 사유와 skipped order를 기록. runtime pilot session/evidence/fill reconciliation은 쓰지 않아 cap 수정 후 같은 trade_day를 다시 점검 가능** |
 | Target-weight promotion proof guard | 높음 | **완료 — promotion package가 target-weight 계열 strategy의 promotable day를 verified `pilot_paper` execution proof로만 계산. `pilot_authorized`, 승인 snapshot 일치, target-weight plan/execution params hash 일치, liquidity/pre-trade risk/order result/fill/position reconciliation complete가 모두 필요하며, live gate도 proof summary 누락/invalid day를 fail-closed 차단** |
