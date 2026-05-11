@@ -851,6 +851,18 @@ def execute_plan(
     return results
 
 
+def _execution_reached_order_submission(execution: dict[str, Any]) -> bool:
+    if int(execution.get("executed") or 0) > 0:
+        return True
+    if int(execution.get("failed") or 0) > 0:
+        return True
+    return any(
+        detail.get("status") in {"success", "failed", "exception"}
+        for detail in execution.get("details", [])
+        if isinstance(detail, dict)
+    )
+
+
 def _position_quantity(position: Any) -> int:
     if position is None:
         return 0
@@ -3986,6 +3998,7 @@ def run_pilot(
     evidence_collection = {"attempted": False, "recorded": False}
 
     if execute:
+        order_submission_reached = _execution_reached_order_submission(execution)
         evidence_caps_snapshot = build_pilot_evidence_caps_snapshot(
             plan,
             validation,
@@ -4009,6 +4022,7 @@ def run_pilot(
             "pilot_caps_snapshot": evidence_caps_snapshot,
             "orders_planned": len(plan.orders),
             "orders_executed": execution.get("executed", 0),
+            "order_submission_reached": order_submission_reached,
             "execution_complete": execution_evidence["complete"],
             "evidence_collectible": execution_evidence["complete"],
             "evidence_block_reason": "" if execution_evidence["complete"] else execution_evidence["reason"],
@@ -4021,6 +4035,7 @@ def run_pilot(
             and pilot_authorization_snapshot_check["allowed"]
             and preflight_refresh["complete"]
             and (execution_idempotency is None or execution_idempotency["allowed"])
+            and (execution_evidence["complete"] or order_submission_reached)
         ):
             save_pilot_session_artifact(
                 strategy=candidate_id,
