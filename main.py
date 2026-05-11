@@ -1098,6 +1098,7 @@ def run_emergency_liquidate(args):
     }
     if not positions:
         logger.info("보유 포지션이 없습니다.")
+        _notify_emergency_liquidation_summary(config, mode, summary)
         return summary
 
     # 청산 시에는 계좌(전략)별로 executor 사용 (live 시 해당 계좌로 매도)
@@ -1160,7 +1161,41 @@ def run_emergency_liquidate(args):
         summary["succeeded"],
         summary["failed"],
     )
+    _notify_emergency_liquidation_summary(config, mode, summary)
     return summary
+
+
+def _notify_emergency_liquidation_summary(config, mode: str, summary: dict) -> None:
+    """긴급 청산 실행 결과를 통합 알림으로 전파한다."""
+    attempted = int(summary.get("attempted") or 0)
+    succeeded = int(summary.get("succeeded") or 0)
+    failed = int(summary.get("failed") or 0)
+    status = "실패 포함" if failed else "완료"
+    lines = [
+        f"긴급 청산 {status}",
+        f"- mode: {mode}",
+        f"- 대상: {attempted}건",
+        f"- 성공: {succeeded}건",
+        f"- 실패: {failed}건",
+    ]
+    failed_details = [
+        d for d in (summary.get("details") or [])
+        if d.get("status") in {"failed", "exception"}
+    ][:5]
+    for detail in failed_details:
+        lines.append(
+            "- 실패 상세: "
+            f"{detail.get('symbol', '')} "
+            f"({detail.get('reason', '')})"
+        )
+    try:
+        from core.notifier import Notifier
+        Notifier(config).send_message(
+            "\n".join(lines),
+            critical=(mode == "live" or attempted > 0 or failed > 0),
+        )
+    except Exception as exc:
+        logger.error("긴급 청산 결과 알림 발송 실패: {}", exc)
 
 
 def _live_liquidation_account_keys(config) -> list[str]:
