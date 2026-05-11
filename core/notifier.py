@@ -251,26 +251,81 @@ class Notifier:
             self._send_email_tracked(title, "WARNING", body_text=plain, table_rows=rows)
 
     def send_trade_alert(self, trade_info: dict) -> None:
-        self.discord.send_trade_alert(trade_info)
         action = trade_info.get("action", "")
+        symbol = trade_info.get("symbol", "")
+        price = trade_info.get("price", 0)
+        quantity = trade_info.get("quantity", 0)
+        pnl = trade_info.get("pnl", 0)
         pnl_rate = trade_info.get("pnl_rate", 0)
-        if action != "BUY" and pnl_rate <= -5.0:
-            symbol = trade_info.get("symbol", "")
-            price = trade_info.get("price", 0)
-            msg = f"[매도/손절] {symbol} @ {price:,.0f}원 | 손익률 {pnl_rate:.2f}%"
-            rows = [{
-                "symbol": str(symbol),
-                "signal": str(action),
-                "price": f"{price:,.0f}원",
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }]
-            self._send_email_tracked("매도 손절 주의", "CRITICAL", body_text=msg, table_rows=rows)
+
+        is_buy = action == "BUY"
+        color = 0x27AE60 if is_buy else 0xE74C3C
+        fields = [
+            {"name": "종목", "value": symbol, "inline": True},
+            {"name": "가격", "value": f"{price:,.0f}원", "inline": True},
+            {"name": "수량", "value": f"{quantity}주", "inline": True},
+            {"name": "금액", "value": f"{price * quantity:,.0f}원", "inline": True},
+        ]
+        if action != "BUY":
+            emoji = "📈" if pnl >= 0 else "📉"
+            fields.append({
+                "name": f"{emoji} 수익",
+                "value": f"{pnl:,.0f}원 ({pnl_rate:.2f}%)",
+                "inline": True,
+            })
+
+        title = f"{'🟢 매수' if is_buy else '🔴 매도'} — {action}"
+        self.send_embed(title, "", color=color, fields=fields, critical=action != "BUY" and pnl_rate <= -5.0)
 
     def send_daily_report(self, report: dict) -> None:
-        self.discord.send_daily_report(report)
+        fields = [
+            {"name": "💰 총 평가금", "value": f"{report.get('total_value', 0):,.0f}원", "inline": True},
+            {"name": "💵 현금", "value": f"{report.get('cash', 0):,.0f}원", "inline": True},
+            {"name": "📈 일일 수익률", "value": f"{report.get('daily_return', 0):.2f}%", "inline": True},
+            {"name": "📊 누적 수익률", "value": f"{report.get('cumulative_return', 0):.2f}%", "inline": True},
+            {"name": "📉 MDD", "value": f"{report.get('mdd', 0):.2f}%", "inline": True},
+            {"name": "📋 보유 종목", "value": f"{report.get('position_count', 0)}개", "inline": True},
+            {"name": "🔄 당일 매매", "value": f"{report.get('total_trades', 0)}건", "inline": True},
+        ]
+        diag = report.get("strategy_diagnosis")
+        if diag:
+            if isinstance(diag, (list, tuple)):
+                diag_text = "\n".join(str(x) for x in diag)
+            else:
+                diag_text = str(diag)
+            diag_text = diag_text.strip()
+            if len(diag_text) > 1000:
+                diag_text = diag_text[:997] + "..."
+            fields.append({
+                "name": "📋 전략 진단 (장마감)",
+                "value": diag_text or "—",
+                "inline": False,
+            })
+
+        cum_return = report.get("cumulative_return", 0)
+        color = 0x27AE60 if cum_return >= 0 else 0xE74C3C
+        self.send_embed("📊 일일 리포트", "", color=color, fields=fields)
 
     def send_signal_alert(self, symbol: str, signal_info: dict) -> None:
-        self.discord.send_signal_alert(symbol, signal_info)
+        signal = signal_info.get("signal", "HOLD")
+        if signal == "HOLD":
+            return
+
+        score = signal_info.get("score", 0)
+        close = signal_info.get("close", 0)
+        details = signal_info.get("details", {})
+        is_buy = signal == "BUY"
+        color = 0x27AE60 if is_buy else 0xE74C3C
+        fields = [
+            {"name": "종목", "value": symbol, "inline": True},
+            {"name": "종가", "value": f"{close:,.0f}원", "inline": True},
+            {"name": "점수", "value": f"{score}", "inline": True},
+        ]
+        for key, val in details.items():
+            fields.append({"name": key, "value": str(val), "inline": True})
+
+        emoji = "🟢" if is_buy else "🔴"
+        self.send_embed(f"{emoji} {signal} 신호 감지", "", color=color, fields=fields)
 
     # ------------------------------------------------------------------
     # 유틸
