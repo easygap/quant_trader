@@ -394,6 +394,11 @@ def build_target_weight_plan(
 
     symbols = normalize_symbols(symbols)
     current_positions = _coerce_positions(positions)
+    symbol_set = set(symbols)
+    position_symbols_outside_universe = [
+        symbol for symbol in sorted(current_positions) if symbol not in symbol_set
+    ]
+    pricing_symbols = normalize_symbols([*symbols, *position_symbols_outside_universe])
     params = dict(params)
     as_of_ts = pd.Timestamp(as_of_date or datetime.now()).normalize()
     end = as_of_ts.strftime("%Y-%m-%d")
@@ -412,20 +417,39 @@ def build_target_weight_plan(
     missing_symbols: list[str] = []
     price_last_dates: dict[str, pd.Timestamp] = {}
     ohlcv_frames: dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
+    price_data_symbols: list[str] = []
+    for symbol in pricing_symbols:
         frame = _fetch_korean_stock(collector, symbol, start, end)
         close = close_series_from_ohlcv(frame)
+        if close.empty:
+            if symbol in symbols:
+                missing_symbols.append(symbol)
+            continue
         close = close[close.index <= as_of_ts]
         if close.empty:
-            missing_symbols.append(symbol)
+            if symbol in symbols:
+                missing_symbols.append(symbol)
             continue
         price_last_dates[symbol] = pd.Timestamp(close.index[-1]).normalize()
         ohlcv_frames[symbol] = frame
         close.name = symbol
         close_parts.append(close)
-        valid_symbols.append(symbol)
+        price_data_symbols.append(symbol)
+        if symbol in symbols:
+            valid_symbols.append(symbol)
 
-    if not close_parts:
+    missing_position_symbols = [
+        symbol for symbol in sorted(current_positions) if symbol not in price_last_dates
+    ]
+    if missing_position_symbols:
+        missing_text = ", ".join(missing_position_symbols)
+        raise ValueError(
+            "target_weight_position_price_missing: "
+            f"positions_without_price={missing_text}; "
+            "refresh market data or close unmanaged positions before target-weight planning"
+        )
+
+    if not valid_symbols:
         raise ValueError("no valid price data for target-weight planning")
 
     close_panel = pd.concat(close_parts, axis=1).sort_index().ffill()
@@ -453,7 +477,7 @@ def build_target_weight_plan(
     price_row = close_panel.loc[trade_day]
     prices = {
         sym: float(price_row[sym])
-        for sym in valid_symbols
+        for sym in price_data_symbols
         if sym in price_row.index and pd.notna(price_row[sym]) and float(price_row[sym]) > 0
     }
     if not prices:
@@ -469,7 +493,8 @@ def build_target_weight_plan(
         if not benchmark_close.empty
         else None
     )
-    score_panel = _target_weight_score_panel(close_panel, benchmark_close, params)
+    score_close_panel = close_panel[valid_symbols]
+    score_panel = _target_weight_score_panel(score_close_panel, benchmark_close, params)
     score_day = _score_date_before(score_panel.index, trade_day)
     if (
         score_day is not None
@@ -642,6 +667,8 @@ def build_target_weight_plan(
         orders=orders,
         diagnostics={
             "missing_symbols": missing_symbols,
+            "position_symbols_outside_universe": position_symbols_outside_universe,
+            "missing_position_symbols": missing_position_symbols,
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
@@ -656,7 +683,11 @@ def build_target_weight_plan(
                 for sym, pos in sorted(current_positions.items())
             },
             "liquidity": _liquidity_diagnostics_from_ohlcv(
-                {symbol: ohlcv_frames[symbol] for symbol in valid_symbols if symbol in ohlcv_frames},
+                {
+                    symbol: ohlcv_frames[symbol]
+                    for symbol in price_data_symbols
+                    if symbol in ohlcv_frames
+                },
                 trade_day=trade_day,
             ),
             "generated_at": datetime.now().isoformat(),

@@ -179,6 +179,70 @@ def test_target_weight_plan_records_liquidity_diagnostics():
     assert plan.diagnostics["position_avg_prices_before"] == {"AAA": 95.0}
 
 
+def test_target_weight_plan_liquidates_priced_position_outside_universe():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    frames = _frames_for_rotation()
+    frames["ZZZ"] = _ohlcv(frames["AAA"]["date"], [50.0] * len(frames["AAA"]))
+
+    plan = build_target_weight_plan(
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        cash=100_000.0,
+        positions={"ZZZ": {"quantity": 10, "avg_price": 40.0}},
+        as_of_date="2025-03-10",
+        collector=FakeCollector(frames),
+    )
+
+    sell_orders = [order for order in plan.orders if order.action == "SELL"]
+
+    assert "ZZZ" not in plan.symbols
+    assert "ZZZ" not in plan.targets
+    assert plan.prices["ZZZ"] == 50.0
+    assert plan.market_value_before == 500.0
+    assert plan.nav == 100_500.0
+    assert plan.position_quantities_before == {"ZZZ": 10}
+    assert plan.target_quantities_after["ZZZ"] == 0
+    assert sell_orders[0].symbol == "ZZZ"
+    assert sell_orders[0].quantity == 10
+    assert plan.diagnostics["position_symbols_outside_universe"] == ["ZZZ"]
+    assert plan.diagnostics["liquidity"]["symbols"]["ZZZ"]["complete"] is True
+
+
+def test_target_weight_plan_blocks_unpriced_current_position():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    frames = _frames_for_rotation()
+
+    with pytest.raises(ValueError, match="target_weight_position_price_missing") as exc:
+        build_target_weight_plan(
+            symbols=["AAA", "BBB", "CCC"],
+            params={
+                "target_top_n": 2,
+                "target_exposure": 0.80,
+                "short_lookback": 2,
+                "long_lookback": 3,
+                "short_weight": 0.5,
+                "score_mode": "benchmark_excess",
+                "benchmark_symbol": "KS11",
+            },
+            cash=100_000.0,
+            positions={"ZZZ": {"quantity": 10, "avg_price": 40.0}},
+            as_of_date="2025-03-10",
+            collector=FakeCollector(frames),
+        )
+
+    assert "ZZZ" in str(exc.value)
+
+
 def test_target_weight_plan_blocks_stale_symbol_price_after_ffill():
     from core.target_weight_rotation import build_target_weight_plan
 
