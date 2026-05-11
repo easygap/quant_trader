@@ -1084,6 +1084,7 @@ def run_emergency_liquidate(args):
             action_label="실전 긴급 청산",
             example="python main.py --mode liquidate --confirm-live",
         )
+        _sync_live_positions_before_liquidation(config)
 
     from database.repositories import get_all_positions
     from core.order_executor import OrderExecutor
@@ -1125,6 +1126,87 @@ def run_emergency_liquidate(args):
             logger.exception("종목 {} 청산 중 오류: {}", pos.symbol, e)
 
     logger.info("긴급 청산 처리 완료 ({}건)", len(positions))
+
+
+def _live_liquidation_account_keys(config) -> list[str]:
+    """긴급 청산 전 KIS 잔고 동기화가 필요한 계좌 키 목록."""
+    kis = getattr(config, "kis_api", {}) or {}
+    accounts = kis.get("accounts", {}) if isinstance(kis, dict) else {}
+    keys: list[str] = []
+    seen_accounts: set[str] = set()
+
+    def add_key(account_key: str) -> None:
+        account_key = str(account_key or "")
+        get_account_no = getattr(config, "get_account_no", None)
+        account_no = ""
+        if callable(get_account_no):
+            try:
+                account_no = str(get_account_no(account_key) or "")
+            except Exception:
+                account_no = ""
+        dedupe_key = account_no or account_key
+        if dedupe_key in seen_accounts:
+            return
+        seen_accounts.add(dedupe_key)
+        keys.append(account_key)
+
+    add_key("")
+    if isinstance(accounts, dict):
+        for account_key in accounts:
+            add_key(str(account_key))
+    return keys
+
+
+def _sync_live_positions_before_liquidation(config) -> list[dict]:
+    """live 긴급 청산 전 KIS-only 포지션을 DB에 반영한다."""
+    from core.portfolio_manager import PortfolioManager
+
+    results: list[dict] = []
+    failures: list[str] = []
+    for account_key in _live_liquidation_account_keys(config):
+        try:
+            result = (
+                PortfolioManager(config, account_key=account_key).sync_with_broker(auto_correct=True)
+                or {}
+            )
+        except Exception as exc:
+            logger.exception("긴급 청산 전 KIS↔DB 동기화 실패(account_key={}): {}", account_key, exc)
+            failures.append(f"{account_key or '<default>'}: {exc}")
+            continue
+
+        corrected = result.get("corrected") or []
+        mismatches = result.get("mismatches") or []
+        ok = bool(result.get("ok"))
+        results.append({
+            "account_key": account_key,
+            "ok": ok,
+            "mismatches": mismatches,
+            "corrected": corrected,
+            "message": result.get("message", ""),
+        })
+        if ok:
+            logger.info("긴급 청산 전 잔고 동기화 확인: account_key={}", account_key or "<default>")
+        elif corrected and (not mismatches or len(corrected) >= len(mismatches)):
+            logger.warning(
+                "긴급 청산 전 잔고 동기화 보정 완료: account_key={} corrected={} message={}",
+                account_key or "<default>",
+                len(corrected),
+                result.get("message", ""),
+            )
+        else:
+            failures.append(
+                f"{account_key or '<default>'}: {result.get('message', 'sync failed')}"
+                f" (mismatches={len(mismatches)}, corrected={len(corrected)})"
+            )
+
+    if failures:
+        logger.error(
+            "긴급 청산 전 KIS↔DB 잔고 동기화가 완료되지 않아 live 청산을 시작하지 않습니다: {}",
+            "; ".join(failures),
+        )
+        sys.exit(1)
+
+    return results
 
 
 def run_dashboard(args):
