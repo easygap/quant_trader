@@ -160,7 +160,7 @@ class TestForceLiveRemoved:
         monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
         monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
 
-        main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
+        summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
 
         assert calls[:2] == [("sync", "", True), ("positions",)]
         assert sells == [{
@@ -171,6 +171,9 @@ class TestForceLiveRemoved:
             "reason": "긴급 전량 청산 (--mode liquidate)",
             "strategy": "emergency_liquidate",
         }]
+        assert summary["attempted"] == 1
+        assert summary["succeeded"] == 1
+        assert summary["failed"] == 0
 
     def test_live_liquidate_aborts_when_broker_sync_fails_before_position_load(self, monkeypatch):
         """live 긴급 청산 전 KIS↔DB 동기화 실패가 남으면 stale DB 포지션만으로 진행하지 않는다."""
@@ -293,6 +296,63 @@ class TestForceLiveRemoved:
         assert captured["confirm_live"] is False
         assert "종료 코드=1" in message
         assert "LIQUIDATE_TRIGGER_CONFIRM_LIVE=true" in message
+
+    def test_liquidate_summary_reports_sell_failure(self, monkeypatch):
+        """긴급 청산은 개별 매도 실패를 반환 summary에 남긴다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        config = SimpleNamespace(trading={"mode": "paper"})
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(
+            repositories,
+            "get_all_positions",
+            lambda: [
+                SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+            ],
+        )
+
+        class FakeExecutor:
+            def __init__(self, cfg, account_key=""):
+                pass
+
+            def execute_sell(self, symbol, price, quantity=None, reason="", strategy=""):
+                return {"success": False, "reason": "paper sell rejected"}
+
+        monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+
+        summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=False))
+
+        assert summary["attempted"] == 1
+        assert summary["succeeded"] == 0
+        assert summary["failed"] == 1
+        assert summary["details"] == [{
+            "symbol": "005930",
+            "account_key": "",
+            "status": "failed",
+            "reason": "paper sell rejected",
+        }]
+
+    def test_http_liquidate_reports_failed_summary_as_failure(self, monkeypatch):
+        """HTTP 긴급 청산은 반환 summary에 실패가 있으면 성공 응답으로 포장하지 않는다."""
+        import main as main_mod
+        import database.models as db_models
+        import monitoring.logger as logger_mod
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.setattr(db_models, "init_database", lambda: None)
+        monkeypatch.setattr(logger_mod, "setup_logger", lambda: None)
+        monkeypatch.setattr(
+            main_mod,
+            "run_emergency_liquidate",
+            lambda args: {"attempted": 2, "succeeded": 1, "failed": 1, "details": []},
+        )
+
+        ok, message = trigger._run_liquidate()
+
+        assert ok is False
+        assert "실패 1건" in message
+        assert "대상=2" in message
 
 
 # ── 2. OrderGuard 타이밍 ──

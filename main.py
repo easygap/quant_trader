@@ -1090,9 +1090,15 @@ def run_emergency_liquidate(args):
     from core.order_executor import OrderExecutor
 
     positions = get_all_positions()  # 긴급 청산은 모든 계좌 포지션 대상
+    summary = {
+        "attempted": len(positions),
+        "succeeded": 0,
+        "failed": 0,
+        "details": [],
+    }
     if not positions:
         logger.info("보유 포지션이 없습니다.")
-        return
+        return summary
 
     # 청산 시에는 계좌(전략)별로 executor 사용 (live 시 해당 계좌로 매도)
     account_executors = {}
@@ -1119,13 +1125,42 @@ def run_emergency_liquidate(args):
                 strategy="emergency_liquidate",
             )
             if result.get("success"):
+                summary["succeeded"] += 1
+                summary["details"].append({
+                    "symbol": pos.symbol,
+                    "account_key": ak,
+                    "status": "success",
+                    "price": price,
+                })
                 logger.info("청산 완료: {} @ {:,.0f}원", pos.symbol, price)
             else:
-                logger.error("청산 실패 {}: {}", pos.symbol, result.get("reason", ""))
+                reason = result.get("reason", "")
+                summary["failed"] += 1
+                summary["details"].append({
+                    "symbol": pos.symbol,
+                    "account_key": ak,
+                    "status": "failed",
+                    "reason": reason,
+                })
+                logger.error("청산 실패 {}: {}", pos.symbol, reason)
         except Exception as e:
-            logger.exception("종목 {} 청산 중 오류: {}", pos.symbol, e)
+            symbol = getattr(pos, "symbol", "")
+            summary["failed"] += 1
+            summary["details"].append({
+                "symbol": symbol,
+                "account_key": getattr(pos, "account_key", "") or "",
+                "status": "exception",
+                "reason": str(e),
+            })
+            logger.exception("종목 {} 청산 중 오류: {}", symbol, e)
 
-    logger.info("긴급 청산 처리 완료 ({}건)", len(positions))
+    logger.info(
+        "긴급 청산 처리 완료 (대상 {}건, 성공 {}건, 실패 {}건)",
+        summary["attempted"],
+        summary["succeeded"],
+        summary["failed"],
+    )
+    return summary
 
 
 def _live_liquidation_account_keys(config) -> list[str]:
