@@ -136,6 +136,8 @@ def save_trade(
     order_at: datetime = None,
     expected_price: Optional[float] = None,
     actual_slippage_pct: Optional[float] = None,
+    execution_session_id: str = "",
+    order_id: str = "",
 ) -> TradeHistory:
     """매매 기록 저장. signal_at/order_at/expected_price는 paper monitoring용."""
     price_gap = round(price - expected_price, 1) if expected_price is not None else None
@@ -153,6 +155,8 @@ def save_trade(
             slippage=slippage,
             expected_price=expected_price,
             actual_slippage_pct=actual_slippage_pct,
+            execution_session_id=execution_session_id or "",
+            order_id=order_id or "",
             strategy=strategy,
             signal_score=signal_score,
             reason=reason,
@@ -180,6 +184,7 @@ def get_trade_history(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     account_key: Optional[str] = None,
+    execution_session_id: Optional[str] = None,
 ) -> List[TradeHistory]:
     """매매 기록 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
@@ -191,6 +196,8 @@ def get_trade_history(
             query = query.filter(TradeHistory.symbol == symbol)
         if mode:
             query = query.filter(TradeHistory.mode == mode)
+        if execution_session_id is not None:
+            query = query.filter(TradeHistory.execution_session_id == (execution_session_id or ""))
         if start_date:
             query = query.filter(TradeHistory.executed_at >= start_date)
         if end_date:
