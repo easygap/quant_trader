@@ -6,7 +6,7 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-05-08)**:
+> **현재 상태 (2026-05-11)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
 > - Paper Evidence 런타임: v2 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
@@ -18,6 +18,7 @@
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
+> - target-weight capped pilot readiness: audit 시작 시 paper preflight를 먼저 갱신하고, Discord webhook 누락 또는 notifier 비정상 상태는 주문 전 `BLOCKED`로 확정
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
@@ -46,6 +47,7 @@ pip install -r requirements.txt
 
 - `config/settings.yaml.example` → `config/settings.yaml`
 - `.env.example` 참고 후 `.env` 작성
+- target-weight capped paper pilot은 Discord webhook이 필수입니다. `.env`의 `DISCORD_WEBHOOK_URL`을 채우고 `config/settings.yaml`의 `discord.enabled: true`를 유지하세요.
 - `config/holidays.yaml`은 필요 시 갱신 가능
 - 미국 휴장일이 필요하면 `config/us_holidays.yaml` 추가
 
@@ -91,6 +93,10 @@ QUANT_AUTO_ENTRY=true python main.py --mode schedule --strategy scoring
 python tools/paper_preflight.py --strategy scoring --with-pilot-check
 python tools/paper_launch_readiness.py --strategy scoring --generate-runbook
 
+# Target-weight capped pilot preflight / readiness audit
+python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 --with-pilot-check
+python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 --readiness-audit --allow-rerun
+
 # Paper evidence pipeline
 python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --generate-package
 
@@ -117,6 +123,8 @@ python main.py --update-holidays
 ```
 
 Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json`이 존재하고, runtime state 조회가 성공하며, `entry` 허용 또는 현재 pilot authorization이 재검증될 때만 실행됩니다. preflight 누락/손상, runtime 조회 실패, critical fail은 주문 생성 전 차단되며 기존 포지션 SELL 청산은 차단하지 않습니다.
+
+Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
 
 실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + 현재 commit/config와 일치하는 canonical promotion bundle + `ELIGIBLE` paper evidence package가 모두 필요합니다.
 현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
