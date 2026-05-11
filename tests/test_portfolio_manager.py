@@ -78,3 +78,44 @@ def test_sync_with_broker_uses_core_notifier(monkeypatch):
     assert result["mismatches"]
     assert messages
     assert "포지션 동기화 불일치" in messages[0][0]
+
+
+def test_sync_with_broker_skips_auto_correct_when_kis_positions_empty(monkeypatch):
+    """KIS 보유 목록이 빈 응답이면 DB 포지션 전체 삭제 자동보정을 보류한다."""
+    messages = []
+    auto_correct_calls = []
+
+    class _FakeNotifier:
+        def send_message(self, text, critical=False):
+            messages.append((text, critical))
+
+    def _record_auto_correct(self, mismatches):
+        auto_correct_calls.append(mismatches)
+        return [{"symbol": "005930", "action": "deleted"}]
+
+    monkeypatch.setattr(
+        api.kis_api.KISApi,
+        "get_balance",
+        lambda self: {
+            "positions": [],
+            "total_value": 0,
+            "cash": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_all_positions",
+        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
+    )
+    monkeypatch.setattr(core.notifier, "Notifier", _FakeNotifier)
+    monkeypatch.setattr(PortfolioManager, "_auto_correct_positions", _record_auto_correct)
+
+    pm = PortfolioManager(_MockConfig())
+    result = pm.sync_with_broker(auto_correct=True)
+
+    assert result["ok"] is False
+    assert result["corrected"] == []
+    assert result["auto_correct_skipped_reason"] == "empty_broker_positions"
+    assert result["mismatches"][0]["type"] == "db_only"
+    assert "자동 보정 보류" in result["message"]
+    assert auto_correct_calls == []
+    assert messages

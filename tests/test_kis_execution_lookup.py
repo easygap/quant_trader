@@ -131,3 +131,31 @@ def test_open_orders_status_exposes_failure_instead_of_silent_empty_list():
     assert status["checked"] is False
     assert status["reason"] == "kis_open_orders_query_failed"
     assert api.get_open_orders() == []
+
+
+def test_get_balance_rejects_kis_error_body_instead_of_empty_balance():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._request = lambda *a, **kw: {"rt_cd": "1", "msg1": "temporary failure"}
+
+    assert api.get_balance() is None
+
+
+def test_get_balance_parses_successful_empty_account():
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._request = lambda *a, **kw: {
+        "rt_cd": "0",
+        "output1": [],
+        "output2": [{"dnca_tot_amt": "1000000", "tot_evlu_amt": "1000000"}],
+    }
+
+    balance = api.get_balance()
+
+    assert balance is not None
+    assert balance["cash"] == 1_000_000
+    assert balance["positions"] == []
