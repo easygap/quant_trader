@@ -171,6 +171,7 @@
 | Live 긴급 청산 브로커 보유 반영 | 높음 | 완료 — live 설정의 `--mode liquidate`는 `ENABLE_LIVE_TRADING=true`와 `--confirm-live` 확인 후 KIS↔DB 잔고 동기화를 먼저 실행한다. KIS-only 포지션은 DB에 보정한 뒤 청산 대상을 다시 읽고, 동기화 실패가 남으면 stale DB 포지션만으로 청산하지 않고 종료 |
 | HTTP 긴급 청산 live 확인 보강 | 높음 | 완료 — `monitoring.liquidate_trigger`는 live 긴급 청산을 `ENABLE_LIVE_TRADING=true`와 별도 `LIQUIDATE_TRIGGER_CONFIRM_LIVE=true`가 있을 때만 확인 플래그로 전달한다. 내부 guard가 `SystemExit`을 내도 HTTP 서버 프로세스를 종료하지 않고 실패 응답으로 변환 |
 | HTTP 긴급 청산 실패 결과 전파 | 높음 | 완료 — `run_emergency_liquidate()`가 대상/성공/실패 summary를 반환하고, HTTP 트리거는 개별 매도 실패가 1건이라도 있으면 성공 응답으로 포장하지 않고 실패 응답으로 노출 |
+| HTTP 긴급 청산 POST 전용화 | 높음 | 완료 — `/liquidate`는 POST 요청만 청산을 실행하고 GET은 405로 거부한다. 인증은 기본적으로 `X-Token` 또는 `Authorization: Bearer` 헤더만 허용하며, URL query token은 `LIQUIDATE_TRIGGER_ALLOW_QUERY_TOKEN=true`를 명시한 경우에만 허용 |
 | 빈 KIS 잔고 자동보정 보호 | 높음 | 완료 — KIS 보유 목록이 빈 응답인데 DB 포지션이 남아 있으면 자동보정이 전체 포지션을 삭제하지 않도록 기본 보류. 확실한 무보유 계좌 정리만 `position_mismatch_allow_empty_broker_delete=true`로 명시 허용 |
 | 브로커 포지션 자동보정 방어값 복구 | 높음 | 완료 — KIS-only 포지션을 DB에 복구하거나 수량 불일치를 KIS 기준으로 맞출 때 수량을 추가 매수처럼 더하지 않고 절대값으로 보정하며, 평균가 기준 손절·익절·트레일링 스탑을 함께 재생성 |
 | Target-weight pre-trade risk | 높음 | **완료 — `RiskManager.calculate_transaction_costs()`를 plan-level로 재사용해 주문별 예상 체결가, 수수료, 거래세, 슬리피지, 선택 양도세를 반영한 projected cash/total value/exposure를 계산. 현금 부족, `min_cash_ratio`, `max_investment_ratio`, `max_position_ratio`, `max_positions` 위반은 `target_weight_pre_trade_risk_failed`로 readiness/execute를 fail-closed 차단하고 session/readiness/pilot evidence snapshot에 cost summary를 남김** |

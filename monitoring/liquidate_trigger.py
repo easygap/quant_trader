@@ -4,6 +4,8 @@
 - 환경변수 LIQUIDATE_TRIGGER_TOKEN 필수(미설정 시 서버 미가동). LIQUIDATE_TRIGGER_PORT(기본 8765).
 - live 설정에서 실제 청산을 허용하려면 ENABLE_LIVE_TRADING=true 와
   LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 를 둘 다 설정해야 한다.
+- 청산 실행은 POST만 허용한다. 인증 토큰은 기본적으로 X-Token 또는
+  Authorization: Bearer 헤더로만 받는다.
 
 사용:
     set LIQUIDATE_TRIGGER_TOKEN=your_secret
@@ -12,9 +14,9 @@
 
     POST http://localhost:8765/liquidate
     Header: X-Token: your_secret
-    또는 Query: ?token=your_secret
 """
 
+import hmac
 import json
 import os
 import sys
@@ -28,10 +30,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _get_token_from_request(handler: BaseHTTPRequestHandler) -> Optional[str]:
-    """Header X-Token 또는 query token 추출."""
-    token = handler.headers.get("X-Token") or handler.headers.get("Authorization", "").replace("Bearer ", "")
+    """Header X-Token 또는 Authorization: Bearer 토큰 추출."""
+    token = handler.headers.get("X-Token")
     if token:
         return token.strip()
+    auth = handler.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        bearer = auth[7:].strip()
+        if bearer:
+            return bearer
+    if not _env_truthy("LIQUIDATE_TRIGGER_ALLOW_QUERY_TOKEN"):
+        return None
     parsed = urlparse(handler.path)
     qs = parse_qs(parsed.query)
     return (qs.get("token") or [None])[0]
@@ -82,7 +91,11 @@ class LiquidateHandler(BaseHTTPRequestHandler):
         if urlparse(self.path).path.rstrip("/") != "/liquidate":
             self._send(404, {"ok": False, "error": "Not Found"})
             return
-        self._handle_liquidate()
+        self._send(
+            405,
+            {"ok": False, "error": "Method Not Allowed. Use POST /liquidate."},
+            headers={"Allow": "POST"},
+        )
 
     def do_POST(self):
         if urlparse(self.path).path.rstrip("/") != "/liquidate":
@@ -96,7 +109,7 @@ class LiquidateHandler(BaseHTTPRequestHandler):
             self._send(503, {"ok": False, "error": "LIQUIDATE_TRIGGER_TOKEN not configured"})
             return
         provided = _get_token_from_request(self)
-        if not provided or provided != token:
+        if not provided or not hmac.compare_digest(provided, token):
             self._send(403, {"ok": False, "error": "Invalid or missing token"})
             return
         try:
@@ -105,9 +118,11 @@ class LiquidateHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send(500, {"ok": False, "error": str(e)})
 
-    def _send(self, code: int, body: dict):
+    def _send(self, code: int, body: dict, headers: Optional[dict] = None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        for key, value in (headers or {}).items():
+            self.send_header(str(key), str(value))
         self.end_headers()
         self.wfile.write(json.dumps(body, ensure_ascii=False).encode("utf-8"))
 
@@ -122,7 +137,7 @@ def main():
         sys.exit(1)
     port = int(os.environ.get("LIQUIDATE_TRIGGER_PORT", "8765"))
     server = HTTPServer(("", port), LiquidateHandler)
-    print(f"긴급 청산 HTTP 트리거: http://0.0.0.0:{port}/liquidate (X-Token 또는 ?token=)")
+    print(f"긴급 청산 HTTP 트리거: POST http://0.0.0.0:{port}/liquidate (X-Token)")
     server.serve_forever()
 
 
