@@ -195,6 +195,132 @@ def test_live_monitoring_allows_entries_after_broker_sync_ok(monkeypatch):
         scheduler.config.trading["mode"] = old_mode
 
 
+def test_live_entry_loop_halts_when_order_requires_reconcile(monkeypatch):
+    """live 주문 체결 확인이 보류되면 같은 루프의 남은 신규 진입을 중단한다."""
+    from core.scheduler import Scheduler
+
+    sample = _sample_ohlcv(60)
+    calls = []
+    op_events = []
+
+    class FakeCollector:
+        def fetch_stock(self, symbol, start=None, end=None):
+            return sample.copy()
+
+    class FakeStrategy:
+        def generate_signal(self, df, symbol=None):
+            return {"signal": "BUY", "close": 50_000, "atr": 1_000, "score": 82}
+
+    class FakeExecutor:
+        def execute_buy(self, **kwargs):
+            calls.append(kwargs["symbol"])
+            if kwargs["symbol"] == "005930":
+                return {
+                    "success": False,
+                    "requires_reconcile": True,
+                    "order_pending": True,
+                    "symbol": "005930",
+                    "reason": "실전 주문은 접수됐지만 체결 확인 전이라 DB 반영을 보류했습니다.",
+                    "order_id": "local-1",
+                    "broker_order_id": "kis-1",
+                    "order_status": "ACKED",
+                    "execution_check": {"reason": "live_fill_unconfirmed"},
+                }
+            return {"success": True, "symbol": kwargs["symbol"]}
+
+    monkeypatch.setattr("core.data_collector.DataCollector", FakeCollector)
+    monkeypatch.setattr(
+        "core.market_regime.check_market_regime",
+        lambda config, collector: {"allow_buys": True, "position_scale": 1.0},
+    )
+    monkeypatch.setattr("core.scheduler.get_position", lambda symbol, account_key="": None)
+    monkeypatch.setattr(
+        "core.scheduler._log_op",
+        lambda *args, **kwargs: op_events.append((args, kwargs)),
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler._entry_candidates = [
+            {"symbol": "005930", "price": 50_000},
+            {"symbol": "000660", "price": 120_000},
+        ]
+        scheduler.portfolio = SimpleNamespace(
+            get_portfolio_summary=lambda: {
+                "total_value": 1_000_000,
+                "cash": 1_000_000,
+                "current_value": 0,
+            }
+        )
+        scheduler.blackswan = SimpleNamespace(get_recovery_scale=lambda: 1.0)
+        scheduler.discord = MagicMock()
+        scheduler._get_or_create_executor = lambda: FakeExecutor()
+        scheduler._get_strategy = lambda: FakeStrategy()
+
+        scheduler._execute_entry_candidates()
+
+        assert calls == ["005930"]
+        assert scheduler._entry_candidates == [{"symbol": "000660", "price": 120_000}]
+        assert scheduler._last_broker_sync_ok is False
+        assert "pending reconcile" in scheduler._last_broker_sync_message
+        scheduler.discord.send_trade_alert.assert_not_called()
+        scheduler.discord.send_message.assert_called_once()
+        assert scheduler.discord.send_message.call_args.kwargs["critical"] is True
+        assert op_events
+        assert op_events[-1][0][0] == "LIVE_RECONCILE_BLOCK"
+        assert op_events[-1][1]["detail"]["remaining_candidates"] == 1
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
+def test_live_monitoring_skips_rescan_after_entry_requires_reconcile(monkeypatch):
+    """live 신규 진입 실행 중 체결 확인이 보류되면 같은 루프 재스캔도 막는다."""
+    from core.scheduler import Scheduler
+
+    monkeypatch.setattr("api.kis_api.KISApi", _FakeKIS)
+    monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    calls = {"entry": 0, "rescan": 0, "exit": 0}
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler.auto_entry = True
+        scheduler._entry_candidates = [{"symbol": "005930", "price": 50000}]
+        scheduler.portfolio = SimpleNamespace(
+            sync_with_broker=lambda: {"ok": True, "mismatches": [], "message": "일치"}
+        )
+        scheduler.blackswan = SimpleNamespace(
+            consume_cooldown_ended_flag=lambda: False,
+            is_on_cooldown=lambda: False,
+        )
+        scheduler.discord = MagicMock()
+        scheduler._maybe_recheck_market_regime = lambda: None
+
+        def mark_reconcile_block():
+            calls["entry"] += 1
+            scheduler._last_broker_sync_ok = False
+            scheduler._last_broker_sync_message = "live order pending reconcile: 005930"
+
+        scheduler._execute_entry_candidates = mark_reconcile_block
+        scheduler._rescan_for_new_entries = lambda: calls.__setitem__("rescan", calls["rescan"] + 1)
+        scheduler._check_exit_signals = lambda kis=None: calls.__setitem__("exit", calls["exit"] + 1)
+        scheduler._update_dynamic_stop_losses = lambda: None
+        scheduler._publish_dashboard_runtime_state = lambda kis=None: None
+
+        scheduler._run_monitoring()
+
+        assert calls == {"entry": 1, "rescan": 0, "exit": 1}
+        assert scheduler._last_broker_sync_ok is False
+        assert "pending reconcile" in scheduler._last_broker_sync_message
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
 def test_scheduler_post_market_runs():
     """장마감: _run_post_market 호출 시 DB 저장·디스코드 시도만 하고 예외 없이 완료."""
     from core.scheduler import Scheduler
