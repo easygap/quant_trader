@@ -434,12 +434,27 @@ class OrderExecutor:
         except Exception:
             pass
 
-        # 손절가 계산 (국면 배수 적용)
-        stop_loss = self.risk_manager.calculate_stop_loss(price, atr, regime_multiplier=regime_sl_mult)
+        sizing_costs = self.risk_manager.calculate_transaction_costs(
+            price,
+            1,
+            "BUY",
+            avg_daily_volume=avg_daily_volume,
+        )
+        sizing_entry_price = float(sizing_costs.get("execution_price", price) or price)
+
+        # 손절가 계산 (국면 배수 적용). 수량 산정은 예상 체결가 기준으로 보수화한다.
+        stop_loss = self.risk_manager.calculate_stop_loss(
+            sizing_entry_price,
+            atr,
+            regime_multiplier=regime_sl_mult,
+        )
 
         # 포지션 크기 계산 (1% 룰 + 신호 강도 스케일링)
         quantity = self.risk_manager.calculate_position_size(
-            capital, price, stop_loss, signal_score=signal_score,
+            capital,
+            sizing_entry_price,
+            stop_loss,
+            signal_score=signal_score,
         )
 
         if quantity <= 0:
@@ -503,7 +518,7 @@ class OrderExecutor:
         sector_map = self._get_sector_map_cached()
         div_check = self.risk_manager.check_diversification(
             len(positions),
-            price * quantity,
+            sizing_entry_price * quantity,
             capital,
             available_cash=available_cash,
             current_invested=current_invested or 0,
@@ -530,6 +545,7 @@ class OrderExecutor:
         # 거래 비용 계산 (avg_daily_volume 있으면 거래량 기반 동적 슬리피지 적용)
         costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY", avg_daily_volume=avg_daily_volume)
         available_cash = capital if available_cash is None else available_cash
+        estimated_fill_price = float(costs.get("execution_price", price) or price)
 
         # 음수 캐시 방지: 가용 현금이 0 이하이면 즉시 거부
         if available_cash <= 0:
@@ -539,7 +555,7 @@ class OrderExecutor:
             )
             return {"success": False, "reason": "가용 현금 부족 (0 이하)"}
 
-        total_required = (price * quantity) + costs["total_cost"]
+        total_required = (estimated_fill_price * quantity) + float(costs.get("commission", 0) or 0)
         if total_required > available_cash:
             logger.warning(
                 "종목 {} 매수 불가: 필요 현금 {:,.0f}원 > 사용 가능 현금 {:,.0f}원",
@@ -547,18 +563,12 @@ class OrderExecutor:
             )
             return {"success": False, "reason": "사용 가능 현금 부족"}
 
-        # 익절가 계산 (국면 배수 적용)
-        tp_info = self.risk_manager.calculate_take_profit(price, regime_multiplier=regime_tp_mult)
-
-        # 트레일링 스탑 계산
-        trailing_stop = self.risk_manager.calculate_trailing_stop(price, atr)
-
         # 주문 전 안전 체크
         pre_check = self._pre_order_check(
             symbol=symbol,
             action="BUY",
             strategy=strategy,
-            candidate_notional=price * quantity,
+            candidate_notional=estimated_fill_price * quantity,
         )
         if not pre_check["allowed"]:
             result = {"success": False, "reason": pre_check["reason"]}
@@ -658,6 +668,17 @@ class OrderExecutor:
             costs = self.risk_manager.calculate_transaction_costs(
                 fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
             )
+
+        stop_loss = self.risk_manager.calculate_stop_loss(
+            fill_price,
+            atr,
+            regime_multiplier=regime_sl_mult,
+        )
+        tp_info = self.risk_manager.calculate_take_profit(
+            fill_price,
+            regime_multiplier=regime_tp_mult,
+        )
+        trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
 
         _order_at = datetime.now()
         save_trade(
@@ -824,6 +845,10 @@ class OrderExecutor:
         order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
         assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
 
+        stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
+        tp_info = self.risk_manager.calculate_take_profit(fill_price)
+        trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
+
         _order_at = datetime.now()
         save_trade(
             symbol=symbol,
@@ -965,6 +990,7 @@ class OrderExecutor:
         expected_price = float(price)
         fill_price = expected_price
         actual_slippage_pct = None
+        costs = None
 
         # 주문 전 안전 체크 (매도: 쿨다운 중에도 허용)
         pre_check = self._pre_order_check(symbol=symbol, action="SELL", strategy=strategy)
@@ -1028,6 +1054,14 @@ class OrderExecutor:
             OrderGuard.clear(symbol)
         else:
             # Paper mode: simulated broker event
+            costs = self.risk_manager.calculate_transaction_costs(
+                expected_price,
+                sell_qty,
+                "SELL",
+                avg_daily_volume=avg_daily_volume,
+                avg_price=float(position.avg_price),
+            )
+            fill_price = float(costs["execution_price"])
             order.transition(OrderStatus.SUBMITTED)
             order.transition(OrderStatus.ACKED)
             order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
@@ -1035,11 +1069,14 @@ class OrderExecutor:
         # FILLED 상태에서만 DB 반영 (invariant)
         assert order.status == OrderStatus.FILLED, f"SELL DB 반영 시점에 FILLED가 아님: {order.status}"
 
-        costs = self.risk_manager.calculate_transaction_costs(
-            fill_price, sell_qty, "SELL",
-            avg_daily_volume=avg_daily_volume,
-            avg_price=float(position.avg_price),
-        )
+        if self.mode == "live":
+            costs = self.risk_manager.calculate_transaction_costs(
+                fill_price,
+                sell_qty,
+                "SELL",
+                avg_daily_volume=avg_daily_volume,
+                avg_price=float(position.avg_price),
+            )
         total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
         pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
         pnl_rate = ((fill_price / position.avg_price) - 1) * 100
@@ -1050,7 +1087,7 @@ class OrderExecutor:
             strategy=strategy, signal_score=signal_score,
             reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
             mode=self.mode, account_key=self.account_key,
-            expected_price=expected_price if self.mode == "live" else None,
+            expected_price=expected_price,
             actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
             execution_session_id=execution_session_id,
             order_id=order.order_id,
