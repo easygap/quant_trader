@@ -354,6 +354,53 @@ class TestForceLiveRemoved:
         assert "실패 1건" in message
         assert "대상=2" in message
 
+    def test_http_liquidate_get_is_method_not_allowed(self):
+        """HTTP 긴급 청산은 GET 요청으로 실행되지 않는다."""
+        import monitoring.liquidate_trigger as trigger
+
+        captured = {}
+        handler = object.__new__(trigger.LiquidateHandler)
+        handler.path = "/liquidate?token=secret"
+        handler._send = lambda code, body, headers=None: captured.update(
+            {"code": code, "body": body, "headers": headers or {}}
+        )
+
+        handler.do_GET()
+
+        assert captured["code"] == 405
+        assert captured["headers"]["Allow"] == "POST"
+        assert "POST /liquidate" in captured["body"]["error"]
+
+    def test_http_liquidate_query_token_disabled_by_default(self, monkeypatch):
+        """긴급 청산 token query 인증은 기본 비활성이다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_ALLOW_QUERY_TOKEN", raising=False)
+        handler = SimpleNamespace(headers={}, path="/liquidate?token=secret")
+
+        assert trigger._get_token_from_request(handler) is None
+
+    def test_http_liquidate_query_token_requires_explicit_opt_in(self, monkeypatch):
+        """필요한 경우에만 query token 인증을 명시적으로 허용한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.setenv("LIQUIDATE_TRIGGER_ALLOW_QUERY_TOKEN", "true")
+        handler = SimpleNamespace(headers={}, path="/liquidate?token=secret")
+
+        assert trigger._get_token_from_request(handler) == "secret"
+
+    def test_http_liquidate_accepts_bearer_token_header(self, monkeypatch):
+        """긴급 청산은 Authorization: Bearer 헤더 인증을 지원한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_ALLOW_QUERY_TOKEN", raising=False)
+        handler = SimpleNamespace(
+            headers={"Authorization": "Bearer secret"},
+            path="/liquidate?token=ignored",
+        )
+
+        assert trigger._get_token_from_request(handler) == "secret"
+
 
 # ── 2. OrderGuard 타이밍 ──
 

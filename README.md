@@ -143,6 +143,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
 - HTTP 긴급 청산 트리거 live 실행은 별도 확인 환경변수 없이는 차단
 - HTTP 긴급 청산은 개별 매도 실패가 있으면 실패 응답으로 노출
+- HTTP 긴급 청산 실행은 POST 전용이며 query token 인증은 기본 비활성
 - 성과 열화 시 진입 제한
 - 시장 국면 / 블랙스완 대응
 - 단일종목/포트폴리오 백테스트 gap/어닝/BlackSwan 이벤트 guard
