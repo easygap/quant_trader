@@ -135,6 +135,8 @@ class Scheduler:
         self._entry_candidates = []
         self._skip_next_monitor_cycle = False
         self._last_sync_broker_time = None  # KIS 잔고 크로스체크 주기용
+        self._last_broker_sync_ok: bool | None = None
+        self._last_broker_sync_message: str = ""
         self._last_healthcheck_time: datetime | None = None
         self._last_regime_check_time: datetime | None = None  # 장중 시장 국면 재확인 주기
         self._market_regime_scale: float = 1.0
@@ -573,15 +575,31 @@ class Scheduler:
             # 장중 시장 국면 재확인 (2시간마다)
             self._maybe_recheck_market_regime()
 
+            live_entry_allowed = True
+            if self.config.trading.get("mode") == "live":
+                live_entry_allowed = self._maybe_sync_with_broker()
+
             # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
             if self.blackswan.consume_cooldown_ended_flag():
                 logger.info("블랙스완 쿨다운 해제 — 즉시 신호 재평가 트리거")
                 self.discord.send_message("🔄 블랙스완 쿨다운 해제 — 신호 재평가 후 recovery 사이징으로 재진입 검토")
-                self._run_post_cooldown_rescan()
+                if live_entry_allowed:
+                    self._run_post_cooldown_rescan()
+                else:
+                    logger.warning(
+                        "live 쿨다운 해제 후 재진입 스캔 보류 — KIS 잔고 크로스체크 미통과: {}",
+                        self._last_broker_sync_message or "unknown",
+                    )
 
             if self.auto_entry and self._entry_candidates and not self.blackswan.is_on_cooldown():
-                with PositionLock():
-                    self._execute_entry_candidates()
+                if live_entry_allowed:
+                    with PositionLock():
+                        self._execute_entry_candidates()
+                else:
+                    logger.warning(
+                        "live 신규 진입 후보 실행 보류 — KIS 잔고 크로스체크 미통과: {}",
+                        self._last_broker_sync_message or "unknown",
+                    )
 
             with PositionLock():
                 self._check_exit_signals(kis=kis)
@@ -591,11 +609,13 @@ class Scheduler:
 
             # 장중 신호 재평가: 보유하지 않은 워치리스트 종목에서 새 진입 기회 탐색
             if self.auto_entry and not self.blackswan.is_on_cooldown():
-                self._rescan_for_new_entries()
-
-            # live 모드: KIS 잔고와 DB 포지션 상시 크로스체크 (주기적)
-            if self.config.trading.get("mode") == "live":
-                self._maybe_sync_with_broker()
+                if live_entry_allowed:
+                    self._rescan_for_new_entries()
+                else:
+                    logger.warning(
+                        "live 신규 진입 재스캔 보류 — KIS 잔고 크로스체크 미통과: {}",
+                        self._last_broker_sync_message or "unknown",
+                    )
 
             if self.blackswan.is_on_cooldown():
                 logger.warning("블랙스완 쿨다운 중 — 신규 매수만 스킵 (손절/익절은 정상 동작)")
@@ -669,19 +689,43 @@ class Scheduler:
         except Exception as e:
             logger.debug("장중 국면 재확인 실패: {}", e)
 
-    def _maybe_sync_with_broker(self):
-        """live 모드에서 주기적으로 KIS 잔고와 DB 포지션 크로스체크 (불일치 시 로깅·알림)."""
+    def _maybe_sync_with_broker(self) -> bool:
+        """
+        live 모드에서 주기적으로 KIS 잔고와 DB 포지션을 크로스체크한다.
+
+        Returns:
+            신규 진입을 진행해도 되는지 여부. 최근 동기화가 실패/불일치면
+            다음 성공 확인 전까지 신규 BUY 계열 동작을 보류한다.
+        """
         interval_min = int(self.config.trading.get("sync_broker_interval_minutes", 30))
         now = datetime.now()
         if self._last_sync_broker_time is not None:
             elapsed = (now - self._last_sync_broker_time).total_seconds()
             if elapsed < interval_min * 60:
-                return
+                if self._last_broker_sync_ok is not False:
+                    return True
+                logger.info(
+                    "이전 KIS 잔고 크로스체크 미통과 상태 — 신규 진입 재개 전 재확인"
+                )
         self._last_sync_broker_time = now
         try:
-            self.portfolio.sync_with_broker()
+            result = self.portfolio.sync_with_broker()
+            ok = bool(result and result.get("ok"))
+            self._last_broker_sync_ok = ok
+            self._last_broker_sync_message = (
+                result.get("message", "") if isinstance(result, dict) else ""
+            )
+            if not ok:
+                logger.warning(
+                    "장중 KIS 잔고 크로스체크 미통과 — 신규 진입 보류: {}",
+                    self._last_broker_sync_message or result,
+                )
+            return ok
         except Exception as e:
             logger.warning("장중 KIS 잔고 크로스체크 실패: {}", e)
+            self._last_broker_sync_ok = False
+            self._last_broker_sync_message = f"broker_sync_exception: {e}"
+            return False
 
     def _run_post_cooldown_rescan(self):
         """블랙스완 쿨다운 해제 직후: 워치리스트 전 종목을 재스캔해 진입 후보를 다시 채운다."""
