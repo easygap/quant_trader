@@ -23,8 +23,8 @@
     # momentum_top 동일비중 멀티종목 (워치리스트 정의와 동일, KS11 대비)
     python main.py --mode backtest_momentum_top --start 2019-01-01 --end 2026-03-23 --rebalance-days 20
 
-    # 긴급 전체 청산 (수동 개입·블랙스완 외 상황에서 즉시 전 종목 매도)
-    python main.py --mode liquidate
+    # 긴급 전체 청산 (live 설정에서는 ENABLE_LIVE_TRADING=true + --confirm-live 필요)
+    python main.py --mode liquidate --confirm-live
 
     # 바스켓 리밸런싱 (목표 비중 대비 드리프트 체크 → 주문)
     python main.py --mode rebalance --basket kr_blue_chip
@@ -834,19 +834,11 @@ def run_live_trading(args):
         logger.error("전략 상태를 live_candidate로 승격하려면 승인 기준을 충족하세요.")
         sys.exit(1)
 
-    if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
-        logger.error(
-            "실전 모드 진입 거부: 환경변수 ENABLE_LIVE_TRADING=true 가 필요합니다. "
-            "실수로 실주문이 나가지 않도록 설정 후 다시 실행하세요."
-        )
-        sys.exit(1)
-
-    if not getattr(args, "confirm_live", False):
-        logger.error(
-            "실전 모드 진입 거부: --confirm-live 플래그가 필요합니다. "
-            "예: python main.py --mode live --strategy scoring --confirm-live"
-        )
-        sys.exit(1)
+    _require_live_operator_confirmation(
+        args,
+        action_label="실전 모드 진입",
+        example="python main.py --mode live --strategy scoring --confirm-live",
+    )
 
     logger.info("=" * 50)
     logger.info("🔴 실전 매매 모드 시작 (이중 확인 완료)")
@@ -906,6 +898,25 @@ def run_live_trading(args):
     finally:
         config._settings["trading"]["mode"] = old_mode
         logger.info("실전 모드 설정 복원됨")
+
+
+def _require_live_operator_confirmation(args, *, action_label: str, example: str) -> None:
+    """실주문 가능 경로는 환경변수와 CLI 플래그를 둘 다 요구한다."""
+    if os.environ.get("ENABLE_LIVE_TRADING", "").lower() != "true":
+        logger.error(
+            "{} 거부: 환경변수 ENABLE_LIVE_TRADING=true 가 필요합니다. "
+            "실수로 실주문이 나가지 않도록 설정 후 다시 실행하세요.",
+            action_label,
+        )
+        sys.exit(1)
+
+    if not getattr(args, "confirm_live", False):
+        logger.error(
+            "{} 거부: --confirm-live 플래그가 필요합니다. 예: {}",
+            action_label,
+            example,
+        )
+        sys.exit(1)
 
 
 def run_scheduler_loop(args):
@@ -1047,22 +1058,29 @@ def run_compare_paper_backtest(args):
 
 def run_emergency_liquidate(args):
     """긴급 전 종목 매도 (CLI: --mode liquidate). 블랙스완 감지 외에도 수동 개입이 필요할 때 즉시 전 종목 매도."""
-    from database.repositories import get_all_positions
-    from core.order_executor import OrderExecutor
-
     logger.info("=" * 50)
     logger.info("🚨 긴급 전 종목 매도 모드")
     logger.info("=" * 50)
+
+    config = Config.get()
+    mode = str(config.trading.get("mode", "paper")).lower()
+    if mode == "live":
+        _require_live_operator_confirmation(
+            args,
+            action_label="실전 긴급 청산",
+            example="python main.py --mode liquidate --confirm-live",
+        )
+
+    from database.repositories import get_all_positions
+    from core.order_executor import OrderExecutor
 
     positions = get_all_positions()  # 긴급 청산은 모든 계좌 포지션 대상
     if not positions:
         logger.info("보유 포지션이 없습니다.")
         return
 
-    config = Config.get()
     # 청산 시에는 계좌(전략)별로 executor 사용 (live 시 해당 계좌로 매도)
     account_executors = {}
-    mode = config.trading.get("mode", "paper")
 
     for pos in positions:
         try:
@@ -1128,7 +1146,7 @@ def main():
   python main.py --mode paper --strategy scoring
   python main.py --mode schedule --strategy scoring  # 모의 스케줄 무한 루프 (서버 상시 구동)
   python main.py --mode live --strategy scoring --confirm-live  # 실전 (ENABLE_LIVE_TRADING=true 필요)
-  python main.py --mode liquidate  # 긴급 전 종목 매도 (실전/모의 모두 DB 기준)
+  python main.py --mode liquidate --confirm-live  # 긴급 전 종목 매도 (live 설정에서는 ENABLE_LIVE_TRADING=true 필요)
   python main.py --mode compare --start 2025-01-01 --end 2025-03-18 --strategy scoring  # 모의투자 vs 백테스트 비교
   python main.py --update-holidays  # 휴장일 파일(pykrx+fallback) 자동 갱신
   python main.py --mode optimize --strategy scoring  # 임계값만 Grid Search (오버피팅 주의)
