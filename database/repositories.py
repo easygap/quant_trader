@@ -456,6 +456,70 @@ def save_position(
 
 
 @with_retry
+def replace_position_from_broker(
+    symbol: str,
+    avg_price: float,
+    quantity: int,
+    stop_loss_price: float = None,
+    take_profit_price: float = None,
+    trailing_stop_price: float = None,
+    strategy: str = "",
+    account_key: str = "",
+) -> Position:
+    """
+    브로커 잔고 기준으로 포지션을 절대값 보정한다.
+
+    save_position()은 추가 매수 경로라 기존 수량에 더하므로, KIS↔DB 자동보정에서는
+    이 함수를 사용해 quantity/avg_price/total_invested를 브로커 값으로 덮어쓴다.
+    """
+    session = get_session()
+    try:
+        ak = account_key or ""
+        qty = int(quantity)
+        if qty <= 0:
+            raise ValueError("브로커 보정 수량은 1주 이상이어야 합니다")
+
+        position = session.query(Position).filter(
+            Position.account_key == ak, Position.symbol == symbol
+        ).first()
+        if position:
+            position.avg_price = float(avg_price)
+            position.quantity = qty
+            position.total_invested = float(avg_price) * qty
+            position.highest_price = max(position.highest_price or 0, float(avg_price))
+            if strategy:
+                position.strategy = strategy
+        else:
+            position = Position(
+                account_key=ak,
+                symbol=symbol,
+                avg_price=float(avg_price),
+                quantity=qty,
+                total_invested=float(avg_price) * qty,
+                highest_price=float(avg_price),
+                strategy=strategy,
+            )
+            session.add(position)
+
+        if stop_loss_price is not None:
+            position.stop_loss_price = stop_loss_price
+        if take_profit_price is not None:
+            position.take_profit_price = take_profit_price
+        if trailing_stop_price is not None:
+            position.trailing_stop_price = trailing_stop_price
+
+        session.commit()
+        logger.info("브로커 기준 포지션 보정: {} {}주 평균가 {:,.0f}원", symbol, qty, float(avg_price))
+        return position
+    except Exception as e:
+        session.rollback()
+        logger.error("브로커 기준 포지션 보정 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
+@with_retry
 def get_position(symbol: str, account_key: str = "") -> Optional[Position]:
     """특정 종목의 포지션 조회 (account_key 지정 시 해당 계좌만)."""
     session = get_session()
