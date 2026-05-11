@@ -260,7 +260,55 @@ class TestSignalAtMigration:
                 pass
 
 
-# ── 5. Walk-forward non-zero windows ──
+# ── 5. TradeHistory execution link migration ──
+
+class TestTradeHistoryExecutionLinkMigration:
+    def test_execution_link_migration_function_exists(self):
+        """실행 세션/주문 연결 마이그레이션 함수가 존재해야 한다."""
+        from database.models import _migrate_trade_history_execution_link_columns
+        assert callable(_migrate_trade_history_execution_link_columns)
+
+    def test_execution_link_migration_on_existing_db_without_columns(self):
+        """기존 DB에서 execution_session_id/order_id 컬럼을 추가해야 한다."""
+        import tempfile, os
+        from sqlalchemy import create_engine, text, Column, Integer, String, Float
+        from sqlalchemy.orm import DeclarativeBase
+        from database.models import _migrate_trade_history_execution_link_columns
+
+        class OldBase(DeclarativeBase):
+            pass
+
+        class OldTradeHistory(OldBase):
+            __tablename__ = "trade_history"
+            id = Column(Integer, primary_key=True)
+            symbol = Column(String(20))
+            action = Column(String(20))
+            price = Column(Float)
+            quantity = Column(Integer)
+            total_amount = Column(Float)
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            engine = create_engine(f"sqlite:///{db_path}")
+            OldBase.metadata.create_all(engine)
+
+            _migrate_trade_history_execution_link_columns(engine)
+
+            with engine.connect() as conn:
+                r = conn.execute(text("PRAGMA table_info(trade_history)"))
+                cols_after = [row[1] for row in r.fetchall()]
+            engine.dispose()
+            assert "execution_session_id" in cols_after
+            assert "order_id" in cols_after
+        finally:
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass
+
+
+# ── 6. Walk-forward non-zero windows ──
 
 class TestWalkForwardWindows:
     def test_wf_produces_nonzero_windows(self):

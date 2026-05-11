@@ -9,6 +9,7 @@ import json
 import math
 import os
 import sys
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,6 +91,16 @@ def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
 def _execution_day(now: datetime | None = None) -> str:
     current = _coerce_kst_datetime(now)
     return current.date().strftime("%Y-%m-%d")
+
+
+def make_execution_session_id(plan: TargetWeightPlan, now: datetime | None = None) -> str:
+    current = _coerce_kst_datetime(now)
+    stamp = current.strftime("%Y%m%d%H%M%S")
+    candidate = "".join(
+        char if char.isalnum() or char in {"_", "-"} else "_"
+        for char in str(plan.candidate_id)
+    ).strip("_") or "target_weight"
+    return f"{candidate}_{plan.trade_day}_{stamp}_{uuid.uuid4().hex[:8]}"
 
 
 def execution_trade_day_check_not_required() -> dict[str, Any]:
@@ -626,6 +637,7 @@ def execute_plan(
     pre_trade_risk_check: dict[str, Any] | None = None,
     max_order_adv_pct: float = DEFAULT_MAX_ORDER_ADV_PCT,
     allow_rerun: bool = False,
+    execution_session_id: str | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -640,6 +652,7 @@ def execute_plan(
         "halted": False,
         "halt_reason": "",
         "details": [],
+        "execution_session_id": execution_session_id or "",
     }
     if dry_run:
         for order in plan.orders:
@@ -782,6 +795,8 @@ def execute_plan(
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
 
+    execution_session_id = execution_session_id or make_execution_session_id(plan)
+    results["execution_session_id"] = execution_session_id
     executor = OrderExecutor(config, account_key=plan.candidate_id)
     portfolio = PortfolioManager(config, account_key=plan.candidate_id)
 
@@ -806,6 +821,7 @@ def execute_plan(
                     reason=order.reason,
                     strategy=plan.candidate_id,
                     avg_daily_volume=avg_daily_volume,
+                    execution_session_id=execution_session_id,
                 )
             else:
                 avg_daily_volume = _avg_daily_volume_for_order(plan, order)
@@ -820,6 +836,7 @@ def execute_plan(
                     reason=order.reason,
                     strategy=plan.candidate_id,
                     avg_daily_volume=avg_daily_volume,
+                    execution_session_id=execution_session_id,
                 )
             status = "success" if res.get("success") else "failed"
             if res.get("success"):
@@ -1485,7 +1502,10 @@ def reconcile_order_results(plan: TargetWeightPlan, execution: dict[str, Any]) -
     }
 
 
-def load_paper_trade_fills(plan: TargetWeightPlan) -> list[Any]:
+def load_paper_trade_fills(
+    plan: TargetWeightPlan,
+    execution_session_id: str | None = None,
+) -> list[Any]:
     from database.repositories import get_trade_history
 
     trade_day = datetime.strptime(plan.trade_day, "%Y-%m-%d")
@@ -1494,11 +1514,16 @@ def load_paper_trade_fills(plan: TargetWeightPlan) -> list[Any]:
         start_date=trade_day,
         end_date=trade_day + timedelta(days=1),
         account_key=plan.candidate_id,
+        execution_session_id=execution_session_id,
     )
     return [
         trade
         for trade in trades
         if (getattr(trade, "strategy", "") or "") == plan.candidate_id
+        and (
+            not execution_session_id
+            or (getattr(trade, "execution_session_id", "") or "") == execution_session_id
+        )
     ]
 
 
@@ -1506,7 +1531,11 @@ def _fill_key(symbol: str, action: str) -> str:
     return f"{normalize_symbol(symbol)}:{str(action).upper()}"
 
 
-def reconcile_plan_fills(plan: TargetWeightPlan, trades: list[Any] | None) -> dict[str, Any]:
+def reconcile_plan_fills(
+    plan: TargetWeightPlan,
+    trades: list[Any] | None,
+    execution_session_id: str | None = None,
+) -> dict[str, Any]:
     expected: dict[str, int] = {}
     for order in plan.orders:
         key = _fill_key(order.symbol, order.action)
@@ -1514,13 +1543,29 @@ def reconcile_plan_fills(plan: TargetWeightPlan, trades: list[Any] | None) -> di
 
     actual: dict[str, int] = {}
     fill_rows: list[dict[str, Any]] = []
+    unlinked_fills: list[dict[str, Any]] = []
     for trade in trades or []:
         symbol = normalize_symbol(str(getattr(trade, "symbol", "") or ""))
         action = str(getattr(trade, "action", "") or "").upper()
+        trade_session_id = str(getattr(trade, "execution_session_id", "") or "")
+        trade_order_id = str(getattr(trade, "order_id", "") or "")
         try:
             quantity = int(getattr(trade, "quantity"))
         except (TypeError, ValueError):
             quantity = 0
+        if execution_session_id and trade_session_id != execution_session_id:
+            unlinked_fills.append({
+                "symbol": symbol,
+                "action": action,
+                "quantity": quantity,
+                "strategy": getattr(trade, "strategy", None),
+                "mode": getattr(trade, "mode", None),
+                "account_key": getattr(trade, "account_key", None),
+                "executed_at": str(getattr(trade, "executed_at", "")),
+                "execution_session_id": trade_session_id,
+                "order_id": trade_order_id,
+            })
+            continue
         key = _fill_key(symbol, action)
         actual[key] = actual.get(key, 0) + quantity
         fill_rows.append({
@@ -1531,6 +1576,8 @@ def reconcile_plan_fills(plan: TargetWeightPlan, trades: list[Any] | None) -> di
             "mode": getattr(trade, "mode", None),
             "account_key": getattr(trade, "account_key", None),
             "executed_at": str(getattr(trade, "executed_at", "")),
+            "execution_session_id": trade_session_id,
+            "order_id": trade_order_id,
         })
 
     mismatches = [
@@ -1552,7 +1599,7 @@ def reconcile_plan_fills(plan: TargetWeightPlan, trades: list[Any] | None) -> di
         for key, quantity in sorted(actual.items())
         if key not in expected and quantity > 0
     ]
-    complete = len(mismatches) == 0 and len(unexpected_fills) == 0
+    complete = len(mismatches) == 0 and len(unexpected_fills) == 0 and len(unlinked_fills) == 0
     reason = "paper trade fills match target-weight plan"
     if not complete:
         reason_parts = []
@@ -1571,22 +1618,34 @@ def reconcile_plan_fills(plan: TargetWeightPlan, trades: list[Any] | None) -> di
                 for item in unexpected_fills
             )
             reason_parts.append(f"unexpected: {unexpected_text}")
+        if unlinked_fills:
+            unlinked_text = ", ".join(
+                f"{item['symbol']} {item['action']} quantity={item['quantity']}"
+                for item in unlinked_fills
+            )
+            reason_parts.append(f"unlinked: {unlinked_text}")
         reason = f"target_weight_fill_reconciliation_mismatch: {'; '.join(reason_parts)}"
 
     return {
         "checked": True,
         "complete": complete,
         "reason": reason,
+        "execution_session_id": execution_session_id or "",
         "expected_quantities": dict(sorted(expected.items())),
         "actual_quantities": dict(sorted(actual.items())),
         "mismatches": mismatches,
         "unexpected_fills": unexpected_fills,
+        "unlinked_fills": unlinked_fills,
         "fill_count": len(fill_rows),
         "fills": fill_rows,
     }
 
 
-def failed_fill_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict[str, Any]:
+def failed_fill_reconciliation(
+    plan: TargetWeightPlan,
+    error: Exception,
+    execution_session_id: str | None = None,
+) -> dict[str, Any]:
     expected: dict[str, int] = {}
     for order in plan.orders:
         key = _fill_key(order.symbol, order.action)
@@ -1595,6 +1654,7 @@ def failed_fill_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict
         "checked": True,
         "complete": False,
         "reason": f"target_weight_fill_reconciliation_failed: {error}",
+        "execution_session_id": execution_session_id or "",
         "expected_quantities": dict(sorted(expected.items())),
         "actual_quantities": {},
         "mismatches": [
@@ -1607,6 +1667,7 @@ def failed_fill_reconciliation(plan: TargetWeightPlan, error: Exception) -> dict
             for key, quantity in sorted(expected.items())
         ],
         "unexpected_fills": [],
+        "unlinked_fills": [],
         "fill_count": 0,
         "fills": [],
     }
@@ -1640,10 +1701,12 @@ def summarize_execution_for_evidence(
             "checked": False,
             "complete": False,
             "reason": "fill reconciliation not required until target-weight execution is complete",
+            "execution_session_id": execution.get("execution_session_id", ""),
             "expected_quantities": {},
             "actual_quantities": {},
             "mismatches": [],
             "unexpected_fills": [],
+            "unlinked_fills": [],
             "fill_count": 0,
             "fills": [],
         }
@@ -1788,6 +1851,11 @@ def summarize_execution_for_evidence(
         "skipped_orders": skipped,
         "halted": halted,
         "halt_reason": execution.get("halt_reason", ""),
+        "execution_session_id": (
+            execution.get("execution_session_id")
+            or fill_reconciliation.get("execution_session_id")
+            or ""
+        ),
         "execution_trade_day_check": trade_day_check,
         "execution_market_session_check": market_session_check,
         "pilot_authorization_snapshot_check": authorization_snapshot_check,
@@ -3921,6 +3989,7 @@ def run_pilot(
             )
             pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
 
+    execution_session_id: str | None = None
     if execute and not preflight_refresh["complete"]:
         execution = blocked_execution_for_preflight_refresh(plan, preflight_refresh)
     elif execute and not validation.allowed:
@@ -3943,6 +4012,7 @@ def run_pilot(
     elif execute and not pre_trade_risk_check["complete"]:
         execution = blocked_execution_for_pre_trade_risk(plan, pre_trade_risk_check)
     else:
+        execution_session_id = make_execution_session_id(plan, now=execution_now) if execute else None
         execution = execute_plan(
             plan,
             config=config,
@@ -3958,7 +4028,9 @@ def run_pilot(
             liquidity_check=liquidity_check,
             pre_trade_risk_check=pre_trade_risk_check,
             max_order_adv_pct=max_order_adv_pct,
+            execution_session_id=execution_session_id,
         )
+    execution_session_id = str(execution.get("execution_session_id") or execution_session_id or "")
 
     fill_reconciliation = None
     position_reconciliation = None
@@ -3977,11 +4049,19 @@ def run_pilot(
         try:
             fill_reconciliation = reconcile_plan_fills(
                 plan,
-                load_paper_trade_fills(plan),
+                load_paper_trade_fills(
+                    plan,
+                    execution_session_id=execution_session_id or None,
+                ),
+                execution_session_id=execution_session_id or None,
             )
         except Exception as exc:
             logger.exception("target-weight fill reconciliation failed for {}", plan.candidate_id)
-            fill_reconciliation = failed_fill_reconciliation(plan, exc)
+            fill_reconciliation = failed_fill_reconciliation(
+                plan,
+                exc,
+                execution_session_id=execution_session_id or None,
+            )
         try:
             position_reconciliation = reconcile_plan_positions(
                 plan,
