@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from core.live_gate import (
     LIVE_GATE_ARTIFACT_TYPE,
     LIVE_GATE_SCHEMA_VERSION,
+    validate_canonical_metadata_integrity,
     validate_live_readiness,
 )
 
@@ -273,6 +274,51 @@ def test_data_snapshot_fetch_errors_block_live_gate(tmp_path):
     )
 
     assert any("data snapshot 수집 오류" in issue for issue in issues)
+
+
+def test_non_universe_liquidity_fetch_errors_do_not_block_metadata_integrity():
+    manifest = _snapshot_manifest(
+        fetch_errors={
+            "liquidity:0126Z0": {
+                "stage": "universe_liquidity",
+                "error_type": "DataCollectionError",
+                "error": "provider unavailable",
+            }
+        }
+    )
+    metadata = {
+        "data_snapshot_hash": manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": manifest,
+        "evaluation_errors": {},
+        "walk_forward_errors": {},
+    }
+
+    issues = validate_canonical_metadata_integrity(metadata)
+
+    assert not any("data snapshot 수집 오류" in issue for issue in issues)
+
+
+def test_universe_liquidity_fetch_errors_block_metadata_integrity():
+    manifest = _snapshot_manifest(
+        fetch_errors={
+            "liquidity:005930": {
+                "stage": "universe_liquidity",
+                "error_type": "DataCollectionError",
+                "error": "provider unavailable",
+            }
+        }
+    )
+    metadata = {
+        "data_snapshot_hash": manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": manifest,
+        "evaluation_errors": {},
+        "walk_forward_errors": {},
+    }
+
+    issues = validate_canonical_metadata_integrity(metadata)
+
+    assert any("data snapshot 수집 오류" in issue for issue in issues)
+    assert any("liquidity:005930" in issue for issue in issues)
 
 
 def test_failed_canonical_metric_blocks_live_gate(tmp_path):
