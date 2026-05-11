@@ -824,30 +824,24 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
 def run_live_trading(args):
     """
     실전 매매 모드 실행.
-    4중 확인: 전략 상태 → 환경변수 → --confirm-live → 5개 조건 hard gate.
+    4중 확인: 전략 코드 등록 → 환경변수 → --confirm-live → canonical live gate.
     """
-    from strategies import is_strategy_allowed
-    strategy_name = getattr(args, "strategy", None) or Config.get().active_strategy
-    allowed, reason = is_strategy_allowed(strategy_name, "live")
-    if not allowed:
-        logger.error("🚫 Live 전략 실행 차단: {}", reason)
-        logger.error("전략 상태를 live_candidate로 승격하려면 승인 기준을 충족하세요.")
+    from strategies import get_strategy_names, is_strategy_allowed
+
+    config = Config.get()
+    strategy_name = getattr(args, "strategy", None) or config.active_strategy
+    if strategy_name not in get_strategy_names():
+        logger.error("🚫 Live 전략 실행 차단: 등록되지 않은 전략 '{}'", strategy_name)
         sys.exit(1)
 
     _require_live_operator_confirmation(
         args,
         action_label="실전 모드 진입",
-        example="python main.py --mode live --strategy scoring --confirm-live",
+        example=f"python main.py --mode live --strategy {strategy_name} --confirm-live",
     )
 
-    logger.info("=" * 50)
-    logger.info("🔴 실전 매매 모드 시작 (이중 확인 완료)")
-    logger.info("=" * 50)
-
-    config = Config.get()
-
     # ── 라이브 전 필수 검증 게이트 (우회 불가) ──
-    gate_issues = _check_live_readiness_gate(config, args.strategy or "scoring")
+    gate_issues = _check_live_readiness_gate(config, strategy_name)
     if gate_issues:
         logger.error("=" * 50)
         logger.error("🚫 실전 전환 검증 실패 — 아래 항목 확인 후 재시도하세요:")
@@ -857,6 +851,17 @@ def run_live_trading(args):
         logger.error("=" * 50)
         sys.exit(1)
     logger.info("✅ 라이브 전 검증 게이트 통과")
+
+    allowed, reason = is_strategy_allowed(strategy_name, "live")
+    if not allowed:
+        logger.warning(
+            "전략 상태 레지스트리는 live 미허용이지만 canonical live gate가 통과하여 진행합니다: {}",
+            reason,
+        )
+
+    logger.info("=" * 50)
+    logger.info("🔴 실전 매매 모드 시작 (이중 확인 완료)")
+    logger.info("=" * 50)
 
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
@@ -886,14 +891,18 @@ def run_live_trading(args):
 
         # 장 시작 전 KIS 잔고와 DB 포지션 동기화
         from core.portfolio_manager import PortfolioManager
-        portfolio = PortfolioManager(config, account_key=args.strategy or "")
+        portfolio = PortfolioManager(config, account_key=strategy_name)
         sync_result = portfolio.sync_with_broker()
         if not sync_result["ok"]:
             logger.warning("포지션 동기화 불일치 — 확인 후 진행: {}", sync_result["message"])
 
         # 실전 스케줄러 실행 (OrderExecutor는 config에서 mode=live 읽음)
         from core.scheduler import Scheduler
-        scheduler = Scheduler(strategy_name=args.strategy, config=config)
+        scheduler = Scheduler(
+            strategy_name=strategy_name,
+            config=config,
+            live_gate_validated=True,
+        )
         scheduler.run()
     finally:
         config._settings["trading"]["mode"] = old_mode
