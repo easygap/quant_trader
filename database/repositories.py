@@ -16,7 +16,7 @@ from loguru import logger
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
     Position, PortfolioSnapshot, DailyReport, FailedOrder,
-    PendingOrderGuard,
+    PendingOrderGuard, OrderRecord as DbOrderRecord,
 )
 
 
@@ -1021,6 +1021,115 @@ def resolve_failed_order(order_id: int, status: str = "retried"):
         logger.error("Dead-letter 상태 변경 실패: {}", e)
     finally:
         session.close()
+
+
+# =============================================================
+# 주문 상태 추적 (OrderRecord)
+# =============================================================
+
+OPEN_ORDER_RECORD_STATUSES = ("SUBMITTED", "ACKED", "PARTIAL_FILLED")
+
+
+def _status_value(status) -> str:
+    return getattr(status, "value", status) or ""
+
+
+@with_retry
+def save_order_record(order) -> None:
+    """상태기계 OrderRecord를 DB order_records에 upsert한다."""
+    session = get_session()
+    try:
+        status = _status_value(getattr(order, "status", "NEW"))
+        record = session.query(DbOrderRecord).filter(
+            DbOrderRecord.order_id == order.order_id
+        ).first()
+        if record is None:
+            record = DbOrderRecord(order_id=order.order_id)
+            session.add(record)
+
+        record.account_key = getattr(order, "account_key", "") or ""
+        record.symbol = order.symbol
+        record.action = order.action
+        record.status = status
+        record.broker_order_id = getattr(order, "broker_order_id", None)
+        record.requested_qty = int(getattr(order, "requested_qty", 0) or 0)
+        record.requested_price = float(getattr(order, "requested_price", 0) or 0)
+        record.filled_qty = int(getattr(order, "filled_qty", 0) or 0)
+        record.filled_price = float(getattr(order, "filled_price", 0) or 0)
+        record.remaining_qty = int(getattr(order, "remaining_qty", 0) or 0)
+        record.commission = float(getattr(order, "commission", 0) or 0)
+        record.tax = float(getattr(order, "tax", 0) or 0)
+        record.slippage = float(getattr(order, "slippage", 0) or 0)
+        record.reject_reason = getattr(order, "reject_reason", "") or ""
+        record.strategy = getattr(order, "strategy", "") or ""
+        record.signal_score = float(getattr(order, "signal_score", 0) or 0)
+        record.mode = getattr(order, "mode", "") or "paper"
+        record.created_at = getattr(order, "created_at", None) or record.created_at or datetime.now()
+        record.submitted_at = getattr(order, "submitted_at", None)
+        record.filled_at = getattr(order, "filled_at", None)
+        record.updated_at = getattr(order, "updated_at", None) or datetime.now()
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error("주문 상태 저장 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
+@with_retry
+def get_open_order_records(
+    symbol: str | None = None,
+    account_key: str = "",
+    mode: str | None = "live",
+) -> list[dict]:
+    """DB에 남은 미완료 주문 상태를 반환한다."""
+    session = get_session()
+    try:
+        q = session.query(DbOrderRecord).filter(
+            DbOrderRecord.status.in_(OPEN_ORDER_RECORD_STATUSES)
+        )
+        if symbol:
+            q = q.filter(DbOrderRecord.symbol == symbol)
+        if account_key is not None:
+            q = q.filter(DbOrderRecord.account_key == (account_key or ""))
+        if mode:
+            q = q.filter(DbOrderRecord.mode == mode)
+        records = q.order_by(DbOrderRecord.updated_at.desc()).all()
+        return [
+            {
+                "order_id": r.order_id,
+                "account_key": r.account_key,
+                "symbol": r.symbol,
+                "action": r.action,
+                "status": r.status,
+                "broker_order_id": r.broker_order_id,
+                "requested_qty": r.requested_qty,
+                "requested_price": r.requested_price,
+                "filled_qty": r.filled_qty or 0,
+                "filled_price": r.filled_price or 0,
+                "remaining_qty": r.remaining_qty or 0,
+                "strategy": r.strategy or "",
+                "mode": r.mode or "",
+                "created_at": r.created_at,
+                "submitted_at": r.submitted_at,
+                "filled_at": r.filled_at,
+                "updated_at": r.updated_at,
+            }
+            for r in records
+        ]
+    finally:
+        session.close()
+
+
+@with_retry
+def has_open_order_record(symbol: str, account_key: str = "", mode: str | None = "live") -> bool:
+    """미완료 주문 상태가 DB에 남아 있으면 True. 조회 실패는 fail-closed 처리한다."""
+    try:
+        return bool(get_open_order_records(symbol=symbol, account_key=account_key, mode=mode))
+    except Exception as e:
+        logger.error("미완료 주문 상태 조회 실패 — 주문 차단: {}", e)
+        return True
 
 
 # =============================================================

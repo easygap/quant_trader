@@ -162,6 +162,7 @@
 | Research sweep benchmark coverage guard | 높음 | 완료 — EW B&H 벤치마크 입력 universe 일부라도 수집 실패·기간 부족이면 초과수익 계산을 0으로 고정하고 `INSUFFICIENT_BENCHMARK_DATA` decision으로 canonical 평가 진행을 차단 |
 | Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Live 체결보류 신규진입 중단 | 높음 | 완료 — 장중 신규 진입 루프에서 live 주문이 접수됐지만 체결 확인이 보류되면 브로커 잔고 동기화 전까지 같은 루프의 남은 신규 BUY 실행을 중단해 미확정 체결분을 무시한 추가 매수를 차단 |
+| Live 미완료 주문 상태 영속화 | 높음 | 완료 — live 주문 `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태를 `order_records`에 저장하고, 재시작 또는 OrderGuard TTL 만료 후에도 DB에 미완료 주문이 남아 있으면 같은 종목 신규 주문을 fail-closed 차단 |
 | Live 미체결 조회 fail-closed | 높음 | 완료 — KIS 미체결 조회 실패, `rt_cd != 0`, 응답 형식 이상을 주문 가능 상태로 보지 않고 live BUY/SELL을 제출 전 차단 |
 | KIS 잔고 오류 응답 fail-closed | 높음 | 완료 — 잔고 조회 응답도 `rt_cd == 0`일 때만 정상 잔고로 해석한다. 오류 body는 빈 포지션/0원 잔고가 아니라 조회 실패로 반환해 연결 검증·포지션 동기화가 fail-closed 처리된다 |
 | 빈 KIS 잔고 자동보정 보호 | 높음 | 완료 — KIS 보유 목록이 빈 응답인데 DB 포지션이 남아 있으면 자동보정이 전체 포지션을 삭제하지 않도록 기본 보류. 확실한 무보유 계좌 정리만 `position_mismatch_allow_empty_broker_delete=true`로 명시 허용 |
