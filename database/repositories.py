@@ -265,7 +265,11 @@ def get_trade_cash_summary(
     end_date: Optional[datetime] = None,
     account_key: Optional[str] = None,
 ) -> dict:
-    """매매 기록 기준 현금 흐름 요약."""
+    """매매 기록 기준 현금 흐름 요약.
+
+    TradeHistory.price는 실제 체결가다. 슬리피지는 체결가에 이미 반영된
+    진단값이므로 현금 흐름에는 수수료와 세금만 별도 비용으로 반영한다.
+    """
     trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date, account_key=account_key)
 
     cash_delta = 0.0
@@ -278,7 +282,7 @@ def get_trade_cash_summary(
     for trade in trades:
         action = (trade.action or "").upper()
         total_amount = trade.total_amount or 0
-        costs = (trade.commission or 0) + (trade.tax or 0) + (trade.slippage or 0)
+        cash_costs = (trade.commission or 0) + (trade.tax or 0)
 
         total_commission += trade.commission or 0
         total_tax += trade.tax or 0
@@ -286,10 +290,10 @@ def get_trade_cash_summary(
 
         if action == "BUY":
             buy_count += 1
-            cash_delta -= (total_amount + costs)
+            cash_delta -= (total_amount + cash_costs)
         else:
             sell_count += 1
-            cash_delta += (total_amount - costs)
+            cash_delta += (total_amount - cash_costs)
 
     return {
         "cash_delta": round(cash_delta, 0),

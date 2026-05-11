@@ -115,6 +115,90 @@ def test_execute_buy_quantity_records_exact_paper_quantity(fresh_db, monkeypatch
         session.close()
 
 
+def test_paper_buy_uses_estimated_fill_price_for_sizing_and_targets(fresh_db, monkeypatch):
+    """Paper BUY 수량과 방어 가격은 예상 체결가 기준으로 계산한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="paper_buy_fill_basis_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    executor.config.risk_params["stop_loss"] = {"type": "fixed", "fixed_rate": 0.03}
+    executor.config.risk_params["take_profit"] = {
+        "type": "fixed",
+        "fixed_rate": 0.08,
+        "partial_exit": False,
+    }
+    executor.config.risk_params["trailing_stop"] = {
+        "enabled": True,
+        "type": "fixed",
+        "fixed_rate": 0.05,
+    }
+    executor.config.risk_params["transaction_costs"] = {
+        "commission_rate": 0.0,
+        "tax_rate": 0.0,
+        "slippage": 0.001,
+        "slippage_ticks": 0,
+        "dynamic_slippage": {"enabled": False},
+    }
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(executor, "_get_sector_map_cached", lambda: {})
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_diversification",
+        lambda *args, **kwargs: {"can_buy": True, "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_recent_performance",
+        lambda *args, **kwargs: {"allowed": True, "reason": ""},
+    )
+    _allow_paper_entry(monkeypatch)
+
+    captured = {}
+
+    def _capture_position_size(capital, entry_price, stop_loss_price, signal_score=0):
+        captured["capital"] = capital
+        captured["entry_price"] = entry_price
+        captured["stop_loss_price"] = stop_loss_price
+        captured["signal_score"] = signal_score
+        return 2
+
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        _capture_position_size,
+    )
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=1_000_000,
+        available_cash=1_000_000,
+        signal_score=2.0,
+        reason="fill basis sizing test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert captured["entry_price"] == 60_060
+    assert captured["stop_loss_price"] == 58_258
+    assert result["price"] == 60_060
+    assert result["stop_loss"] == 58_258
+    assert result["take_profit"] == 64_865
+    assert result["trailing_stop"] == 57_057
+    position = get_position("005930", account_key="paper_buy_fill_basis_test")
+    assert position.avg_price == 60_060
+    assert position.stop_loss_price == 58_258
+    assert position.take_profit_price == 64_865
+    assert position.trailing_stop_price == 57_057
+
+
 def test_paper_buy_quantity_fails_closed_when_runtime_unavailable(fresh_db, monkeypatch):
     """Paper 신규 진입은 runtime 조회 실패 시 주문/포지션을 만들지 않는다."""
     from core.order_executor import OrderExecutor
@@ -418,6 +502,95 @@ def test_paper_sell_ignores_monthly_buy_cap(fresh_db):
 
     assert result["success"] is True
     assert get_position("005930", account_key="monthly_cap_sell_test") is None
+
+
+def test_paper_sell_applies_model_slippage_to_fill_price(fresh_db):
+    """Paper 매도도 매수처럼 모델 슬리피지를 체결가에 반영한다."""
+    from core.order_executor import OrderExecutor
+    from database.models import TradeHistory, get_session
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="paper_sell_slippage_test")
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 0
+    executor.config.risk_params["transaction_costs"] = {
+        "commission_rate": 0.0,
+        "tax_rate": 0.0,
+        "slippage": 0.001,
+        "slippage_ticks": 0,
+        "dynamic_slippage": {"enabled": False},
+    }
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=2,
+        strategy="scoring",
+        account_key="paper_sell_slippage_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=60_000,
+        quantity=2,
+        reason="STOP_LOSS",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert result["price"] == 59_940
+    assert result["costs"]["execution_price"] == 59_940
+    assert result["costs"]["slippage"] == 120
+    assert result["pnl"] == -120
+    assert get_position("005930", account_key="paper_sell_slippage_test") is None
+
+    session = get_session()
+    try:
+        trade = session.query(TradeHistory).filter(
+            TradeHistory.account_key == "paper_sell_slippage_test",
+            TradeHistory.symbol == "005930",
+            TradeHistory.action == "SELL",
+        ).one()
+        assert trade.price == 59_940
+        assert trade.expected_price == 60_000
+        assert trade.price_gap == -60
+        assert trade.slippage == 120
+    finally:
+        session.close()
+
+
+def test_trade_cash_summary_keeps_slippage_as_diagnostic_cost(fresh_db):
+    """체결가에 반영된 슬리피지를 현금 흐름에서 다시 차감하지 않는다."""
+    from database.repositories import get_trade_cash_summary, save_trade
+
+    save_trade(
+        symbol="005930",
+        action="BUY",
+        price=60_200,
+        quantity=1,
+        commission=9,
+        slippage=200,
+        strategy="scoring",
+        mode="paper",
+        account_key="cash_slippage_test",
+    )
+    save_trade(
+        symbol="005930",
+        action="SELL",
+        price=59_800,
+        quantity=1,
+        commission=9,
+        tax=120,
+        slippage=200,
+        strategy="scoring",
+        mode="paper",
+        account_key="cash_slippage_test",
+    )
+
+    summary = get_trade_cash_summary(mode="paper", account_key="cash_slippage_test")
+
+    assert summary["cash_delta"] == -538
+    assert summary["commission"] == 18
+    assert summary["tax"] == 120
+    assert summary["slippage"] == 400
 
 
 def test_live_pre_order_check_blocks_monthly_buy_cap(fresh_db):
