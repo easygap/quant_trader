@@ -25,6 +25,7 @@
 | **슬리피지** | 기본 0.05% + 동적(체결량 기반) | `risk_params.yaml:transaction_costs.slippage` + `dynamic_slippage` |
 | **백테스트 반영** | 체결가에 슬리피지 반영, PnL에서 수수료+세금 차감. 단일종목/포트폴리오/target-weight research 모두 평균 거래량 기반 동적 슬리피지 적용. target-weight research는 직전 거래일 신호 기준 다음 거래일 시가 체결, 종가 평가 | `backtest/backtester.py`, `backtest/portfolio_backtester.py`, `tools/research_candidate_sweep.py` |
 | **실전 반영** | `OrderExecutor._calculate_costs()` → TradeHistory에 commission/tax/slippage 별도 저장. live 주문은 체결가·체결수량 확인 후에만 거래·포지션 DB 반영 | `core/order_executor.py` |
+| **Paper/live 정산** | TradeHistory.price를 실제 체결가로 고정. 슬리피지는 체결가에 반영된 진단값으로 남기고 현금 흐름에서는 수수료·세금만 별도 차감해 중복 비용 차감을 방지 | `database/repositories.py`, `core/order_executor.py` |
 
 ### 1.3 과매매 억제
 
@@ -105,6 +106,7 @@
 | **백테스트 BlackSwan/어닝/갭 필터 미적용** | 단일종목·포트폴리오 백테스터에 BlackSwan, 어닝 필터, 갭 리스크 체크가 없으면 paper/live보다 낙관적인 성과가 나올 수 있음 | **수정 완료** — `backtest/backtester.py`와 `backtest/portfolio_backtester.py`가 원본 `open`/이벤트 컬럼을 보존하고 `gap_risk` 갭다운 청산·갭업 신규 매수 차단, `earnings_date`/`next_earnings_date`/flag 기반 어닝 윈도우 신규 매수 차단, `risk_params.blackswan` 기반 긴급 청산·쿨다운·recovery 사이징을 반영 |
 | **리서치 벤치마크 부분 결측** | EW B&H 벤치마크 일부 종목 수집 실패 시 누락 종목 몫의 capital이 빠진 채 전체 capital 대비 수익률을 계산하면 후보의 raw benchmark excess가 과대평가될 수 있음 | **수정 완료** — `buy_and_hold_benchmark_with_returns()`가 입력 universe 전체 수집·기간 검증을 요구하고, 결측이 있으면 `benchmark_coverage_complete=false`, 결측 종목, coverage ratio를 artifact/Markdown에 남긴 뒤 `INSUFFICIENT_BENCHMARK_DATA`로 excess gate를 fail-closed 차단 |
 | **live ACK 미체결 장부 오염 위험** | KIS 주문 ACK만 있고 평균 체결가·체결수량 조회가 실패했거나 부분체결인데 예상가 기준 전량 체결로 기록하면 실제 잔고와 DB 포지션이 어긋날 수 있음 | **수정 완료** — live BUY/SELL은 체결 확인 실패 시 `ACKED`/pending, 부분체결 시 `PARTIAL_FILLED`/pending과 `requires_reconcile=True`를 반환하고, KIS 잔고 대조 전 TradeHistory·Position 반영을 보류 |
+| **paper 매수·매도·현금 정산 비용 왜곡** | paper BUY 수량·방어 가격이 원 신호가 기준이고 SELL이 모델 슬리피지를 체결가에 반영하지 않거나, 이미 체결가에 반영된 슬리피지를 현금 흐름에서 다시 차감하면 paper 손익과 가용 현금이 왜곡될 수 있음 | **수정 완료** — paper BUY 수량·손절·익절·트레일링 기준을 예상 체결가로 보수화하고, paper SELL도 매수처럼 `RiskManager.calculate_transaction_costs()`의 execution_price로 체결 처리. DB 현금 요약은 체결가 기준으로 수수료·세금만 별도 반영하고 슬리피지는 진단값으로 집계 |
 | **live 미체결 조회 fail-open 위험** | KIS 미체결 조회 API 실패나 응답 형식 오류를 “미체결 없음”으로 처리하면 재시작/통신 장애 상황에서 중복 주문이 제출될 수 있음 | **수정 완료** — `get_unfilled_order_status()`가 조회 성공 여부를 분리하고, live BUY/SELL은 `checked=False`면 주문 전 fail-closed 차단. 재시작 복구의 전체 미체결 조회 실패도 critical 알림으로 노출 |
 | **target-weight research 당일 종가 체결 착시** | 직전 거래일 점수로 리밸런싱하면서 체결가를 리밸런싱 당일 종가로 쓰면 장중 변동을 이미 알고 체결한 것처럼 성과가 과대평가될 수 있음 | **수정 완료** — target-weight research는 원본 `open` panel을 별도 보존해 리밸런싱을 다음 거래일 시가로 체결하고, 일말 평가는 `close`로 분리. 신규 top-N 매수 후보의 리밸런싱일 `open` 누락은 `target_weight_research_execution_price_missing`으로 fail-closed 차단하고, 이미 보유한 종목의 `open`이 없으면 해당 월 리밸런싱을 skip 진단으로 남김 |
 
@@ -160,6 +162,7 @@
 | Backtest/research liquidity universe filter | 높음 | **완료 — `WatchlistManager.liquidity_filter_report()`를 공통 진단 API로 분리하고, `PortfolioBacktester.run()`과 `tools/research_candidate_sweep.py`가 평가 시작일 기준 20일 평균 거래대금 하한 미만·strict 데이터 누락 종목을 universe에서 사전 제외** |
 | Portfolio dynamic slippage | 높음 | **완료 — `PortfolioBacktester`가 종목별 20일 평균 거래량을 매수/매도 거래비용 계산에 전달하고 `participation_rate`, `slippage_multiplier`, `slippage_cost`를 거래 기록에 남김** |
 | Target-weight research dynamic slippage | 높음 | **완료 — target-weight 리서치 백테스터가 종목별 20일 평균 거래량을 매수/매도 거래비용 계산에 전달하고 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total` 진단값을 artifact metrics에 남김** |
+| Paper/live 체결가 기준 현금 정산 | 높음 | 완료 — paper BUY는 예상 체결가 기준으로 수량·방어 가격을 산정하고, paper BUY/SELL은 모델 execution_price를 체결가로 기록한다. DB 현금 요약은 이미 체결가에 반영된 슬리피지를 다시 차감하지 않는다. slippage 필드는 비용 진단과 리포트용으로 유지 |
 | Research sweep benchmark coverage guard | 높음 | 완료 — EW B&H 벤치마크 입력 universe 일부라도 수집 실패·기간 부족이면 초과수익 계산을 0으로 고정하고 `INSUFFICIENT_BENCHMARK_DATA` decision으로 canonical 평가 진행을 차단 |
 | Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Live 체결보류 신규진입 중단 | 높음 | 완료 — 장중 신규 진입 루프에서 live 주문이 접수됐지만 체결 확인이 보류되면 브로커 잔고 동기화 전까지 같은 루프의 남은 신규 BUY 실행을 중단해 미확정 체결분을 무시한 추가 매수를 차단 |

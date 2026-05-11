@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v5.3
-> **최종 수정**: 2026-05-08
+> **문서 버전**: v5.4
+> **최종 수정**: 2026-05-11
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -33,7 +33,7 @@
    `DataCollector`로 과거 주가 수집 → `Backtester`가 전략으로 시뮬레이션(수수료·세금·슬리피지·손절/익절/트레일링 스탑, gap/어닝/BlackSwan guard 반영, **strict-lookahead 기본**) → `ReportGenerator`가 txt/html 리포트 생성.
 
 3. **모의투자 (paper)**  
-   워치리스트 **1회 순회** 후 프로세스 종료. `WatchlistManager`로 관심 종목 확정 → 종목마다 `DataCollector.fetch_stock` 수집 → 전략 `generate_signal(df, symbol=symbol)` → BUY 시 **시장 국면 필터** 적용 후 `OrderExecutor`가 **DB에만 기록** + 알림. 실제 주문 없음.
+   워치리스트 **1회 순회** 후 프로세스 종료. `WatchlistManager`로 관심 종목 확정 → 종목마다 `DataCollector.fetch_stock` 수집 → 전략 `generate_signal(df, symbol=symbol)` → BUY 시 **시장 국면 필터** 적용 후 `OrderExecutor`가 **DB에만 기록** + 알림. 실제 주문 없음. BUY/SELL 체결가는 모델 슬리피지를 반영한 실행가로 저장하고, DB 현금 흐름은 체결가 기준 수수료·세금만 별도 차감해 슬리피지를 중복 비용으로 처리하지 않는다.
 
 4. **스케줄 루프 (schedule)**  
    **모의 전용 무한 루프**. `config.trading.mode`가 `live`이면 거부(실전은 `--mode live --confirm-live`). `core/runtime_lock.py`로 `data/.scheduler.lock` 파일 락을 잡은 뒤 `Scheduler.run()` — 장전/장중/장마감 루프가 paper와 동일하게 동작하며 프로세스를 유지(systemd 상시 구동용). 기본은 signal-only이며, full paper는 `QUANT_AUTO_ENTRY=true`로만 켠다.
@@ -97,8 +97,8 @@ quant_trader/
 │   ├── indicator_engine.py      # pandas-ta: RSI, MACD, 볼린저, MA(SMA/EMA), 스토캐스틱, ADX, ATR, OBV, volume_ratio
 │   ├── signal_generator.py      # 멀티 지표 스코어링 → BUY/SELL/HOLD, collinearity_mode(representative_only 권장)
 │   ├── risk_manager.py          # 포지션 사이징(1% 룰), 분산(업종 비중 포함), 성과 열화, 손절/익절/트레일링, 거래 비용
-│   ├── order_executor.py        # 매수/매도 (paper: DB만, live: KIS), PositionLock, OrderGuard, 유동성·어닝 필터, 매수 직전 재검증, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
-│   ├── portfolio_manager.py     # 포지션·잔고·수익률, sync_with_broker(KIS↔DB 크로스체크), save_daily_snapshot()
+│   ├── order_executor.py        # 매수/매도 (paper: DB만, live: KIS), paper BUY/SELL 모델 슬리피지 체결가 반영, PositionLock, OrderGuard, 유동성·어닝 필터, 매수 직전 재검증, Dead-letter 큐(재시도 실패 시 FailedOrder 저장)
+│   ├── portfolio_manager.py     # 포지션·잔고·수익률, 체결가 기준 현금 요약, sync_with_broker(KIS↔DB 크로스체크), save_daily_snapshot()
 │   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
 │   ├── scheduler.py             # 무한 루프: 장전/장중(10분)/장마감, 시장 국면 필터, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전전환 자동 평가
 │   ├── runtime_lock.py          # schedule 모드 단일 인스턴스 락 (`data/.scheduler.lock`)
@@ -163,7 +163,7 @@ quant_trader/
 ├── database/
 │   ├── __init__.py
 │   ├── models.py                # ORM 모델 6종(StockPrice, TradeHistory, Position, PortfolioSnapshot, DailyReport, FailedOrder), SQLite WAL/PostgreSQL, scoped_session, @with_retry, db_session()
-│   ├── repositories.py          # CRUD — 읽기·쓰기 전체 @with_retry, get_paper_performance_metrics, save_failed_order/get_pending_failed_orders/resolve_failed_order (Dead-letter)
+│   ├── repositories.py          # CRUD — 읽기·쓰기 전체 @with_retry, 체결가 기준 get_trade_cash_summary, get_paper_performance_metrics, save_failed_order/get_pending_failed_orders/resolve_failed_order (Dead-letter)
 │   └── backup.py                # SQLite Online Backup API로 WAL 안전 백업 (실패 시 -wal/-shm 포함 폴백), 보관 일수 자동 삭제
 ├── monitoring/
 │   ├── __init__.py
