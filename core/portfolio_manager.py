@@ -292,6 +292,7 @@ class PortfolioManager:
 
         kis_positions = {p["symbol"]: p for p in balance["positions"] if p.get("symbol")}
         db_positions = {p.symbol: p for p in get_all_positions(account_key=self.account_key if self.account_key else None)}
+        empty_broker_auto_correct_skipped = False
 
         mismatches = []
         for symbol, kp in kis_positions.items():
@@ -333,9 +334,22 @@ class PortfolioManager:
             logger.warning("sync_with_broker: {}", msg)
 
             if auto_correct:
-                corrected = self._auto_correct_positions(mismatches)
-                msg += f" → 자동 보정 {len(corrected)}건"
-                logger.info("sync_with_broker: 자동 보정 완료 ({}건)", len(corrected))
+                allow_empty_delete = self.config.trading.get(
+                    "position_mismatch_allow_empty_broker_delete",
+                    False,
+                )
+                if not kis_positions and db_positions and not allow_empty_delete:
+                    auto_correct = False
+                    empty_broker_auto_correct_skipped = True
+                    msg += " → 자동 보정 보류(브로커 보유 목록 빈 응답)"
+                    logger.warning(
+                        "sync_with_broker: KIS 보유 목록이 비어 있어 DB 포지션 자동 삭제를 보류합니다. "
+                        "확실한 무보유 계좌라면 position_mismatch_allow_empty_broker_delete=true 설정 후 재시도하세요."
+                    )
+                else:
+                    corrected = self._auto_correct_positions(mismatches)
+                    msg += f" → 자동 보정 {len(corrected)}건"
+                    logger.info("sync_with_broker: 자동 보정 완료 ({}건)", len(corrected))
 
             try:
                 from core.notifier import Notifier
@@ -347,7 +361,10 @@ class PortfolioManager:
                 )
             except Exception as e:
                 logger.error("sync_with_broker: 알림 발송 실패 — {}", e)
-            return {"ok": False, "mismatches": mismatches, "corrected": corrected, "message": msg}
+            result = {"ok": False, "mismatches": mismatches, "corrected": corrected, "message": msg}
+            if empty_broker_auto_correct_skipped:
+                result["auto_correct_skipped_reason"] = "empty_broker_positions"
+            return result
         logger.info("sync_with_broker: DB와 KIS 잔고 일치")
         return {"ok": True, "mismatches": [], "corrected": [], "message": "일치"}
 
