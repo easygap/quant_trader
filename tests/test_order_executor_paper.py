@@ -504,6 +504,202 @@ def test_paper_sell_ignores_monthly_buy_cap(fresh_db):
     assert get_position("005930", account_key="monthly_cap_sell_test") is None
 
 
+def test_buy_blocks_when_mdd_limit_reached(fresh_db, monkeypatch):
+    """운영 MDD 한도에 닿으면 신규 BUY만 차단한다."""
+    from core.order_executor import OrderExecutor
+
+    class FakePortfolioManager:
+        def __init__(self, config=None, account_key=""):
+            pass
+
+        def get_portfolio_summary(self):
+            return {"total_value": 8_500_000, "mdd": 15.0}
+
+    executor = OrderExecutor(account_key="mdd_guard_test")
+    executor.mode = "live"
+    executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = 0.15
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
+
+    result = executor._pre_order_check(symbol="005930", action="BUY", strategy="scoring")
+
+    assert result["allowed"] is False
+    assert result["drawdown_guard_blocked"] is True
+    assert result["drawdown_guard_type"] == "mdd"
+    assert "MDD 한도 도달" in result["reason"]
+
+
+def test_mdd_guard_uses_restored_peak_snapshot(fresh_db):
+    """재시작 후에도 DB 스냅샷 peak 기준으로 MDD 차단을 유지한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import save_portfolio_snapshot, save_trade
+
+    account_key = "restored_peak_guard_test"
+    save_portfolio_snapshot(
+        total_value=12_000_000,
+        cash=12_000_000,
+        invested=0,
+        cumulative_return=20.0,
+        mdd=0.0,
+        position_count=0,
+        account_key=account_key,
+        peak_value=12_000_000,
+    )
+    save_trade(
+        symbol="CASH_ADJUST",
+        action="SELL",
+        price=200_000,
+        quantity=1,
+        strategy="test",
+        reason="restored peak current value seed",
+        mode="paper",
+        account_key=account_key,
+    )
+
+    executor = OrderExecutor(account_key=account_key)
+    executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = 0.15
+
+    result = executor._pre_order_check(symbol="005930", action="BUY", strategy="scoring")
+
+    assert result["allowed"] is False
+    assert result["drawdown_guard_type"] == "mdd"
+    assert result["mdd"] == 15.0
+
+
+def test_buy_blocks_when_daily_loss_limit_reached(fresh_db, monkeypatch):
+    """최근 스냅샷 대비 일일 손실 한도에 닿으면 신규 BUY를 차단한다."""
+    from datetime import datetime, timedelta
+
+    import pandas as pd
+
+    from core.order_executor import OrderExecutor
+
+    class FakePortfolioManager:
+        def __init__(self, config=None, account_key=""):
+            pass
+
+        def get_portfolio_summary(self):
+            return {"total_value": 970_000, "mdd": 2.0}
+
+    executor = OrderExecutor(account_key="daily_loss_guard_test")
+    executor.mode = "live"
+    executor.config.risk_params["drawdown"]["max_daily_loss"] = 0.03
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
+    monkeypatch.setattr(
+        "database.repositories.get_portfolio_snapshots",
+        lambda days=30, account_key=None: pd.DataFrame(
+            [
+                {
+                    "date": datetime.now() - timedelta(days=1),
+                    "total_value": 1_000_000,
+                }
+            ]
+        ),
+    )
+
+    result = executor._pre_order_check(symbol="005930", action="BUY", strategy="scoring")
+
+    assert result["allowed"] is False
+    assert result["drawdown_guard_blocked"] is True
+    assert result["drawdown_guard_type"] == "daily_loss"
+    assert result["daily_loss"] == 3.0
+    assert "일일 손실 한도 도달" in result["reason"]
+
+
+def test_execute_buy_paths_share_drawdown_guard(fresh_db, monkeypatch):
+    """일반 BUY와 fixed-quantity BUY가 같은 운영 손실 한도 가드를 탄다."""
+    from core.order_executor import OrderExecutor
+
+    class FakePortfolioManager:
+        def __init__(self, config=None, account_key=""):
+            pass
+
+        def get_portfolio_summary(self):
+            return {"total_value": 8_400_000, "mdd": 16.0}
+
+    executor = OrderExecutor(account_key="shared_drawdown_guard_test")
+    executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = 0.15
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(executor, "_get_sector_map_cached", lambda: {})
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_diversification",
+        lambda *args, **kwargs: {"can_buy": True, "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_recent_performance",
+        lambda *args, **kwargs: {"allowed": True, "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
+
+    normal_buy = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="drawdown guard normal buy test",
+        strategy="scoring",
+    )
+    quantity_buy = executor.execute_buy_quantity(
+        symbol="000660",
+        price=100_000,
+        quantity=1,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="drawdown guard quantity buy test",
+        strategy="scoring",
+    )
+
+    assert normal_buy["success"] is False
+    assert quantity_buy["success"] is False
+    assert "MDD 한도 도달" in normal_buy["reason"]
+    assert "MDD 한도 도달" in quantity_buy["reason"]
+
+
+def test_paper_sell_ignores_drawdown_guard(fresh_db, monkeypatch):
+    """손실 한도에 걸려도 기존 포지션 청산 SELL은 계속 허용한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    class GuardShouldNotRun:
+        def __init__(self, config=None, account_key=""):
+            raise AssertionError("SELL은 손실 한도 가드를 조회하면 안 된다")
+
+    executor = OrderExecutor(account_key="drawdown_guard_sell_test")
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 0
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", GuardShouldNotRun)
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=1,
+        strategy="scoring",
+        account_key="drawdown_guard_sell_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=57_000,
+        quantity=1,
+        reason="STOP_LOSS",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert get_position("005930", account_key="drawdown_guard_sell_test") is None
+
+
 def test_paper_sell_applies_model_slippage_to_fill_price(fresh_db):
     """Paper 매도도 매수처럼 모델 슬리피지를 체결가에 반영한다."""
     from core.order_executor import OrderExecutor
