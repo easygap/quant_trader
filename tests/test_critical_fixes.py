@@ -246,6 +246,54 @@ class TestForceLiveRemoved:
         assert exc.value.code == 1
         get_positions.assert_not_called()
 
+    def test_http_liquidate_passes_live_confirm_from_env(self, monkeypatch):
+        """HTTP 긴급 청산은 별도 환경변수로 live 확인 플래그를 넘긴다."""
+        import main as main_mod
+        import database.models as db_models
+        import monitoring.logger as logger_mod
+        import monitoring.liquidate_trigger as trigger
+
+        captured = {}
+        monkeypatch.setattr(db_models, "init_database", lambda: None)
+        monkeypatch.setattr(logger_mod, "setup_logger", lambda: None)
+        monkeypatch.setenv("LIQUIDATE_TRIGGER_CONFIRM_LIVE", "true")
+
+        def fake_run(args):
+            captured["confirm_live"] = args.confirm_live
+
+        monkeypatch.setattr(main_mod, "run_emergency_liquidate", fake_run)
+
+        ok, message = trigger._run_liquidate()
+
+        assert ok is True
+        assert captured["confirm_live"] is True
+        assert "청산 요청 처리 완료" in message
+
+    def test_http_liquidate_converts_system_exit_to_failure(self, monkeypatch):
+        """HTTP 긴급 청산 내부 guard 실패는 서버 프로세스를 죽이지 않고 실패 응답으로 변환한다."""
+        import main as main_mod
+        import database.models as db_models
+        import monitoring.logger as logger_mod
+        import monitoring.liquidate_trigger as trigger
+
+        captured = {}
+        monkeypatch.setattr(db_models, "init_database", lambda: None)
+        monkeypatch.setattr(logger_mod, "setup_logger", lambda: None)
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_CONFIRM_LIVE", raising=False)
+
+        def fake_run(args):
+            captured["confirm_live"] = args.confirm_live
+            raise SystemExit(1)
+
+        monkeypatch.setattr(main_mod, "run_emergency_liquidate", fake_run)
+
+        ok, message = trigger._run_liquidate()
+
+        assert ok is False
+        assert captured["confirm_live"] is False
+        assert "종료 코드=1" in message
+        assert "LIQUIDATE_TRIGGER_CONFIRM_LIVE=true" in message
+
 
 # ── 2. OrderGuard 타이밍 ──
 
