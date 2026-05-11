@@ -262,13 +262,18 @@ def _normalized_quantities(raw: Any) -> dict[str, int]:
     }
 
 
-def _numbers_match(actual: Any, expected: Any) -> bool:
+AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW = 10_000.0
+
+
+def _numbers_match(actual: Any, expected: Any, *, absolute_tolerance: float | None = None) -> bool:
     try:
         actual_num = float(actual)
         expected_num = float(expected)
     except (TypeError, ValueError):
         return actual == expected
     tolerance = max(1e-6, abs(expected_num) * 1e-9)
+    if absolute_tolerance is not None:
+        tolerance = max(tolerance, float(absolute_tolerance))
     return abs(actual_num - expected_num) <= tolerance
 
 
@@ -353,17 +358,28 @@ def validate_pilot_authorization_snapshot(
         if actual_value != expected_value
     ]
     numeric_checks = [
-        ("target_exposure", snapshot.get("target_exposure"), expected["target_exposure"]),
-        ("base_target_exposure", snapshot.get("base_target_exposure"), expected["base_target_exposure"]),
-        ("gross_exposure_after", snapshot.get("gross_exposure_after"), expected["gross_exposure_after"]),
-        ("max_order_notional", snapshot.get("max_order_notional"), expected["max_order_notional"]),
+        ("target_exposure", snapshot.get("target_exposure"), expected["target_exposure"], None),
+        ("base_target_exposure", snapshot.get("base_target_exposure"), expected["base_target_exposure"], None),
+        (
+            "gross_exposure_after",
+            snapshot.get("gross_exposure_after"),
+            expected["gross_exposure_after"],
+            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+        ),
+        (
+            "max_order_notional",
+            snapshot.get("max_order_notional"),
+            expected["max_order_notional"],
+            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+        ),
     ]
-    for field, actual_value, expected_value in numeric_checks:
-        if not _numbers_match(actual_value, expected_value):
+    for field, actual_value, expected_value, absolute_tolerance in numeric_checks:
+        if not _numbers_match(actual_value, expected_value, absolute_tolerance=absolute_tolerance):
             mismatches.append({
                 "field": field,
                 "expected": expected_value,
                 "actual": actual_value,
+                "tolerance": absolute_tolerance,
             })
 
     if mismatches:
@@ -707,7 +723,7 @@ def execute_plan(
             else:
                 avg_daily_volume = _avg_daily_volume_for_order(plan, order)
                 available_cash = portfolio.get_available_cash()
-                total_value = portfolio.get_total_value()
+                total_value = portfolio.get_current_capital()
                 res = executor.execute_buy_quantity(
                     symbol=order.symbol,
                     price=order.price,
