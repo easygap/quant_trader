@@ -164,6 +164,7 @@
 | Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Live 체결보류 신규진입 중단 | 높음 | 완료 — 장중 신규 진입 루프에서 live 주문이 접수됐지만 체결 확인이 보류되면 브로커 잔고 동기화 전까지 같은 루프의 남은 신규 BUY 실행을 중단해 미확정 체결분을 무시한 추가 매수를 차단 |
 | Live 미완료 주문 상태 영속화 | 높음 | 완료 — live 주문 `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태를 `order_records`에 저장하고, 재시작 또는 OrderGuard TTL 만료 후에도 DB에 미완료 주문이 남아 있으면 같은 종목 신규 주문을 fail-closed 차단 |
+| Live 보류 주문 복구 대조 | 높음 | 완료 — 재시작 복구에서 KIS 미체결 조회가 성공했고 DB `ACKED`/`PARTIAL_FILLED` 주문번호가 브로커 미체결 목록에서 사라졌으면 체결 조회 결과를 보강해 `order_records`를 `RECONCILED`로 닫고 종목별 OrderGuard를 해제. 잔고/포지션 정합성은 이어지는 KIS↔DB 동기화가 처리 |
 | Live 미체결 조회 fail-closed | 높음 | 완료 — KIS 미체결 조회 실패, `rt_cd != 0`, 응답 형식 이상을 주문 가능 상태로 보지 않고 live BUY/SELL을 제출 전 차단 |
 | KIS 잔고 오류 응답 fail-closed | 높음 | 완료 — 잔고 조회 응답도 `rt_cd == 0`일 때만 정상 잔고로 해석한다. 오류 body는 빈 포지션/0원 잔고가 아니라 조회 실패로 반환해 연결 검증·포지션 동기화가 fail-closed 처리된다 |
 | Live 시작 전 연결·잔고 동기화 차단 | 높음 | 완료 — `main.py --mode live`가 canonical live gate를 통과해도 KIS 연결 검증 또는 초기 KIS↔DB 잔고 동기화가 실패하면 실전 스케줄러를 시작하지 않고 종료. 불안정한 브로커 상태에서 live 루프가 뜨는 경로를 fail-closed 처리 |
