@@ -87,6 +87,8 @@ class TradeHistory(Base):
     slippage = Column(Float, default=0)                         # 슬리피지
     expected_price = Column(Float, nullable=True)               # 주문 시점 예상 체결가(현재가)
     actual_slippage_pct = Column(Float, nullable=True)          # 실제 슬리피지 %(체결 후)
+    execution_session_id = Column(String(96), default="", nullable=False, index=True)  # 파일럿/실행 세션 ID
+    order_id = Column(String(64), default="", nullable=False, index=True)              # 내부 주문 ID
     strategy = Column(String(50))                               # 사용된 전략명
     signal_score = Column(Float)                                # 매매 신호 점수
     reason = Column(Text)                                       # 매매 사유 (상세)
@@ -499,6 +501,40 @@ def _migrate_trade_history_signal_columns(engine):
                     raise
 
 
+def _migrate_trade_history_execution_link_columns(engine):
+    """기존 DB에 실행 세션/주문 연결 컬럼 추가."""
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    cols = [
+        ("trade_history", "execution_session_id", "VARCHAR(96) DEFAULT '' NOT NULL"),
+        ("trade_history", "order_id", "VARCHAR(64) DEFAULT '' NOT NULL"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in cols:
+            try:
+                if dialect == "sqlite":
+                    t_check = conn.execute(text(
+                        f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    ))
+                    if not t_check.fetchone():
+                        continue
+                    r = conn.execute(text(f"PRAGMA table_info({table})"))
+                    if any(row[1] == col for row in r.fetchall()):
+                        continue
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                else:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+                    )
+                conn.commit()
+            except Exception as e:
+                if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                    conn.rollback()
+                else:
+                    conn.rollback()
+                    raise
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -518,6 +554,10 @@ def init_database():
         pass
     try:
         _migrate_trade_history_signal_columns(engine)
+    except Exception:
+        pass
+    try:
+        _migrate_trade_history_execution_link_columns(engine)
     except Exception:
         pass
 
