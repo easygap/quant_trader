@@ -2196,6 +2196,43 @@ def _position_avg_price_for_order(plan: TargetWeightPlan, order: Any) -> float:
     return float(avg_price)
 
 
+def refresh_paper_preflight_status(strategy: str, date: str) -> dict[str, Any]:
+    """Refresh paper preflight so readiness uses the current notifier/runtime gates."""
+    try:
+        import core.paper_pilot as paper_pilot
+        import core.paper_preflight as paper_preflight
+
+        previous_runtime_dir = paper_preflight.RUNTIME_DIR
+        paper_preflight.RUNTIME_DIR = paper_pilot.RUNTIME_DIR
+        try:
+            result = paper_preflight.run_preflight(strategy, date)
+        finally:
+            paper_preflight.RUNTIME_DIR = previous_runtime_dir
+        return {
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+            "strategy": result.strategy,
+            "date": result.date,
+            "overall": result.overall,
+            "entry_allowed": bool(result.entry_allowed),
+            "runtime_state": result.runtime_state,
+            "notifier_health": result.notifier_health,
+            "pilot_authorized": bool(result.pilot_authorized),
+            "blocking_requirements": list(result.blocking_requirements or []),
+            "block_reasons": list(result.block_reasons or []),
+        }
+    except Exception as exc:
+        logger.exception("target-weight readiness preflight refresh failed for {}", strategy)
+        return {
+            "checked": True,
+            "complete": False,
+            "reason": f"target_weight_preflight_refresh_failed: {exc}",
+            "strategy": strategy,
+            "date": date,
+        }
+
+
 def assess_plan_pre_trade_risk(
     plan: TargetWeightPlan,
     *,
@@ -2447,6 +2484,7 @@ def build_pilot_readiness_audit(
     validation: Any,
     cap_preview: Any,
     cap_recommendation: dict[str, Any],
+    preflight_refresh: dict[str, Any],
     launch_readiness: dict[str, Any],
     execution_idempotency: dict[str, Any],
     execution_trade_day_check: dict[str, Any],
@@ -2465,6 +2503,11 @@ def build_pilot_readiness_audit(
     if trading_mode == "live":
         blockers.append("trading_mode: target-weight pilot requires paper mode, not live")
 
+    if preflight_refresh.get("checked", False) and not preflight_refresh.get("complete", False):
+        blockers.append(
+            "preflight_refresh: "
+            f"{preflight_refresh.get('reason', 'paper preflight refresh failed')}"
+        )
     for blocker in launch_readiness.get("blocking_requirements", []) or []:
         blockers.append(f"launch_readiness: {blocker}")
     if not launch_readiness.get("infra_ready", False):
@@ -2598,6 +2641,7 @@ def build_pilot_readiness_audit(
         "plan_validation": asdict(validation),
         "cap_preview": asdict(cap_preview),
         "cap_recommendation": cap_recommendation,
+        "preflight_refresh": preflight_refresh,
         "launch_readiness": launch_readiness,
         "execution_idempotency": execution_idempotency,
         "execution_trade_day_check": execution_trade_day_check,
@@ -3203,6 +3247,7 @@ def run_pilot_readiness_audit(
         config=config,
         collector=collector,
     )
+    preflight_refresh = refresh_paper_preflight_status(plan.candidate_id, plan.trade_day)
     pilot_check = check_pilot_entry(
         plan.candidate_id,
         candidate_notional=plan.max_order_notional,
@@ -3253,6 +3298,7 @@ def run_pilot_readiness_audit(
         validation=validation,
         cap_preview=cap_preview,
         cap_recommendation=cap_recommendation,
+        preflight_refresh=preflight_refresh,
         launch_readiness=launch_readiness,
         execution_idempotency=execution_idempotency,
         execution_trade_day_check=execution_trade_day_check,
