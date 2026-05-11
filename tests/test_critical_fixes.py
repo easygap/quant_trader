@@ -401,6 +401,22 @@ class TestForceLiveRemoved:
 
         assert trigger._get_token_from_request(handler) == "secret"
 
+    def test_http_liquidate_bind_host_defaults_to_loopback(self, monkeypatch):
+        """긴급 청산 HTTP 서버는 기본적으로 로컬 루프백에만 바인드한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_HOST", raising=False)
+
+        assert trigger._get_bind_host() == "127.0.0.1"
+
+    def test_http_liquidate_bind_host_requires_explicit_external_override(self, monkeypatch):
+        """외부 바인드는 환경변수로 명시했을 때만 사용한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.setenv("LIQUIDATE_TRIGGER_HOST", "0.0.0.0")
+
+        assert trigger._get_bind_host() == "0.0.0.0"
+
 
 # ── 2. OrderGuard 타이밍 ──
 
