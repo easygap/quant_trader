@@ -166,6 +166,73 @@ class TestNotifierHealth:
         assert health_path.exists()
         health = json.loads(health_path.read_text(encoding="utf-8"))
         assert "discord_configured" in health
+        assert "checked_at" in health
+
+    def test_configured_webhook_without_test_send_is_unverified(
+        self,
+        monkeypatch,
+        evidence_dir,
+        runtime_dir,
+        fresh_db,
+    ):
+        """webhook URL만 있으면 pilot-grade notifier health로 보지 않는다."""
+        _seed_v2(evidence_dir, "notif_s", [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from config.config_loader import Config
+        monkeypatch.setattr(
+            Config,
+            "get",
+            lambda: MagicMock(discord={"enabled": True, "webhook_url": "https://discord.test/webhook"}),
+        )
+
+        from core.paper_preflight import run_preflight
+        r = run_preflight("notif_s", "2026-04-06")
+
+        health = json.loads((runtime_dir / "notifier_health.json").read_text(encoding="utf-8"))
+        assert r.notifier_health == "unverified"
+        assert health["discord_configured"] is True
+        assert health["discord_reachable"] is None
+
+    def test_preflight_preserves_recent_successful_notifier_health(
+        self,
+        monkeypatch,
+        evidence_dir,
+        runtime_dir,
+        fresh_db,
+    ):
+        """send-test 없이 갱신해도 최근 성공한 webhook 도달성 증거를 덮어쓰지 않는다."""
+        _seed_v2(evidence_dir, "notif_s", [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+        checked_at = datetime.now().isoformat()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({
+                "discord_configured": True,
+                "discord_reachable": True,
+                "checked_at": checked_at,
+                "test_sent_at": checked_at,
+                "last_success_at": checked_at,
+            }),
+            encoding="utf-8",
+        )
+
+        from config.config_loader import Config
+        monkeypatch.setattr(
+            Config,
+            "get",
+            lambda: MagicMock(discord={"enabled": True, "webhook_url": "https://discord.test/webhook"}),
+        )
+
+        from core.paper_preflight import run_preflight
+        r = run_preflight("notif_s", "2026-04-06")
+
+        health = json.loads((runtime_dir / "notifier_health.json").read_text(encoding="utf-8"))
+        assert r.notifier_health == "healthy"
+        assert health["discord_reachable"] is True
+        assert health["last_success_at"] == checked_at
 
 
 class TestEvidenceFreshness:
