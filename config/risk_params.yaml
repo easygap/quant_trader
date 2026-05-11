@@ -79,7 +79,7 @@ diversification:
 position_limits:
   max_holding_days: 30        # 0이면 비활성. 이 일수 초과 보유 포지션은 자동 매도
   min_holding_days: 5         # 0이면 비활성. 매수 후 이 일수 미만이면 매도 차단 (손절·블랙스완 예외). 과매매 방지를 위해 3→5일로 강화.
-  max_monthly_roundtrips: 8   # 0이면 무제한. 백테스트 시 월간 왕복 거래 횟수 상한. 초과 시 신규 매수 차단 (과매매 억제)
+  max_monthly_roundtrips: 8   # 0이면 무제한. 백테스트·운영 신규 BUY 월간 횟수 상한. 초과 시 신규 매수 차단 (과매매 억제)
 
 # --- 최대 낙폭 (MDD) 제한 ---
 drawdown:

@@ -17,7 +17,7 @@ from api.kis_api import KISApi
 from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position,
-    get_position, get_all_positions, save_failed_order,
+    get_position, get_all_positions, save_failed_order, count_monthly_buy_trades,
 )
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
@@ -244,6 +244,48 @@ class OrderExecutor:
             },
         )
 
+    def _monthly_buy_cap_check(self, symbol: str, action: str = "BUY") -> dict:
+        """종목별 월간 BUY 체결 횟수 제한을 운영 주문에도 적용한다."""
+        if str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+
+        try:
+            limit = int(
+                ((self.config.risk_params or {}).get("position_limits") or {})
+                .get("max_monthly_roundtrips", 0)
+                or 0
+            )
+        except Exception:
+            limit = 0
+        if limit <= 0:
+            return {"allowed": True, "reason": ""}
+
+        try:
+            current_count = count_monthly_buy_trades(
+                symbol,
+                mode=self.mode,
+                account_key=self.account_key if self.account_key else "",
+            )
+        except Exception as exc:
+            reason = f"월간 거래 횟수 확인 실패: {exc}"
+            logger.warning("종목 {} 매수 차단: {}", symbol, reason)
+            return {"allowed": False, "reason": reason}
+
+        if current_count >= limit:
+            reason = (
+                f"월간 거래 횟수 제한 초과: {symbol} "
+                f"{current_count}/{limit}회 BUY 체결"
+            )
+            logger.warning("종목 {} 매수 차단: {}", symbol, reason)
+            return {
+                "allowed": False,
+                "reason": reason,
+                "monthly_buy_cap_blocked": True,
+                "monthly_buy_count": current_count,
+                "monthly_buy_limit": limit,
+            }
+        return {"allowed": True, "reason": ""}
+
     def execute_buy(
         self,
         symbol: str,
@@ -441,6 +483,7 @@ class OrderExecutor:
 
         # 주문 전 안전 체크
         pre_check = self._pre_order_check(
+            symbol=symbol,
             action="BUY",
             strategy=strategy,
             candidate_notional=price * quantity,
@@ -655,6 +698,7 @@ class OrderExecutor:
             }
 
         pre_check = self._pre_order_check(
+            symbol=symbol,
             action="BUY",
             strategy=strategy,
             candidate_notional=fill_price * quantity,
@@ -834,7 +878,7 @@ class OrderExecutor:
         actual_slippage_pct = None
 
         # 주문 전 안전 체크 (매도: 쿨다운 중에도 허용)
-        pre_check = self._pre_order_check(action="SELL", strategy=strategy)
+        pre_check = self._pre_order_check(symbol=symbol, action="SELL", strategy=strategy)
         if not pre_check["allowed"]:
             return {"success": False, "reason": pre_check["reason"]}
 
@@ -1348,6 +1392,7 @@ class OrderExecutor:
 
     def _pre_order_check(
         self,
+        symbol: str = "",
         action: str = "BUY",
         strategy: str = "",
         candidate_notional: float | None = None,
@@ -1361,6 +1406,10 @@ class OrderExecutor:
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
+        monthly_cap = self._monthly_buy_cap_check(symbol, action)
+        if not monthly_cap["allowed"]:
+            return monthly_cap
+
         # 페이퍼/스케줄 신규 진입은 runtime/preflight 확인에 실패하면 차단한다.
         if self.mode != "live":
             return self._paper_entry_pre_order_check(
