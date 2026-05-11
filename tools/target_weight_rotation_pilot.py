@@ -2412,6 +2412,7 @@ def assess_plan_pre_trade_risk(
     total_tax = 0.0
     total_slippage = 0.0
     total_capital_gains_tax = 0.0
+    projected_position_prices: dict[str, float] = {}
 
     for order in plan.orders:
         action = str(order.action).upper()
@@ -2429,6 +2430,7 @@ def assess_plan_pre_trade_risk(
         capital_gains_tax = float(costs.get("capital_gains_tax", 0) or 0)
         slippage = float(costs.get("slippage", 0) or 0)
         execution_price = float(costs.get("execution_price", order.price) or order.price)
+        projected_position_prices[order.symbol] = execution_price
         total_commission += commission
         total_tax += tax
         total_capital_gains_tax += capital_gains_tax
@@ -2473,7 +2475,7 @@ def assess_plan_pre_trade_risk(
     for symbol, quantity in expected_quantities.items():
         if int(quantity) <= 0:
             continue
-        price = plan.prices.get(symbol)
+        price = projected_position_prices.get(symbol, plan.prices.get(symbol))
         if price is None or float(price) <= 0:
             missing_price_symbols.append(symbol)
             continue
@@ -2509,9 +2511,11 @@ def assess_plan_pre_trade_risk(
     if projected_total_value > 0:
         for symbol, value in sorted(position_values.items()):
             ratio = value / projected_total_value
+            valuation_price = projected_position_prices.get(symbol, plan.prices.get(symbol))
             position_ratio_rows.append({
                 "symbol": symbol,
                 "value": round(value, 2),
+                "valuation_price": round(float(valuation_price), 4),
                 "ratio": round(ratio, 6),
             })
             if ratio > max_position_ratio + 1e-9:
@@ -2539,6 +2543,10 @@ def assess_plan_pre_trade_risk(
         "projected_investment_ratio_after_costs": round(projected_investment_ratio, 6),
         "projected_total_value_after_costs": round(projected_total_value, 2),
         "target_position_count": target_position_count,
+        "projected_position_prices": {
+            symbol: round(float(price), 4)
+            for symbol, price in sorted(projected_position_prices.items())
+        },
         "limits": {
             "max_position_ratio": max_position_ratio,
             "max_investment_ratio": max_investment_ratio,
@@ -2573,6 +2581,7 @@ def failed_pre_trade_risk_validation(plan: TargetWeightPlan, error: Exception) -
         "projected_investment_ratio_after_costs": None,
         "projected_total_value_after_costs": None,
         "target_position_count": int(plan.target_position_count),
+        "projected_position_prices": {},
         "limits": {},
         "position_ratios": [],
         "order_costs": [],
