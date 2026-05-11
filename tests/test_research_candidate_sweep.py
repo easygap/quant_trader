@@ -603,6 +603,125 @@ def test_evaluate_candidate_routes_target_weight_rotation(monkeypatch):
     assert metrics["avg_slots_filled"] == 2.0
 
 
+def test_target_weight_research_rebalances_at_next_open_not_same_day_close():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.to_datetime(["2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"])
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            if symbol == "AAA":
+                return pd.DataFrame(
+                    {
+                        "open": [100.0, 100.0, 50.0, 510.0],
+                        "close": [100.0, 110.0, 500.0, 520.0],
+                        "volume": [100.0, 100.0, 900.0, 900.0],
+                    },
+                    index=dates,
+                )
+            if symbol == "BBB":
+                return pd.DataFrame(
+                    {
+                        "open": [100.0, 100.0, 100.0, 100.0],
+                        "close": [100.0, 101.0, 100.0, 100.0],
+                        "volume": [100.0, 100.0, 100.0, 100.0],
+                    },
+                    index=dates,
+                )
+            return pd.DataFrame(
+                {
+                    "open": [100.0, 100.0, 100.0, 100.0],
+                    "close": [100.0, 100.0, 100.0, 100.0],
+                    "volume": [100.0, 100.0, 100.0, 100.0],
+                },
+                index=dates,
+            )
+
+    class NoCostRiskManager:
+        def calculate_transaction_costs(self, price, quantity, side, **kwargs):
+            return {
+                "execution_price": float(price),
+                "commission": 0.0,
+                "tax": 0.0,
+                "slippage": 0.0,
+                "slippage_multiplier": 1.0,
+                "participation_rate": 0.0,
+            }
+
+    result = sweep.run_target_weight_rotation_backtest(
+        ["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-02-04",
+        capital=1_000.0,
+        params={
+            "target_top_n": 1,
+            "target_exposure": 1.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+        },
+        collector=FakeCollector(),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    trade = result["trades"][0]
+    assert trade["symbol"] == "AAA"
+    assert trade["action"] == "BUY"
+    assert trade["price"] == 50.0
+    assert trade["avg_daily_volume"] == 100.0
+    assert trade["execution_price_mode"] == "next_open"
+    assert result["target_weight_metrics"]["execution_price_mode"] == "next_open"
+    assert result["target_weight_metrics"]["avg_volume_lookback_lag_days"] == 1
+
+
+def test_target_weight_research_blocks_missing_rebalance_open_price():
+    import pandas as pd
+    import pytest
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.to_datetime(["2025-01-30", "2025-01-31", "2025-02-03"])
+
+    class MissingOpenCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            if symbol == "AAA":
+                return pd.DataFrame(
+                    {
+                        "close": [100.0, 110.0, 500.0],
+                        "volume": [100.0, 100.0, 100.0],
+                    },
+                    index=dates,
+                )
+            return pd.DataFrame(
+                {
+                    "open": [100.0, 100.0, 100.0],
+                    "close": [100.0, 100.0, 100.0],
+                    "volume": [100.0, 100.0, 100.0],
+                },
+                index=dates,
+            )
+
+    with pytest.raises(ValueError, match="target_weight_research_execution_price_missing"):
+        sweep.run_target_weight_rotation_backtest(
+            ["AAA"],
+            start="2025-02-03",
+            end="2025-02-03",
+            capital=1_000.0,
+            params={
+                "target_top_n": 1,
+                "target_exposure": 1.0,
+                "short_lookback": 1,
+                "long_lookback": 1,
+                "short_weight": 1.0,
+            },
+            collector=MissingOpenCollector(),
+        )
+
+
 def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):
     from tools.research_candidate_sweep import write_candidate_artifacts
 
