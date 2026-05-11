@@ -15,6 +15,7 @@ Live eligibility는 canonical promotion bundle과 registry review에서만 결�
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
@@ -49,6 +50,25 @@ PROMOTION_MIN_AVG_EXCESS = 0.0    # benchmark 대비 평균 excess는 양수여�
 PROMOTION_MIN_CUMULATIVE_RETURN = 0.0
 PROMOTION_MIN_SELL_TRADES = 5
 PROMOTION_MIN_WIN_RATE = 45.0
+
+
+def _annualized_sharpe_from_daily_returns(daily_returns: list[float]) -> Optional[float]:
+    valid_returns = []
+    for value in daily_returns:
+        try:
+            valid_returns.append(float(value) / 100.0)
+        except (TypeError, ValueError):
+            continue
+    if len(valid_returns) < 2:
+        return None
+    daily_rf = (1 + RF_ANNUAL) ** (1 / 252) - 1
+    excess_returns = [value - daily_rf for value in valid_returns]
+    mean = sum(excess_returns) / len(excess_returns)
+    variance = sum((value - mean) ** 2 for value in excess_returns) / (len(excess_returns) - 1)
+    std = math.sqrt(variance)
+    if std <= 0:
+        return 0.0
+    return mean / std * math.sqrt(252)
 
 
 # ─── 데이터 구조 ────────────────────────────────────────────
@@ -1304,6 +1324,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     # aggregate metrics (execution-backed records 기준)
     daily_returns = [r.get("daily_return") for r in records if r.get("daily_return") is not None]
     avg_daily_return = sum(daily_returns) / len(daily_returns) if daily_returns else 0
+    paper_sharpe = _annualized_sharpe_from_daily_returns(daily_returns)
     cumulative = records[-1].get("cumulative_return", 0)
     mdds = [r.get("mdd") for r in records if r.get("mdd") is not None]
     max_mdd = min(mdds) if mdds else 0
@@ -1418,6 +1439,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "period": f"{records[0]['date']} ~ {records[-1]['date']}",
         "total_days": total_days,
         "avg_daily_return": round(avg_daily_return, 4),
+        "paper_sharpe": round(paper_sharpe, 4) if paper_sharpe is not None else None,
         "cumulative_return": round(cumulative, 2) if cumulative else 0,
         "max_mdd": round(max_mdd, 2),
         "win_rate": round(win_rate, 1),
