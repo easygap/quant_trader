@@ -8,6 +8,7 @@
   LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 를 둘 다 설정해야 한다.
 - 청산 실행은 POST만 허용한다. 인증 토큰은 기본적으로 X-Token 또는
   Authorization: Bearer 헤더로만 받는다.
+- 토큰은 기본 최소 16자 이상이어야 하며 흔한 placeholder 값은 거부한다.
 
 사용:
     set LIQUIDATE_TRIGGER_TOKEN=your_secret
@@ -32,6 +33,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+DEFAULT_MIN_TOKEN_LENGTH = 16
+PLACEHOLDER_TOKENS = {
+    "secret",
+    "token",
+    "your_secret",
+    "changeme",
+    "change_me",
+    "password",
+    "test",
+}
 
 
 def _get_token_from_request(handler: BaseHTTPRequestHandler) -> Optional[str]:
@@ -64,6 +75,30 @@ def _get_bind_host() -> str:
 def _get_bind_port() -> int:
     """긴급 청산 HTTP 서버 바인드 포트."""
     return int(os.environ.get("LIQUIDATE_TRIGGER_PORT", str(DEFAULT_PORT)))
+
+
+def _min_token_length() -> int:
+    """긴급 청산 HTTP 인증 토큰 최소 길이."""
+    raw = os.environ.get("LIQUIDATE_TRIGGER_MIN_TOKEN_LENGTH", "").strip()
+    if not raw:
+        return DEFAULT_MIN_TOKEN_LENGTH
+    try:
+        return max(int(raw), DEFAULT_MIN_TOKEN_LENGTH)
+    except ValueError:
+        return DEFAULT_MIN_TOKEN_LENGTH
+
+
+def _validate_trigger_token(token: str) -> tuple[bool, str]:
+    """긴급 청산 HTTP 인증 토큰 강도 검증."""
+    token = (token or "").strip()
+    if not token:
+        return False, "LIQUIDATE_TRIGGER_TOKEN not configured"
+    if token.lower() in PLACEHOLDER_TOKENS:
+        return False, "LIQUIDATE_TRIGGER_TOKEN uses a placeholder value"
+    min_length = _min_token_length()
+    if len(token) < min_length:
+        return False, f"LIQUIDATE_TRIGGER_TOKEN must be at least {min_length} characters"
+    return True, ""
 
 
 def _run_liquidate() -> tuple[bool, str]:
@@ -120,8 +155,9 @@ class LiquidateHandler(BaseHTTPRequestHandler):
 
     def _handle_liquidate(self):
         token = os.environ.get("LIQUIDATE_TRIGGER_TOKEN", "").strip()
-        if not token:
-            self._send(503, {"ok": False, "error": "LIQUIDATE_TRIGGER_TOKEN not configured"})
+        token_ok, token_error = _validate_trigger_token(token)
+        if not token_ok:
+            self._send(503, {"ok": False, "error": token_error})
             return
         provided = _get_token_from_request(self)
         if not provided or not hmac.compare_digest(provided, token):
@@ -147,8 +183,9 @@ class LiquidateHandler(BaseHTTPRequestHandler):
 
 def main():
     token = os.environ.get("LIQUIDATE_TRIGGER_TOKEN", "").strip()
-    if not token:
-        print("LIQUIDATE_TRIGGER_TOKEN 환경변수가 없습니다. 서버를 시작하지 않습니다.")
+    token_ok, token_error = _validate_trigger_token(token)
+    if not token_ok:
+        print(f"{token_error}. 서버를 시작하지 않습니다.")
         sys.exit(1)
     host = _get_bind_host()
     port = _get_bind_port()
