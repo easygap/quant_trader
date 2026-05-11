@@ -356,6 +356,14 @@ def check_pilot_entry(
                 auth=auth,
                 caps=caps,
             )
+        if nh.get("discord_reachable") is False:
+            return _pilot_check_result(
+                strategy,
+                allowed=False,
+                reason="notifier unreachable — pilot requires working discord webhook",
+                auth=auth,
+                caps=caps,
+            )
     except Exception as exc:
         return _pilot_check_result(
             strategy,
@@ -790,15 +798,25 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
 
     # ── 4. notifier health ──
     notifier_ready = False
+    notifier_status = "missing"
     try:
         nh_path = RUNTIME_DIR / "notifier_health.json"
         if nh_path.exists():
             nh = json.loads(nh_path.read_text(encoding="utf-8"))
-            notifier_ready = nh.get("discord_configured", False)
+            if not nh.get("discord_configured", False):
+                notifier_status = "missing"
+            elif nh.get("discord_reachable") is False:
+                notifier_status = "unreachable"
+            else:
+                notifier_status = "configured"
+                notifier_ready = True
     except Exception:
         pass
     if not notifier_ready:
-        blockers.append("notifier: Discord webhook 미설정")
+        if notifier_status == "unreachable":
+            blockers.append("notifier: Discord webhook test failed")
+        else:
+            blockers.append("notifier: Discord webhook 미설정")
 
     # ── 5. pilot authorization ──
     auth = get_active_pilot(strategy, today)
@@ -846,6 +864,7 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
         "benchmark_ready": benchmark_ready,
         "benchmark_final_ratio": benchmark_final_ratio,
         "notifier_ready": notifier_ready,
+        "notifier_status": notifier_status,
         "pilot_authorization_present": pilot_present,
         "strategy_eligible": strategy_eligible,
         # runtime
@@ -893,7 +912,7 @@ def generate_launch_readiness_artifact(strategy: str) -> tuple[Path, Path]:
                    f"{lr['benchmark_final_ratio']:.0%}" if lr['benchmark_final_ratio'] is not None else "N/A",
                    f">= {PILOT_MIN_BENCHMARK_FINAL_RATIO:.0%}",
                    lr["benchmark_ready"]),
-        _lr_check("Discord notifier", "configured" if lr["notifier_ready"] else "missing",
+        _lr_check("Discord notifier", lr.get("notifier_status", "configured" if lr["notifier_ready"] else "missing"),
                    "configured", lr["notifier_ready"]),
         _lr_check("Pilot authorization", "present" if lr["pilot_authorization_present"] else "absent",
                    "present (manual)", lr["pilot_authorization_present"]),
