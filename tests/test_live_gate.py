@@ -112,6 +112,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
         "recommendation": "ELIGIBLE",
         "promotable_evidence_days": 60,
         "benchmark_final_ratio": 0.9,
+        "paper_sharpe": 0.5,
         "avg_same_universe_excess": 0.15,
         "avg_cash_adjusted_excess": 0.12,
         "cumulative_return": 3.2,
