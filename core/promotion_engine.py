@@ -198,6 +198,7 @@ def promote(m: StrategyMetrics, experiment_note: str = "") -> PromotionResult:
 # ── Artifact-driven 입력 ──
 
 ARTIFACT_DIR = "reports/promotion"
+PAPER_EVIDENCE_DIR = "reports/paper_evidence"
 REQUIRED_ARTIFACTS = [
     "metrics_summary.json",
     "walk_forward_summary.json",
@@ -205,6 +206,94 @@ REQUIRED_ARTIFACTS = [
     "promotion_result.json",
     "run_metadata.json",
 ]
+
+
+def _as_int(value) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_paper_evidence_package(
+    strategy_name: str,
+    evidence_dir: str = PAPER_EVIDENCE_DIR,
+) -> Optional[dict]:
+    """paper promotion evidence package를 로드한다. 없으면 None으로 둔다."""
+    import json
+    from pathlib import Path
+
+    path = Path(evidence_dir) / f"promotion_evidence_{strategy_name}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("paper evidence package 로드 실패: {} ({})", path, exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("paper evidence package schema 오류: {}", path)
+        return None
+    if payload.get("strategy") not in (None, strategy_name):
+        logger.warning(
+            "paper evidence package strategy 불일치: {} != {}",
+            payload.get("strategy"),
+            strategy_name,
+        )
+        return None
+    return payload
+
+
+def paper_evidence_metrics_from_package(package: Optional[dict]) -> dict[str, object]:
+    """promotion package를 StrategyMetrics의 paper_* 필드로 변환한다."""
+    if not isinstance(package, dict):
+        return {}
+    return {
+        "paper_days": _as_int(
+            package.get("promotable_evidence_days", package.get("real_paper_days"))
+        ),
+        "paper_sharpe": _as_float(package.get("paper_sharpe", package.get("sharpe"))),
+        "paper_excess": _as_float(package.get("avg_same_universe_excess")),
+        "paper_evidence_recommendation": package.get("recommendation"),
+        "paper_benchmark_final_ratio": _as_float(package.get("benchmark_final_ratio")),
+        "paper_sell_count": _as_int(package.get("sell_count")),
+        "paper_win_rate": _as_float(package.get("win_rate")),
+        "paper_frozen_days": _as_int(package.get("frozen_days")),
+        "paper_cumulative_return": _as_float(package.get("cumulative_return")),
+    }
+
+
+def attach_paper_evidence_metrics(
+    metrics: StrategyMetrics,
+    paper_metrics: dict[str, object],
+) -> StrategyMetrics:
+    """StrategyMetrics에 paper evidence 필드를 반영한다."""
+    for field in (
+        "paper_days",
+        "paper_sharpe",
+        "paper_excess",
+        "paper_evidence_recommendation",
+        "paper_benchmark_final_ratio",
+        "paper_sell_count",
+        "paper_win_rate",
+        "paper_frozen_days",
+        "paper_cumulative_return",
+    ):
+        value = paper_metrics.get(field)
+        if value is not None:
+            setattr(metrics, field, value)
+    return metrics
 
 
 def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
@@ -254,7 +343,10 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
         return None
 
 
-def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "StrategyMetrics"]:
+def load_metrics_from_artifact(
+    artifact_dir: str = ARTIFACT_DIR,
+    evidence_dir: str = PAPER_EVIDENCE_DIR,
+) -> dict[str, "StrategyMetrics"]:
     """metrics_summary.json + walk_forward_summary.json에서 StrategyMetrics 구성."""
     import json
     from pathlib import Path
@@ -284,7 +376,25 @@ def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "S
     excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
         wf = wf_raw.get(name, {})
-        result[name] = StrategyMetrics(
+        paper_metrics = {
+            **paper_evidence_metrics_from_package(load_paper_evidence_package(name, evidence_dir)),
+            **{
+                key: m.get(key)
+                for key in (
+                    "paper_days",
+                    "paper_sharpe",
+                    "paper_excess",
+                    "paper_evidence_recommendation",
+                    "paper_benchmark_final_ratio",
+                    "paper_sell_count",
+                    "paper_win_rate",
+                    "paper_frozen_days",
+                    "paper_cumulative_return",
+                )
+                if m.get(key) is not None
+            },
+        }
+        result[name] = attach_paper_evidence_metrics(StrategyMetrics(
             name=name,
             total_return=m.get("total_return", 0),
             profit_factor=m.get("profit_factor", 0),
@@ -299,7 +409,7 @@ def load_metrics_from_artifact(artifact_dir: str = ARTIFACT_DIR) -> dict[str, "S
             ev_per_trade=m.get("ev_per_trade"),
             cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
             turnover_per_year=m.get("turnover_per_year"),
-        )
+        ), paper_metrics)
     return result
 
 

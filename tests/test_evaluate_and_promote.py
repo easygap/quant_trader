@@ -237,6 +237,91 @@ def test_attach_canonical_walk_forward_metrics_mutates_metrics_and_returns_summa
     assert summary["total_trades"] == 9
 
 
+def _provisional_metrics():
+    return {
+        "total_return": 18.0,
+        "profit_factor": 1.5,
+        "mdd": -8.0,
+        "wf_positive_rate": 0.8,
+        "wf_sharpe_positive_rate": 0.8,
+        "wf_windows": 6,
+        "wf_total_trades": 120,
+        "sharpe": 0.7,
+        "ev_per_trade": 1000.0,
+        "cost_adjusted_cagr": 8.0,
+        "turnover_per_year": 300.0,
+    }
+
+
+def _write_paper_package(evidence_dir, strategy, **overrides):
+    payload = {
+        "strategy": strategy,
+        "recommendation": "ELIGIBLE",
+        "promotable_evidence_days": 60,
+        "paper_sharpe": 0.55,
+        "avg_same_universe_excess": 0.2,
+        "benchmark_final_ratio": 0.9,
+        "sell_count": 8,
+        "win_rate": 55.0,
+        "frozen_days": 0,
+        "cumulative_return": 4.0,
+    }
+    payload.update(overrides)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exists(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_ready_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "live_candidate"
+    assert "live" in promotions[strategy]["allowed_modes"]
+    assert metrics[strategy]["paper_days"] == 60
+    assert metrics[strategy]["paper_evidence_recommendation"] == "ELIGIBLE"
+
+
+def test_build_promotion_results_stays_provisional_when_paper_evidence_missing(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_missing_strategy"
+    metrics = {strategy: _provisional_metrics()}
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(tmp_path / "paper_evidence"))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "live" not in promotions[strategy]["allowed_modes"]
+    assert "paper_days" not in metrics[strategy]
+
+
+def test_build_promotion_results_does_not_promote_live_when_evidence_blocked(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_blocked_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        recommendation="BLOCKED",
+        promotable_evidence_days=60,
+    )
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert metrics[strategy]["paper_evidence_recommendation"] == "BLOCKED"
+
+
 def test_canonical_research_candidate_metadata_is_json_serializable():
     from tools.evaluate_and_promote import (
         build_canonical_research_candidate_specs,
