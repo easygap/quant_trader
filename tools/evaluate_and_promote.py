@@ -286,6 +286,12 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence"):
         "paper_win_rate",
         "paper_frozen_days",
         "paper_cumulative_return",
+        "target_weight_evidence_required",
+        "target_weight_verified_pilot_days",
+        "target_weight_invalid_days",
+        "target_weight_all_promotable_days_verified",
+        "target_weight_params_hash_consistent",
+        "target_weight_params_hash",
     )
     for name, m in metrics_all.items():
         paper_metrics = paper_evidence_metrics_from_package(

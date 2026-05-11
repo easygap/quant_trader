@@ -322,6 +322,84 @@ def test_build_promotion_results_does_not_promote_live_when_evidence_blocked(tmp
     assert metrics[strategy]["paper_evidence_recommendation"] == "BLOCKED"
 
 
+def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "target_weight_rotation_test"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "live" not in promotions[strategy]["allowed_modes"]
+    assert "target-weight evidence required flag missing" in promotions[strategy]["reason"]
+
+
+def test_build_promotion_results_promotes_target_weight_with_verified_proof(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "target_weight_rotation_test"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "params_hash": "hash",
+            "params_hashes": ["hash"],
+            "params_hash_consistent": True,
+            "all_promotable_days_verified": True,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+        target_weight_params_hash="hash",
+    )
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "live_candidate"
+    assert "live" in promotions[strategy]["allowed_modes"]
+    assert metrics[strategy]["target_weight_verified_pilot_days"] == 60
+    assert metrics[strategy]["target_weight_params_hash"] == "hash"
+
+
+def test_build_promotion_results_blocks_target_weight_mixed_params_hash(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "target_weight_rotation_test"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "params_hash": None,
+            "params_hashes": ["hash-a", "hash-b"],
+            "params_hash_consistent": False,
+            "all_promotable_days_verified": False,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+        target_weight_params_hash=None,
+    )
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "target-weight promotable evidence not fully verified" in promotions[strategy]["reason"]
+    assert "target-weight params_hash not consistent" in promotions[strategy]["reason"]
+
+
 def test_canonical_research_candidate_metadata_is_json_serializable():
     from tools.evaluate_and_promote import (
         build_canonical_research_candidate_specs,
