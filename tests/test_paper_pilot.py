@@ -219,6 +219,26 @@ class TestPilotBasic:
         assert result.allowed is False
         assert "notifier" in result.reason.lower()
 
+    def test_notifier_unreachable_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
+        """webhook test send failure → pilot entry blocked."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True, "discord_reachable": False}),
+            encoding="utf-8",
+        )
+
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+        assert result.allowed is False
+        assert "notifier unreachable" in result.reason.lower()
+
     def test_missing_notifier_health_blocks_pilot(self, evidence_dir, runtime_dir, fresh_db):
         """notifier health artifact 부재 → pilot entry blocked."""
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
@@ -1002,6 +1022,30 @@ class TestLaunchReadiness:
         assert lr["infra_ready"] is True
         assert lr["launch_ready"] is True
         assert lr["blocking_requirements"] == []
+
+    def test_launch_readiness_blocks_unreachable_notifier(self, evidence_dir, runtime_dir, fresh_db):
+        """webhook test send failure → launch readiness infra blocked."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-03", "benchmark_status": "final"},
+            {"date": "2026-04-04", "benchmark_status": "final"},
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        (runtime_dir).mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "notifier_health.json").write_text(
+            json.dumps({"discord_configured": True, "discord_reachable": False}),
+            encoding="utf-8",
+        )
+
+        from core.paper_pilot import enable_pilot, compute_launch_readiness
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+
+        lr = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-04-07")
+        assert lr["notifier_ready"] is False
+        assert lr["notifier_status"] == "unreachable"
+        assert lr["infra_ready"] is False
+        assert lr["launch_ready"] is False
+        assert any("webhook test failed" in b.lower() for b in lr["blocking_requirements"])
 
     def test_infra_ready_but_no_pilot_auth(self, evidence_dir, runtime_dir, fresh_db):
         """모든 인프라 조건 충족, pilot auth만 없음 → infra_ready=true, launch_ready=false."""
