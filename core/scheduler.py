@@ -613,6 +613,11 @@ class Scheduler:
                 if live_entry_allowed:
                     with PositionLock():
                         self._execute_entry_candidates()
+                    if (
+                        self.config.trading.get("mode") == "live"
+                        and self._last_broker_sync_ok is False
+                    ):
+                        live_entry_allowed = False
                 else:
                     logger.warning(
                         "live 신규 진입 후보 실행 보류 — KIS 잔고 크로스체크 미통과: {}",
@@ -934,7 +939,8 @@ class Scheduler:
         now = datetime.now()
         stale_minutes = 30  # 30분 이상 경과한 후보는 폐기
 
-        for candidate in self._entry_candidates:
+        candidates = list(self._entry_candidates)
+        for idx, candidate in enumerate(candidates):
             symbol = candidate["symbol"]
             if get_position(symbol, account_key=self.strategy_name):
                 continue
@@ -994,6 +1000,43 @@ class Scheduler:
             )
             if result.get("success"):
                 self.discord.send_trade_alert(result)
+            elif result.get("requires_reconcile") or result.get("order_pending"):
+                reason = result.get("reason", "live order requires reconcile")
+                self._last_broker_sync_ok = False
+                self._last_broker_sync_message = f"live order pending reconcile: {symbol} {reason}"
+                logger.warning(
+                    "live 주문 체결 확인 보류 — 남은 신규 진입 중단: {} reason={}",
+                    symbol,
+                    reason,
+                )
+                _log_op(
+                    "LIVE_RECONCILE_BLOCK",
+                    f"entry loop halted: {symbol} requires broker reconciliation",
+                    severity="warning",
+                    symbol=symbol,
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    detail={
+                        "symbol": symbol,
+                        "reason": reason,
+                        "order_id": result.get("order_id"),
+                        "broker_order_id": result.get("broker_order_id"),
+                        "order_status": result.get("order_status"),
+                        "execution_check": result.get("execution_check"),
+                        "remaining_candidates": len(candidates) - idx - 1,
+                    },
+                )
+                try:
+                    self.discord.send_message(
+                        "⚠️ **live 주문 체결 확인 보류**\n"
+                        f"{symbol} 주문이 브로커에서 접수됐지만 체결 확인이 끝나지 않았습니다.\n"
+                        "잔고 동기화 전까지 이번 루프의 남은 신규 진입을 중단합니다.",
+                        critical=True,
+                    )
+                except Exception as e:
+                    logger.debug("live reconcile 보류 알림 실패: {}", e)
+                remaining.extend(candidates[idx + 1:])
+                break
             else:
                 remaining.append(candidate)
 
