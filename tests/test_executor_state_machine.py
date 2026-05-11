@@ -46,11 +46,20 @@ class TestExecutorUsesStateMachine:
     def setup_method(self):
         from config.config_loader import Config
         Config._instance = None
-        from database.models import init_database, get_session, TradeHistory, Position
+        from database.models import (
+            init_database,
+            get_session,
+            OrderRecord as DbOrderRecord,
+            PendingOrderGuard,
+            TradeHistory,
+            Position,
+        )
         init_database()
         session = get_session()
         session.query(TradeHistory).delete()
         session.query(Position).delete()
+        session.query(PendingOrderGuard).delete()
+        session.query(DbOrderRecord).delete()
         session.commit()
         session.close()
 
@@ -339,7 +348,7 @@ class TestExecutorUsesStateMachine:
         """실전 BUY는 주문 ACK만 있고 체결 확인이 없으면 장부 반영을 보류한다."""
         from core.order_guard import OrderGuard
         from database.models import TradeHistory, get_session
-        from database.repositories import get_position
+        from database.repositories import get_open_order_records, get_position
 
         class AckNoFillKIS:
             def has_unfilled_orders(self, symbol):
@@ -372,6 +381,15 @@ class TestExecutorUsesStateMachine:
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "005930"]
         assert orders[-1].status == OrderStatus.ACKED
         assert OrderGuard.has_pending("005930")
+        open_records = get_open_order_records(
+            symbol="005930",
+            account_key="test_sm",
+            mode="live",
+        )
+        assert len(open_records) == 1
+        assert open_records[0]["status"] == OrderStatus.ACKED.value
+        assert open_records[0]["broker_order_id"] == "B123"
+        assert open_records[0]["remaining_qty"] == 3
 
         session = get_session()
         try:
@@ -379,6 +397,60 @@ class TestExecutorUsesStateMachine:
         finally:
             session.close()
             OrderGuard.clear("005930")
+
+    def test_live_buy_blocks_when_persistent_open_order_remains_after_guard_clear(self):
+        """DB에 ACK/PARTIAL 주문이 남아 있으면 TTL 가드가 비어도 같은 종목 주문을 막는다."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_open_order_records
+
+        class AckNoFillKIS:
+            def __init__(self):
+                self.buy_called = 0
+
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                self.buy_called += 1
+                return {"odno": f"B{self.buy_called}"}
+
+            def get_filled_avg_price_after_order(self, symbol, order_output):
+                return None
+
+        OrderGuard.clear("005930")
+        first_kis = AckNoFillKIS()
+        first = self._prepare_live_executor(self._make_executor(), first_kis)
+        first_result = first.execute_buy(
+            symbol="005930",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="first pending live order",
+            strategy="scoring",
+        )
+        assert first_result["requires_reconcile"] is True
+        assert first_kis.buy_called == 1
+        assert get_open_order_records("005930", account_key="test_sm", mode="live")
+
+        OrderGuard.clear("005930")
+        second_kis = AckNoFillKIS()
+        second = self._prepare_live_executor(self._make_executor(), second_kis)
+        second_result = second.execute_buy(
+            symbol="005930",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="duplicate pending live order",
+            strategy="scoring",
+        )
+
+        assert second_result["success"] is False
+        assert second_result["requires_reconcile"] is True
+        assert second_result["persistent_order_block"] is True
+        assert "재조정되지 않은 실전 주문 상태" in second_result["reason"]
+        assert second_kis.buy_called == 0
 
     def test_live_sell_ack_without_fill_keeps_position_open(self):
         """실전 SELL도 체결 확인 전에는 보유 포지션을 줄이거나 삭제하지 않는다."""
@@ -477,7 +549,7 @@ class TestExecutorUsesStateMachine:
         """요청 수량보다 적은 체결만 확인되면 부분체결 상태로 남기고 장부 반영을 보류한다."""
         from core.order_guard import OrderGuard
         from database.models import TradeHistory, get_session
-        from database.repositories import get_position
+        from database.repositories import get_open_order_records, get_position
 
         class AckPartialFillKIS:
             def has_unfilled_orders(self, symbol):
@@ -516,6 +588,15 @@ class TestExecutorUsesStateMachine:
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "005380"]
         assert orders[-1].status == OrderStatus.PARTIAL_FILLED
         assert orders[-1].filled_qty == 1
+        open_records = get_open_order_records(
+            symbol="005380",
+            account_key="test_sm",
+            mode="live",
+        )
+        assert len(open_records) == 1
+        assert open_records[0]["status"] == OrderStatus.PARTIAL_FILLED.value
+        assert open_records[0]["filled_qty"] == 1
+        assert open_records[0]["remaining_qty"] == 2
 
         session = get_session()
         try:
