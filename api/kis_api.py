@@ -1143,6 +1143,10 @@ class KISApi:
 
         if not data:
             return None
+        if not isinstance(data, dict) or data.get("rt_cd") != "0":
+            msg = data.get("msg1", data.get("msg_cd", "잔고 조회 실패")) if isinstance(data, dict) else "잔고 조회 실패"
+            logger.warning("KIS 잔고 조회 실패: {}", msg)
+            return None
 
         output1 = data.get("output1", [])   # 종목별 보유 현황
         output2 = data.get("output2", [{}]) # 계좌 요약
