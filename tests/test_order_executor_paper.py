@@ -265,3 +265,65 @@ def test_paper_sell_remains_allowed_when_runtime_unavailable(fresh_db, monkeypat
 
     assert result["success"] is True
     assert get_position("005930", account_key="exit_safe_test") is None
+
+
+def test_paper_sell_rejects_quantity_above_position(fresh_db):
+    """보유 수량보다 큰 매도 요청은 paper 체결/손익 기록 전에 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="oversell_test")
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        stop_loss_price=55_000,
+        take_profit_price=70_000,
+        trailing_stop_price=58_000,
+        strategy="scoring",
+        account_key="oversell_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=59_000,
+        quantity=4,
+        reason="manual oversell test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "보유 수량 초과 매도 요청"
+    assert result["requested_quantity"] == 4
+    assert result["available_quantity"] == 3
+    assert get_position("005930", account_key="oversell_test").quantity == 3
+
+
+def test_paper_sell_rejects_non_positive_quantity(fresh_db):
+    """0 이하 명시 수량은 전량 청산으로 해석하지 않고 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="invalid_sell_qty_test")
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        stop_loss_price=55_000,
+        take_profit_price=70_000,
+        trailing_stop_price=58_000,
+        strategy="scoring",
+        account_key="invalid_sell_qty_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=59_000,
+        quantity=0,
+        reason="manual invalid quantity test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is False
+    assert result["reason"] == "매도 수량은 1주 이상이어야 합니다"
+    assert get_position("005930", account_key="invalid_sell_qty_test").quantity == 3
