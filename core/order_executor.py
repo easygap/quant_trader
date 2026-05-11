@@ -784,6 +784,24 @@ class OrderExecutor:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
             return {"success": False, "reason": "보유 포지션 없음"}
 
+        sell_qty = position.quantity if quantity is None else int(quantity)
+        if sell_qty <= 0:
+            logger.warning("종목 {} 매도 수량 오류: {}", symbol, sell_qty)
+            return {"success": False, "reason": "매도 수량은 1주 이상이어야 합니다"}
+        if sell_qty > position.quantity:
+            logger.warning(
+                "종목 {} 매도 수량 초과: 요청 {}주 > 보유 {}주",
+                symbol,
+                sell_qty,
+                position.quantity,
+            )
+            return {
+                "success": False,
+                "reason": "보유 수량 초과 매도 요청",
+                "requested_quantity": sell_qty,
+                "available_quantity": position.quantity,
+            }
+
         # 최소 보유 기간 검사 (손절/블랙스완은 예외)
         is_emergency = reason in ("STOP_LOSS", "블랙스완 긴급 매도", "TRAILING_STOP")
         if not is_emergency:
@@ -796,7 +814,6 @@ class OrderExecutor:
                     logger.info("종목 {} 매도 스킵: {}", symbol, msg)
                     return {"success": False, "reason": msg}
 
-        sell_qty = quantity or position.quantity
         expected_price = float(price)
         fill_price = expected_price
         actual_slippage_pct = None
