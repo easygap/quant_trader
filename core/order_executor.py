@@ -18,6 +18,7 @@ from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position,
     get_position, get_all_positions, save_failed_order, count_monthly_buy_trades,
+    save_order_record, get_open_order_records,
 )
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
@@ -68,11 +69,66 @@ class OrderExecutor:
             "reason": "not_run",
             "orders": [],
         }
+        self._restore_persistent_open_orders()
 
         if self.mode == "live":
             self.kis_api.authenticate()
 
         logger.info("OrderExecutor 초기화 완료 (모드: {})", self.mode)
+
+    def _restore_persistent_open_orders(self) -> None:
+        if self.mode != "live":
+            return
+        try:
+            records = get_open_order_records(account_key=self.account_key, mode=self.mode)
+            if records:
+                self.order_book.restore_from_records(records)
+                logger.warning(
+                    "DB 미완료 주문 상태 복구: {}건 — 신규 주문 전 브로커 재조정 필요",
+                    len(records),
+                )
+        except Exception as e:
+            logger.error("DB 미완료 주문 상태 복구 실패: {}", e)
+
+    def _persist_order_record(self, order) -> None:
+        if self.mode != "live":
+            return
+        save_order_record(order)
+
+    def _persistent_live_order_block(self, symbol: str, order) -> dict | None:
+        if self.mode != "live":
+            return None
+        try:
+            open_records = get_open_order_records(
+                symbol=symbol,
+                account_key=self.account_key,
+                mode=self.mode,
+            )
+        except Exception as e:
+            order.transition(OrderStatus.REJECTED, reason="DB 미완료 주문 조회 실패")
+            logger.error("DB 미완료 주문 조회 실패 — 실전 주문 차단: {}", e)
+            return {
+                "success": False,
+                "reason": "DB 미완료 주문 상태를 확인하지 못해 실전 중복 주문 방지를 위해 주문을 보류했습니다.",
+                "symbol": symbol,
+                "mode": self.mode,
+                "requires_reconcile": True,
+                "persistent_order_block": True,
+                "open_order_records": [],
+            }
+        if not open_records:
+            return None
+        order.transition(OrderStatus.REJECTED, reason="DB 미완료 주문 상태 존재")
+        self._persist_order_record(order)
+        return {
+            "success": False,
+            "reason": f"{symbol} 종목에 재조정되지 않은 실전 주문 상태가 남아 있어 중복 주문을 차단했습니다.",
+            "symbol": symbol,
+            "mode": self.mode,
+            "requires_reconcile": True,
+            "persistent_order_block": True,
+            "open_order_records": open_records,
+        }
 
     def _get_sector_map_cached(self) -> dict:
         """업종 매핑을 한 번만 조회하고 캐시한다. 실패 시 빈 dict."""
@@ -525,7 +581,11 @@ class OrderExecutor:
                          if o.order_id != order.order_id]
         if existing_open:
             order.transition(OrderStatus.REJECTED, reason="중복 주문: 미완료 주문 존재")
-            return {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+            self._persist_order_record(order)
+            result = {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+            if self.mode == "live":
+                result.update({"requires_reconcile": True, "persistent_order_block": True})
+            return result
 
         # 3) Submit → broker/simulated event → FILLED
         fill_price = expected_price
@@ -533,15 +593,21 @@ class OrderExecutor:
 
         if self.mode == "live":
             ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            persistent_block = self._persistent_live_order_block(symbol, order)
+            if persistent_block:
+                return persistent_block
             if OrderGuard.has_pending(symbol):
                 order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+                self._persist_order_record(order)
                 return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             live_unfilled_block = self._live_unfilled_order_block(symbol, order)
             if live_unfilled_block:
+                self._persist_order_record(order)
                 return live_unfilled_block
 
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
             order.transition(OrderStatus.SUBMITTED)
+            self._persist_order_record(order)
 
             order_result = self._execute_with_retry(
                 self.kis_api.buy_order, symbol, quantity, int(price),
@@ -551,9 +617,11 @@ class OrderExecutor:
             if order_result is None:
                 order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
                 OrderGuard.clear(symbol)
+                self._persist_order_record(order)
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
 
             order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
+            self._persist_order_record(order)
             execution = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
                 requested_qty=quantity,
@@ -570,6 +638,7 @@ class OrderExecutor:
             self._report_execution_slippage(symbol, "BUY", expected_price, fill_price, actual_slippage_pct)
             # FILLED 전이 — 이 시점에서만 position/trade 반영
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+            self._persist_order_record(order)
             OrderGuard.clear(symbol)
         else:
             # Paper mode: simulated broker event
@@ -744,7 +813,11 @@ class OrderExecutor:
         ]
         if existing_open:
             order.transition(OrderStatus.REJECTED, reason="중복 주문: 미완료 주문 존재")
-            return {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+            self._persist_order_record(order)
+            result = {"success": False, "reason": f"{symbol} 미완료 주문 존재"}
+            if self.mode == "live":
+                result.update({"requires_reconcile": True, "persistent_order_block": True})
+            return result
 
         order.transition(OrderStatus.SUBMITTED)
         order.transition(OrderStatus.ACKED)
@@ -907,15 +980,21 @@ class OrderExecutor:
 
         if self.mode == "live":
             ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            persistent_block = self._persistent_live_order_block(symbol, order)
+            if persistent_block:
+                return persistent_block
             if OrderGuard.has_pending(symbol):
                 order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+                self._persist_order_record(order)
                 return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             live_unfilled_block = self._live_unfilled_order_block(symbol, order)
             if live_unfilled_block:
+                self._persist_order_record(order)
                 return live_unfilled_block
 
             OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
             order.transition(OrderStatus.SUBMITTED)
+            self._persist_order_record(order)
 
             order_result = self._execute_with_retry(
                 self.kis_api.sell_order, symbol, sell_qty, int(price),
@@ -925,9 +1004,11 @@ class OrderExecutor:
             if order_result is None:
                 order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
                 OrderGuard.clear(symbol)
+                self._persist_order_record(order)
                 return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
 
             order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
+            self._persist_order_record(order)
             execution = self._resolve_live_execution(
                 symbol, expected_price, order_result if isinstance(order_result, dict) else None,
                 requested_qty=sell_qty,
@@ -943,6 +1024,7 @@ class OrderExecutor:
             actual_slippage_pct = execution["actual_slippage_pct"]
             self._report_execution_slippage(symbol, "SELL", expected_price, fill_price, actual_slippage_pct)
             order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
+            self._persist_order_record(order)
             OrderGuard.clear(symbol)
         else:
             # Paper mode: simulated broker event
@@ -1348,6 +1430,7 @@ class OrderExecutor:
         action: str,
         execution: dict,
     ) -> dict:
+        self._persist_order_record(order)
         logger.warning(
             "실전 주문 체결 미확인 — 장부 반영 보류: {} {} order_id={} broker_order_id={} reason={}",
             action,
