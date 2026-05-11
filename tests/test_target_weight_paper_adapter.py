@@ -12,6 +12,9 @@ import pandas as pd
 import pytest
 
 
+TEST_EXECUTION_SESSION_ID = "target_weight_candidate_2026-04-10_test_session"
+
+
 class FakeCollector:
     def __init__(self, frames):
         self.frames = frames
@@ -236,9 +239,10 @@ def _target_weight_preflight_refresh_ok(monkeypatch):
     monkeypatch.setattr(twp, "refresh_paper_preflight_status", _ok)
 
 
-def _complete_execution(plan):
+def _complete_execution(plan, execution_session_id=TEST_EXECUTION_SESSION_ID):
     details = []
-    for order in plan.orders:
+    for index, order in enumerate(plan.orders):
+        order_id = f"ORD-TW-{index + 1:03d}"
         result = {
             "success": True,
             "symbol": order.symbol,
@@ -246,6 +250,8 @@ def _complete_execution(plan):
             "price": order.price,
             "quantity": order.quantity,
             "mode": "paper",
+            "execution_session_id": execution_session_id,
+            "order_id": order_id,
         }
         if order.action == "BUY":
             result["paper_fixed_quantity"] = True
@@ -265,10 +271,11 @@ def _complete_execution(plan):
         "halted": False,
         "halt_reason": "",
         "details": details,
+        "execution_session_id": execution_session_id,
     }
 
 
-def _complete_fills(plan):
+def _complete_fills(plan, execution_session_id=TEST_EXECUTION_SESSION_ID):
     return [
         SimpleNamespace(
             symbol=order.symbol,
@@ -278,8 +285,10 @@ def _complete_fills(plan):
             mode="paper",
             account_key=plan.candidate_id,
             executed_at=f"{plan.trade_day} 09:00:00",
+            execution_session_id=execution_session_id,
+            order_id=f"ORD-TW-{index + 1:03d}",
         )
-        for order in plan.orders
+        for index, order in enumerate(plan.orders)
     ]
 
 
@@ -1391,6 +1400,47 @@ def test_reconcile_plan_fills_flags_partial_quantity():
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[0].symbol
     assert reconciliation["mismatches"][0]["expected_quantity"] == plan.orders[0].quantity
     assert reconciliation["mismatches"][0]["actual_quantity"] == plan.orders[0].quantity - 1
+
+
+def test_load_paper_trade_fills_filters_by_execution_session_id(monkeypatch):
+    import database.repositories as repositories
+    from tools.target_weight_rotation_pilot import load_paper_trade_fills
+
+    plan = _adapter_plan()
+    target_fill = _complete_fills(plan, execution_session_id="session-a")[0]
+    other_fill = _complete_fills(plan, execution_session_id="session-b")[0]
+    captured = {}
+
+    def fake_get_trade_history(**kwargs):
+        captured.update(kwargs)
+        return [target_fill, other_fill]
+
+    monkeypatch.setattr(repositories, "get_trade_history", fake_get_trade_history)
+
+    fills = load_paper_trade_fills(plan, execution_session_id="session-a")
+
+    assert captured["execution_session_id"] == "session-a"
+    assert fills == [target_fill]
+
+
+def test_reconcile_plan_fills_rejects_same_day_unlinked_trade_history_fill():
+    from tools.target_weight_rotation_pilot import reconcile_plan_fills
+
+    plan = _adapter_plan()
+    unlinked_fills = _complete_fills(plan, execution_session_id="")
+
+    reconciliation = reconcile_plan_fills(
+        plan,
+        unlinked_fills,
+        execution_session_id=TEST_EXECUTION_SESSION_ID,
+    )
+
+    assert reconciliation["complete"] is False
+    assert "target_weight_fill_reconciliation_mismatch" in reconciliation["reason"]
+    assert "unlinked" in reconciliation["reason"]
+    assert reconciliation["actual_quantities"] == {}
+    assert reconciliation["unlinked_fills"][0]["symbol"] == plan.orders[0].symbol
+    assert reconciliation["mismatches"][0]["actual_quantity"] == 0
 
 
 def test_verify_existing_pilot_evidence_accepts_complete_record(monkeypatch):
@@ -2914,7 +2964,7 @@ def test_run_pilot_blocks_evidence_when_execution_incomplete(monkeypatch, tmp_pa
             "details": [],
         },
     )
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: [])
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: [])
     monkeypatch.setattr(twp, "_load_positions", lambda account_key: {})
     monkeypatch.setattr(
         pe,
@@ -2976,7 +3026,7 @@ def test_run_pilot_blocks_evidence_when_position_reconciliation_fails(monkeypatc
         "execute_plan",
         lambda *args, **kwargs: _complete_execution(plan),
     )
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
     monkeypatch.setattr(
         pe,
@@ -3034,7 +3084,7 @@ def test_run_pilot_blocks_evidence_when_order_result_reconciliation_fails(monkey
         lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
     )
     monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: execution)
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -3102,7 +3152,7 @@ def test_run_pilot_blocks_evidence_when_fill_reconciliation_fails(monkeypatch, t
         lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
     )
     monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: incomplete_fills)
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: incomplete_fills)
     position_snapshots = iter([
         {},
         {
@@ -3133,6 +3183,71 @@ def test_run_pilot_blocks_evidence_when_fill_reconciliation_fails(monkeypatch, t
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_fill_reconciliation_mismatch" in result["evidence_collection"]["reason"]
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
+    assert saved_sessions[0]["target_weight_execution"]["fill_complete"] is False
+
+
+def test_run_pilot_blocks_evidence_when_trade_fills_are_unlinked(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    execution = _complete_execution(plan, execution_session_id=TEST_EXECUTION_SESSION_ID)
+    unlinked_fills = _complete_fills(plan, execution_session_id="")
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: execution)
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: unlinked_fills)
+    position_snapshots = iter([
+        {},
+        {
+            order.symbol: SimpleNamespace(quantity=order.target_quantity)
+            for order in plan.orders
+        },
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("unlinked fills must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+
+    reconciliation = result["execution_evidence"]["fill_reconciliation"]
+    assert result["execution_evidence"]["fill_complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_fill_reconciliation_mismatch" in result["evidence_collection"]["reason"]
+    assert reconciliation["execution_session_id"] == TEST_EXECUTION_SESSION_ID
+    assert reconciliation["unlinked_fills"][0]["execution_session_id"] == ""
     assert saved_sessions[0]["target_weight_execution"]["fill_complete"] is False
 
 
@@ -3178,7 +3293,7 @@ def test_run_pilot_records_artifact_when_pilot_cap_validation_blocks(monkeypatch
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("cap validation block must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("cap validation block must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3330,7 +3445,7 @@ def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkey
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("liquidity failure must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("liquidity failure must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3405,7 +3520,7 @@ def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("pre-trade risk failure must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("pre-trade risk failure must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3479,7 +3594,7 @@ def test_run_pilot_blocks_stale_trade_day_before_order_submission(monkeypatch, t
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("stale trade day must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("stale trade day must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3558,7 +3673,7 @@ def test_run_pilot_blocks_same_trade_day_after_close_before_order_submission(mon
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("closed market session must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("closed market session must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3630,7 +3745,7 @@ def test_run_pilot_blocks_authorization_snapshot_mismatch_before_order_submissio
     monkeypatch.setattr(
         twp,
         "load_paper_trade_fills",
-        lambda plan: pytest.fail("stale authorization snapshot must not reconcile fills"),
+        lambda plan, **kwargs: pytest.fail("stale authorization snapshot must not reconcile fills"),
     )
     monkeypatch.setattr(
         pe,
@@ -3899,7 +4014,7 @@ def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp
         "execute_plan",
         lambda *args, **kwargs: _complete_execution(plan),
     )
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -3967,7 +4082,7 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
         "execute_plan",
         lambda *args, **kwargs: _complete_execution(plan),
     )
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -4043,7 +4158,7 @@ def test_run_pilot_accepts_verified_already_recorded_pilot_evidence(monkeypatch,
         lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
     )
     monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
@@ -4105,7 +4220,7 @@ def test_run_pilot_blocks_unverified_already_recorded_evidence(monkeypatch, tmp_
         lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
     )
     monkeypatch.setattr(twp, "execute_plan", lambda *args, **kwargs: _complete_execution(plan))
-    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan: _complete_fills(plan))
+    monkeypatch.setattr(twp, "load_paper_trade_fills", lambda plan, **kwargs: _complete_fills(plan))
     position_snapshots = iter([
         {},
         {
