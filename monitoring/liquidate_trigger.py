@@ -54,7 +54,7 @@ def _run_liquidate() -> tuple[bool, str]:
 
     args = Namespace(confirm_live=_env_truthy("LIQUIDATE_TRIGGER_CONFIRM_LIVE"))
     try:
-        run_emergency_liquidate(args)
+        result = run_emergency_liquidate(args)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
         return (
@@ -63,6 +63,17 @@ def _run_liquidate() -> tuple[bool, str]:
             f"종료 코드={code}. live 설정이면 ENABLE_LIVE_TRADING=true 및 "
             "LIQUIDATE_TRIGGER_CONFIRM_LIVE=true 설정을 확인하세요.",
         )
+    if isinstance(result, dict):
+        attempted = int(result.get("attempted") or 0)
+        succeeded = int(result.get("succeeded") or 0)
+        failed = int(result.get("failed") or 0)
+        if failed:
+            return (
+                False,
+                f"전 종목 청산 요청 처리 중 실패 {failed}건이 발생했습니다. "
+                f"대상={attempted}, 성공={succeeded}, 실패={failed}. 로그를 확인하세요.",
+            )
+        return True, f"전 종목 청산 요청 처리 완료. 대상={attempted}, 성공={succeeded}, 실패={failed}."
     return True, "전 종목 청산 요청 처리 완료."
 
 
