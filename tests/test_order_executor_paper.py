@@ -78,6 +78,7 @@ def fresh_db():
 def test_execute_buy_quantity_records_exact_paper_quantity(fresh_db, monkeypatch):
     """Target-weight adapters can submit exact paper buy quantities."""
     from core.order_executor import OrderExecutor
+    from database.models import get_session, TradeHistory
     from database.repositories import get_position, get_daily_trade_summary
 
     executor = OrderExecutor(account_key="exact_qty_test")
@@ -93,15 +94,25 @@ def test_execute_buy_quantity_records_exact_paper_quantity(fresh_db, monkeypatch
         available_cash=10_000_000,
         reason="exact quantity test",
         strategy="target_weight_rotation_test",
+        execution_session_id="session-exact-qty",
     )
 
     assert result["success"] is True
     assert result["quantity"] == 7
+    assert result["execution_session_id"] == "session-exact-qty"
+    assert result["order_id"].startswith("ORD-")
     position = get_position("005930", account_key="exact_qty_test")
     assert position is not None
     assert position.quantity == 7
     summary = get_daily_trade_summary(mode="paper", account_key="exact_qty_test")
     assert summary["buy_count"] == 1
+    session = get_session()
+    try:
+        trade = session.query(TradeHistory).filter(TradeHistory.symbol == "005930").one()
+        assert trade.execution_session_id == "session-exact-qty"
+        assert trade.order_id == result["order_id"]
+    finally:
+        session.close()
 
 
 def test_paper_buy_quantity_fails_closed_when_runtime_unavailable(fresh_db, monkeypatch):
