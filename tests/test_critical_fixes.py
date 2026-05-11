@@ -417,6 +417,57 @@ class TestForceLiveRemoved:
 
         assert trigger._get_bind_host() == "0.0.0.0"
 
+    def test_http_liquidate_token_validation_rejects_short_token(self, monkeypatch):
+        """긴급 청산 HTTP 토큰은 기본 최소 길이를 만족해야 한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_MIN_TOKEN_LENGTH", raising=False)
+
+        ok, error = trigger._validate_trigger_token("short")
+
+        assert ok is False
+        assert "at least 16 characters" in error
+
+    def test_http_liquidate_token_validation_rejects_placeholder(self, monkeypatch):
+        """흔한 placeholder 토큰은 길이와 무관하게 거부한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.setenv("LIQUIDATE_TRIGGER_MIN_TOKEN_LENGTH", "16")
+
+        ok, error = trigger._validate_trigger_token("your_secret")
+
+        assert ok is False
+        assert "placeholder" in error
+
+    def test_http_liquidate_token_validation_accepts_strong_token(self, monkeypatch):
+        """충분히 긴 임의 토큰은 허용한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        monkeypatch.delenv("LIQUIDATE_TRIGGER_MIN_TOKEN_LENGTH", raising=False)
+
+        ok, error = trigger._validate_trigger_token("strong-liquidate-token-2026")
+
+        assert ok is True
+        assert error == ""
+
+    def test_http_liquidate_rejects_weak_configured_token_before_auth(self, monkeypatch):
+        """서버 요청 처리도 약한 설정 토큰을 503으로 차단한다."""
+        import monitoring.liquidate_trigger as trigger
+
+        captured = {}
+        handler = object.__new__(trigger.LiquidateHandler)
+        handler.path = "/liquidate"
+        handler.headers = {"X-Token": "short"}
+        handler._send = lambda code, body, headers=None: captured.update(
+            {"code": code, "body": body, "headers": headers or {}}
+        )
+        monkeypatch.setenv("LIQUIDATE_TRIGGER_TOKEN", "short")
+
+        handler._handle_liquidate()
+
+        assert captured["code"] == 503
+        assert "at least 16 characters" in captured["body"]["error"]
+
 
 # ── 2. OrderGuard 타이밍 ──
 
