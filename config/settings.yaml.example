@@ -3,6 +3,7 @@
 # ============================================================
 # 중요: app_key, app_secret, account_no, webhook_url 은 환경변수에서만 로드됩니다.
 # .env 에 KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_NO, DISCORD_WEBHOOK_URL 설정하세요.
+# target-weight capped paper pilot은 Discord webhook이 비어 있으면 readiness/preflight 단계에서 차단됩니다.
 
 kis_api:
   app_key: ""
@@ -84,6 +85,7 @@ dart:
   enabled: true
 
 # 알림: 디스코드 → 이메일 폴백 (critical 시 디스코드+이메일 동시)
+# target-weight capped paper pilot은 DISCORD_WEBHOOK_URL 설정이 필수입니다.
 discord:
   enabled: true
   webhook_url: ""
