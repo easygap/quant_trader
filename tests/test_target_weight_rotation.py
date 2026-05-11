@@ -235,34 +235,140 @@ def test_target_weight_plan_blocks_stale_benchmark_price_for_excess_scores():
     assert "benchmark_latest=2025-03-06" in message
 
 
-def test_target_weight_rotation_backtest_blocks_stale_symbol_price_after_ffill():
+def test_target_weight_rotation_backtest_ignores_unheld_stale_symbol_price_after_ffill():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
     frames = _frames_for_rotation()
-    frames["BBB"] = frames["BBB"][frames["BBB"]["date"] != pd.Timestamp("2025-02-03")]
+    frames["CCC"] = frames["CCC"][frames["CCC"]["date"] != pd.Timestamp("2025-02-03")]
 
-    with pytest.raises(ValueError, match="target_weight_research_stale_price_data") as exc:
-        run_target_weight_rotation_backtest(
-            symbols=["AAA", "BBB", "CCC"],
-            start="2025-02-03",
-            end="2025-02-05",
-            capital=100_000.0,
-            params={
-                "target_top_n": 2,
-                "target_exposure": 0.80,
-                "short_lookback": 2,
-                "long_lookback": 3,
-                "short_weight": 0.5,
-                "score_mode": "benchmark_excess",
-                "benchmark_symbol": "KS11",
-            },
-            collector=FakeCollector(frames),
-            risk_manager=NoCostRiskManager(),
-        )
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-05",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
 
-    message = str(exc.value)
-    assert "trade_day=2025-02-03" in message
-    assert "BBB=2025-01-31" in message
+    first_day_buys = [
+        t["symbol"]
+        for t in result["trades"]
+        if t["action"] == "BUY" and t["date"] == pd.Timestamp("2025-02-03")
+    ]
+
+    assert set(first_day_buys) == {"AAA", "BBB"}
+    assert result["target_weight_metrics"]["held_price_freshness_checked"] is True
+
+
+def test_target_weight_rotation_backtest_excludes_stale_score_symbol_after_ffill():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    dates = pd.to_datetime(["2025-01-28", "2025-01-29", "2025-01-30", "2025-01-31", "2025-02-03"])
+    frames = {
+        "AAA": _ohlcv(dates, [100.0, 100.0, 100.0, 110.0, 111.0]),
+        "BBB": _ohlcv(dates, [100.0, 100.0, 200.0, 210.0, 211.0]),
+        "KS11": _ohlcv(dates, [100.0] * len(dates)),
+    }
+    frames["BBB"] = frames["BBB"][frames["BBB"]["date"] != pd.Timestamp("2025-01-31")]
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-02-03",
+        capital=100_000.0,
+        params={
+            "target_top_n": 1,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 2,
+            "short_weight": 1.0,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    buys = [t["symbol"] for t in result["trades"] if t["action"] == "BUY"]
+    metrics = result["target_weight_metrics"]
+
+    assert buys == ["AAA"]
+    assert metrics["stale_score_symbols_excluded"] == 1
+    assert metrics["stale_score_symbol_count"] == 1
+    assert metrics["stale_score_symbols_sample"] == ["BBB"]
+
+
+def test_target_weight_rotation_backtest_records_held_stale_valuation_after_ffill():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    frames["AAA"] = frames["AAA"][frames["AAA"]["date"] != pd.Timestamp("2025-02-04")]
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-02-05",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    metrics = result["target_weight_metrics"]
+
+    assert metrics["held_stale_valuation_days"] == 1
+    assert metrics["held_stale_valuation_events"] == 1
+    assert metrics["held_stale_valuation_symbol_count"] == 1
+    assert metrics["held_stale_valuation_sample"] == ["2025-02-04:AAA=2025-02-03"]
+
+
+def test_target_weight_rotation_backtest_skips_rebalance_when_held_open_is_missing():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    frames = _frames_for_rotation()
+    frames["AAA"] = frames["AAA"][frames["AAA"]["date"] != pd.Timestamp("2025-03-03")]
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    metrics = result["target_weight_metrics"]
+    march_trades = [t for t in result["trades"] if t["date"] == pd.Timestamp("2025-03-03")]
+
+    assert march_trades == []
+    assert metrics["skipped_rebalance_missing_held_open_count"] == 1
+    assert metrics["missing_held_open_events"] == 1
+    assert metrics["missing_held_open_symbol_count"] == 1
+    assert metrics["missing_held_open_sample"] == ["2025-03-03:AAA"]
 
 
 def test_target_weight_rotation_backtest_blocks_stale_benchmark_price_for_excess_scores():
