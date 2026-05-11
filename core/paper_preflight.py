@@ -328,8 +328,10 @@ def _check_stale_anomalies(strategy, checks, actions):
 
 def _check_notifier_health(result, checks, actions, send_test: bool):
     health = {"discord_configured": False, "discord_reachable": None,
-              "test_send_id": None, "test_send_status": None}
+              "test_send_id": None, "test_send_status": None,
+              "checked_at": datetime.now().isoformat()}
     try:
+        existing_health = _load_notifier_health()
         from config.config_loader import Config
         config = Config.get()
         dc = config.discord
@@ -337,6 +339,16 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
         enabled = dc.get("enabled", False)
 
         health["discord_configured"] = bool(enabled and webhook_url)
+        if existing_health:
+            for key in (
+                "discord_reachable",
+                "test_send_id",
+                "test_send_status",
+                "test_sent_at",
+                "last_success_at",
+            ):
+                if existing_health.get(key) is not None:
+                    health[key] = existing_health.get(key)
 
         if not health["discord_configured"]:
             checks.append(PreflightCheck("notifier_discord", "warn",
@@ -361,7 +373,9 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
                     health["discord_reachable"] = resp.status_code in (200, 204)
                     health["test_send_id"] = correlation_id
                     health["test_send_status"] = resp.status_code
+                    health["test_sent_at"] = health["checked_at"]
                     if health["discord_reachable"]:
+                        health["last_success_at"] = health["checked_at"]
                         checks.append(PreflightCheck("notifier_discord", "pass",
                                       f"test send OK (status={resp.status_code}, id={correlation_id})"))
                         result.notifier_health = "healthy"
@@ -376,9 +390,29 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
                                   f"test send exception: {e}"))
                     result.notifier_health = "degraded"
             else:
-                checks.append(PreflightCheck("notifier_discord", "pass",
-                              "webhook configured (use --send-test-notification to verify)"))
-                result.notifier_health = "configured"
+                from core.paper_pilot import _notifier_health_verdict
+                ready, status, reason = _notifier_health_verdict(health)
+                if ready:
+                    checks.append(PreflightCheck(
+                        "notifier_discord",
+                        "pass",
+                        "recent webhook test OK",
+                    ))
+                    result.notifier_health = "healthy"
+                elif status == "unreachable":
+                    checks.append(PreflightCheck("notifier_discord", "warn", reason))
+                    result.notifier_health = "degraded"
+                elif status == "stale":
+                    checks.append(PreflightCheck("notifier_discord", "warn", reason))
+                    result.notifier_health = "stale"
+                else:
+                    checks.append(PreflightCheck(
+                        "notifier_discord",
+                        "warn",
+                        "webhook configured but test send not verified",
+                    ))
+                    actions.append("preflight를 --send-test-notification 옵션으로 다시 실행해 Discord 도달성 확인")
+                    result.notifier_health = "unverified"
 
     except Exception as e:
         checks.append(PreflightCheck("notifier_discord", "warn", f"exception: {e}"))
@@ -386,6 +420,17 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
 
     # notifier health artifact
     _save_notifier_health(health)
+
+
+def _load_notifier_health() -> dict | None:
+    path = RUNTIME_DIR / "notifier_health.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _check_market_session(date, checks):
