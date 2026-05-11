@@ -61,6 +61,12 @@ class StrategyMetrics:
     paper_win_rate: Optional[float] = None
     paper_frozen_days: Optional[int] = None
     paper_cumulative_return: Optional[float] = None
+    target_weight_evidence_required: Optional[bool] = None
+    target_weight_verified_pilot_days: Optional[int] = None
+    target_weight_invalid_days: Optional[int] = None
+    target_weight_all_promotable_days_verified: Optional[bool] = None
+    target_weight_params_hash_consistent: Optional[bool] = None
+    target_weight_params_hash: Optional[str] = None
 
 
 @dataclass
@@ -152,6 +158,23 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"paper frozen_days {m.paper_frozen_days} > 0")
     if m.paper_cumulative_return is None or m.paper_cumulative_return <= 0:
         fails.append(f"paper cumulative_return {m.paper_cumulative_return or 0} <= 0")
+    if m.name.startswith("target_weight_"):
+        if m.target_weight_evidence_required is not True:
+            fails.append("target-weight evidence required flag missing")
+        if m.target_weight_verified_pilot_days is None or m.target_weight_verified_pilot_days < 60:
+            fails.append(
+                f"target-weight verified pilot days {m.target_weight_verified_pilot_days or 0} < 60"
+            )
+        if m.target_weight_invalid_days is None:
+            fails.append("target-weight invalid days missing")
+        elif m.target_weight_invalid_days > 0:
+            fails.append(f"target-weight invalid days {m.target_weight_invalid_days} > 0")
+        if m.target_weight_all_promotable_days_verified is not True:
+            fails.append("target-weight promotable evidence not fully verified")
+        if m.target_weight_params_hash_consistent is not True:
+            fails.append("target-weight params_hash not consistent")
+        if not m.target_weight_params_hash:
+            fails.append("target-weight params_hash missing")
     if fails:
         return False, "live 미달: " + ", ".join(fails)
     return True, "live_candidate 충족"
@@ -161,12 +184,12 @@ def promote(m: StrategyMetrics, experiment_note: str = "") -> PromotionResult:
     """metrics 기반 자동 승격 판정. 수동 override 없음."""
 
     # live_candidate 체크
-    ok, reason = _check_live_candidate(m)
-    if ok:
+    live_ok, live_reason = _check_live_candidate(m)
+    if live_ok:
         return PromotionResult(
             name=m.name, status="live_candidate",
             allowed_modes=["backtest", "paper", "live"],
-            reason=reason, experiment_note=experiment_note,
+            reason=live_reason, experiment_note=experiment_note,
         )
 
     # provisional_paper_candidate 체크
@@ -175,7 +198,7 @@ def promote(m: StrategyMetrics, experiment_note: str = "") -> PromotionResult:
         return PromotionResult(
             name=m.name, status="provisional_paper_candidate",
             allowed_modes=["backtest", "paper"],
-            reason=reason, experiment_note=experiment_note,
+            reason=f"{reason}; live 차단: {live_reason}", experiment_note=experiment_note,
         )
 
     # paper_only 체크
@@ -259,6 +282,7 @@ def paper_evidence_metrics_from_package(package: Optional[dict]) -> dict[str, ob
     """promotion package를 StrategyMetrics의 paper_* 필드로 변환한다."""
     if not isinstance(package, dict):
         return {}
+    target_weight_evidence = package.get("target_weight_evidence") or {}
     return {
         "paper_days": _as_int(
             package.get("promotable_evidence_days", package.get("real_paper_days"))
@@ -271,6 +295,13 @@ def paper_evidence_metrics_from_package(package: Optional[dict]) -> dict[str, ob
         "paper_win_rate": _as_float(package.get("win_rate")),
         "paper_frozen_days": _as_int(package.get("frozen_days")),
         "paper_cumulative_return": _as_float(package.get("cumulative_return")),
+        "target_weight_evidence_required": target_weight_evidence.get("required"),
+        "target_weight_verified_pilot_days": _as_int(package.get("target_weight_verified_pilot_days")),
+        "target_weight_invalid_days": _as_int(package.get("target_weight_invalid_days")),
+        "target_weight_all_promotable_days_verified": target_weight_evidence.get("all_promotable_days_verified"),
+        "target_weight_params_hash_consistent": target_weight_evidence.get("params_hash_consistent"),
+        "target_weight_params_hash": package.get("target_weight_params_hash")
+            or target_weight_evidence.get("params_hash"),
     }
 
 
@@ -289,6 +320,12 @@ def attach_paper_evidence_metrics(
         "paper_win_rate",
         "paper_frozen_days",
         "paper_cumulative_return",
+        "target_weight_evidence_required",
+        "target_weight_verified_pilot_days",
+        "target_weight_invalid_days",
+        "target_weight_all_promotable_days_verified",
+        "target_weight_params_hash_consistent",
+        "target_weight_params_hash",
     ):
         value = paper_metrics.get(field)
         if value is not None:
