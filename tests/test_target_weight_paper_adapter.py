@@ -283,6 +283,22 @@ def _complete_fills(plan):
     ]
 
 
+@pytest.mark.parametrize(
+    ("execution", "expected"),
+    [
+        ({"executed": 0, "failed": 0, "details": [{"status": "skipped_liquidity_preflight"}]}, False),
+        ({"executed": 0, "failed": 0, "details": [{"status": "skipped_pre_trade_risk"}]}, False),
+        ({"executed": 1, "failed": 0, "details": [{"status": "success"}]}, True),
+        ({"executed": 0, "failed": 1, "details": [{"status": "failed"}]}, True),
+        ({"executed": 0, "failed": 0, "details": [{"status": "exception"}]}, True),
+    ],
+)
+def test_execution_reached_order_submission_tracks_actual_order_attempts(execution, expected):
+    from tools.target_weight_rotation_pilot import _execution_reached_order_submission
+
+    assert _execution_reached_order_submission(execution) is expected
+
+
 def test_validate_execution_trade_day_allows_same_kst_day():
     from tools.target_weight_rotation_pilot import validate_execution_trade_day
 
@@ -3233,7 +3249,7 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
     assert pre_reconciliation["unexpected_positions"] == [
         {"symbol": "ZZZ", "actual_quantity": 3}
     ]
-    assert saved_sessions[0]["target_weight_execution"]["pre_execution_complete"] is False
+    assert saved_sessions == []
 
 
 def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkeypatch, tmp_path):
@@ -3313,7 +3329,7 @@ def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkey
     assert result["execution_evidence"]["complete"] is False
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_liquidity_preflight_failed" in result["evidence_collection"]["reason"]
-    assert saved_sessions[0]["target_weight_execution"]["liquidity_complete"] is False
+    assert saved_sessions == []
 
 
 def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch, tmp_path):
@@ -3389,7 +3405,7 @@ def test_run_pilot_blocks_order_submission_when_pre_trade_risk_fails(monkeypatch
     assert result["execution_evidence"]["complete"] is False
     assert result["evidence_collection"]["status"] == "blocked"
     assert "target_weight_pre_trade_risk_failed" in result["evidence_collection"]["reason"]
-    assert saved_sessions[0]["target_weight_execution"]["pre_trade_risk_complete"] is False
+    assert saved_sessions == []
 
 
 def test_run_pilot_blocks_stale_trade_day_before_order_submission(monkeypatch, tmp_path):
