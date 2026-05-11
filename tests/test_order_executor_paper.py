@@ -245,6 +245,202 @@ def test_paper_buy_quantity_allows_pilot_override(fresh_db, monkeypatch):
     assert get_position("005930", account_key="pilot_override_test") is not None
 
 
+def _set_monthly_buy_cap(executor, cap: int):
+    executor.config.risk_params.setdefault("position_limits", {})[
+        "max_monthly_roundtrips"
+    ] = cap
+
+
+def _allow_paper_entry(monkeypatch):
+    monkeypatch.setattr(
+        "core.paper_preflight.load_preflight_status",
+        lambda strategy, strict=False: _passing_preflight(),
+    )
+    monkeypatch.setattr(
+        "core.paper_runtime.get_paper_runtime_state",
+        lambda *a, **kw: _normal_runtime_state(),
+    )
+
+
+def _seed_buy_trades(account_key: str, symbol: str, mode: str, count: int):
+    from database.repositories import save_trade
+
+    for idx in range(count):
+        save_trade(
+            symbol=symbol,
+            action="BUY",
+            price=60_000 + idx,
+            quantity=1,
+            strategy="scoring",
+            reason="monthly cap seed",
+            mode=mode,
+            account_key=account_key,
+        )
+
+
+def test_count_monthly_buy_trades_filters_scope_and_month(fresh_db):
+    """월간 BUY 집계는 현재 월, account_key, mode, symbol 기준으로만 센다."""
+    from datetime import datetime, timedelta
+
+    from database.models import TradeHistory, get_session
+    from database.repositories import count_monthly_buy_trades
+
+    now = datetime.now()
+    month_start = now.replace(day=1, hour=12, minute=0, second=0, microsecond=0)
+    previous_month = month_start - timedelta(days=1)
+
+    rows = [
+        ("scope_count", "005930", "BUY", "paper", month_start, 60_000),
+        ("scope_count", "005930", "BUY", "paper", month_start + timedelta(days=1), 60_100),
+        ("scope_count", "005930", "SELL", "paper", month_start, 60_200),
+        ("scope_count", "000660", "BUY", "paper", month_start, 100_000),
+        ("scope_count", "005930", "BUY", "live", month_start, 60_300),
+        ("other_account", "005930", "BUY", "paper", month_start, 60_400),
+        ("scope_count", "005930", "BUY", "paper", previous_month, 59_900),
+    ]
+
+    session = get_session()
+    try:
+        for account_key, symbol, action, mode, executed_at, price in rows:
+            session.add(
+                TradeHistory(
+                    account_key=account_key,
+                    symbol=symbol,
+                    action=action,
+                    price=price,
+                    quantity=1,
+                    total_amount=price,
+                    strategy="scoring",
+                    reason="monthly cap scope test",
+                    mode=mode,
+                    executed_at=executed_at,
+                )
+            )
+        session.commit()
+    finally:
+        session.close()
+
+    current_count = count_monthly_buy_trades(
+        "005930",
+        mode="paper",
+        account_key="scope_count",
+        at=month_start,
+    )
+    previous_count = count_monthly_buy_trades(
+        "005930",
+        mode="paper",
+        account_key="scope_count",
+        at=previous_month,
+    )
+
+    assert current_count == 2
+    assert previous_count == 1
+
+
+def test_paper_buy_quantity_blocks_monthly_buy_cap(fresh_db, monkeypatch):
+    """운영 paper BUY도 종목별 월간 거래 횟수 cap에 도달하면 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="monthly_cap_test")
+    _set_monthly_buy_cap(executor, 2)
+    _seed_buy_trades("monthly_cap_test", "005930", "paper", 2)
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy_quantity(
+        symbol="005930",
+        price=60_000,
+        quantity=1,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="monthly cap test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is False
+    assert "월간 거래 횟수 제한 초과" in result["reason"]
+    assert get_position("005930", account_key="monthly_cap_test") is None
+
+
+def test_monthly_buy_cap_is_scoped_by_account_mode_and_symbol(fresh_db, monkeypatch):
+    """월간 cap은 account_key/mode/symbol 단위로 분리된다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    _seed_buy_trades("other_account", "005930", "paper", 2)
+    _seed_buy_trades("scoped_cap_test", "000660", "paper", 2)
+    _seed_buy_trades("scoped_cap_test", "005930", "live", 2)
+
+    executor = OrderExecutor(account_key="scoped_cap_test")
+    _set_monthly_buy_cap(executor, 2)
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy_quantity(
+        symbol="005930",
+        price=60_000,
+        quantity=1,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="monthly cap scoped test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert get_position("005930", account_key="scoped_cap_test") is not None
+
+
+def test_paper_sell_ignores_monthly_buy_cap(fresh_db):
+    """월간 BUY cap에 도달해도 기존 포지션 청산은 막지 않는다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="monthly_cap_sell_test")
+    _set_monthly_buy_cap(executor, 1)
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 0
+    _seed_buy_trades("monthly_cap_sell_test", "005930", "paper", 1)
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=1,
+        strategy="scoring",
+        account_key="monthly_cap_sell_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=61_000,
+        quantity=1,
+        reason="monthly cap sell test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is True
+    assert get_position("005930", account_key="monthly_cap_sell_test") is None
+
+
+def test_live_pre_order_check_blocks_monthly_buy_cap(fresh_db):
+    """live BUY도 월간 cap에 도달하면 거래시간/KIS 조회 전 fail-closed 차단한다."""
+    from core.order_executor import OrderExecutor
+
+    executor = OrderExecutor(account_key="live_monthly_cap_test")
+    executor.mode = "live"
+    _set_monthly_buy_cap(executor, 1)
+    _seed_buy_trades("live_monthly_cap_test", "005930", "live", 1)
+
+    result = executor._pre_order_check(
+        symbol="005930",
+        action="BUY",
+        strategy="scoring",
+    )
+
+    assert result["allowed"] is False
+    assert result["monthly_buy_cap_blocked"] is True
+    assert result["monthly_buy_count"] == 1
+    assert result["monthly_buy_limit"] == 1
+
+
 def test_paper_sell_remains_allowed_when_runtime_unavailable(fresh_db, monkeypatch):
     """Runtime 장애가 있어도 기존 포지션 청산 경로는 막지 않는다."""
     from core.order_executor import OrderExecutor
