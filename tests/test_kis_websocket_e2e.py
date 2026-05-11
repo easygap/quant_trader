@@ -179,13 +179,21 @@ class TestWebSocketMockE2E:
         def fake_connect_sync(*args, **kwargs):
             return ctx_manager
 
+        gap_snapshots = []
+
+        def capture_gap_snapshot(snapshot):
+            gap_snapshots.append(dict(snapshot))
+
         with patch("api.kis_api.KISApi") as MockKIS:
             MockKIS.return_value.get_approval_key.return_value = "mock_key"
             MockKIS.return_value._mask_key.return_value = "****"
-            with patch("api.websocket_handler.websockets.connect", fake_connect_sync):
+            with patch("api.websocket_handler.websockets.connect", fake_connect_sync), \
+                 patch("monitoring.dashboard_runtime_state.merge_ws_gap", capture_gap_snapshot):
                 handler = WebSocketHandler()
                 task = asyncio.create_task(handler.connect(["005930"]))
                 await asyncio.sleep(0.25)
+                assert gap_snapshots
+                assert gap_snapshots[-1]["is_connected"] is True
                 await handler.disconnect()
                 await asyncio.sleep(0.1)
                 task.cancel()
@@ -194,3 +202,4 @@ class TestWebSocketMockE2E:
                 except asyncio.CancelledError:
                     pass
         assert handler.is_connected is False
+        assert gap_snapshots[-1]["is_connected"] is False
