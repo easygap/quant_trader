@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +31,8 @@ PILOT_MAX_EVIDENCE_STALE_DAYS = 5
 # pilot entry guard: 최근 5일 benchmark final 비율 최소 기준
 PILOT_MIN_BENCHMARK_FINAL_RATIO = 0.4
 PILOT_ELIGIBLE_STATUSES = ("provisional_paper_candidate", "approved", "live_candidate")
+# pilot entry guard: Discord webhook 실제 도달성 검증의 최대 유효 시간
+PILOT_MAX_NOTIFIER_HEALTH_AGE_HOURS = 24
 
 
 def _coerce_date(value: str | datetime | None = None) -> datetime:
@@ -62,6 +64,49 @@ def _business_days_between(start_date: str, end_date: str) -> int:
             count += 1
         day += timedelta(days=1)
     return count
+
+
+def _parse_health_timestamp(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _notifier_health_verdict(
+    health: dict,
+    *,
+    now: datetime | None = None,
+    max_age_hours: int = PILOT_MAX_NOTIFIER_HEALTH_AGE_HOURS,
+) -> tuple[bool, str, str]:
+    """Return (ready, status, reason) for pilot-grade notifier health."""
+    now = now or datetime.now()
+    if not health.get("discord_configured", False):
+        return False, "missing", "Discord webhook 미설정"
+    if health.get("discord_reachable") is not True:
+        if health.get("discord_reachable") is False:
+            return False, "unreachable", "Discord webhook test failed"
+        return False, "unverified", "Discord webhook test not verified"
+
+    checked_at = _parse_health_timestamp(
+        health.get("last_success_at")
+        or health.get("test_sent_at")
+        or health.get("checked_at")
+    )
+    if checked_at is None:
+        return False, "stale", "Discord webhook test timestamp missing"
+
+    age = now - checked_at
+    if age < timedelta(0):
+        return False, "stale", "Discord webhook test timestamp is in the future"
+    if age > timedelta(hours=max_age_hours):
+        return False, "stale", f"Discord webhook test stale ({age.total_seconds() / 3600:.1f}h)"
+    return True, "healthy", "Discord webhook test verified"
 
 
 @dataclass
@@ -348,19 +393,19 @@ def check_pilot_entry(
                 caps=caps,
             )
         nh = json.loads(notifier_path.read_text(encoding="utf-8"))
-        if not nh.get("discord_configured", False):
+        notifier_ready, notifier_status, notifier_reason = _notifier_health_verdict(nh)
+        if not notifier_ready:
+            reason = "notifier unhealthy — pilot requires verified discord webhook"
+            if notifier_status == "unreachable":
+                reason = "notifier unreachable — pilot requires working discord webhook"
+            elif notifier_status == "unverified":
+                reason = "notifier unverified — run preflight with --send-test-notification"
+            elif notifier_status == "stale":
+                reason = "notifier stale — rerun preflight with --send-test-notification"
             return _pilot_check_result(
                 strategy,
                 allowed=False,
-                reason="notifier unhealthy — pilot requires discord webhook",
-                auth=auth,
-                caps=caps,
-            )
-        if nh.get("discord_reachable") is False:
-            return _pilot_check_result(
-                strategy,
-                allowed=False,
-                reason="notifier unreachable — pilot requires working discord webhook",
+                reason=f"{reason}: {notifier_reason}",
                 auth=auth,
                 caps=caps,
             )
@@ -803,18 +848,16 @@ def compute_launch_readiness(strategy: str, as_of_date: str | datetime | None = 
         nh_path = RUNTIME_DIR / "notifier_health.json"
         if nh_path.exists():
             nh = json.loads(nh_path.read_text(encoding="utf-8"))
-            if not nh.get("discord_configured", False):
-                notifier_status = "missing"
-            elif nh.get("discord_reachable") is False:
-                notifier_status = "unreachable"
-            else:
-                notifier_status = "configured"
-                notifier_ready = True
+            notifier_ready, notifier_status, _ = _notifier_health_verdict(nh)
     except Exception:
         pass
     if not notifier_ready:
         if notifier_status == "unreachable":
             blockers.append("notifier: Discord webhook test failed")
+        elif notifier_status == "unverified":
+            blockers.append("notifier: Discord webhook test not verified")
+        elif notifier_status == "stale":
+            blockers.append("notifier: Discord webhook test stale")
         else:
             blockers.append("notifier: Discord webhook 미설정")
 
@@ -912,8 +955,8 @@ def generate_launch_readiness_artifact(strategy: str) -> tuple[Path, Path]:
                    f"{lr['benchmark_final_ratio']:.0%}" if lr['benchmark_final_ratio'] is not None else "N/A",
                    f">= {PILOT_MIN_BENCHMARK_FINAL_RATIO:.0%}",
                    lr["benchmark_ready"]),
-        _lr_check("Discord notifier", lr.get("notifier_status", "configured" if lr["notifier_ready"] else "missing"),
-                   "configured", lr["notifier_ready"]),
+        _lr_check("Discord notifier", lr.get("notifier_status", "healthy" if lr["notifier_ready"] else "missing"),
+                   "healthy", lr["notifier_ready"]),
         _lr_check("Pilot authorization", "present" if lr["pilot_authorization_present"] else "absent",
                    "present (manual)", lr["pilot_authorization_present"]),
         _lr_check("Strategy eligible", lr["strategy"] , "provisional_paper_candidate+",
