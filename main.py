@@ -878,10 +878,11 @@ def run_live_trading(args):
             sys.exit(1)
         logger.info("KIS API 토큰 사전 발급 완료")
         if not kis.verify_connection():
-            logger.warning(
+            logger.error(
                 "KIS 잔고 조회 실패 — 실환경 연결 검증 실패. "
-                "계좌/권한을 확인한 뒤 재시도하세요. 스케줄러는 계속 진행합니다."
+                "계좌/권한을 확인한 뒤 재시도하세요. 실전 스케줄러를 시작하지 않습니다."
             )
+            sys.exit(1)
 
         # 블랙스완 상태 확인 (로그만)
         from core.blackswan_detector import BlackSwanDetector
@@ -894,7 +895,11 @@ def run_live_trading(args):
         portfolio = PortfolioManager(config, account_key=strategy_name)
         sync_result = portfolio.sync_with_broker()
         if not sync_result["ok"]:
-            logger.warning("포지션 동기화 불일치 — 확인 후 진행: {}", sync_result["message"])
+            logger.error(
+                "포지션 동기화 불일치 — 실전 스케줄러를 시작하지 않습니다: {}",
+                sync_result["message"],
+            )
+            sys.exit(1)
 
         # 실전 스케줄러 실행 (OrderExecutor는 config에서 mode=live 읽음)
         from core.scheduler import Scheduler
