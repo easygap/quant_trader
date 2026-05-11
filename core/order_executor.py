@@ -286,6 +286,22 @@ class OrderExecutor:
             }
         return {"allowed": True, "reason": ""}
 
+    @staticmethod
+    def _is_emergency_sell_reason(reason: str) -> bool:
+        """손실 방어용 청산은 최소 보유 기간보다 우선한다."""
+        text = str(reason or "").strip()
+        normalized = text.upper()
+        if normalized in {"STOP_LOSS", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN"}:
+            return True
+        emergency_keywords = (
+            "블랙스완",
+            "갭다운",
+            "긴급 전량 청산",
+            "--mode liquidate",
+            "강제 청산",
+        )
+        return any(keyword in text for keyword in emergency_keywords)
+
     def execute_buy(
         self,
         symbol: str,
@@ -861,8 +877,8 @@ class OrderExecutor:
                 "available_quantity": position.quantity,
             }
 
-        # 최소 보유 기간 검사 (손절/블랙스완은 예외)
-        is_emergency = reason in ("STOP_LOSS", "블랙스완 긴급 매도", "TRAILING_STOP")
+        # 최소 보유 기간 검사 (손실 방어용 긴급 청산은 예외)
+        is_emergency = self._is_emergency_sell_reason(reason)
         if not is_emergency:
             min_hold = self._get_min_holding_days()
             if min_hold > 0 and getattr(position, "bought_at", None):
