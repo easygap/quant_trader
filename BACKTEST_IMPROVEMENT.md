@@ -1,6 +1,6 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.6
+> **문서 버전**: v5.7
 > **최종 수정**: 2026-05-12
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
@@ -109,6 +109,7 @@
 | target-weight 리스크 완화 후보군 검증 | 높음 | 완료 — `--candidate-family target_weight_risk_relief --top-n 200` full sweep에서 10개 후보 비교. 최상위 후보=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5`, return +125.61%, raw excess +93.72%p, exposure-matched excess +104.53%p, Sharpe 0.91, PF 2.19였지만 전 후보가 MDD -25.27%~-32.14%, turnover/year 1027.2%~1344.3%로 provisional 게이트 미통과. 판정=`KEEP_RESEARCH_ONLY`; 이후 저회전·변동성 타깃 후보군으로 병목을 재검증 |
 | target-weight 저회전 후보군 | 높음 | 검증 완료 — `--candidate-family target_weight_turnover_relief --top-n 200` full sweep에서 6개 후보 비교. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk90_35_bimonthly`, return +85.72%, raw excess +53.83%p, turnover/year 616.7%. 분기 후보는 turnover/year 456.1~476.9%까지 낮췄지만 전 후보가 benchmark excess Sharpe<=0 및 MDD -25.35%~-35.12%로 `NO_ALPHA_CANDIDATE` |
 | target-weight 변동성 타깃 후보군 | 높음 | 검증 완료 — `--candidate-family target_weight_volatility_target --top-n 200` full sweep에서 6개 후보 비교. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_vol16_dd8_floor35`, return +105.18%, raw excess +73.29%p, exposure-matched excess +91.35%p, Sharpe 0.81, PF 2.03, turnover/year 958.0%. 다만 전 후보가 MDD -24.26%~-31.04%로 provisional MDD 게이트 미통과, 5개 후보가 benchmark excess Sharpe<=0이라 판정=`KEEP_RESEARCH_ONLY`. 다음은 단순 노출 축소보다 종목 선별 랭킹에 낙폭·하방변동성·상관/업종 집중 페널티를 반영 |
+| target-weight 리스크 페널티 랭킹 후보군 | 높음 | 구현 완료 — `target_weight_downside_rank_relief` family가 target-weight 점수 산출 후 rolling downside volatility와 rolling drawdown 페널티를 차감해 고위험 종목의 top-N 진입을 줄인다. 다음 full sweep에서 MDD와 benchmark excess Sharpe 개선 여부 확인 |
 | Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | **완료 — `backtest.cost_impact`가 비용 차감 전/후 수익률, 비용 드래그, 비용/순손익, status를 표준 집계하고 백테스트 리포트에 노출** |
 | 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
