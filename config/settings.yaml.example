@@ -70,7 +70,7 @@ trading:
   blackswan_recovery_scale: 0.5     # recovery 중 포지션 사이징 배수 (0.5 = 50%)
   # 시장 국면 필터 (단계적 대응): 3가지 독립 신호 중 2개↑ → bearish / 1개 → caution / 0 → bullish
   #   A. 200일선 이탈 / B. 단기 모멘텀 하락 / C. 단기 MA 데드크로스 (선택적)
-  market_regime_filter: true
+  market_regime_filter: false                 # 검증 기준 기본 OFF. 활성화 시 백테스트도 같은 키를 기준으로 동기화
   market_regime_index: "KS11"
   market_regime_ma_days: 200
   market_regime_short_momentum_days: 20       # 신호 B: 단기 모멘텀 산출 기간
