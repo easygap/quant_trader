@@ -305,6 +305,25 @@ class TestArtifacts:
         assert "Preflight" in content
         assert "Entry Allowed" in content
 
+    def test_preflight_warns_on_test_artifacts(self, evidence_dir, runtime_dir, fresh_db):
+        """운영 reports에 test artifact가 있으면 preflight에 경고와 정리 명령을 남긴다."""
+        _seed_v2(evidence_dir, "scoring", [{"date": "2026-04-06"}])
+        (evidence_dir / "daily_evidence_dedup_test.jsonl").write_text("{}", encoding="utf-8")
+
+        from core.paper_preflight import run_preflight
+        result = run_preflight("scoring", "2026-04-06")
+
+        assert result.test_artifact_count == 1
+        assert result.test_artifact_examples == ["paper_evidence/daily_evidence_dedup_test.jsonl"]
+        assert any(c["name"] == "test_artifacts" and c["status"] == "warn" for c in result.checks)
+        assert any("quarantine_test_artifacts.py" in action for action in result.operator_actions)
+
+        payload = json.loads((runtime_dir / "preflight_status_scoring.json").read_text(encoding="utf-8"))
+        assert payload["test_artifact_count"] == 1
+        md = (runtime_dir / "preflight_status_scoring.md").read_text(encoding="utf-8")
+        assert "Test Artifact Note" in md
+        assert "daily_evidence_dedup_test.jsonl" in md
+
     def test_session_bootstrap_md(self, evidence_dir, runtime_dir, fresh_db):
         _seed_v2(evidence_dir, "s1", [{"date": "2026-04-06"}])
         _seed_v2(evidence_dir, "s2", [
