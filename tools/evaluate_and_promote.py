@@ -266,16 +266,24 @@ def attach_canonical_walk_forward_metrics(metrics, window_metrics):
     }
 
 
-def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence"):
+def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", strategy_specs=None):
     from core.promotion_engine import (
         StrategyMetrics,
         attach_paper_evidence_metrics,
+        attach_target_weight_canonical_hash_check,
         load_paper_evidence_package,
         paper_evidence_metrics_from_package,
         promote,
     )
 
     promotions = {}
+    canonical_params_hashes = {
+        spec.get("candidate_id"): spec.get("params_hash")
+        for spec in (strategy_specs or [])
+        if isinstance(spec, dict)
+        and isinstance(spec.get("candidate_id"), str)
+        and isinstance(spec.get("params_hash"), str)
+    }
     paper_fields = (
         "paper_days",
         "paper_sharpe",
@@ -292,10 +300,17 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence"):
         "target_weight_all_promotable_days_verified",
         "target_weight_params_hash_consistent",
         "target_weight_params_hash",
+        "target_weight_canonical_params_hash",
+        "target_weight_params_hash_matches_canonical",
     )
     for name, m in metrics_all.items():
         paper_metrics = paper_evidence_metrics_from_package(
             load_paper_evidence_package(name, evidence_dir)
+        )
+        paper_metrics = attach_target_weight_canonical_hash_check(
+            name,
+            paper_metrics,
+            canonical_params_hashes,
         )
         for key in paper_fields:
             value = paper_metrics.get(key)
@@ -565,8 +580,13 @@ def run_canonical():
         m["benchmark_excess_return"] = benchmark["strategy_excess_return_pct"].get(name)
         m["benchmark_excess_sharpe"] = benchmark["strategy_excess_sharpe"].get(name)
 
+    strategy_specs_metadata = [
+        canonical_research_candidate_metadata(spec)
+        for spec in research_specs
+    ]
+
     # ── Promotion 계산 ──
-    promotions = build_promotion_results(metrics_all)
+    promotions = build_promotion_results(metrics_all, strategy_specs=strategy_specs_metadata)
 
     # ── Artifact 저장 ──
     out_dir = Path("reports/promotion")
@@ -597,10 +617,7 @@ def run_canonical():
         "evaluation_errors": evaluation_errors,
         "walk_forward_errors": walk_forward_errors,
         "canonical_research_candidate_ids": [spec.candidate_id for spec in research_specs],
-        "strategy_specs": [
-            canonical_research_candidate_metadata(spec)
-            for spec in research_specs
-        ],
+        "strategy_specs": strategy_specs_metadata,
         "wf_window_months": 12,
         "wf_step_months": 6,
         "wf_n_windows": len(windows),
