@@ -912,6 +912,26 @@ TARGET_WEIGHT_RISK_RELIEF_CANDIDATE_IDS = [
 ]
 
 
+def _target_weight_spec_with_frequency(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    rebalance_frequency: str,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "rebalance_frequency": rebalance_frequency,
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -921,6 +941,52 @@ def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     return [
         specs_by_id[candidate_id]
         for candidate_id in TARGET_WEIGHT_RISK_RELIEF_CANDIDATE_IDS
+    ]
+
+
+def build_target_weight_turnover_relief_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight shortlist for lower rebalance-frequency relief sweeps."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_rotation_candidate_specs()
+    }
+    return [
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"],
+            suffix="bimonthly",
+            rebalance_frequency="bimonthly",
+            description="risk-overlay top-5 rotation rebalanced every 2 months to reduce turnover",
+        ),
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"],
+            suffix="quarterly",
+            rebalance_frequency="quarterly",
+            description="risk-overlay top-5 rotation rebalanced quarterly to reduce turnover",
+        ),
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5"],
+            suffix="bimonthly",
+            rebalance_frequency="bimonthly",
+            description="5pct tolerance risk-overlay rotation rebalanced every 2 months",
+        ),
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5"],
+            suffix="quarterly",
+            rebalance_frequency="quarterly",
+            description="5pct tolerance risk-overlay rotation rebalanced quarterly",
+        ),
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk90_35"],
+            suffix="bimonthly",
+            rebalance_frequency="bimonthly",
+            description="risk90/35 overlay top-5 rotation rebalanced every 2 months",
+        ),
+        _target_weight_spec_with_frequency(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75"],
+            suffix="bimonthly",
+            rebalance_frequency="bimonthly",
+            description="75pct exposure top-5 rotation rebalanced every 2 months",
+        ),
     ]
 
 
@@ -961,6 +1027,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "risk_relief",
     ):
         return build_target_weight_risk_relief_candidate_specs()
+    if family in (
+        "target_weight_turnover_relief",
+        "target_weight_low_turnover",
+        "turnover_relief",
+        "low_turnover",
+    ):
+        return build_target_weight_turnover_relief_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -972,11 +1045,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_cash_switch_candidate_specs(),
             *build_benchmark_aware_rotation_candidate_specs(),
             *build_target_weight_rotation_candidate_specs(),
+            *build_target_weight_turnover_relief_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
-        "target_weight_rotation, target_weight_risk_relief, all"
+        "target_weight_rotation, target_weight_risk_relief, "
+        "target_weight_turnover_relief, all"
     )
 
 
@@ -1367,6 +1442,39 @@ def monthly_rebalance_days(index: pd.Index) -> list[pd.Timestamp]:
     return [pd.Timestamp(day).normalize() for day in idx[mask.to_numpy()]]
 
 
+def target_weight_rebalance_days(
+    index: pd.Index,
+    frequency: str = "monthly",
+) -> list[pd.Timestamp]:
+    """Return target-weight rebalance days for the requested cadence."""
+    monthly_days = monthly_rebalance_days(index)
+    freq = str(frequency or "monthly").lower().strip().replace("-", "_")
+    if freq in ("monthly", "1m", "every_month"):
+        return monthly_days
+
+    step_by_frequency = {
+        "bimonthly": 2,
+        "bi_monthly": 2,
+        "every_2_months": 2,
+        "2m": 2,
+        "quarterly": 3,
+        "quarter": 3,
+        "every_3_months": 3,
+        "3m": 3,
+    }
+    step = step_by_frequency.get(freq)
+    if step is None:
+        raise ValueError(
+            "unsupported_rebalance_frequency: "
+            f"{frequency}; expected monthly, bimonthly, or quarterly"
+        )
+    return [
+        pd.Timestamp(day).normalize()
+        for idx, day in enumerate(monthly_days)
+        if idx % step == 0
+    ]
+
+
 def _score_date_before(index: pd.Index, day: pd.Timestamp) -> pd.Timestamp | None:
     prior = pd.DatetimeIndex(index)[pd.DatetimeIndex(index) < pd.Timestamp(day)]
     if len(prior) == 0:
@@ -1715,6 +1823,7 @@ def run_target_weight_rotation_backtest(
                 "trades": [],
                 "target_weight_metrics": {
                     "target_top_n": int(params.get("target_top_n", 0) or 0),
+                    "rebalance_frequency": str(params.get("rebalance_frequency", "monthly") or "monthly"),
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
@@ -1754,7 +1863,8 @@ def run_target_weight_rotation_backtest(
         if len(eval_index) == 0:
             return {"equity_curve": pd.DataFrame(), "trades": [], "target_weight_metrics": {}}
 
-        rebalance_days = set(monthly_rebalance_days(eval_index))
+        rebalance_frequency = str(params.get("rebalance_frequency", "monthly") or "monthly").lower().strip()
+        rebalance_days = set(target_weight_rebalance_days(eval_index, rebalance_frequency))
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
@@ -1996,6 +2106,7 @@ def run_target_weight_rotation_backtest(
             "trades": trades,
             "target_weight_metrics": {
                 "target_top_n": top_n,
+                "rebalance_frequency": rebalance_frequency,
                 "hold_rank_buffer": hold_rank_buffer,
                 "rebalance_tolerance_pct": round(tolerance * 100, 2),
                 "rebalance_count": rebalance_count,
@@ -2891,6 +3002,7 @@ def main() -> None:
             "benchmark_aware_rotation",
             "target_weight_rotation",
             "target_weight_risk_relief",
+            "target_weight_turnover_relief",
             "all",
         ],
         help="Research candidate family to evaluate.",
