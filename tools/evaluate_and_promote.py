@@ -294,6 +294,9 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", 
         "paper_win_rate",
         "paper_frozen_days",
         "paper_cumulative_return",
+        "paper_latest_evidence_date",
+        "paper_evidence_age_days",
+        "paper_evidence_fresh",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
@@ -303,9 +306,11 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", 
         "target_weight_canonical_params_hash",
         "target_weight_params_hash_matches_canonical",
     )
+    paper_reference_date = datetime.now()
     for name, m in metrics_all.items():
         paper_metrics = paper_evidence_metrics_from_package(
-            load_paper_evidence_package(name, evidence_dir)
+            load_paper_evidence_package(name, evidence_dir),
+            reference_date=paper_reference_date,
         )
         paper_metrics = attach_target_weight_canonical_hash_check(
             name,
