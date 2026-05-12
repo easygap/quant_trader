@@ -6,7 +6,7 @@
 """
 
 import base64
-import html
+import html as html_lib
 import io
 import os
 from datetime import datetime
@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 from loguru import logger
+
+from backtest.cost_impact import render_cost_impact_text, summarize_cost_impact
 
 
 def _default_backtest_slippage_pct() -> float:
@@ -484,6 +486,13 @@ class ReportGenerator:
         slip_summary = compute_live_slippage_vs_backtest()
         lines.extend(_format_live_slippage_text_table(slip_summary))
 
+        cost_impact = m.get("cost_impact") or summarize_cost_impact(m, trades)
+        lines.extend(["[ 비용 전/후 성과 비교 ]"])
+        lines.extend(render_cost_impact_text(cost_impact))
+        if cost_impact.get("issues"):
+            lines.append("  확인 필요: " + ", ".join(cost_impact["issues"]))
+        lines.append("")
+
         lines.extend([
             "[ 매매 성과 ]",
             f"  총 매매 횟수  : {m['total_trades']:>13d}회",
@@ -598,12 +607,43 @@ class ReportGenerator:
         slip_summary = compute_live_slippage_vs_backtest()
         live_slip_html = _format_live_slippage_html_card(slip_summary)
 
+        cost_impact = m.get("cost_impact") or summarize_cost_impact(m, trades)
+        cost_status = str(cost_impact.get("status", "pass"))
+        cost_status_color = {
+            "pass": "#27ae60",
+            "warn": "#fbbf24",
+            "fail": "#e74c3c",
+        }.get(cost_status, "#e2e8f0")
+        cost_issues = cost_impact.get("issues") or []
+        cost_issue_html = (
+            "<p style=\"margin-top:10px;color:#fbbf24;font-size:12px;\">확인 필요: "
+            + html_lib.escape(", ".join(cost_issues))
+            + "</p>"
+            if cost_issues
+            else ""
+        )
+        cost_impact_html = f"""
+    <div class="chart">
+        <h3 style="margin-bottom:12px;font-size:14px;">비용 전/후 성과 비교</h3>
+        <table>
+            <tr><th>항목</th><th>값</th></tr>
+            <tr><td>비용 차감 전 추정 수익률</td><td>{cost_impact.get('gross_return_estimate_pct', 0):.2f}%</td></tr>
+            <tr><td>비용 차감 후 수익률</td><td>{cost_impact.get('net_return_pct', 0):.2f}%</td></tr>
+            <tr><td>비용 드래그</td><td>{cost_impact.get('cost_drag_pct', 0):.2f}% ({cost_impact.get('cost_drag_bps', 0):.1f}bp)</td></tr>
+            <tr><td>총 거래비용</td><td>{cost_impact.get('total_transaction_cost', 0):,.0f}원</td></tr>
+            <tr><td>비용 구성</td><td>수수료 {cost_impact.get('commission_share_pct', 0):.1f}% / 세금 {cost_impact.get('tax_share_pct', 0):.1f}% / 슬리피지 {cost_impact.get('slippage_share_pct', 0):.1f}%</td></tr>
+            <tr><td>비용/순손익</td><td>{'N/A' if cost_impact.get('cost_to_net_profit_pct') is None else f"{cost_impact.get('cost_to_net_profit_pct'):.1f}%"}</td></tr>
+            <tr><td>상태</td><td style="color:{cost_status_color};font-weight:700;">{html_lib.escape(cost_status)}</td></tr>
+        </table>
+        {cost_issue_html}
+    </div>"""
+
         mcpr = m.get("commission_to_profit_ratio")
         cpr_disp = f"{mcpr * 100:.2f}%" if mcpr is not None else "N/A"
         ow = result.get("overtrading_warnings") or []
         if ow:
             ow_items = "".join(
-                f'<li style="margin:6px 0;color:#fbbf24;">{html.escape(w)}</li>' for w in ow
+                f'<li style="margin:6px 0;color:#fbbf24;">{html_lib.escape(w)}</li>' for w in ow
             )
             overtrading_warn_html = f"""
     <div class="card" style="margin-bottom:24px;border:1px solid rgba(251,191,36,0.25);">
@@ -710,6 +750,8 @@ class ReportGenerator:
     </div>
 
     {overtrading_warn_html}
+
+    {cost_impact_html}
 
     {f'<div class="chart"><h3 style="margin-bottom:12px;font-size:14px;">📈 자본 곡선</h3>{chart_svg}</div>' if chart_svg else ''}
 

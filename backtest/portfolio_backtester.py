@@ -11,6 +11,11 @@ import numpy as np
 from loguru import logger
 from datetime import timedelta
 
+from backtest.cost_impact import (
+    cost_impact_metric_fields,
+    render_cost_impact_text,
+    summarize_cost_impact,
+)
 from config.config_loader import Config
 from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
@@ -986,8 +991,12 @@ class PortfolioBacktester:
 
         unique_symbols_traded = len(set(t["symbol"] for t in trades))
         avg_positions = equity["n_positions"].mean() if "n_positions" in equity.columns else 0
+        total_commission = sum(float(t.get("commission", 0) or 0) for t in trades)
+        total_tax = sum(float(t.get("tax", 0) or 0) for t in trades)
+        total_slippage_cost = sum(float(t.get("slippage_cost", 0) or 0) for t in trades)
+        total_transaction_cost = round(total_commission + total_tax + total_slippage_cost, 0)
 
-        return {
+        metrics = {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
             "sharpe_ratio": round(sharpe, 2),
@@ -1003,6 +1012,10 @@ class PortfolioBacktester:
             "losing_trades": len(losing),
             "final_value": round(final_value, 0),
             "initial_capital": initial_capital,
+            "total_commission": round(total_commission, 0),
+            "total_tax": round(total_tax, 0),
+            "total_slippage_cost": round(total_slippage_cost, 0),
+            "total_transaction_cost": total_transaction_cost,
             "symbols_traded": unique_symbols_traded,
             "avg_positions": round(avg_positions, 1),
             "regime_buy_blocks": result.get("regime_buy_blocks", 0),
@@ -1014,6 +1027,10 @@ class PortfolioBacktester:
             "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
             "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
         }
+        cost_impact = summarize_cost_impact(metrics, trades)
+        metrics.update(cost_impact_metric_fields(cost_impact))
+        metrics["cost_impact"] = cost_impact
+        return metrics
 
     def print_report(self, result: dict):
         if not result:
@@ -1042,6 +1059,9 @@ class PortfolioBacktester:
         print(f"  손익비         : {m['profit_factor']:>13.2f}")
         print(f"  거래 종목 수   : {m.get('symbols_traded', 0):>13d}개")
         print(f"  평균 보유 종목 : {m.get('avg_positions', 0):>13.1f}개")
+        print("-" * 60)
+        for line in render_cost_impact_text(m.get("cost_impact") or summarize_cost_impact(m, result.get("trades", []))):
+            print(line)
         print("-" * 60)
 
         if result.get("per_symbol_stats"):
