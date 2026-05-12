@@ -878,6 +878,46 @@ def test_write_sweep_artifact_does_not_touch_promotion_dir(tmp_path):
     assert "EM Excess" in md_path.read_text(encoding="utf-8")
 
 
+def test_write_sweep_artifact_surfaces_rejection_reasons(tmp_path):
+    from tools.research_candidate_sweep import write_candidate_artifacts
+
+    bundle = _minimal_bundle(
+        [
+            {
+                "candidate_id": "risk_candidate",
+                "rank_score": 10.0,
+                "promotion": {
+                    "status": "paper_only",
+                    "reason": "provisional 미달: MDD -25.79% < -20%, turnover 1097.1%/y >= 1000.0%/y",
+                },
+                "metrics": {
+                    "total_return": 110.39,
+                    "benchmark_excess_return": 78.5,
+                    "exposure_matched_excess_return": 90.25,
+                    "avg_exposure_pct": 66.2,
+                    "sharpe": 0.85,
+                    "profit_factor": 2.06,
+                    "mdd": -25.79,
+                    "total_trades": 107,
+                },
+                "rejection_reasons": [
+                    "promotion_status=paper_only",
+                    "mdd < -20",
+                    "turnover_per_year >= 1000",
+                ],
+            }
+        ]
+    )
+
+    _, md_path = write_candidate_artifacts(bundle, tmp_path)
+    text = md_path.read_text(encoding="utf-8")
+
+    assert "## Rejection Reasons" in text
+    assert "risk_candidate" in text
+    assert "mdd < -20" in text
+    assert "turnover 1097.1%/y >= 1000.0%/y" in text
+
+
 def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):
     import pandas as pd
     import config.config_loader as config_loader
