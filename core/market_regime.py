@@ -20,6 +20,58 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 
+def _cfg_dict(config, name: str) -> dict:
+    """Config 객체와 dict 설정을 모두 지원한다."""
+    if hasattr(config, name):
+        return getattr(config, name) or {}
+    if isinstance(config, dict):
+        return config.get(name, {}) or {}
+    return {}
+
+
+def resolve_market_regime_config(config, *, for_backtest: bool = False) -> dict:
+    """
+    운영과 백테스트의 시장 국면 설정을 같은 키 체계로 정규화한다.
+
+    기본값은 settings.trading.market_regime_* 를 따른다. 백테스트에서는
+    risk_params.backtest_regime_filter에 명시된 값만 실험용 override로 사용하고,
+    enabled가 null/미지정이면 운영 설정을 그대로 mirror한다.
+    """
+    trading = _cfg_dict(config, "trading")
+    risk_params = _cfg_dict(config, "risk_params")
+    backtest_cfg = (risk_params.get("backtest_regime_filter") or {}) if for_backtest else {}
+
+    def _override(key: str, runtime_key: str, default):
+        if for_backtest and key in backtest_cfg and backtest_cfg.get(key) is not None:
+            return backtest_cfg.get(key)
+        return trading.get(runtime_key, default)
+
+    enabled_override = backtest_cfg.get("enabled") if for_backtest else None
+    if for_backtest and enabled_override is not None:
+        enabled = bool(enabled_override)
+    else:
+        enabled = bool(trading.get("market_regime_filter", False))
+
+    return {
+        "enabled": enabled,
+        "index_symbol": _override("index_symbol", "market_regime_index", "KS11"),
+        "ma_days": max(20, int(_override("ma_days", "market_regime_ma_days", 200))),
+        "short_momentum_days": max(
+            1,
+            int(_override("short_momentum_days", "market_regime_short_momentum_days", 20)),
+        ),
+        "short_momentum_threshold": float(
+            _override("short_momentum_threshold", "market_regime_short_momentum_threshold", -5.0)
+        ),
+        "caution_scale": float(_override("caution_scale", "market_regime_caution_scale", 0.5)),
+        "ma_cross_enabled": bool(
+            _override("ma_cross_enabled", "market_regime_ma_cross_enabled", False)
+        ),
+        "ma_short": max(5, int(_override("ma_short", "market_regime_ma_short", 20))),
+        "ma_mid": max(10, int(_override("ma_mid", "market_regime_ma_mid", 60))),
+    }
+
+
 def check_market_regime(config, collector=None) -> dict:
     """
     시장 국면을 판별하고 단계적 position_scale 을 반환한다.
@@ -38,7 +90,7 @@ def check_market_regime(config, collector=None) -> dict:
             },
         }
     """
-    trading = config.trading if hasattr(config, "trading") else config.get("trading", {})
+    regime_cfg = resolve_market_regime_config(config)
     default_result = {
         "regime": "bullish",
         "position_scale": 1.0,
@@ -46,19 +98,17 @@ def check_market_regime(config, collector=None) -> dict:
         "details": {},
     }
 
-    if not trading.get("market_regime_filter", False):
+    if not regime_cfg["enabled"]:
         return default_result
 
-    index_symbol = trading.get("market_regime_index", "KS11")
-    ma_days = max(20, int(trading.get("market_regime_ma_days", 200)))
-    short_days = max(1, int(trading.get("market_regime_short_momentum_days", 20)))
-    short_threshold = float(trading.get("market_regime_short_momentum_threshold", -5.0))
-    caution_scale = float(trading.get("market_regime_caution_scale", 0.5))
-
-    # 단기 MA 크로스 (선택적): 200일선보다 빠르게 하락 감지
-    ma_cross_enabled = trading.get("market_regime_ma_cross_enabled", False)
-    ma_short = max(5, int(trading.get("market_regime_ma_short", 20)))
-    ma_mid = max(10, int(trading.get("market_regime_ma_mid", 60)))
+    index_symbol = regime_cfg["index_symbol"]
+    ma_days = regime_cfg["ma_days"]
+    short_days = regime_cfg["short_momentum_days"]
+    short_threshold = regime_cfg["short_momentum_threshold"]
+    caution_scale = regime_cfg["caution_scale"]
+    ma_cross_enabled = regime_cfg["ma_cross_enabled"]
+    ma_short = regime_cfg["ma_short"]
+    ma_mid = regime_cfg["ma_mid"]
 
     need_days = max(ma_days, ma_mid, short_days) + 50
 

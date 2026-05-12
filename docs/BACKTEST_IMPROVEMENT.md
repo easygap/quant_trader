@@ -146,6 +146,7 @@
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI** |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
+| 운영/백테스트 시장국면 설정 동기화 | 높음 | 완료 — `trading.market_regime_*`를 canonical 설정으로 두고 `resolve_market_regime_config()`로 paper/live와 백테스트가 같은 파라미터를 보게 했다. `backtest_regime_filter`는 명시 값만 실험용 override로 사용하며, 백테스트도 MA(20/60) 데드크로스 신호를 반영한다. 기본값은 검증 결과에 맞춰 OFF |
 | Research sweep exposure-matched benchmark | 중간 | **완료 — 후보별 평균 노출/현금비중과 exposure-matched B&H excess 진단 추가. promotion gate는 raw benchmark 기준 유지** |
 | Target-weight top-N rotation backtester | 높음 | **완료 — 월간 직전일 점수 기준 top-N 목표비중 리밸런싱, 다음 거래일 시가 체결, 종가 평가, delta 거래비용, 노출 진단 구현. score day 종가 stale 종목은 후보에서 제외하고, 보유 종목 stale 평가는 별도 metrics로 기록하며, 보유 종목 시가 누락 리밸런싱은 거래 없이 skip 기록. 벤치마크 stale과 신규 top-N 후보 시가 누락은 fail-closed. 기존 종가 체결 기반 target-weight research artifact는 재생성 또는 execution price mode 확인 후 사용** |
 | Target-weight research next-open execution guard | 높음 | 완료 — 리서치 백테스트의 리밸런싱 체결가를 당일 종가에서 원본 `open` 기반 다음 거래일 시가로 변경하고, trade/metrics에 `execution_price_mode=next_open`, `execution_price_freshness_checked`, `avg_volume_lookback_lag_days=1`을 기록 |

@@ -269,7 +269,7 @@ quant_trader/
 | **trading_hours.py** | 한국 장·휴장일(holidays.yaml → pykrx → fallback). **미국**: `us_holidays.yaml`, 동부 09:30~16:00 (`is_us_trading_day`, `is_us_market_open` 등). 주문 가능 시간 검사. |
 | **holidays_updater.py** | pykrx(또는 fallback)로 휴장일 조회 → `config/holidays.yaml` 저장. `update_holidays_yaml()`. |
 | **blackswan_detector.py** | 급락 감지 시 전량 매도·디스코드 경고·쿨다운. **쿨다운 해제 시** 즉시 재스캔 트리거 + recovery 기간(기본 120분) 중 사이징 50% 축소. `blackswan_recovery_minutes`, `blackswan_recovery_scale`. |
-| **market_regime.py** | `check_market_regime()` → 3중 신호 단계적 국면 판별. **신호 A**: 200일선 이탈, **신호 B**: 20일 수익률 ≤ -5%, **신호 C**: MA(20)<MA(60) 데드크로스(선택적). 2개↑ 충족 → bearish(매수 중단), 1개 → caution(사이징 50%), 0 → bullish. 신호 C는 200일선 이탈보다 2~3주 빠르게 추세 전환 포착. `market_regime_ma_cross_enabled: false`면 기존 2-신호 로직과 동일. |
+| **market_regime.py** | `check_market_regime()` → 3중 신호 단계적 국면 판별. **신호 A**: 200일선 이탈, **신호 B**: 20일 수익률 ≤ -5%, **신호 C**: MA(20)<MA(60) 데드크로스(선택적). 2개↑ 충족 → bearish(매수 중단), 1개 → caution(사이징 50%), 0 → bullish. 신호 C는 200일선 이탈보다 2~3주 빠르게 추세 전환 포착. `resolve_market_regime_config()`가 운영과 백테스트의 `trading.market_regime_*` 기준을 동기화하고, `backtest_regime_filter`는 명시 값만 실험용 override로 사용한다. 기본값은 검증 결과에 맞춰 OFF. |
 | **fundamental_loader.py** | `get_fundamentals(symbol)`, `check_fundamental_filter()`. **pykrx(우선) → yfinance(폴백)** 순서로 PER·부채비율 조회. pykrx는 한국 종목 PER 정확도 높음. yfinance는 부채비율 등 보충. |
 | **dart_loader.py** | `DartEarningsLoader`: DART API로 corp_code 매핑·정기공시 기반 차기 실적 시점 추정. `data/dart_corpCode.zip` 캐시. |
 | **earnings_filter.py** | `is_near_earnings(symbol, skip_days, config=...)`. **1순위** yfinance `earningsDate`, **2순위** DART(`settings.dart.enabled`·API 키). 둘 다 없으면 통과. `trading.skip_earnings_days`(기본 3). |
@@ -353,7 +353,7 @@ quant_trader/
 |------|------|
 | **test_backtester_strategies.py** | 백테스터 전략별 시뮬레이션 검증. |
 | **test_backtester_trailing_stop.py** | 트레일링 스탑 로직 검증. |
-| **test_portfolio_regime_filter.py** | 포트폴리오 시장국면 필터와 gap/어닝/BlackSwan 이벤트 guard 검증. |
+| **test_portfolio_regime_filter.py** | 포트폴리오 시장국면 필터, 운영/백테스트 국면 설정 동기화, MA 크로스 신호, gap/어닝/BlackSwan 이벤트 guard 검증. |
 | **test_blackswan_detector.py** | 블랙스완 감지·쿨다운. |
 | **test_discord_bot.py** | 디스코드 알림(모킹). |
 | **test_integration_smoke.py** | 설정·DB·지표·신호 등 연동 스모크. |
@@ -394,7 +394,7 @@ quant_trader/
 | **database** | type(sqlite), sqlite_path(data/quant_trader.db) | DB 설정. type: postgresql 전환 가능 |
 | **logging** | level(INFO), log_dir(logs), rotation(10MB), retention(30 days) | loguru 로그 설정 |
 | **data_source** | preferred(auto), allow_kis_fallback(true), warn_on_source_mismatch(true) | 데이터 소스·수정주가 일치 제어 |
-| **trading** | market_open(09:00), market_close(15:30), mode(paper), auto_entry(false), skip_earnings_days(3), market_regime_filter(true), market_regime_index(KS11), blackswan_recovery_minutes(120), sync_broker_interval_minutes, position_mismatch_auto_correct, position_mismatch_allow_empty_broker_delete 등 | 매매 모드·시장 국면 필터·블랙스완·KIS↔DB 보정 |
+| **trading** | market_open(09:00), market_close(15:30), mode(paper), auto_entry(false), skip_earnings_days(3), market_regime_filter(false), market_regime_index(KS11), blackswan_recovery_minutes(120), sync_broker_interval_minutes, position_mismatch_auto_correct, position_mismatch_allow_empty_broker_delete 등 | 매매 모드·시장 국면 필터·블랙스완·KIS↔DB 보정 |
 | **dart** | enabled, api_key(또는 `DART_API_KEY` 환경변수) | 전자공시 기반 실적 시점 추정 → `earnings_filter` 폴백 |
 | **discord** | enabled(false), webhook_url, username | 디스코드 알림. target-weight capped paper pilot에서는 `DISCORD_WEBHOOK_URL` 필수 |
 | **telegram** | enabled(false), bot_token, chat_id | 텔레그램 알림 (이중화) |
