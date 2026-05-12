@@ -8,6 +8,7 @@ Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
   - benchmark_comparison.json
   - run_metadata.json
   - promotion_result.json  (최종 상태 계산 결과)
+  - promotion_blocker_summary.json/md (운영자용 차단 사유 요약)
 """
 import sys, os, json, hashlib, subprocess
 from datetime import datetime
@@ -369,6 +370,139 @@ def build_promotion_results(
     return promotions
 
 
+PROMOTION_BLOCKER_METRIC_KEYS = (
+    "total_return",
+    "profit_factor",
+    "mdd",
+    "sharpe",
+    "benchmark_excess_return",
+    "benchmark_excess_sharpe",
+    "wf_positive_rate",
+    "wf_sharpe_positive_rate",
+    "wf_windows",
+    "wf_total_trades",
+    "paper_days",
+    "paper_evidence_recommendation",
+    "paper_latest_evidence_date",
+    "paper_evidence_age_days",
+    "paper_evidence_fresh",
+    "target_weight_verified_pilot_days",
+    "target_weight_invalid_days",
+    "target_weight_params_hash_matches_canonical",
+    "canonical_data_integrity_ok",
+)
+
+
+def _promotion_reason_items(reason: str) -> list[str]:
+    if not isinstance(reason, str) or not reason.strip():
+        return []
+    return [
+        item.strip()
+        for item in reason.replace("\n", " ").split(";")
+        if item.strip()
+    ]
+
+
+def _next_promotion_action(status: str, blockers: list[str]) -> str:
+    text = " ".join(blockers).lower()
+    if status == "live_candidate":
+        return "live readiness gate 검증 후 제한 캡 운영 검토"
+    if "canonical data integrity" in text or "benchmark" in text:
+        return "canonical 데이터/벤치마크 coverage 재생성 후 재평가"
+    if "paper evidence" in text or "paper " in text or "60영업일" in text:
+        return "paper evidence 최신화/누적 후 promotion package 재생성"
+    if "target-weight" in text:
+        return "target-weight pilot proof와 params hash 일치 여부 재검증"
+    if status == "paper_only":
+        return "research 품질, MDD, turnover, WF 안정성 개선"
+    if status == "research_only":
+        return "research 후보 재설계 또는 후보군 제외 검토"
+    return "승격 조건과 운영 증거를 재검토"
+
+
+def build_promotion_blocker_summary(promotions: dict, metrics_all: dict, metadata: dict | None = None) -> dict:
+    """promotion_result를 사람이 바로 읽을 blocker 중심 운영 요약으로 변환."""
+    generated_at = (
+        metadata.get("generated_at")
+        if isinstance(metadata, dict) and metadata.get("generated_at")
+        else datetime.now().isoformat()
+    )
+    status_counts: dict[str, int] = {}
+    strategies = {}
+    for name in sorted(promotions):
+        promotion = promotions.get(name) or {}
+        metrics = metrics_all.get(name) or {}
+        status = promotion.get("status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        blockers = _promotion_reason_items(promotion.get("reason", ""))
+        metric_snapshot = {
+            key: metrics.get(key)
+            for key in PROMOTION_BLOCKER_METRIC_KEYS
+            if metrics.get(key) is not None
+        }
+        strategies[name] = {
+            "status": status,
+            "allowed_modes": promotion.get("allowed_modes", []),
+            "next_action": _next_promotion_action(status, blockers),
+            "blockers": blockers,
+            "metrics": metric_snapshot,
+            "reason": promotion.get("reason", ""),
+        }
+    return {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "summary": {
+            "total_strategies": len(strategies),
+            "status_counts": dict(sorted(status_counts.items())),
+            "live_ready_count": status_counts.get("live_candidate", 0),
+            "blocked_from_live_count": len(strategies) - status_counts.get("live_candidate", 0),
+        },
+        "strategies": strategies,
+    }
+
+
+def _md_cell(value) -> str:
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\n", "<br>")
+
+
+def write_promotion_blocker_summary(summary: dict, output_dir: str | Path) -> tuple[Path, Path]:
+    """promotion blocker 요약 JSON/Markdown artifact를 저장."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "promotion_blocker_summary.json"
+    md_path = out_dir / "promotion_blocker_summary.md"
+    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    lines = [
+        "# Promotion Blocker Summary",
+        "",
+        f"- Generated: {summary.get('generated_at')}",
+        f"- Total strategies: {summary.get('summary', {}).get('total_strategies', 0)}",
+        f"- Live ready: {summary.get('summary', {}).get('live_ready_count', 0)}",
+        f"- Blocked from live: {summary.get('summary', {}).get('blocked_from_live_count', 0)}",
+        "",
+        "| Strategy | Status | Next Action | Key Blockers |",
+        "|---|---|---|---|",
+    ]
+    for name, item in (summary.get("strategies") or {}).items():
+        blockers = item.get("blockers") or []
+        blocker_text = "<br>".join(blockers[:4]) if blockers else "없음"
+        lines.append(
+            "| "
+            + " | ".join([
+                _md_cell(name),
+                _md_cell(item.get("status")),
+                _md_cell(item.get("next_action")),
+                _md_cell(blocker_text),
+            ])
+            + " |"
+        )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path, md_path
+
+
 def run_canonical():
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
@@ -658,6 +792,7 @@ def run_canonical():
     # ── Artifact 저장 ──
     out_dir = Path("reports/promotion")
     out_dir.mkdir(parents=True, exist_ok=True)
+    blocker_summary = build_promotion_blocker_summary(promotions, metrics_all, metadata)
 
     artifacts = {
         "run_metadata.json": metadata,
@@ -665,12 +800,15 @@ def run_canonical():
         "walk_forward_summary.json": wf_all,
         "benchmark_comparison.json": benchmark,
         "promotion_result.json": promotions,
+        "promotion_blocker_summary.json": blocker_summary,
     }
 
     for fname, data in artifacts.items():
         path = out_dir / fname
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         print(f"  → {path}")
+    _, blocker_md_path = write_promotion_blocker_summary(blocker_summary, out_dir)
+    print(f"  → {blocker_md_path}")
 
     # ── 상태 요약 출력 ──
     print("\n" + "=" * 80)
