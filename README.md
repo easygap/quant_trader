@@ -268,6 +268,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-12 follow-up: `target_weight_churn_relief` 후보군을 추가했습니다. 직전 best였던 downside rank penalty 후보를 기준으로 `max_new_targets_per_rebalance` 신규 편입 상한, 격월 리밸런싱, 넓은 tolerance 조합을 별도 family로 분리해 top-200 full sweep에서 turnover/year와 MDD 병목이 실제로 완화되는지 확인할 수 있게 했습니다.
 
+2026-05-12 churn control top-200 follow-up: `--candidate-family target_weight_churn_relief --top-n 200` full sweep에서 후보 5개를 검증했고 판정은 `KEEP_RESEARCH_ONLY`입니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2`는 return=+118.89%, raw excess=+87.00%p, exposure-matched excess=+97.61%p, Sharpe=0.89, PF=2.04, WF positive/Sh+=100%였지만 MDD=-26.95%, turnover/year=1034.2%로 provisional 게이트를 넘지 못했습니다. `maxnew1`과 격월 후보는 turnover/year를 423.0~674.4%까지 낮췄지만 benchmark excess Sharpe와 MDD가 악화됐습니다. 다음 연구는 단순 교체 제한보다 포트폴리오 drawdown guard, 재진입 cooldown, 상관/업종 집중도 페널티처럼 손실 구간 자체를 줄이는 구조가 우선입니다.
+
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
 | relative_strength_rotation | **provisional_paper_candidate** | +18.09 | 1.62 | 100 | 83.3 | — |
