@@ -32,6 +32,7 @@ DEFAULT_START = "2023-01-01"
 DEFAULT_END = "2025-12-31"
 DEFAULT_INITIAL_CAPITAL = 10_000_000
 DEFAULT_TOP_N = 20
+DEFAULT_UNIVERSE_SCAN_LIMIT = 100
 DEFAULT_CANDIDATE_FAMILY = "rotation"
 DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
 TARGET_WEIGHT_EXECUTION_PRICE_MODE = "next_open"
@@ -942,11 +943,21 @@ def temporary_diversification(config, overrides: dict[str, Any] | None):
                 div[key] = saved[key]
 
 
-def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
+def select_canonical_universe(
+    top_n: int = DEFAULT_TOP_N,
+    *,
+    scan_limit: int | None = None,
+) -> list[str]:
     """Use the same liquidity proxy as canonical promotion evaluation."""
     from core.data_collector import DataCollector
     import FinanceDataReader as fdr
 
+    requested_top_n = max(1, int(top_n))
+    requested_scan_limit = (
+        max(DEFAULT_UNIVERSE_SCAN_LIMIT, requested_top_n * 2)
+        if scan_limit is None
+        else max(requested_top_n, int(scan_limit))
+    )
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
     stocks = fdr.StockListing("KOSPI")
@@ -955,7 +966,8 @@ def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
         common = common[common["Marcap"] > 1e11]
 
     amounts: dict[str, float] = {}
-    for sym in common["Code"].tolist()[:100]:
+    candidates = common["Code"].tolist()[:requested_scan_limit]
+    for sym in candidates:
         try:
             df = dc.fetch_korean_stock(sym, "2022-10-01", "2022-12-31")
             if df is not None and not df.empty:
@@ -965,7 +977,14 @@ def select_canonical_universe(top_n: int = DEFAULT_TOP_N) -> list[str]:
         except Exception:
             continue
 
-    return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:top_n])
+    if len(amounts) < requested_top_n:
+        logger.warning(
+            "canonical universe 후보 수 부족: requested_top_n={} scan_limit={} collected={}",
+            requested_top_n,
+            requested_scan_limit,
+            len(amounts),
+        )
+    return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:requested_top_n])
 
 
 def apply_research_universe_liquidity_filter(
@@ -2350,6 +2369,7 @@ def run_candidate_sweep(
     *,
     symbols: list[str] | None = None,
     top_n: int = DEFAULT_TOP_N,
+    universe_scan_limit: int | None = None,
     start: str = DEFAULT_START,
     end: str = DEFAULT_END,
     capital: float = DEFAULT_INITIAL_CAPITAL,
@@ -2359,7 +2379,27 @@ def run_candidate_sweep(
     from config.config_loader import Config
 
     config = Config.get()
-    input_universe = normalize_symbols(symbols or select_canonical_universe(top_n))
+    if symbols is None:
+        input_universe = select_canonical_universe(
+            top_n,
+            scan_limit=universe_scan_limit,
+        )
+        universe_selection = {
+            "source": "canonical_liquidity_universe",
+            "requested_top_n": max(1, int(top_n)),
+            "scan_limit": (
+                max(DEFAULT_UNIVERSE_SCAN_LIMIT, max(1, int(top_n)) * 2)
+                if universe_scan_limit is None
+                else max(max(1, int(top_n)), int(universe_scan_limit))
+            ),
+        }
+    else:
+        input_universe = normalize_symbols(symbols)
+        universe_selection = {
+            "source": "explicit_symbols",
+            "requested_top_n": len(input_universe),
+            "scan_limit": len(input_universe),
+        }
     symbols, liquidity_filter = apply_research_universe_liquidity_filter(
         input_universe,
         config,
@@ -2425,6 +2465,11 @@ def run_candidate_sweep(
         "eval_end": end,
         "initial_capital": capital,
         "candidate_family": candidate_family,
+        "universe_selection": {
+            **universe_selection,
+            "selected_before_liquidity_filter": len(input_universe),
+            "selected_after_liquidity_filter": len(symbols),
+        },
         "input_universe": input_universe,
         "universe_liquidity_filter": liquidity_filter,
         "universe": symbols,
@@ -2493,6 +2538,12 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         f"Generated: {bundle.get('generated_at', '')[:19]}",
         f"Period: {bundle.get('eval_start')} ~ {bundle.get('eval_end')}",
         f"Candidate family: {bundle.get('candidate_family', 'rotation')}",
+        (
+            "Universe selection: "
+            f"{(bundle.get('universe_selection') or {}).get('source', 'unknown')} "
+            f"top_n={(bundle.get('universe_selection') or {}).get('requested_top_n', 'N/A')} "
+            f"scan_limit={(bundle.get('universe_selection') or {}).get('scan_limit', 'N/A')}"
+        ),
         f"Input universe size: {len(bundle.get('input_universe', bundle.get('universe', [])))}",
         f"Universe size: {len(bundle.get('universe', []))}",
     ]
@@ -2577,6 +2628,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Research candidate sweep")
     parser.add_argument("--symbols", help="Comma-separated symbols. Omit to use canonical liquidity universe.")
     parser.add_argument("--top-n", type=int, default=DEFAULT_TOP_N)
+    parser.add_argument(
+        "--universe-scan-limit",
+        type=int,
+        default=None,
+        help=(
+            "Number of KOSPI candidates to scan before selecting the liquidity-ranked "
+            "canonical universe. Defaults to max(100, top_n*2)."
+        ),
+    )
     parser.add_argument("--start", default=DEFAULT_START)
     parser.add_argument("--end", default=DEFAULT_END)
     parser.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
@@ -2604,6 +2664,7 @@ def main() -> None:
     bundle = run_candidate_sweep(
         symbols=parse_symbols(args.symbols),
         top_n=args.top_n,
+        universe_scan_limit=args.universe_scan_limit,
         start=args.start,
         end=args.end,
         capital=args.capital,
