@@ -20,6 +20,7 @@ from typing import Any
 LIVE_GATE_SCHEMA_VERSION = 1
 LIVE_GATE_ARTIFACT_TYPE = "canonical_promotion_bundle"
 LIVE_GATE_MAX_ARTIFACT_AGE_DAYS = 7
+LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS = 14
 LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH = 64
 
 REQUIRED_PROMOTION_ARTIFACTS = (
@@ -68,6 +69,32 @@ def _datetime_age_days(generated_at: datetime, now: datetime) -> float:
     if generated_at.tzinfo is None and now.tzinfo is not None:
         now = now.replace(tzinfo=None)
     return (now - generated_at).total_seconds() / 86400
+
+
+def _parse_date(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _latest_evidence_date(evidence: dict[str, Any]) -> datetime | None:
+    latest = _parse_date(evidence.get("latest_evidence_date"))
+    if latest is not None:
+        return latest
+    period = evidence.get("period")
+    if isinstance(period, str) and "~" in period:
+        return _parse_date(period.split("~")[-1].strip())
+    return None
 
 
 def _config_hash(config: Any, attr: str) -> str:
@@ -478,6 +505,19 @@ def validate_live_readiness(
         sell_count = _as_int(evidence.get("sell_count")) or 0
         win_rate = _as_float(evidence.get("win_rate")) or 0
         frozen_days = _as_int(evidence.get("frozen_days")) or 0
+        latest_evidence = _latest_evidence_date(evidence)
+        if latest_evidence is None:
+            issues.append("paper evidence latest_evidence_date 누락 또는 형식 오류.")
+        else:
+            evidence_age_days = (now.date() - latest_evidence.date()).days
+            if evidence_age_days < 0:
+                issues.append("paper evidence latest_evidence_date가 현재 시각보다 미래입니다.")
+            elif evidence_age_days > LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS:
+                issues.append(
+                    "paper evidence가 오래됨: "
+                    f"{evidence_age_days}일 경과 "
+                    f"(최대 {LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS}일)."
+                )
         if promotable_days < 60:
             issues.append("paper evidence 60영업일 미달.")
         if benchmark_final_ratio < 0.8:
