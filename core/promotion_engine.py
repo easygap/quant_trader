@@ -61,6 +61,7 @@ class StrategyMetrics:
     paper_sharpe: Optional[float] = None
     paper_excess: Optional[float] = None  # same-universe excess return
     paper_evidence_recommendation: Optional[str] = None
+    paper_evidence_block_reasons: Optional[list[str]] = None
     paper_benchmark_final_ratio: Optional[float] = None
     paper_sell_count: Optional[int] = None
     paper_win_rate: Optional[float] = None
@@ -69,6 +70,10 @@ class StrategyMetrics:
     paper_latest_evidence_date: Optional[str] = None
     paper_evidence_age_days: Optional[int] = None
     paper_evidence_fresh: Optional[bool] = None
+    paper_trade_quality_status: Optional[str] = None
+    paper_trade_quality_adverse_gap_bps: Optional[float] = None
+    paper_trade_quality_missing_expected_ratio: Optional[float] = None
+    paper_trade_quality_missing_expected_count: Optional[int] = None
     target_weight_evidence_required: Optional[bool] = None
     target_weight_verified_pilot_days: Optional[int] = None
     target_weight_invalid_days: Optional[int] = None
@@ -167,7 +172,13 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
     if m.paper_excess is None or m.paper_excess < 0:
         fails.append(f"paper excess {m.paper_excess or 0} < 0")
     if m.paper_evidence_recommendation != "ELIGIBLE":
-        fails.append(f"paper evidence recommendation {m.paper_evidence_recommendation or 'missing'} != ELIGIBLE")
+        detail = ""
+        if m.paper_evidence_block_reasons:
+            detail = ": " + "; ".join(m.paper_evidence_block_reasons[:3])
+        fails.append(
+            f"paper evidence recommendation {m.paper_evidence_recommendation or 'missing'} != ELIGIBLE"
+            f"{detail}"
+        )
     if m.paper_benchmark_final_ratio is None or m.paper_benchmark_final_ratio < 0.8:
         fails.append(f"paper benchmark_final_ratio {m.paper_benchmark_final_ratio or 0} < 0.8")
     if m.paper_sell_count is None or m.paper_sell_count < 5:
@@ -357,6 +368,10 @@ def paper_evidence_metrics_from_package(
     if not isinstance(package, dict):
         return {}
     target_weight_evidence = package.get("target_weight_evidence") or {}
+    trade_quality = package.get("trade_quality") or {}
+    block_reasons = package.get("block_reasons")
+    if not isinstance(block_reasons, list):
+        block_reasons = []
     latest_evidence_date = _latest_evidence_date_from_package(package)
     reference = _parse_date_like(reference_date) or datetime.now().date()
     evidence_age_days = (
@@ -375,6 +390,7 @@ def paper_evidence_metrics_from_package(
         "paper_sharpe": _as_float(package.get("paper_sharpe", package.get("sharpe"))),
         "paper_excess": _as_float(package.get("avg_same_universe_excess")),
         "paper_evidence_recommendation": package.get("recommendation"),
+        "paper_evidence_block_reasons": [str(reason) for reason in block_reasons],
         "paper_benchmark_final_ratio": _as_float(package.get("benchmark_final_ratio")),
         "paper_sell_count": _as_int(package.get("sell_count")),
         "paper_win_rate": _as_float(package.get("win_rate")),
@@ -387,6 +403,16 @@ def paper_evidence_metrics_from_package(
         ),
         "paper_evidence_age_days": evidence_age_days,
         "paper_evidence_fresh": evidence_fresh,
+        "paper_trade_quality_status": trade_quality.get("status"),
+        "paper_trade_quality_adverse_gap_bps": _as_float(
+            trade_quality.get("adverse_gap_bps_of_notional")
+        ),
+        "paper_trade_quality_missing_expected_ratio": _as_float(
+            trade_quality.get("missing_expected_price_ratio")
+        ),
+        "paper_trade_quality_missing_expected_count": _as_int(
+            trade_quality.get("missing_expected_price_count")
+        ),
         "target_weight_evidence_required": target_weight_evidence.get("required"),
         "target_weight_verified_pilot_days": _as_int(package.get("target_weight_verified_pilot_days")),
         "target_weight_invalid_days": _as_int(package.get("target_weight_invalid_days")),
@@ -407,6 +433,7 @@ def attach_paper_evidence_metrics(
         "paper_sharpe",
         "paper_excess",
         "paper_evidence_recommendation",
+        "paper_evidence_block_reasons",
         "paper_benchmark_final_ratio",
         "paper_sell_count",
         "paper_win_rate",
@@ -415,6 +442,10 @@ def attach_paper_evidence_metrics(
         "paper_latest_evidence_date",
         "paper_evidence_age_days",
         "paper_evidence_fresh",
+        "paper_trade_quality_status",
+        "paper_trade_quality_adverse_gap_bps",
+        "paper_trade_quality_missing_expected_ratio",
+        "paper_trade_quality_missing_expected_count",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
