@@ -142,6 +142,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "cash_switch_rotation_sma200" in ids
     assert "benchmark_aware_rotation_60_120_dense" in ids
     assert "target_weight_rotation_top3_60_120_excess" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk60" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -380,6 +381,27 @@ def test_build_candidate_specs_supports_target_weight_volatility_target_family()
     assert all(spec.params["market_exposure_mode"] == "benchmark_vol_target" for spec in direct)
     assert {spec.params["benchmark_vol_target_pct"] for spec in direct} == {14.0, 16.0}
     assert {spec.params["bear_target_exposure"] for spec in direct} == {0.25, 0.35}
+
+
+def test_build_candidate_specs_supports_target_weight_downside_rank_relief_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_downside_rank_relief")
+    alias = build_candidate_specs("rank_relief")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk60",
+        "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk90",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["rank_penalty_mode"] == "downside_risk" for spec in direct)
+    assert {spec.params["rank_penalty_lookback"] for spec in direct} == {60, 90}
+    assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
+    assert any(spec.params.get("target_exposure") == 0.75 for spec in direct)
 
 
 def test_build_candidate_specs_rejects_unknown_family():
@@ -879,6 +901,78 @@ def test_target_weight_research_rebalances_at_next_open_not_same_day_close():
     assert trade["execution_price_mode"] == "next_open"
     assert result["target_weight_metrics"]["execution_price_mode"] == "next_open"
     assert result["target_weight_metrics"]["avg_volume_lookback_lag_days"] == 1
+
+
+def test_target_weight_rank_penalty_can_move_high_downside_name_below_lower_risk_name():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.to_datetime(
+        [
+            "2025-01-27",
+            "2025-01-28",
+            "2025-01-29",
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-03",
+        ]
+    )
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            if symbol == "AAA":
+                close = [100.0, 50.0, 100.0, 100.0, 130.0, 130.0]
+            elif symbol == "BBB":
+                close = [100.0, 100.0, 100.0, 100.0, 120.0, 120.0]
+            else:
+                close = [100.0] * len(dates)
+            return pd.DataFrame(
+                {
+                    "open": [100.0] * len(dates),
+                    "close": close,
+                    "volume": [100.0] * len(dates),
+                },
+                index=dates,
+            )
+
+    class NoCostRiskManager:
+        def calculate_transaction_costs(self, price, quantity, side, **kwargs):
+            return {
+                "execution_price": float(price),
+                "commission": 0.0,
+                "tax": 0.0,
+                "slippage": 0.0,
+                "slippage_multiplier": 1.0,
+                "participation_rate": 0.0,
+            }
+
+    result = sweep.run_target_weight_rotation_backtest(
+        ["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-02-03",
+        capital=1_000.0,
+        params={
+            "target_top_n": 1,
+            "target_exposure": 1.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "rank_penalty_mode": "downside_risk",
+            "rank_penalty_lookback": 4,
+            "downside_vol_penalty_weight": 1.0,
+            "drawdown_penalty_weight": 0.0,
+        },
+        collector=FakeCollector(),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    assert result["trades"][0]["symbol"] == "BBB"
+    metrics = result["target_weight_metrics"]
+    assert metrics["rank_penalty_mode"] == "downside_risk"
+    assert metrics["rank_penalty_lookback"] == 4
+    assert metrics["downside_vol_penalty_weight"] == 1.0
 
 
 def test_target_weight_rebalance_days_support_lower_frequency():
