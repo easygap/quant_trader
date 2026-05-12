@@ -430,6 +430,74 @@ def test_build_promotion_results_does_not_promote_live_when_evidence_blocked(tmp
     assert metrics[strategy]["paper_evidence_recommendation"] == "BLOCKED"
 
 
+def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        write_promotion_blocker_summary,
+    )
+
+    promotions = {
+        "paper_ready_strategy": {
+            "status": "live_candidate",
+            "allowed_modes": ["backtest", "paper", "live"],
+            "reason": "live_candidate 충족",
+        },
+        "paper_blocked_strategy": {
+            "status": "paper_only",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": (
+                "paper_only 충족; provisional 차단: "
+                "canonical data integrity failed: 벤치마크 coverage 누락 종목"
+            ),
+        },
+        "paper_stale_strategy": {
+            "status": "provisional_paper_candidate",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": (
+                "provisional_paper_candidate 충족; live 차단: "
+                "paper evidence stale latest=2026-01-01 age=120d > 14d"
+            ),
+        },
+    }
+    metrics = {
+        "paper_ready_strategy": {
+            "total_return": 18.0,
+            "benchmark_excess_return": 2.0,
+            "paper_days": 60,
+        },
+        "paper_blocked_strategy": {
+            "total_return": 8.0,
+            "benchmark_excess_return": None,
+            "canonical_data_integrity_ok": False,
+        },
+        "paper_stale_strategy": {
+            "total_return": 18.0,
+            "paper_latest_evidence_date": "2026-01-01",
+            "paper_evidence_fresh": False,
+        },
+    }
+
+    summary = build_promotion_blocker_summary(
+        promotions,
+        metrics,
+        metadata={"generated_at": "2026-05-12T09:00:00"},
+    )
+    json_path, md_path = write_promotion_blocker_summary(summary, tmp_path)
+
+    assert summary["artifact_type"] == "promotion_blocker_summary"
+    assert summary["summary"]["total_strategies"] == 3
+    assert summary["summary"]["live_ready_count"] == 1
+    assert summary["summary"]["blocked_from_live_count"] == 2
+    assert summary["strategies"]["paper_blocked_strategy"]["next_action"].startswith("canonical")
+    assert summary["strategies"]["paper_stale_strategy"]["next_action"].startswith("paper evidence")
+    assert summary["strategies"]["paper_ready_strategy"]["metrics"]["paper_days"] == 60
+    assert json.loads(json_path.read_text(encoding="utf-8"))["summary"]["live_ready_count"] == 1
+    report = md_path.read_text(encoding="utf-8")
+    assert "# Promotion Blocker Summary" in report
+    assert "paper_blocked_strategy" in report
+    assert "canonical data integrity failed" in report
+
+
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
