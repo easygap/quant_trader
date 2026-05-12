@@ -144,6 +144,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "target_weight_rotation_top3_60_120_excess" in ids
     assert "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk60" in ids
     assert "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd10_floor35_cd1" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -424,6 +425,28 @@ def test_build_candidate_specs_supports_target_weight_churn_relief_family():
     assert {spec.params["max_new_targets_per_rebalance"] for spec in direct} == {1, 2}
     assert any(spec.params["rebalance_frequency"] == "bimonthly" for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
+
+
+def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_drawdown_guard")
+    alias = build_candidate_specs("drawdown_guard")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd10_floor35_cd1",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2_pdd10_floor35_cd1",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60_pdd10_floor35_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["rank_penalty_mode"] == "downside_risk" for spec in direct)
+    assert {spec.params["portfolio_drawdown_guard_trigger_pct"] for spec in direct} == {8.0, 10.0}
+    assert {spec.params["portfolio_drawdown_guard_exposure"] for spec in direct} == {0.25, 0.35, 0.40}
+    assert all(spec.params["portfolio_drawdown_guard_cooldown_rebalances"] == 1 for spec in direct)
+    assert any(spec.params.get("max_new_targets_per_rebalance") == 2 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():
