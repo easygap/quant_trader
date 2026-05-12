@@ -48,6 +48,16 @@ def test_parse_symbols_restores_numeric_codes_losing_leading_zeroes():
     assert parse_symbols("5930,660,035720") == ["005930", "000660", "035720"]
 
 
+def test_parse_candidate_ids_accepts_repeated_and_comma_values():
+    from tools.research_candidate_sweep import parse_candidate_ids
+
+    assert parse_candidate_ids(["candidate_a,candidate_b", "candidate_a"]) == [
+        "candidate_a",
+        "candidate_b",
+    ]
+    assert parse_candidate_ids(None) is None
+
+
 def test_select_canonical_universe_scans_past_legacy_100_for_large_top_n(monkeypatch):
     import sys
     import types
@@ -108,6 +118,22 @@ def test_build_candidate_specs_supports_all_families():
         "trend_pullback",
         "target_weight_rotation",
     }
+
+
+def test_filter_candidate_specs_limits_to_requested_ids_and_rejects_typos():
+    import pytest
+    from tools.research_candidate_sweep import CandidateSpec, filter_candidate_specs
+
+    specs = [
+        CandidateSpec("candidate_a", "relative_strength_rotation", {}, "A"),
+        CandidateSpec("candidate_b", "relative_strength_rotation", {}, "B"),
+    ]
+
+    selected = filter_candidate_specs(specs, ["candidate_b"])
+
+    assert [spec.candidate_id for spec in selected] == ["candidate_b"]
+    with pytest.raises(ValueError, match="unknown candidate_id"):
+        filter_candidate_specs(specs, ["candidate_missing"])
 
 
 def test_build_candidate_specs_supports_pullback_family_aliases():
@@ -909,6 +935,83 @@ def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):
     assert bundle["input_universe"] == ["AAA", "BBB"]
     assert bundle["universe"] == ["AAA"]
     assert bundle["universe_liquidity_filter"]["excluded_symbols"] == ["BBB"]
+
+
+def test_run_candidate_sweep_limits_to_requested_candidate_ids(monkeypatch):
+    import pandas as pd
+    import config.config_loader as config_loader
+    import tools.research_candidate_sweep as sweep
+
+    class _Config:
+        yaml_hash = "yaml"
+        resolved_hash = "resolved"
+        risk_params = {"liquidity_filter": {"enabled": False}}
+
+    evaluated = []
+
+    def fake_evaluate(spec, symbols, start, end, capital, benchmark_daily_returns):
+        evaluated.append(spec.candidate_id)
+        return {
+            "total_return": 12.0,
+            "sharpe": 0.7,
+            "profit_factor": 1.4,
+            "mdd": -8.0,
+            "total_trades": 40,
+            "ev_per_trade": 1000.0,
+            "cost_adjusted_cagr": 5.0,
+            "turnover_per_year": 300.0,
+        }
+
+    monkeypatch.setattr(config_loader.Config, "get", staticmethod(lambda: _Config()))
+    monkeypatch.setattr(
+        sweep,
+        "apply_research_universe_liquidity_filter",
+        lambda symbols, config, *, as_of_end: (
+            symbols,
+            {
+                "enabled": False,
+                "input_symbols": symbols,
+                "passed_symbols": symbols,
+                "excluded_symbols": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "buy_and_hold_benchmark_with_returns",
+        lambda symbols, start, end, capital: (
+            {
+                "ew_bh_return": 2.0,
+                "ew_bh_sharpe": 0.2,
+                "universe_size": len(symbols),
+                "benchmark_symbols": symbols,
+                "benchmark_coverage_complete": True,
+            },
+            pd.Series(dtype=float),
+        ),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "build_candidate_specs",
+        lambda family: [
+            sweep.CandidateSpec("candidate_a", "relative_strength_rotation", {}, "A"),
+            sweep.CandidateSpec("candidate_b", "relative_strength_rotation", {}, "B"),
+        ],
+    )
+    monkeypatch.setattr(sweep, "evaluate_candidate", fake_evaluate)
+
+    bundle = sweep.run_candidate_sweep(
+        symbols=["AAA", "BBB"],
+        start="2025-01-01",
+        end="2025-12-31",
+        include_walk_forward=False,
+        candidate_ids=["candidate_b"],
+    )
+
+    assert evaluated == ["candidate_b"]
+    assert bundle["candidate_ids_requested"] == ["candidate_b"]
+    assert bundle["candidate_ids_evaluated"] == ["candidate_b"]
+    assert [record["candidate_id"] for record in bundle["candidates"]] == ["candidate_b"]
 
 
 def test_portfolio_backtester_strategy_config_for_run_applies_overlay():
