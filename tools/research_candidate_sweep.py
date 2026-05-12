@@ -994,6 +994,26 @@ def _target_weight_spec_with_churn_control(
     )
 
 
+def _target_weight_spec_with_portfolio_drawdown_guard(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    guard_params: dict[str, Any],
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        **guard_params,
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1162,6 +1182,65 @@ def build_target_weight_churn_relief_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight variants that cap exposure after portfolio drawdown events."""
+    rank_specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_downside_rank_relief_candidate_specs()
+    }
+    churn_specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_churn_relief_candidate_specs()
+    }
+    guard10_floor35_cd1 = {
+        "portfolio_drawdown_guard_trigger_pct": 10.0,
+        "portfolio_drawdown_guard_exposure": 0.35,
+        "portfolio_drawdown_guard_cooldown_rebalances": 1,
+    }
+    guard8_floor25_cd1 = {
+        "portfolio_drawdown_guard_trigger_pct": 8.0,
+        "portfolio_drawdown_guard_exposure": 0.25,
+        "portfolio_drawdown_guard_cooldown_rebalances": 1,
+    }
+    guard10_floor40_cd1 = {
+        "portfolio_drawdown_guard_trigger_pct": 10.0,
+        "portfolio_drawdown_guard_exposure": 0.40,
+        "portfolio_drawdown_guard_cooldown_rebalances": 1,
+    }
+    return [
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            rank_specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60"],
+            suffix="pdd10_floor35_cd1",
+            guard_params=guard10_floor35_cd1,
+            description="rank-penalty risk-overlay rotation with portfolio drawdown exposure guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            rank_specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60"],
+            suffix="pdd8_floor25_cd1",
+            guard_params=guard8_floor25_cd1,
+            description="rank-penalty risk-overlay rotation with stricter drawdown exposure guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            churn_specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2"],
+            suffix="pdd10_floor35_cd1",
+            guard_params=guard10_floor35_cd1,
+            description="churn-limited rank-penalty rotation with portfolio drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            rank_specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60"],
+            suffix="pdd10_floor35_cd1",
+            guard_params=guard10_floor35_cd1,
+            description="rank-penalty risk-overlay rotation with portfolio drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            rank_specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90"],
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with portfolio drawdown guard",
+        ),
+    ]
+
+
 def build_target_weight_turnover_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for lower rebalance-frequency relief sweeps."""
     specs_by_id = {
@@ -1276,6 +1355,15 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "rank_churn_relief",
     ):
         return build_target_weight_churn_relief_candidate_specs()
+    if family in (
+        "target_weight_drawdown_guard",
+        "target_weight_portfolio_guard",
+        "target_weight_loss_guard",
+        "drawdown_guard",
+        "portfolio_guard",
+        "loss_guard",
+    ):
+        return build_target_weight_drawdown_guard_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -1291,13 +1379,15 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_target_weight_volatility_target_candidate_specs(),
             *build_target_weight_downside_rank_relief_candidate_specs(),
             *build_target_weight_churn_relief_candidate_specs(),
+            *build_target_weight_drawdown_guard_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
         "target_weight_rotation, target_weight_risk_relief, "
         "target_weight_turnover_relief, target_weight_volatility_target, "
-        "target_weight_downside_rank_relief, target_weight_churn_relief, all"
+        "target_weight_downside_rank_relief, target_weight_churn_relief, "
+        "target_weight_drawdown_guard, all"
     )
 
 
@@ -2207,6 +2297,21 @@ def run_target_weight_rotation_backtest(
                         if params.get("max_new_targets_per_rebalance") is not None
                         else None
                     ),
+                    "portfolio_drawdown_guard_enabled": bool(
+                        float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0) > 0
+                    ),
+                    "portfolio_drawdown_guard_trigger_pct": round(
+                        max(0.0, float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0)),
+                        2,
+                    ),
+                    "portfolio_drawdown_guard_exposure_pct": round(
+                        max(0.0, min(float(params.get("portfolio_drawdown_guard_exposure", 0.0) or 0.0), 1.0)) * 100,
+                        1,
+                    ),
+                    "portfolio_drawdown_guard_cooldown_rebalances": max(
+                        0,
+                        int(params.get("portfolio_drawdown_guard_cooldown_rebalances", 0) or 0),
+                    ),
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
@@ -2251,11 +2356,34 @@ def run_target_weight_rotation_backtest(
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
+        base_target_exposure = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
         max_new_targets_raw = params.get("max_new_targets_per_rebalance")
         max_new_targets_per_rebalance = (
             max(0, int(max_new_targets_raw))
             if max_new_targets_raw is not None
             else None
+        )
+        portfolio_drawdown_guard_trigger_pct = max(
+            0.0,
+            float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
+        )
+        portfolio_drawdown_guard_enabled = portfolio_drawdown_guard_trigger_pct > 0
+        portfolio_drawdown_guard_exposure = max(
+            0.0,
+            min(
+                float(
+                    params.get(
+                        "portfolio_drawdown_guard_exposure",
+                        params.get("bear_target_exposure", base_target_exposure),
+                    )
+                    or 0.0
+                ),
+                base_target_exposure,
+            ),
+        )
+        portfolio_drawdown_guard_cooldown_rebalances = max(
+            0,
+            int(params.get("portfolio_drawdown_guard_cooldown_rebalances", 0) or 0),
         )
         rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
         rank_penalty_active = rank_penalty_mode not in ("none", "off", "disabled", "")
@@ -2287,8 +2415,13 @@ def run_target_weight_rotation_backtest(
         rebalance_count = 0
         filled_slots: list[int] = []
         target_exposures: list[float] = []
-        base_target_exposure = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
         risk_off_rebalance_count = 0
+        portfolio_peak_value = float(capital)
+        last_equity_value = float(capital)
+        portfolio_drawdown_guard_cooldown_remaining = 0
+        portfolio_drawdown_guard_trigger_count = 0
+        portfolio_drawdown_guard_rebalance_count = 0
+        portfolio_drawdown_guard_drawdowns: list[float] = []
         total_turnover = 0.0
         skipped_tolerance_trades = 0
         skipped_tolerance_sell_trades = 0
@@ -2392,9 +2525,29 @@ def run_target_weight_rotation_backtest(
                             break
                         missing_held_open_samples.append(f"{day.strftime('%Y-%m-%d')}:{sym}")
                 if not skip_rebalance_for_missing_held_open:
-                    target_exposure = _target_exposure_for_day(day, benchmark_close, params)
+                    market_target_exposure = _target_exposure_for_day(day, benchmark_close, params)
+                    target_exposure = market_target_exposure
+                    if portfolio_drawdown_guard_enabled and portfolio_peak_value > 0:
+                        portfolio_drawdown_pct = (
+                            last_equity_value / portfolio_peak_value - 1.0
+                        ) * 100
+                        guard_triggered = portfolio_drawdown_pct <= -portfolio_drawdown_guard_trigger_pct
+                        if guard_triggered:
+                            portfolio_drawdown_guard_trigger_count += 1
+                            portfolio_drawdown_guard_cooldown_remaining = max(
+                                portfolio_drawdown_guard_cooldown_remaining,
+                                portfolio_drawdown_guard_cooldown_rebalances + 1,
+                            )
+                        if portfolio_drawdown_guard_cooldown_remaining > 0:
+                            target_exposure = min(
+                                target_exposure,
+                                portfolio_drawdown_guard_exposure,
+                            )
+                            portfolio_drawdown_guard_rebalance_count += 1
+                            portfolio_drawdown_guard_drawdowns.append(portfolio_drawdown_pct)
+                            portfolio_drawdown_guard_cooldown_remaining -= 1
                     target_exposures.append(target_exposure)
-                    if target_exposure < base_target_exposure - 1e-9:
+                    if market_target_exposure < base_target_exposure - 1e-9:
                         risk_off_rebalance_count += 1
                     avg_daily_volumes: dict[str, float] = {}
                     if day in avg_volume_panel.index:
@@ -2471,6 +2624,9 @@ def run_target_weight_rotation_backtest(
                 if close_prices.get(sym, 0.0) > 0
             )
             value = cash + market_value
+            last_equity_value = value
+            if value > portfolio_peak_value:
+                portfolio_peak_value = value
             equity_rows.append(
                 {
                     "date": day,
@@ -2501,6 +2657,31 @@ def run_target_weight_rotation_backtest(
                 "rebalance_frequency": rebalance_frequency,
                 "hold_rank_buffer": hold_rank_buffer,
                 "max_new_targets_per_rebalance": max_new_targets_per_rebalance,
+                "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
+                "portfolio_drawdown_guard_trigger_pct": round(
+                    portfolio_drawdown_guard_trigger_pct,
+                    2,
+                ) if portfolio_drawdown_guard_enabled else 0.0,
+                "portfolio_drawdown_guard_exposure_pct": round(
+                    portfolio_drawdown_guard_exposure * 100,
+                    1,
+                ) if portfolio_drawdown_guard_enabled else 0.0,
+                "portfolio_drawdown_guard_cooldown_rebalances": (
+                    portfolio_drawdown_guard_cooldown_rebalances
+                    if portfolio_drawdown_guard_enabled
+                    else 0
+                ),
+                "portfolio_drawdown_guard_trigger_count": portfolio_drawdown_guard_trigger_count,
+                "portfolio_drawdown_guard_rebalance_count": portfolio_drawdown_guard_rebalance_count,
+                "portfolio_drawdown_guard_rebalance_pct": round(
+                    portfolio_drawdown_guard_rebalance_count / rebalance_count * 100,
+                    1,
+                ) if rebalance_count else 0,
+                "portfolio_drawdown_guard_worst_drawdown_pct": round(
+                    min(portfolio_drawdown_guard_drawdowns),
+                    2,
+                ) if portfolio_drawdown_guard_drawdowns else 0,
+                "portfolio_drawdown_guard_remaining_cooldown": portfolio_drawdown_guard_cooldown_remaining,
                 "rank_penalty_mode": rank_penalty_mode if rank_penalty_active else "none",
                 "rank_penalty_lookback": max(
                     0,
@@ -3412,6 +3593,7 @@ def main() -> None:
             "target_weight_volatility_target",
             "target_weight_downside_rank_relief",
             "target_weight_churn_relief",
+            "target_weight_drawdown_guard",
             "all",
         ],
         help="Research candidate family to evaluate.",
