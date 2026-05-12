@@ -2351,6 +2351,15 @@ def data_quality_check_not_available(
     }
 
 
+def _check_display_status(check: dict[str, Any] | None) -> str:
+    payload = check or {}
+    if not payload.get("checked", True):
+        return "NOT CHECKED"
+    if payload.get("complete", payload.get("allowed", False)):
+        return "PASS"
+    return "BLOCKED"
+
+
 def assess_plan_data_quality(plan: TargetWeightPlan) -> dict[str, Any]:
     """Validate target-weight price freshness diagnostics before operator action."""
     diagnostics = plan.diagnostics or {}
@@ -3319,6 +3328,7 @@ def build_target_weight_daily_ops_summary(
             "target_positions": plan.get("target_position_count", 0),
             "max_order_notional": plan.get("max_order_notional", 0),
             "gross_exposure_after": plan.get("gross_exposure_after", 0),
+            "data_quality_status": _check_display_status(data_quality_check),
             "data_quality_complete": bool(data_quality_check.get("complete", False)),
             "data_quality_reason": data_quality_check.get("reason", "not checked"),
             "price_symbols_checked": int(data_quality_check.get("symbols_checked", 0) or 0),
@@ -3326,10 +3336,22 @@ def build_target_weight_daily_ops_summary(
             "liquidity_reason": liquidity.get("reason", "not checked"),
             "pre_trade_risk_complete": bool(pre_trade_risk.get("complete", False)),
             "pre_trade_risk_reason": pre_trade_risk.get("reason", "not checked"),
+            "execution_trade_day_checked": bool(execution_trade_day_check.get("checked", False)),
+            "execution_trade_day_status": _check_display_status(execution_trade_day_check),
             "execution_trade_day_allowed": bool(execution_trade_day_check.get("allowed", False)),
             "execution_trade_day_reason": execution_trade_day_check.get("reason", "not checked"),
+            "execution_market_session_checked": bool(
+                execution_market_session_check.get("checked", False)
+            ),
+            "execution_market_session_status": _check_display_status(execution_market_session_check),
             "execution_market_session_allowed": bool(execution_market_session_check.get("allowed", False)),
             "execution_market_session_reason": execution_market_session_check.get("reason", "not checked"),
+            "pilot_authorization_snapshot_checked": bool(
+                pilot_authorization_snapshot_check.get("checked", False)
+            ),
+            "pilot_authorization_snapshot_status": _check_display_status(
+                pilot_authorization_snapshot_check
+            ),
             "pilot_authorization_snapshot_allowed": bool(
                 pilot_authorization_snapshot_check.get("allowed", False)
             ),
@@ -3362,13 +3384,7 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         or decision.get("data_quality_check")
         or data_quality_check_not_available()
     )
-    data_quality_status = (
-        "PASS"
-        if data_quality.get("complete")
-        else "NOT CHECKED"
-        if not data_quality.get("checked")
-        else "BLOCKED"
-    )
+    data_quality_status = _check_display_status(data_quality)
     commands = summary.get("operator_commands", {})
     execution_day = decision.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     market_session = (
@@ -3414,17 +3430,17 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         ),
         (
             f"- Execution day check: "
-            f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(execution_day)} - "
             f"{execution_day.get('reason', 'not checked')}"
         ),
         (
             f"- Market session check: "
-            f"{'PASS' if market_session.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(market_session)} - "
             f"{market_session.get('reason', 'not checked')}"
         ),
         (
             f"- Pilot auth snapshot: "
-            f"{'PASS' if authorization_snapshot.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(authorization_snapshot)} - "
             f"{authorization_snapshot.get('reason', 'not checked')}"
         ),
         (
@@ -3524,13 +3540,7 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     launch = audit["launch_readiness"]
     caps = audit["cap_recommendation"]["suggested_caps"]
     data_quality = audit.get("data_quality_check") or data_quality_check_not_available()
-    data_quality_status = (
-        "PASS"
-        if data_quality.get("complete")
-        else "NOT CHECKED"
-        if not data_quality.get("checked")
-        else "BLOCKED"
-    )
+    data_quality_status = _check_display_status(data_quality)
     liquidity = audit.get("liquidity_check", {})
     pre_trade_risk = audit.get("pre_trade_risk_check", {})
     execution_day = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
@@ -3559,17 +3569,17 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         f"- Execution time (KST): `{market_session.get('execution_time', 'N/A')}`",
         (
             f"- Execution day check: "
-            f"{'PASS' if execution_day.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(execution_day)} - "
             f"{execution_day.get('reason', 'not checked')}"
         ),
         (
             f"- Market session check: "
-            f"{'PASS' if market_session.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(market_session)} - "
             f"{market_session.get('reason', 'not checked')}"
         ),
         (
             f"- Pilot auth snapshot: "
-            f"{'PASS' if authorization_snapshot.get('allowed') else 'BLOCKED'} - "
+            f"{_check_display_status(authorization_snapshot)} - "
             f"{authorization_snapshot.get('reason', 'not checked')}"
         ),
         f"- Targets: {', '.join(plan['targets']) if plan['targets'] else '(none)'}",

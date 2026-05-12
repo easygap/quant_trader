@@ -2020,6 +2020,128 @@ def test_build_pilot_readiness_audit_blocks_data_quality_issue():
     assert "stale symbol price data" in report
 
 
+def test_readiness_and_daily_ops_mark_not_checked_authorization_snapshot():
+    from tools.target_weight_rotation_pilot import (
+        build_pilot_readiness_audit,
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        preview_plan_against_caps,
+        recommend_pilot_caps,
+        render_pilot_readiness_audit_markdown,
+        render_target_weight_daily_ops_markdown,
+        validate_pilot_authorization_snapshot,
+        validate_plan_against_pilot,
+    )
+
+    plan = _adapter_plan()
+    pilot_check = SimpleNamespace(
+        allowed=False,
+        reason="pilot entry blocked",
+        remaining_orders=0,
+        remaining_exposure=0,
+        auth=None,
+        caps_snapshot={},
+    )
+    validation = validate_plan_against_pilot(plan, pilot_check)
+    cap_preview = preview_plan_against_caps(plan)
+    cap_recommendation = recommend_pilot_caps(plan)
+    auth_snapshot_check = validate_pilot_authorization_snapshot(plan, pilot_check)
+
+    audit = build_pilot_readiness_audit(
+        plan=plan,
+        pilot_check=pilot_check,
+        validation=validation,
+        cap_preview=cap_preview,
+        cap_recommendation=cap_recommendation,
+        preflight_refresh={
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+        },
+        launch_readiness={
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": False,
+            "infra_ready": True,
+            "launch_ready": False,
+            "blocking_requirements": ["pilot authorization missing"],
+            "runtime_state": "normal",
+        },
+        execution_idempotency={
+            "checked": True,
+            "allowed": True,
+            "reason": "no completed session for this trade day",
+        },
+        execution_trade_day_check={
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight execution trade day matches current KST date",
+        },
+        execution_market_session_check={
+            "checked": False,
+            "allowed": True,
+            "complete": True,
+            "reason": "execution market session check not required",
+        },
+        pilot_authorization_snapshot_check=auth_snapshot_check,
+        pre_execution_reconciliation={
+            "checked": True,
+            "complete": True,
+            "reason": "starting positions match target-weight plan",
+        },
+        liquidity_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+        },
+        pre_trade_risk_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+        },
+        trading_mode="paper",
+    )
+    readiness_report = render_pilot_readiness_audit_markdown(audit)
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 0,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 0,
+        "latest_record_date": None,
+        "latest_verified_pilot_date": None,
+        "latest_shadow_date": None,
+        "ready_for_promotion_day_count": False,
+    }
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+    daily_report = render_target_weight_daily_ops_markdown(summary)
+
+    assert auth_snapshot_check["checked"] is False
+    assert "Pilot auth snapshot: NOT CHECKED" in readiness_report
+    assert "Pilot auth snapshot: PASS" not in readiness_report
+    assert "Market session check: NOT CHECKED" in readiness_report
+    assert "Pilot auth snapshot: NOT CHECKED" in daily_report
+    assert "Pilot auth snapshot: PASS" not in daily_report
+    assert summary["risk_snapshot"]["pilot_authorization_snapshot_checked"] is False
+    assert summary["risk_snapshot"]["pilot_authorization_snapshot_status"] == "NOT CHECKED"
+    assert summary["risk_snapshot"]["execution_market_session_status"] == "NOT CHECKED"
+
+
 def test_assess_plan_liquidity_blocks_large_adv_order():
     from tools.target_weight_rotation_pilot import assess_plan_liquidity
 
