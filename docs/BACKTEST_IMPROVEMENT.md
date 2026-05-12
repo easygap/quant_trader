@@ -165,6 +165,7 @@
 | Target-weight research dynamic slippage | 높음 | **완료 — target-weight 리서치 백테스터가 종목별 20일 평균 거래량을 매수/매도 거래비용 계산에 전달하고 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total` 진단값을 artifact metrics에 남김** |
 | Paper/live 체결가 기준 현금 정산 | 높음 | 완료 — paper BUY는 예상 체결가 기준으로 수량·방어 가격을 산정하고, paper BUY/SELL은 모델 execution_price를 체결가로 기록한다. DB 현금 요약은 이미 체결가에 반영된 슬리피지를 다시 차감하지 않는다. slippage 필드는 비용 진단과 리포트용으로 유지 |
 | 운영 손실 한도 신규 진입 차단 | 높음 | 완료 — `OrderExecutor` 주문 전 검사에서 `drawdown.max_portfolio_mdd`와 `max_daily_loss`를 확인해 신규 BUY만 fail-closed 차단한다. MDD는 DB peak를 복구하는 `PortfolioManager.get_portfolio_summary()` 기준을 사용하고, 일일 손실은 최근 포트폴리오 스냅샷 대비 평가금액 하락률로 본다. SELL/exit는 손절·청산 경로라 계속 허용 |
+| Paper Evidence MDD 정규화 | 높음 | 완료 — PortfolioSnapshot은 MDD를 양수 퍼센트로 저장하고 기존 evidence/promotion은 음수 drawdown 기준으로 판정하던 불일치를 정리했다. 수집·finalize·promotion 집계에서 MDD를 `-abs(mdd)`로 정규화해 deep_drawdown anomaly와 `max_mdd` 승격 차단이 fail-open 되지 않게 했다 |
 | Research sweep benchmark coverage guard | 높음 | 완료 — EW B&H 벤치마크 입력 universe 일부라도 수집 실패·기간 부족이면 초과수익 계산을 0으로 고정하고 `INSUFFICIENT_BENCHMARK_DATA` decision으로 canonical 평가 진행을 차단 |
 | Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Live 체결보류 신규진입 중단 | 높음 | 완료 — 장중 신규 진입 루프에서 live 주문이 접수됐지만 체결 확인이 보류되면 브로커 잔고 동기화 전까지 같은 루프의 남은 신규 BUY 실행을 중단해 미확정 체결분을 무시한 추가 매수를 차단 |
