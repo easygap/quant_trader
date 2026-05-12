@@ -3,6 +3,7 @@ Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 
 실행: python tools/evaluate_and_promote.py --canonical
 요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
+요약 검증: python tools/evaluate_and_promote.py --blocker-summary-check
 출력: reports/promotion/
   - metrics_summary.json
   - walk_forward_summary.json
@@ -393,6 +394,14 @@ PROMOTION_BLOCKER_METRIC_KEYS = (
     "canonical_data_integrity_ok",
 )
 
+PROMOTION_BLOCKER_SOURCE_METADATA_KEYS = (
+    "generated_at",
+    "data_snapshot_hash",
+    "commit_hash",
+    "config_yaml_hash",
+    "config_resolved_hash",
+)
+
 
 def _promotion_reason_items(reason: str) -> list[str]:
     if not isinstance(reason, str) or not reason.strip():
@@ -421,8 +430,42 @@ def _next_promotion_action(status: str, blockers: list[str]) -> str:
     return "승격 조건과 운영 증거를 재검토"
 
 
+def _promotion_blocker_metric_snapshots(metrics_all: dict, strategy_names) -> dict:
+    snapshots = {}
+    if not isinstance(metrics_all, dict):
+        metrics_all = {}
+    for name in sorted(strategy_names):
+        metrics = metrics_all.get(name) or {}
+        snapshots[name] = {
+            key: metrics.get(key)
+            for key in PROMOTION_BLOCKER_METRIC_KEYS
+            if metrics.get(key) is not None
+        }
+    return snapshots
+
+
+def build_promotion_blocker_source_hash(promotions: dict, metrics_all: dict, metadata: dict | None = None) -> str:
+    """blocker summary가 어떤 promotion artifact 조합에서 생성됐는지 추적한다."""
+    if not isinstance(promotions, dict):
+        promotions = {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    metadata_snapshot = {
+        key: metadata.get(key)
+        for key in PROMOTION_BLOCKER_SOURCE_METADATA_KEYS
+        if metadata.get(key) is not None
+    }
+    payload = {
+        "promotions": {name: promotions[name] for name in sorted(promotions)},
+        "metrics": _promotion_blocker_metric_snapshots(metrics_all, promotions.keys()),
+        "metadata": metadata_snapshot,
+    }
+    return stable_payload_hash(payload)
+
+
 def build_promotion_blocker_summary(promotions: dict, metrics_all: dict, metadata: dict | None = None) -> dict:
     """promotion_result를 사람이 바로 읽을 blocker 중심 운영 요약으로 변환."""
+    if not isinstance(promotions, dict):
+        promotions = {}
     generated_at = (
         metadata.get("generated_at")
         if isinstance(metadata, dict) and metadata.get("generated_at")
@@ -430,29 +473,25 @@ def build_promotion_blocker_summary(promotions: dict, metrics_all: dict, metadat
     )
     status_counts: dict[str, int] = {}
     strategies = {}
+    metric_snapshots = _promotion_blocker_metric_snapshots(metrics_all, promotions.keys())
     for name in sorted(promotions):
         promotion = promotions.get(name) or {}
-        metrics = metrics_all.get(name) or {}
         status = promotion.get("status", "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         blockers = _promotion_reason_items(promotion.get("reason", ""))
-        metric_snapshot = {
-            key: metrics.get(key)
-            for key in PROMOTION_BLOCKER_METRIC_KEYS
-            if metrics.get(key) is not None
-        }
         strategies[name] = {
             "status": status,
             "allowed_modes": promotion.get("allowed_modes", []),
             "next_action": _next_promotion_action(status, blockers),
             "blockers": blockers,
-            "metrics": metric_snapshot,
+            "metrics": metric_snapshots.get(name, {}),
             "reason": promotion.get("reason", ""),
         }
     return {
         "artifact_type": "promotion_blocker_summary",
         "schema_version": 1,
         "generated_at": generated_at,
+        "source_artifact_hash": build_promotion_blocker_source_hash(promotions, metrics_all, metadata),
         "summary": {
             "total_strategies": len(strategies),
             "status_counts": dict(sorted(status_counts.items())),
@@ -520,6 +559,38 @@ def load_promotion_blocker_summary_from_artifacts(artifact_dir: str | Path = "re
     if not isinstance(metadata, dict):
         raise ValueError(f"{metadata_path} top-level JSON is not an object")
     return build_promotion_blocker_summary(promotions, metrics, metadata)
+
+
+def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "reports/promotion") -> list[str]:
+    """저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검사한다."""
+    base = Path(artifact_dir)
+    summary_path = base / "promotion_blocker_summary.json"
+    if not summary_path.exists():
+        return [f"{summary_path} 없음: --blocker-summary로 재생성 필요"]
+
+    try:
+        current = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{summary_path} 로드 실패: {exc}"]
+    if not isinstance(current, dict):
+        return [f"{summary_path} top-level JSON is not an object"]
+
+    try:
+        expected = load_promotion_blocker_summary_from_artifacts(base)
+    except Exception as exc:
+        return [f"promotion source artifact 로드 실패: {exc}"]
+
+    issues = []
+    if current.get("artifact_type") != expected.get("artifact_type"):
+        issues.append("artifact_type 불일치")
+    if current.get("schema_version") != expected.get("schema_version"):
+        issues.append("schema_version 불일치")
+    if current.get("source_artifact_hash") != expected.get("source_artifact_hash"):
+        issues.append("source_artifact_hash 불일치: --blocker-summary로 재생성 필요")
+    for key in ("summary", "strategies"):
+        if current.get(key) != expected.get(key):
+            issues.append(f"{key} 내용 불일치: --blocker-summary로 재생성 필요")
+    return issues
 
 
 def run_canonical():
@@ -852,10 +923,23 @@ def main():
         action="store_true",
         help="기존 promotion artifact에서 blocker summary JSON/MD 재생성",
     )
+    parser.add_argument(
+        "--blocker-summary-check",
+        action="store_true",
+        help="저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검증",
+    )
     args = parser.parse_args()
 
     if args.canonical:
         run_canonical()
+    elif args.blocker_summary_check:
+        issues = validate_promotion_blocker_summary_artifact("reports/promotion")
+        if issues:
+            print("FAIL: blocker summary 동기화 검증 실패")
+            for issue in issues:
+                print(f"  - {issue}")
+            sys.exit(1)
+        print("OK: blocker summary 동기화 검증 성공")
     elif args.blocker_summary:
         out_dir = Path("reports/promotion")
         try:
