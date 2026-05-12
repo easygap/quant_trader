@@ -67,6 +67,44 @@ def normalize_symbols(symbols: list[Any]) -> list[str]:
     return normalized
 
 
+class CachedKoreanStockCollector:
+    """Small fetch-through cache for repeated research candidate evaluations."""
+
+    def __init__(self, collector: Any):
+        self.collector = collector
+        self.cache: dict[tuple[str, str, str], pd.DataFrame | None] = {}
+        self.unique_fetches = 0
+        self.cache_hits = 0
+        self.quiet_ohlcv_log = getattr(collector, "quiet_ohlcv_log", False)
+
+    def fetch_korean_stock(self, symbol: str, start: str, end: str):
+        key = (normalize_symbol(symbol), str(start), str(end))
+        if key in self.cache:
+            self.cache_hits += 1
+            return self._copy_frame(self.cache[key])
+
+        if hasattr(self.collector, "quiet_ohlcv_log"):
+            self.collector.quiet_ohlcv_log = self.quiet_ohlcv_log
+        frame = self.collector.fetch_korean_stock(symbol, start, end)
+        self.unique_fetches += 1
+        self.cache[key] = self._copy_frame(frame)
+        return self._copy_frame(frame)
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "unique_fetches": self.unique_fetches,
+            "cache_hits": self.cache_hits,
+            "cached_items": len(self.cache),
+        }
+
+    @staticmethod
+    def _copy_frame(frame):
+        if isinstance(frame, pd.DataFrame):
+            return frame.copy(deep=True)
+        return frame
+
+
 @dataclass(frozen=True)
 class CandidateSpec:
     candidate_id: str
@@ -2370,6 +2408,7 @@ def evaluate_candidate(
     end: str,
     capital: float,
     benchmark_daily_returns: pd.Series | None = None,
+    target_weight_collector: Any | None = None,
 ) -> dict[str, Any]:
     from backtest.portfolio_backtester import PortfolioBacktester
     from config.config_loader import Config
@@ -2381,6 +2420,7 @@ def evaluate_candidate(
             end=end,
             capital=capital,
             params=spec.params,
+            collector=target_weight_collector,
         )
         metrics = calculate_research_metrics(result, capital, benchmark_daily_returns)
         metrics.update(result.get("target_weight_metrics", {}))
@@ -2419,6 +2459,7 @@ def attach_walk_forward_metrics(
     windows: list[tuple[str, str]],
     capital: float,
     benchmark_daily_returns: pd.Series | None = None,
+    target_weight_collector: Any | None = None,
 ) -> dict[str, Any]:
     wf_metrics = []
     for start, end in windows:
@@ -2429,7 +2470,17 @@ def attach_walk_forward_metrics(
                 wf_benchmark_returns = wf_benchmark_returns[
                     (idx >= pd.Timestamp(start)) & (idx <= pd.Timestamp(end))
                 ]
-            wf_metrics.append(evaluate_candidate(spec, symbols, start, end, capital, wf_benchmark_returns))
+            wf_metrics.append(
+                evaluate_candidate(
+                    spec,
+                    symbols,
+                    start,
+                    end,
+                    capital,
+                    wf_benchmark_returns,
+                    target_weight_collector=target_weight_collector,
+                )
+            )
         except Exception as e:
             logger.warning("{} WF {}~{} failed: {}", spec.candidate_id, start, end, e)
             wf_metrics.append({"total_return": 0, "sharpe": 0, "total_trades": 0})
@@ -2509,9 +2560,23 @@ def run_candidate_sweep(
         build_candidate_specs(candidate_family),
         candidate_ids,
     )
+    target_weight_collector = None
+    if any(spec.strategy == "target_weight_rotation" for spec in specs):
+        from core.data_collector import DataCollector
+
+        target_weight_collector = CachedKoreanStockCollector(DataCollector())
+        target_weight_collector.quiet_ohlcv_log = True
     for spec in specs:
         logger.info("Evaluating {}", spec.candidate_id)
-        metrics = evaluate_candidate(spec, symbols, start, end, capital, benchmark_daily_returns)
+        metrics = evaluate_candidate(
+            spec,
+            symbols,
+            start,
+            end,
+            capital,
+            benchmark_daily_returns,
+            target_weight_collector=target_weight_collector,
+        )
         if include_walk_forward:
             metrics = attach_walk_forward_metrics(
                 spec,
@@ -2520,6 +2585,7 @@ def run_candidate_sweep(
                 windows,
                 capital,
                 benchmark_daily_returns,
+                target_weight_collector=target_weight_collector,
             )
         else:
             metrics.update(
@@ -2575,6 +2641,11 @@ def run_candidate_sweep(
         "ranking_rule": (
             "rank_score + promotion status; live/paper promotion remains controlled "
             "by canonical promotion and evidence gates"
+        ),
+        "data_fetch_cache": (
+            target_weight_collector.stats()
+            if target_weight_collector is not None
+            else {"enabled": False}
         ),
         "decision": decision,
         "rejection_summary": summarize_rejection_reasons(ranked),
@@ -2660,6 +2731,14 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
                 ),
                 f"Liquidity exclusions: {', '.join(excluded[:20]) if excluded else 'none'}",
             ]
+        )
+    fetch_cache = bundle.get("data_fetch_cache") or {}
+    if fetch_cache.get("enabled"):
+        lines.append(
+            "Data fetch cache: "
+            f"unique_fetches={int(fetch_cache.get('unique_fetches', 0) or 0)}, "
+            f"cache_hits={int(fetch_cache.get('cache_hits', 0) or 0)}, "
+            f"cached_items={int(fetch_cache.get('cached_items', 0) or 0)}"
         )
     lines.extend(
         [
