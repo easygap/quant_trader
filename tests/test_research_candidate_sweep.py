@@ -182,6 +182,8 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
         "target_weight_rotation_top5_60_120_floor0_hold3_risk90_45",
         "target_weight_rotation_top5_60_120_floor0_hold3_risk90_35",
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol3",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5",
         "target_weight_rotation_top5_60_120_floor0_exp80",
         "target_weight_rotation_top5_60_120_floor0_exp80_tol3",
         "target_weight_rotation_top5_60_120_floor0_exp75",
@@ -203,10 +205,12 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
     assert direct[10].params["bear_target_exposure"] == 0.45
     assert direct[11].params["bear_target_exposure"] == 0.35
     assert direct[12].params["market_ma_period"] == 60
-    assert direct[13].params["target_exposure"] == 0.80
-    assert direct[14].params["target_tolerance_pct"] == 3.0
-    assert direct[15].params["target_exposure"] == 0.75
-    assert direct[17].params["target_tolerance_pct"] == 3.0
+    assert direct[13].params["target_tolerance_pct"] == 3.0
+    assert direct[14].params["target_tolerance_pct"] == 5.0
+    assert direct[15].params["target_exposure"] == 0.80
+    assert direct[16].params["target_tolerance_pct"] == 3.0
+    assert direct[17].params["target_exposure"] == 0.75
+    assert direct[19].params["target_tolerance_pct"] == 3.0
     assert direct[-1].params["market_exposure_mode"] == "benchmark_sma"
 
 
@@ -675,6 +679,81 @@ def test_target_weight_research_rebalances_at_next_open_not_same_day_close():
     assert trade["execution_price_mode"] == "next_open"
     assert result["target_weight_metrics"]["execution_price_mode"] == "next_open"
     assert result["target_weight_metrics"]["avg_volume_lookback_lag_days"] == 1
+
+
+def test_target_weight_research_records_tolerance_skipped_rebalances():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.to_datetime(["2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04", "2025-03-03"])
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            if symbol == "AAA":
+                return pd.DataFrame(
+                    {
+                        "open": [100.0, 100.0, 100.0, 100.0, 104.0],
+                        "close": [100.0, 110.0, 100.0, 110.0, 104.0],
+                        "volume": [100.0, 100.0, 100.0, 100.0, 100.0],
+                    },
+                    index=dates,
+                )
+            if symbol == "BBB":
+                return pd.DataFrame(
+                    {
+                        "open": [100.0, 100.0, 100.0, 100.0, 96.0],
+                        "close": [100.0, 105.0, 100.0, 105.0, 96.0],
+                        "volume": [100.0, 100.0, 100.0, 100.0, 100.0],
+                    },
+                    index=dates,
+                )
+            return pd.DataFrame(
+                {
+                    "open": [100.0, 100.0, 100.0, 100.0, 100.0],
+                    "close": [100.0, 100.0, 100.0, 100.0, 100.0],
+                    "volume": [100.0, 100.0, 100.0, 100.0, 100.0],
+                },
+                index=dates,
+            )
+
+    class NoCostRiskManager:
+        def calculate_transaction_costs(self, price, quantity, side, **kwargs):
+            return {
+                "execution_price": float(price),
+                "commission": 0.0,
+                "tax": 0.0,
+                "slippage": 0.0,
+                "slippage_multiplier": 1.0,
+                "participation_rate": 0.0,
+            }
+
+    result = sweep.run_target_weight_rotation_backtest(
+        ["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-03-03",
+        capital=1_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 3.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+        },
+        collector=FakeCollector(),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    metrics = result["target_weight_metrics"]
+    assert len(result["trades"]) == 2
+    assert metrics["rebalance_tolerance_pct"] == 3.0
+    assert metrics["rebalance_tolerance_skipped_trades"] == 2
+    assert metrics["rebalance_tolerance_skipped_sell_trades"] == 1
+    assert metrics["rebalance_tolerance_skipped_buy_trades"] == 1
+    assert metrics["rebalance_tolerance_skipped_notional"] == 40.0
+    assert metrics["rebalance_tolerance_skipped_notional_pct_of_capital"] == 4.0
 
 
 def test_target_weight_research_blocks_missing_rebalance_open_price():
