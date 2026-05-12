@@ -909,6 +909,30 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
     )
 
 
+def filter_candidate_specs(
+    specs: list[CandidateSpec],
+    candidate_ids: list[str] | None = None,
+) -> list[CandidateSpec]:
+    """Limit a sweep to explicit candidate IDs while failing closed on typos."""
+    requested = [str(candidate_id).strip() for candidate_id in (candidate_ids or []) if str(candidate_id).strip()]
+    if not requested:
+        return specs
+
+    requested_set = set(requested)
+    selected = [spec for spec in specs if spec.candidate_id in requested_set]
+    found = {spec.candidate_id for spec in selected}
+    missing = [candidate_id for candidate_id in requested if candidate_id not in found]
+    if missing:
+        available_preview = ", ".join(spec.candidate_id for spec in specs[:10])
+        if len(specs) > 10:
+            available_preview = f"{available_preview}, ..."
+        raise ValueError(
+            "unknown candidate_id: "
+            f"{', '.join(missing)}; available in selected family: {available_preview}"
+        )
+    return selected
+
+
 def make_windows(start: str, end: str, window_months: int = 12, step_months: int = 6) -> list[tuple[str, str]]:
     windows: list[tuple[str, str]] = []
     cursor = pd.Timestamp(start)
@@ -2375,6 +2399,7 @@ def run_candidate_sweep(
     capital: float = DEFAULT_INITIAL_CAPITAL,
     include_walk_forward: bool = True,
     candidate_family: str = DEFAULT_CANDIDATE_FAMILY,
+    candidate_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -2416,7 +2441,10 @@ def run_candidate_sweep(
     windows = make_windows(start, end) if include_walk_forward else []
     records = []
 
-    specs = build_candidate_specs(candidate_family)
+    specs = filter_candidate_specs(
+        build_candidate_specs(candidate_family),
+        candidate_ids,
+    )
     for spec in specs:
         logger.info("Evaluating {}", spec.candidate_id)
         metrics = evaluate_candidate(spec, symbols, start, end, capital, benchmark_daily_returns)
@@ -2465,6 +2493,8 @@ def run_candidate_sweep(
         "eval_end": end,
         "initial_capital": capital,
         "candidate_family": candidate_family,
+        "candidate_ids_requested": list(candidate_ids or []),
+        "candidate_ids_evaluated": [spec.candidate_id for spec in specs],
         "universe_selection": {
             **universe_selection,
             "selected_before_liquidity_filter": len(input_universe),
@@ -2538,6 +2568,10 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         f"Generated: {bundle.get('generated_at', '')[:19]}",
         f"Period: {bundle.get('eval_start')} ~ {bundle.get('eval_end')}",
         f"Candidate family: {bundle.get('candidate_family', 'rotation')}",
+        (
+            "Candidate filter: "
+            f"{', '.join(bundle.get('candidate_ids_requested') or []) or 'all'}"
+        ),
         (
             "Universe selection: "
             f"{(bundle.get('universe_selection') or {}).get('source', 'unknown')} "
@@ -2624,6 +2658,20 @@ def parse_symbols(value: str | None) -> list[str] | None:
     return normalize_symbols([s.strip() for s in value.split(",") if s.strip()])
 
 
+def parse_candidate_ids(values: list[str] | None) -> list[str] | None:
+    if not values:
+        return None
+    parsed: list[str] = []
+    seen = set()
+    for value in values:
+        for item in str(value).split(","):
+            candidate_id = item.strip()
+            if candidate_id and candidate_id not in seen:
+                parsed.append(candidate_id)
+                seen.add(candidate_id)
+    return parsed or None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Research candidate sweep")
     parser.add_argument("--symbols", help="Comma-separated symbols. Omit to use canonical liquidity universe.")
@@ -2657,6 +2705,15 @@ def main() -> None:
         ],
         help="Research candidate family to evaluate.",
     )
+    parser.add_argument(
+        "--candidate-id",
+        action="append",
+        default=None,
+        help=(
+            "Candidate ID to evaluate within the selected family. "
+            "Can be repeated or comma-separated."
+        ),
+    )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
@@ -2670,6 +2727,7 @@ def main() -> None:
         capital=args.capital,
         include_walk_forward=not args.quick,
         candidate_family=args.candidate_family,
+        candidate_ids=parse_candidate_ids(args.candidate_id),
     )
     json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
     print(f"Wrote {json_path}")
