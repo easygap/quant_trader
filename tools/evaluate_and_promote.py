@@ -308,6 +308,7 @@ def build_promotion_results(
         "paper_sharpe",
         "paper_excess",
         "paper_evidence_recommendation",
+        "paper_evidence_block_reasons",
         "paper_benchmark_final_ratio",
         "paper_sell_count",
         "paper_win_rate",
@@ -316,6 +317,10 @@ def build_promotion_results(
         "paper_latest_evidence_date",
         "paper_evidence_age_days",
         "paper_evidence_fresh",
+        "paper_trade_quality_status",
+        "paper_trade_quality_adverse_gap_bps",
+        "paper_trade_quality_missing_expected_ratio",
+        "paper_trade_quality_missing_expected_count",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
@@ -388,6 +393,10 @@ PROMOTION_BLOCKER_METRIC_KEYS = (
     "paper_latest_evidence_date",
     "paper_evidence_age_days",
     "paper_evidence_fresh",
+    "paper_trade_quality_status",
+    "paper_trade_quality_adverse_gap_bps",
+    "paper_trade_quality_missing_expected_ratio",
+    "paper_trade_quality_missing_expected_count",
     "target_weight_verified_pilot_days",
     "target_weight_invalid_days",
     "target_weight_params_hash_matches_canonical",
@@ -419,6 +428,8 @@ def _next_promotion_action(status: str, blockers: list[str]) -> str:
         return "live readiness gate 검증 후 제한 캡 운영 검토"
     if "canonical data integrity" in text or "benchmark" in text:
         return "canonical 데이터/벤치마크 coverage 재생성 후 재평가"
+    if "fill_quality" in text or "expected_price" in text or "adverse_fill_gap" in text:
+        return "paper 체결 품질 리포트 확인 후 체결 왜곡/가격 기준 재검토"
     if "paper evidence" in text or "paper " in text or "60영업일" in text:
         return "paper evidence 최신화/누적 후 promotion package 재생성"
     if "target-weight" in text:
