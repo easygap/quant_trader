@@ -187,6 +187,83 @@ class _PortfolioGuardConfig:
         return self._trading
 
 
+def test_backtest_regime_config_mirrors_trading_when_enabled_not_overridden():
+    """백테스트 설정이 enabled를 명시하지 않으면 운영 시장국면 설정을 따른다."""
+    from core.market_regime import resolve_market_regime_config
+
+    class ConfigLike:
+        trading = {
+            "market_regime_filter": True,
+            "market_regime_index": "KS11",
+            "market_regime_ma_days": 120,
+            "market_regime_short_momentum_days": 15,
+            "market_regime_short_momentum_threshold": -4.0,
+            "market_regime_caution_scale": 0.4,
+            "market_regime_ma_cross_enabled": True,
+            "market_regime_ma_short": 10,
+            "market_regime_ma_mid": 40,
+        }
+        risk_params = {"backtest_regime_filter": {}}
+
+    cfg = resolve_market_regime_config(ConfigLike(), for_backtest=True)
+
+    assert cfg["enabled"] is True
+    assert cfg["ma_days"] == 120
+    assert cfg["short_momentum_days"] == 15
+    assert cfg["short_momentum_threshold"] == -4.0
+    assert cfg["caution_scale"] == 0.4
+    assert cfg["ma_cross_enabled"] is True
+    assert cfg["ma_short"] == 10
+    assert cfg["ma_mid"] == 40
+
+
+def _ma_cross_only_index_df() -> pd.DataFrame:
+    """마지막 전일 기준 MA 데드크로스만 켜지는 지수 시계열."""
+    dates = pd.bdate_range("2024-01-01", periods=61)
+    closes = [100.0] * 50 + [130.0] * 5 + [90.0] * 4 + [120.0, 120.0]
+    return pd.DataFrame({"close": closes}, index=dates)
+
+
+def test_backtest_regime_precompute_uses_ma_cross_signal(monkeypatch):
+    """백테스트 국면 계산도 운영과 같은 MA 크로스 신호를 반영한다."""
+    from backtest.backtester import Backtester
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    index_df = _ma_cross_only_index_df()
+
+    class FakeDataCollector:
+        def fetch_korean_stock(self, *args, **kwargs):
+            return index_df
+
+    config = _PortfolioGuardConfig(gap_enabled=False)
+    config.risk_params["backtest_regime_filter"] = {
+        "enabled": True,
+        "index_symbol": "KS11",
+        "ma_days": 20,
+        "short_momentum_days": 1,
+        "short_momentum_threshold": -5.0,
+        "caution_scale": 0.5,
+        "ma_cross_enabled": True,
+        "ma_short": 5,
+        "ma_mid": 10,
+    }
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: FakeDataCollector())
+
+    single_bt = Backtester(config)
+    portfolio_bt = PortfolioBacktester(config)
+
+    symbol_df = pd.DataFrame({"close": [100.0] * len(index_df)}, index=index_df.index)
+    single_series = single_bt._precompute_regime_series(symbol_df)
+    portfolio_series = portfolio_bt._precompute_regime_series(list(index_df.index))
+
+    assert single_series.iloc[-1] == "caution"
+    assert portfolio_series.iloc[-1] == "caution"
+
+    config.risk_params["backtest_regime_filter"]["ma_cross_enabled"] = False
+    assert single_bt._precompute_regime_series(symbol_df).iloc[-1] == "bullish"
+    assert portfolio_bt._precompute_regime_series(list(index_df.index)).iloc[-1] == "bullish"
+
+
 def _make_portfolio_guard_df(close, *, open_=None, signals=None, volume=1_000_000):
     dates = pd.bdate_range("2024-01-01", periods=len(close))
     close = np.array(close, dtype=float)
