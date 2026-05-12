@@ -109,6 +109,8 @@ def _write_bundle(
 def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
     payload = {
         "strategy": strategy,
+        "period": "2026-02-01 ~ 2026-04-29",
+        "latest_evidence_date": "2026-04-29",
         "recommendation": "ELIGIBLE",
         "promotable_evidence_days": 60,
         "benchmark_final_ratio": 0.9,
@@ -391,6 +393,50 @@ def test_paper_evidence_must_be_eligible(tmp_path):
     assert any("recommendation=BLOCKED" in issue for issue in issues)
     assert any("60영업일 미달" in issue for issue in issues)
     assert any("same-universe excess" in issue for issue in issues)
+
+
+def test_paper_evidence_latest_date_must_be_fresh(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(
+        evidence_dir,
+        period="2026-02-01 ~ 2026-04-01",
+        latest_evidence_date="2026-04-01",
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("paper evidence가 오래됨" in issue for issue in issues)
+
+
+def test_paper_evidence_latest_date_is_required(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(
+        evidence_dir,
+        period="",
+        latest_evidence_date=None,
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("latest_evidence_date 누락" in issue for issue in issues)
 
 
 def test_valid_canonical_bundle_and_paper_evidence_pass(tmp_path):
