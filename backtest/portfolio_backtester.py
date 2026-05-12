@@ -12,6 +12,7 @@ from loguru import logger
 from datetime import timedelta
 
 from config.config_loader import Config
+from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
 
@@ -235,22 +236,25 @@ class PortfolioBacktester:
           backtester.py TICKET-02와 동일 로직.
         """
         import pandas as _pd
-        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        regime_cfg = resolve_market_regime_config(self.config, for_backtest=True)
         idx = _pd.DatetimeIndex(all_dates) if all_dates else _pd.DatetimeIndex([])
         default = _pd.Series("bullish", index=idx)
 
-        if not regime_cfg.get("enabled", False):
+        if not regime_cfg["enabled"]:
             return default
 
-        index_symbol = regime_cfg.get("index_symbol", "KS11")
-        ma_days = max(20, int(regime_cfg.get("ma_days", 200)))
-        short_days = max(1, int(regime_cfg.get("short_momentum_days", 20)))
-        short_threshold = float(regime_cfg.get("short_momentum_threshold", -5.0))
+        index_symbol = regime_cfg["index_symbol"]
+        ma_days = regime_cfg["ma_days"]
+        short_days = regime_cfg["short_momentum_days"]
+        short_threshold = regime_cfg["short_momentum_threshold"]
+        ma_cross_enabled = regime_cfg["ma_cross_enabled"]
+        ma_short = regime_cfg["ma_short"]
+        ma_mid = regime_cfg["ma_mid"]
 
         try:
             from core.data_collector import DataCollector
             collector = DataCollector()
-            margin_days = ma_days + 60
+            margin_days = max(ma_days, ma_mid, short_days) + 60
             first_date = all_dates[0] if all_dates else None
             if first_date and hasattr(first_date, "strftime"):
                 start_str = (first_date - timedelta(days=margin_days + 30)).strftime("%Y-%m-%d")
@@ -270,6 +274,12 @@ class PortfolioBacktester:
         idx_close = index_df["close"].astype(float)
         idx_ma = idx_close.rolling(ma_days, min_periods=ma_days).mean()
         idx_momentum = idx_close.pct_change(short_days) * 100
+        if ma_cross_enabled:
+            idx_ma_short = idx_close.rolling(ma_short, min_periods=ma_short).mean()
+            idx_ma_mid = idx_close.rolling(ma_mid, min_periods=ma_mid).mean()
+        else:
+            idx_ma_short = None
+            idx_ma_mid = None
 
         regime_map = {}
         idx_dates = index_df.index.tolist()
@@ -285,7 +295,13 @@ class PortfolioBacktester:
 
             below_ma = prev_close < float(prev_ma)
             momentum_triggered = float(prev_momentum) <= short_threshold
-            triggered = sum([below_ma, momentum_triggered])
+            ma_cross_triggered = False
+            if ma_cross_enabled:
+                prev_ma_short = idx_ma_short.iloc[prev_idx]
+                prev_ma_mid = idx_ma_mid.iloc[prev_idx]
+                if not _pd.isna(prev_ma_short) and not _pd.isna(prev_ma_mid):
+                    ma_cross_triggered = float(prev_ma_short) < float(prev_ma_mid)
+            triggered = sum([below_ma, momentum_triggered, ma_cross_triggered])
 
             if triggered >= 2:
                 regime_map[idx_dates[i]] = "bearish"
@@ -381,9 +397,9 @@ class PortfolioBacktester:
         per_symbol_pnl = {s: 0 for s in symbols}
 
         # 시장국면 필터 설정 (TICKET-05)
-        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
-        regime_enabled = regime_cfg.get("enabled", False) and regime_series is not None
-        caution_scale = float(regime_cfg.get("caution_scale", 0.5))
+        regime_cfg = resolve_market_regime_config(self.config, for_backtest=True)
+        regime_enabled = regime_cfg["enabled"] and regime_series is not None
+        caution_scale = regime_cfg["caution_scale"]
         regime_buy_blocks = 0
         regime_caution_buys = 0
 
