@@ -1,7 +1,7 @@
 # 백테스트 신뢰성 개선 내역
 
-> **문서 버전**: v5.3
-> **최종 수정**: 2026-05-08
+> **문서 버전**: v5.4
+> **최종 수정**: 2026-05-12
 > **목적**: 백테스트 왜곡을 줄이기 위해 적용된 개선 사항, 알려진 한계, 추가 과제를 정리
 
 ---
@@ -105,7 +105,8 @@
 
 | 과제 | 우선순위 | 상태 |
 |------|----------|------|
-| 유니버스 전체 (코스피200) 백테스트 | 높음 | 1차 실행 완료 — `--top-n 200 --candidate-id target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` full sweep에서 200개 중 유동성 통과 164개, benchmark coverage 100%, return +110.39%, raw excess +78.50%p였지만 MDD -25.79%, turnover/year 1097.1%로 `paper_only`. 다음은 `--candidate-family target_weight_risk_relief`로 보수 overlay/tolerance 후보의 drawdown·turnover 동시 완화 검증 |
+| 유니버스 전체 (코스피200) 백테스트 | 높음 | 1차 실행 완료 — `--top-n 200 --candidate-id target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` full sweep에서 200개 중 유동성 통과 164개, benchmark coverage 100%, return +110.39%, raw excess +78.50%p였지만 MDD -25.79%, turnover/year 1097.1%로 `paper_only` |
+| target-weight 리스크 완화 후보군 검증 | 높음 | 완료 — `--candidate-family target_weight_risk_relief --top-n 200` full sweep에서 10개 후보 비교. 최상위 후보=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5`, return +125.61%, raw excess +93.72%p, exposure-matched excess +104.53%p, Sharpe 0.91, PF 2.19였지만 전 후보가 MDD -25.27%~-32.14%, turnover/year 1027.2%~1344.3%로 provisional 게이트 미통과. 판정=`KEEP_RESEARCH_ONLY`, 다음은 격월/분기 리밸런싱·변동성 타깃·회전율 패널티 랭킹 검증 |
 | Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | **완료 — `backtest.cost_impact`가 비용 차감 전/후 수익률, 비용 드래그, 비용/순손익, status를 표준 집계하고 백테스트 리포트에 노출** |
 | 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
