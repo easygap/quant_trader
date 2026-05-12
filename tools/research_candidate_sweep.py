@@ -860,6 +860,32 @@ def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
     ]
 
 
+TARGET_WEIGHT_RISK_RELIEF_CANDIDATE_IDS = [
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk90_35",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk90_45",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk120_55",
+    "target_weight_rotation_top5_60_120_floor0_hold3_sma120_55",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol3",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5",
+    "target_weight_rotation_top5_60_120_floor0_exp80_tol3",
+    "target_weight_rotation_top5_60_120_floor0_exp75",
+    "target_weight_rotation_top5_60_120_floor0_tol3",
+]
+
+
+def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_rotation_candidate_specs()
+    }
+    return [
+        specs_by_id[candidate_id]
+        for candidate_id in TARGET_WEIGHT_RISK_RELIEF_CANDIDATE_IDS
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -890,6 +916,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "monthly_topn",
     ):
         return build_target_weight_rotation_candidate_specs()
+    if family in (
+        "target_weight_risk_relief",
+        "target_weight_bottleneck_relief",
+        "target_weight_gate_relief",
+        "risk_relief",
+    ):
+        return build_target_weight_risk_relief_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -905,7 +938,7 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
-        "target_weight_rotation, all"
+        "target_weight_rotation, target_weight_risk_relief, all"
     )
 
 
@@ -2778,6 +2811,7 @@ def main() -> None:
             "cash_switch",
             "benchmark_aware_rotation",
             "target_weight_rotation",
+            "target_weight_risk_relief",
             "all",
         ],
         help="Research candidate family to evaluate.",
