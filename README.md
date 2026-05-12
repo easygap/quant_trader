@@ -19,6 +19,7 @@
 > - target-weight 저회전 top-200 sweep: 격월/분기 후보가 회전율은 낮췄지만 benchmark excess Sharpe와 MDD 게이트 미통과로 `NO_ALPHA_CANDIDATE`
 > - target-weight 변동성 타깃 top-200 sweep: 최상위 후보는 초과수익이 양수였지만 전 후보가 MDD 게이트 미통과로 `KEEP_RESEARCH_ONLY`
 > - target-weight 리스크 페널티 랭킹 top-200 sweep: 수익·초과수익은 개선됐지만 MDD·회전율 게이트 미통과로 `KEEP_RESEARCH_ONLY`
+> - target-weight 손실방어 top-200 sweep: pdd8/floor25/cooldown1 후보가 MDD -19.56%, turnover/year 296.4%로 개선되어 research sweep 기준 `RUN_CANONICAL_EVALUATION`
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
@@ -271,6 +272,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-12 churn control top-200 follow-up: `--candidate-family target_weight_churn_relief --top-n 200` full sweep에서 후보 5개를 검증했고 판정은 `KEEP_RESEARCH_ONLY`입니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2`는 return=+118.89%, raw excess=+87.00%p, exposure-matched excess=+97.61%p, Sharpe=0.89, PF=2.04, WF positive/Sh+=100%였지만 MDD=-26.95%, turnover/year=1034.2%로 provisional 게이트를 넘지 못했습니다. `maxnew1`과 격월 후보는 turnover/year를 423.0~674.4%까지 낮췄지만 benchmark excess Sharpe와 MDD가 악화됐습니다. 다음 연구는 단순 교체 제한보다 포트폴리오 drawdown guard, 재진입 cooldown, 상관/업종 집중도 페널티처럼 손실 구간 자체를 줄이는 구조가 우선입니다.
 
 2026-05-12 follow-up: `target_weight_drawdown_guard` 후보군을 추가했습니다. 직전 평가 NAV 기준 포트폴리오 낙폭이 임계값을 넘으면 다음 리밸런싱 목표 노출을 floor까지 낮추고, 회복 직후에도 지정 리밸런싱 횟수만큼 cooldown을 유지합니다. 다음 검증은 `--candidate-family target_weight_drawdown_guard --top-n 200` full sweep으로 MDD가 실제로 낮아지는지 확인합니다.
+
+2026-05-12 손실방어 top-200 follow-up: `--candidate-family target_weight_drawdown_guard --top-n 200` full sweep에서 후보 5개를 검증했고 판정은 `RUN_CANONICAL_EVALUATION`입니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1`는 return=+99.53%, raw excess=+67.64%p, exposure-matched excess=+83.07%p, avg exposure=56.5%, Sharpe=1.02, PF=4.88, MDD=-19.56%, turnover/year=296.4%, WF positive/Sh+=66.7%였습니다. 포트폴리오 guard는 trigger 17회, guard rebalance 20회(74.1%)로 동작했습니다. 두 번째 후보 `target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1`도 provisional 조건을 통과했지만 turnover/year=893.4%로 비용 민감도가 더 큽니다. 나머지 3개는 MDD -20% 미만 또는 benchmark excess Sharpe<=0로 `paper_only`입니다. 다음 단계는 eligible 2개 후보를 canonical promotion evaluation에 올려 같은 기준에서 재현성을 확인하는 것이며, 이 artifact만으로 paper/live 전환은 하지 않습니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
