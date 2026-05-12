@@ -722,14 +722,87 @@ class TestTradeHistoryExecutionLinkMigration:
 
 # ── 6. Walk-forward non-zero windows ──
 
-class TestWalkForwardWindows:
-    def test_wf_produces_nonzero_windows(self):
-        """5년 데이터로 walk-forward 시 최소 1개 이상의 window가 생성되어야 한다."""
-        from config.config_loader import Config
-        from backtest.strategy_validator import StrategyValidator
+def _offline_walk_forward_ohlcv():
+    import numpy as np
+    import pandas as pd
 
-        config = Config.get()
-        v = StrategyValidator(config)
+    dates = pd.bdate_range("2021-01-01", "2025-12-31")
+    steps = np.arange(len(dates), dtype=float)
+    close = 50_000 + steps * 8 + np.sin(steps / 17.0) * 350
+    open_ = close * (1 + np.sin(steps / 11.0) * 0.002)
+    high = np.maximum(open_, close) * 1.01
+    low = np.minimum(open_, close) * 0.99
+    volume = 1_000_000 + (steps % 20) * 10_000
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        },
+        index=dates,
+    )
+
+
+def _build_offline_walk_forward_validator(monkeypatch, tmp_path):
+    import pandas as pd
+    import backtest.strategy_validator as validator_mod
+    from config.config_loader import Config
+    from core.data_collector import DataCollector
+
+    class NoopNotifier:
+        def __init__(self, config):
+            self.config = config
+
+        def send(self, message):
+            return None
+
+    data = _offline_walk_forward_ohlcv()
+    fetch_calls = []
+    run_calls = []
+
+    def fake_fetch(self, symbol, start_date=None, end_date=None):
+        fetch_calls.append((symbol, start_date, end_date))
+        start = pd.Timestamp(start_date or data.index.min()).normalize()
+        end = pd.Timestamp(end_date or data.index.max()).normalize()
+        frame = data.loc[start:end].copy()
+        if symbol == "KS11":
+            frame["close"] = frame["close"] * 0.95
+        return frame
+
+    def fake_run(df, *, strategy_name, strict_lookahead=True):
+        run_calls.append(
+            {
+                "strategy_name": strategy_name,
+                "strict_lookahead": strict_lookahead,
+                "rows": len(df),
+            }
+        )
+        return {
+            "initial_capital": 10_000_000,
+            "metrics": {
+                "sharpe_ratio": 1.35,
+                "max_drawdown": -12.5,
+                "profit_factor": 1.8,
+                "total_trades": 14,
+            },
+        }
+
+    monkeypatch.setattr(DataCollector, "fetch_korean_stock", fake_fetch)
+    monkeypatch.setattr(validator_mod, "Notifier", NoopNotifier)
+    validator = validator_mod.StrategyValidator(Config.get(), output_dir=tmp_path)
+    monkeypatch.setattr(validator.backtester, "run", fake_run)
+    return validator, fetch_calls, run_calls
+
+
+class TestWalkForwardWindows:
+    def test_wf_produces_nonzero_windows(self, monkeypatch, tmp_path):
+        """5년 데이터로 walk-forward 시 최소 1개 이상의 window가 생성되어야 한다."""
+        v, fetch_calls, run_calls = _build_offline_walk_forward_validator(
+            monkeypatch,
+            tmp_path,
+        )
         result = v.run_walk_forward(
             symbol="005930",
             strategy_name="scoring",
@@ -742,14 +815,18 @@ class TestWalkForwardWindows:
         )
         n_total = result.get("n_total", 0)
         assert n_total > 0, f"walk-forward windows={n_total}, 1개 이상이어야 함"
+        assert fetch_calls == [
+            ("005930", "2021-01-01", "2025-12-31"),
+            ("KS11", "2021-01-01", "2025-12-31"),
+        ]
+        assert len(run_calls) == n_total
+        assert all(call["strict_lookahead"] is True for call in run_calls)
+        assert all(call["rows"] == 252 for call in run_calls)
+        assert str(result["report_path"]).startswith(str(tmp_path))
 
-    def test_wf_result_has_flat_keys(self):
+    def test_wf_result_has_flat_keys(self, monkeypatch, tmp_path):
         """WF 결과가 flat 구조(summary 서브키 없음)로 반환되어야 한다."""
-        from config.config_loader import Config
-        from backtest.strategy_validator import StrategyValidator
-
-        config = Config.get()
-        v = StrategyValidator(config)
+        v, _, run_calls = _build_offline_walk_forward_validator(monkeypatch, tmp_path)
         result = v.run_walk_forward(
             symbol="005930",
             strategy_name="breakout_volume",
@@ -760,6 +837,8 @@ class TestWalkForwardWindows:
         assert "n_total" in result, "n_total 키가 없음"
         assert "pass_rate" in result, "pass_rate 키가 없음"
         assert "avg_oos_sharpe" in result, "avg_oos_sharpe 키가 없음"
+        assert "summary" not in result
+        assert result["n_total"] == len(run_calls)
 
 
 # ── 6. 벤치마크 거래비용 ──
