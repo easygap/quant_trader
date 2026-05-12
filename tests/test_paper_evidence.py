@@ -1858,3 +1858,58 @@ class TestShadowEvidenceNotPromotable:
         assert len(records) == 1
         assert records[0]["execution_backed"] is True
         assert records[0]["daily_return"] == 0.2
+
+
+class TestArtifactQuarantine:
+    """운영 reports에 test artifact가 섞이지 않게 격리한다."""
+
+    def test_scan_detects_promotion_payload_test_strategy(self, tmp_path):
+        from tools.quarantine_test_artifacts import scan_test_artifacts
+
+        reports_dir = tmp_path / "reports"
+        promotion_dir = reports_dir / "promotion"
+        promotion_dir.mkdir(parents=True)
+        (promotion_dir / "promotion_result.json").write_text(
+            json.dumps({
+                "dedup_test": {"status": "paper_only"},
+                "scoring": {"status": "paper_only"},
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (promotion_dir / "metrics_summary.json").write_text(
+            json.dumps({"scoring": {"total_return": 5.0}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        found = [path.relative_to(reports_dir).as_posix() for path in scan_test_artifacts(reports_dir)]
+
+        assert "promotion/promotion_result.json" in found
+        assert "promotion/metrics_summary.json" not in found
+
+    def test_quarantine_moves_only_test_artifacts(self, tmp_path):
+        from tools.quarantine_test_artifacts import quarantine
+
+        reports_dir = tmp_path / "reports"
+        evidence_dir = reports_dir / "paper_evidence"
+        runtime_dir = reports_dir / "paper_runtime"
+        evidence_dir.mkdir(parents=True)
+        runtime_dir.mkdir(parents=True)
+        test_file = evidence_dir / "daily_evidence_dedup_test.jsonl"
+        prod_file = evidence_dir / "daily_evidence_scoring.jsonl"
+        runtime_test = runtime_dir / "runtime_status_smoke_s.json"
+        test_file.write_text("{}", encoding="utf-8")
+        prod_file.write_text("{}", encoding="utf-8")
+        runtime_test.write_text("{}", encoding="utf-8")
+
+        moved = quarantine(reports_dir, dry_run=False)
+        moved_rel = sorted(str(src.relative_to(reports_dir)).replace("\\", "/") for src, _ in moved)
+
+        assert moved_rel == [
+            "paper_evidence/daily_evidence_dedup_test.jsonl",
+            "paper_runtime/runtime_status_smoke_s.json",
+        ]
+        assert not test_file.exists()
+        assert not runtime_test.exists()
+        assert prod_file.exists()
+        assert (reports_dir / "_quarantine" / "paper_evidence" / "daily_evidence_dedup_test.jsonl").exists()
+        assert (reports_dir / "_quarantine" / "paper_runtime" / "runtime_status_smoke_s.json").exists()
