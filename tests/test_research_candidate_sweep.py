@@ -58,6 +58,37 @@ def test_parse_candidate_ids_accepts_repeated_and_comma_values():
     assert parse_candidate_ids(None) is None
 
 
+def test_cached_korean_stock_collector_reuses_and_copies_frames():
+    import pandas as pd
+    from tools.research_candidate_sweep import CachedKoreanStockCollector
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_korean_stock(self, symbol, start, end):
+            self.calls += 1
+            return pd.DataFrame({"close": [100.0], "volume": [10.0]})
+
+    raw = FakeCollector()
+    collector = CachedKoreanStockCollector(raw)
+
+    first = collector.fetch_korean_stock("5930", "2025-01-01", "2025-01-31")
+    first.loc[0, "close"] = 0.0
+    second = collector.fetch_korean_stock("005930", "2025-01-01", "2025-01-31")
+
+    assert raw.calls == 1
+    assert second.loc[0, "close"] == 100.0
+    assert collector.stats() == {
+        "enabled": True,
+        "unique_fetches": 1,
+        "cache_hits": 1,
+        "cached_items": 1,
+    }
+
+
 def test_select_canonical_universe_scans_past_legacy_100_for_large_top_n(monkeypatch):
     import sys
     import types
@@ -681,8 +712,11 @@ def test_evaluate_candidate_routes_target_weight_rotation(monkeypatch):
     import tools.research_candidate_sweep as sweep
 
     dates = pd.bdate_range("2025-01-01", periods=3)
+    sentinel_collector = object()
+    seen = {}
 
     def fake_target_runner(**kwargs):
+        seen["collector"] = kwargs.get("collector")
         return {
             "equity_curve": pd.DataFrame(
                 {
@@ -718,9 +752,11 @@ def test_evaluate_candidate_routes_target_weight_rotation(monkeypatch):
         "2025-01-03",
         100.0,
         pd.Series([0.01, 0.01], index=dates[1:]),
+        target_weight_collector=sentinel_collector,
     )
 
     assert metrics["total_return"] == 8.0
+    assert seen["collector"] is sentinel_collector
     assert metrics["target_top_n"] == 2
     assert metrics["rebalance_count"] == 1
     assert metrics["avg_slots_filled"] == 2.0
@@ -964,10 +1000,17 @@ def test_write_sweep_artifact_surfaces_rejection_reasons(tmp_path):
             }
         ]
     )
+    bundle["data_fetch_cache"] = {
+        "enabled": True,
+        "unique_fetches": 3,
+        "cache_hits": 7,
+        "cached_items": 3,
+    }
 
     _, md_path = write_candidate_artifacts(bundle, tmp_path)
     text = md_path.read_text(encoding="utf-8")
 
+    assert "Data fetch cache: unique_fetches=3, cache_hits=7, cached_items=3" in text
     assert "## Rejection Reasons" in text
     assert "## Rejection Summary" in text
     assert "risk_candidate" in text
@@ -1046,7 +1089,15 @@ def test_run_candidate_sweep_limits_to_requested_candidate_ids(monkeypatch):
 
     evaluated = []
 
-    def fake_evaluate(spec, symbols, start, end, capital, benchmark_daily_returns):
+    def fake_evaluate(
+        spec,
+        symbols,
+        start,
+        end,
+        capital,
+        benchmark_daily_returns,
+        **kwargs,
+    ):
         evaluated.append(spec.candidate_id)
         return {
             "total_return": 12.0,
@@ -1109,6 +1160,102 @@ def test_run_candidate_sweep_limits_to_requested_candidate_ids(monkeypatch):
     assert bundle["candidate_ids_requested"] == ["candidate_b"]
     assert bundle["candidate_ids_evaluated"] == ["candidate_b"]
     assert [record["candidate_id"] for record in bundle["candidates"]] == ["candidate_b"]
+
+
+def test_run_candidate_sweep_reports_target_weight_fetch_cache(monkeypatch):
+    import pandas as pd
+    import config.config_loader as config_loader
+    import core.data_collector as data_collector
+    import tools.research_candidate_sweep as sweep
+
+    class _Config:
+        yaml_hash = "yaml"
+        resolved_hash = "resolved"
+        risk_params = {"liquidity_filter": {"enabled": False}}
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            return pd.DataFrame(
+                {"close": [100.0, 101.0], "volume": [10.0, 10.0]},
+                index=pd.bdate_range("2025-01-01", periods=2),
+            )
+
+    def fake_target_runner(**kwargs):
+        kwargs["collector"].fetch_korean_stock("AAA", "2024-01-01", "2025-01-31")
+        return {
+            "equity_curve": pd.DataFrame(
+                {
+                    "date": pd.bdate_range("2025-01-01", periods=2),
+                    "value": [100.0, 110.0],
+                    "cash": [50.0, 60.0],
+                    "n_positions": [1, 1],
+                }
+            ),
+            "trades": [
+                {
+                    "date": pd.Timestamp("2025-01-02"),
+                    "symbol": "AAA",
+                    "action": "BUY",
+                    "price": 10.0,
+                    "quantity": 1.0,
+                    "pnl": 0,
+                }
+            ],
+            "target_weight_metrics": {
+                "target_top_n": 1,
+                "turnover_per_year": 200.0,
+            },
+        }
+
+    monkeypatch.setattr(config_loader.Config, "get", staticmethod(lambda: _Config()))
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+    monkeypatch.setattr(
+        sweep,
+        "apply_research_universe_liquidity_filter",
+        lambda symbols, config, *, as_of_end: (
+            symbols,
+            {"enabled": False, "input_symbols": symbols, "passed_symbols": symbols},
+        ),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "buy_and_hold_benchmark_with_returns",
+        lambda symbols, start, end, capital: (
+            {
+                "ew_bh_return": 2.0,
+                "ew_bh_sharpe": 0.2,
+                "universe_size": len(symbols),
+                "benchmark_symbols": symbols,
+                "benchmark_coverage_complete": True,
+            },
+            pd.Series(dtype=float),
+        ),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "build_candidate_specs",
+        lambda family: [
+            sweep.CandidateSpec("candidate_a", "target_weight_rotation", {"target_top_n": 1}, "A"),
+            sweep.CandidateSpec("candidate_b", "target_weight_rotation", {"target_top_n": 1}, "B"),
+        ],
+    )
+    monkeypatch.setattr(sweep, "run_target_weight_rotation_backtest", fake_target_runner)
+
+    bundle = sweep.run_candidate_sweep(
+        symbols=["AAA"],
+        start="2025-01-01",
+        end="2025-01-31",
+        include_walk_forward=False,
+    )
+
+    assert bundle["data_fetch_cache"] == {
+        "enabled": True,
+        "unique_fetches": 1,
+        "cache_hits": 1,
+        "cached_items": 1,
+    }
 
 
 def test_portfolio_backtester_strategy_config_for_run_applies_overlay():
