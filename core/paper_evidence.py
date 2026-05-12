@@ -1454,6 +1454,8 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "strategy": strategy,
         "generated_at": datetime.now().isoformat(),
         "period": f"{records[0]['date']} ~ {records[-1]['date']}",
+        "earliest_evidence_date": records[0]["date"],
+        "latest_evidence_date": records[-1]["date"],
         "total_days": total_days,
         "avg_daily_return": round(avg_daily_return, 4),
         "paper_sharpe": round(paper_sharpe, 4) if paper_sharpe is not None else None,

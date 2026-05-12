@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -254,8 +255,12 @@ def _provisional_metrics():
 
 
 def _write_paper_package(evidence_dir, strategy, **overrides):
+    latest_evidence_date = date.today().isoformat()
     payload = {
         "strategy": strategy,
+        "generated_at": f"{latest_evidence_date}T15:30:00",
+        "period": f"2026-01-01 ~ {latest_evidence_date}",
+        "latest_evidence_date": latest_evidence_date,
         "recommendation": "ELIGIBLE",
         "promotable_evidence_days": 60,
         "paper_sharpe": 0.55,
@@ -288,6 +293,28 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     assert "live" in promotions[strategy]["allowed_modes"]
     assert metrics[strategy]["paper_days"] == 60
     assert metrics[strategy]["paper_evidence_recommendation"] == "ELIGIBLE"
+    assert metrics[strategy]["paper_evidence_fresh"] is True
+
+
+def test_build_promotion_results_blocks_stale_paper_evidence(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_stale_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        generated_at="2026-01-15T15:30:00",
+        period="2025-11-01 ~ 2026-01-01",
+        latest_evidence_date="2026-01-01",
+    )
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "paper evidence stale" in promotions[strategy]["reason"]
+    assert metrics[strategy]["paper_evidence_fresh"] is False
 
 
 def test_build_promotion_results_stays_provisional_when_paper_evidence_missing(tmp_path):

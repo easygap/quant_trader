@@ -18,6 +18,16 @@ from core.promotion_engine import (
 )
 
 
+def _fresh_paper_evidence_kwargs():
+    from datetime import date
+
+    return {
+        "paper_latest_evidence_date": date.today().isoformat(),
+        "paper_evidence_age_days": 0,
+        "paper_evidence_fresh": True,
+    }
+
+
 def _canonical_snapshot_metadata():
     from tools.evaluate_and_promote import build_data_snapshot_manifest
 
@@ -166,10 +176,29 @@ class TestPromotionRules:
                             paper_sell_count=6,
                             paper_win_rate=50.0,
                             paper_frozen_days=0,
-                            paper_cumulative_return=2.0)
+                            paper_cumulative_return=2.0,
+                            **_fresh_paper_evidence_kwargs())
         r = promote(m)
         assert r.status == "live_candidate"
         assert "live" in r.allowed_modes
+
+    def test_live_candidate_blocks_stale_paper_evidence(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            paper_days=60, paper_sharpe=0.5, paper_excess=1.0,
+                            paper_evidence_recommendation="ELIGIBLE",
+                            paper_benchmark_final_ratio=0.9,
+                            paper_sell_count=6,
+                            paper_win_rate=50.0,
+                            paper_frozen_days=0,
+                            paper_cumulative_return=2.0,
+                            paper_latest_evidence_date="2026-01-01",
+                            paper_evidence_age_days=120,
+                            paper_evidence_fresh=False)
+        r = promote(m)
+        assert r.status != "live_candidate"
+        assert "paper evidence stale" in r.reason
 
     def test_live_candidate_fails_without_paper(self):
         m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
@@ -226,6 +255,7 @@ class TestPromotionRules:
             target_weight_params_hash="old-hash",
             target_weight_canonical_params_hash="current-hash",
             target_weight_params_hash_matches_canonical=False,
+            **_fresh_paper_evidence_kwargs(),
         )
 
         r = promote(m)
@@ -264,6 +294,7 @@ class TestPromotionRules:
             target_weight_params_hash="current-hash",
             target_weight_canonical_params_hash="current-hash",
             target_weight_params_hash_matches_canonical=True,
+            **_fresh_paper_evidence_kwargs(),
         )
 
         r = promote(m)
@@ -577,9 +608,12 @@ class TestArtifactLoading:
                 }),
                 encoding="utf-8",
             )
+            fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
             (evidence_dir / "promotion_evidence_scoring.json").write_text(
                 json.dumps({
                     "strategy": "scoring",
+                    "period": f"2026-01-01 ~ {fresh_latest}",
+                    "latest_evidence_date": fresh_latest,
                     "recommendation": "ELIGIBLE",
                     "promotable_evidence_days": 60,
                     "paper_sharpe": 0.55,
@@ -655,9 +689,12 @@ class TestArtifactLoading:
                 }),
                 encoding="utf-8",
             )
+            fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
             (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
                 json.dumps({
                     "strategy": strategy,
+                    "period": f"2026-01-01 ~ {fresh_latest}",
+                    "latest_evidence_date": fresh_latest,
                     "recommendation": "ELIGIBLE",
                     "promotable_evidence_days": 60,
                     "paper_sharpe": 0.55,
