@@ -932,6 +932,26 @@ def _target_weight_spec_with_frequency(
     )
 
 
+def _target_weight_spec_with_exposure_overlay(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    overlay_params: dict[str, Any],
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        **overlay_params,
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -941,6 +961,68 @@ def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     return [
         specs_by_id[candidate_id]
         for candidate_id in TARGET_WEIGHT_RISK_RELIEF_CANDIDATE_IDS
+    ]
+
+
+def build_target_weight_volatility_target_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight shortlist for volatility target and drawdown brake sweeps."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_rotation_candidate_specs()
+    }
+    vol16_floor35 = {
+        "market_exposure_mode": "benchmark_vol_target",
+        "benchmark_vol_target_pct": 16.0,
+        "benchmark_vol_lookback": 40,
+        "benchmark_drawdown_lookback": 60,
+        "benchmark_drawdown_trigger_pct": 8.0,
+        "bear_target_exposure": 0.35,
+    }
+    vol14_floor25 = {
+        "market_exposure_mode": "benchmark_vol_target",
+        "benchmark_vol_target_pct": 14.0,
+        "benchmark_vol_lookback": 40,
+        "benchmark_drawdown_lookback": 60,
+        "benchmark_drawdown_trigger_pct": 6.0,
+        "bear_target_exposure": 0.25,
+    }
+    return [
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3"],
+            suffix="vol16_dd8_floor35",
+            overlay_params=vol16_floor35,
+            description="top-5 hold-buffer rotation with volatility target and drawdown brake",
+        ),
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3"],
+            suffix="vol14_dd6_floor25",
+            overlay_params=vol14_floor25,
+            description="top-5 hold-buffer rotation with stricter volatility target and drawdown floor",
+        ),
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"],
+            suffix="vol16_dd8_floor35",
+            overlay_params=vol16_floor35,
+            description="risk-overlay top-5 rotation with volatility target position sizing",
+        ),
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"],
+            suffix="vol14_dd6_floor25",
+            overlay_params=vol14_floor25,
+            description="risk-overlay top-5 rotation with stricter volatility target sizing",
+        ),
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5"],
+            suffix="vol16_dd8_floor35",
+            overlay_params=vol16_floor35,
+            description="5pct tolerance risk-overlay rotation with volatility target sizing",
+        ),
+        _target_weight_spec_with_exposure_overlay(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk90_35"],
+            suffix="vol16_dd8_floor35",
+            overlay_params=vol16_floor35,
+            description="risk90/35 top-5 rotation with volatility target sizing",
+        ),
     ]
 
 
@@ -1034,6 +1116,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "low_turnover",
     ):
         return build_target_weight_turnover_relief_candidate_specs()
+    if family in (
+        "target_weight_volatility_target",
+        "target_weight_vol_target",
+        "target_weight_position_sizing",
+        "volatility_target",
+        "vol_target",
+    ):
+        return build_target_weight_volatility_target_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -1046,12 +1136,13 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_benchmark_aware_rotation_candidate_specs(),
             *build_target_weight_rotation_candidate_specs(),
             *build_target_weight_turnover_relief_candidate_specs(),
+            *build_target_weight_volatility_target_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
         "target_weight_rotation, target_weight_risk_relief, "
-        "target_weight_turnover_relief, all"
+        "target_weight_turnover_relief, target_weight_volatility_target, all"
     )
 
 
@@ -1533,6 +1624,9 @@ def _target_exposure_for_day(
     def bear_exposure() -> float:
         return max(0.0, min(float(params.get("bear_target_exposure", base)), 1.0))
 
+    def clamp_exposure(value: float) -> float:
+        return max(0.0, min(float(value), base))
+
     ma_period = int(params.get("market_ma_period", 120))
     risk_off = False
     if ma_period > 0:
@@ -1542,11 +1636,33 @@ def _target_exposure_for_day(
     if mode == "benchmark_sma":
         return bear_exposure() if risk_off else base
 
-    if mode != "benchmark_risk":
-        return base
-
     history = benchmark_close.loc[benchmark_close.index <= score_day].dropna().astype(float)
     if history.empty:
+        return base
+
+    if mode == "benchmark_vol_target":
+        exposure = base
+        floor = min(bear_exposure(), base)
+        vol_target = params.get("benchmark_vol_target_pct")
+        vol_lookback = max(2, int(params.get("benchmark_vol_lookback", 40)))
+        returns = history.pct_change().dropna().tail(vol_lookback)
+        if vol_target is not None and len(returns) >= 2:
+            realized_vol_pct = float(returns.std()) * np.sqrt(252) * 100
+            if realized_vol_pct > 0:
+                exposure = min(exposure, base * float(vol_target) / realized_vol_pct)
+
+        drawdown_trigger = params.get("benchmark_drawdown_trigger_pct")
+        if drawdown_trigger is not None:
+            drawdown_lookback = max(2, int(params.get("benchmark_drawdown_lookback", 60)))
+            drawdown_window = history.tail(drawdown_lookback)
+            rolling_peak = float(drawdown_window.max()) if not drawdown_window.empty else 0.0
+            if rolling_peak > 0:
+                drawdown_pct = (float(history.iloc[-1]) / rolling_peak - 1.0) * 100
+                if drawdown_pct <= -abs(float(drawdown_trigger)):
+                    exposure = min(exposure, floor)
+        return max(floor, clamp_exposure(exposure))
+
+    if mode != "benchmark_risk":
         return base
 
     drawdown_trigger = params.get("benchmark_drawdown_trigger_pct")
@@ -1787,7 +1903,15 @@ def run_target_weight_rotation_backtest(
     symbols = normalize_symbols(symbols)
     short_lb = int(params.get("short_lookback", 60))
     long_lb = int(params.get("long_lookback", 120))
-    warmup_days = max(long_lb * 3, 180)
+    exposure_lookbacks = [
+        int(params.get(key, 0) or 0)
+        for key in (
+            "market_ma_period",
+            "benchmark_drawdown_lookback",
+            "benchmark_vol_lookback",
+        )
+    ]
+    warmup_days = max(long_lb * 3, 180, *(lookback * 3 for lookback in exposure_lookbacks))
     fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=warmup_days)).strftime("%Y-%m-%d")
     collector = collector or DataCollector()
     risk_manager = risk_manager or RiskManager()
@@ -3003,6 +3127,7 @@ def main() -> None:
             "target_weight_rotation",
             "target_weight_risk_relief",
             "target_weight_turnover_relief",
+            "target_weight_volatility_target",
             "all",
         ],
         help="Research candidate family to evaluate.",
