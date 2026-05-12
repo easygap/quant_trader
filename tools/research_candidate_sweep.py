@@ -728,6 +728,50 @@ def build_target_weight_rotation_candidate_specs() -> list[CandidateSpec]:
             description="shorter benchmark-risk overlay that cuts hold-buffer top-5 exposure to 35pct",
         ),
         CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol3",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 60,
+                "bear_target_exposure": 0.35,
+                "benchmark_drawdown_lookback": 60,
+                "benchmark_drawdown_trigger_pct": 5.0,
+                "benchmark_vol_lookback": 40,
+                "benchmark_vol_trigger_pct": 28.0,
+                "target_tolerance_pct": 3.0,
+            },
+            description="risk-overlay target-weight rotation with a wider 3pct rebalance tolerance",
+        ),
+        CandidateSpec(
+            candidate_id="target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5",
+            strategy="target_weight_rotation",
+            params={
+                **common,
+                "target_top_n": 5,
+                "short_lookback": 60,
+                "long_lookback": 120,
+                "short_weight": 0.6,
+                "min_score_floor_pct": 0.0,
+                "hold_rank_buffer": 3,
+                "market_exposure_mode": "benchmark_risk",
+                "market_ma_period": 60,
+                "bear_target_exposure": 0.35,
+                "benchmark_drawdown_lookback": 60,
+                "benchmark_drawdown_trigger_pct": 5.0,
+                "benchmark_vol_lookback": 40,
+                "benchmark_vol_trigger_pct": 28.0,
+                "target_tolerance_pct": 5.0,
+            },
+            description="risk-overlay target-weight rotation with a 5pct tolerance to test turnover relief",
+        ),
+        CandidateSpec(
             candidate_id="target_weight_rotation_top5_60_120_floor0_exp80",
             strategy="target_weight_rotation",
             params={
@@ -1347,15 +1391,21 @@ def _execute_target_weight_rebalance(
     avg_daily_volumes: dict[str, float] | None,
     risk_manager,
     execution_price_mode: str = "rebalance_day_price",
-) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float]:
+) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float, dict[str, Any]]:
     avg_daily_volumes = avg_daily_volumes or {}
+    diagnostics = {
+        "skipped_tolerance_trades": 0,
+        "skipped_tolerance_sell_trades": 0,
+        "skipped_tolerance_buy_trades": 0,
+        "skipped_tolerance_notional": 0.0,
+    }
     nav = cash + sum(
         pos["qty"] * prices.get(sym, 0.0)
         for sym, pos in positions.items()
         if prices.get(sym, 0.0) > 0
     )
     if nav <= 0:
-        return cash, positions, [], 0.0
+        return cash, positions, [], 0.0, diagnostics
 
     target_set = {sym for sym in targets if prices.get(sym, 0.0) > 0}
     per_target_value = nav * target_exposure / len(target_set) if target_set else 0.0
@@ -1376,7 +1426,11 @@ def _execute_target_weight_rebalance(
         if qty_to_sell <= 1e-9:
             continue
         price = prices[sym]
-        if abs(qty_to_sell * price) / nav < rebalance_tolerance:
+        skipped_notional = abs(qty_to_sell * price)
+        if skipped_notional / nav < rebalance_tolerance:
+            diagnostics["skipped_tolerance_trades"] += 1
+            diagnostics["skipped_tolerance_sell_trades"] += 1
+            diagnostics["skipped_tolerance_notional"] += skipped_notional
             continue
         avg_price = float(positions[sym].get("avg_price", price))
         avg_daily_volume = avg_daily_volumes.get(sym)
@@ -1425,7 +1479,11 @@ def _execute_target_weight_rebalance(
         qty_to_buy = desired - current
         if qty_to_buy <= 1e-9 or prices.get(sym, 0.0) <= 0:
             continue
-        if abs(qty_to_buy * prices[sym]) / nav < rebalance_tolerance:
+        skipped_notional = abs(qty_to_buy * prices[sym])
+        if skipped_notional / nav < rebalance_tolerance:
+            diagnostics["skipped_tolerance_trades"] += 1
+            diagnostics["skipped_tolerance_buy_trades"] += 1
+            diagnostics["skipped_tolerance_notional"] += skipped_notional
             continue
         avg_daily_volume = avg_daily_volumes.get(sym)
         costs = risk_manager.calculate_transaction_costs(
@@ -1483,7 +1541,11 @@ def _execute_target_weight_rebalance(
             }
         )
 
-    return cash, positions, trades, turnover
+    diagnostics["skipped_tolerance_notional"] = round(
+        float(diagnostics["skipped_tolerance_notional"]),
+        2,
+    )
+    return cash, positions, trades, turnover, diagnostics
 
 
 def run_target_weight_rotation_backtest(
@@ -1613,6 +1675,10 @@ def run_target_weight_rotation_backtest(
         base_target_exposure = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
         risk_off_rebalance_count = 0
         total_turnover = 0.0
+        skipped_tolerance_trades = 0
+        skipped_tolerance_sell_trades = 0
+        skipped_tolerance_buy_trades = 0
+        skipped_tolerance_notional = 0.0
         stale_score_symbols_excluded = 0
         stale_score_symbol_set: set[str] = set()
         held_stale_valuation_days = 0
@@ -1724,7 +1790,7 @@ def run_target_weight_rotation_backtest(
                             and pd.notna(volume_row[sym])
                             and float(volume_row[sym]) > 0
                         }
-                    cash, positions, new_trades, turnover = _execute_target_weight_rebalance(
+                    cash, positions, new_trades, turnover, rebalance_diagnostics = _execute_target_weight_rebalance(
                         day=day,
                         cash=cash,
                         positions=positions,
@@ -1738,6 +1804,18 @@ def run_target_weight_rotation_backtest(
                     )
                     trades.extend(new_trades)
                     total_turnover += turnover
+                    skipped_tolerance_trades += int(
+                        rebalance_diagnostics.get("skipped_tolerance_trades", 0) or 0
+                    )
+                    skipped_tolerance_sell_trades += int(
+                        rebalance_diagnostics.get("skipped_tolerance_sell_trades", 0) or 0
+                    )
+                    skipped_tolerance_buy_trades += int(
+                        rebalance_diagnostics.get("skipped_tolerance_buy_trades", 0) or 0
+                    )
+                    skipped_tolerance_notional += float(
+                        rebalance_diagnostics.get("skipped_tolerance_notional", 0.0) or 0.0
+                    )
                     rebalance_count += 1
                     filled_slots.append(len([sym for sym in targets if sym in positions]))
 
@@ -1805,6 +1883,7 @@ def run_target_weight_rotation_backtest(
             "target_weight_metrics": {
                 "target_top_n": top_n,
                 "hold_rank_buffer": hold_rank_buffer,
+                "rebalance_tolerance_pct": round(tolerance * 100, 2),
                 "rebalance_count": rebalance_count,
                 "avg_slots_filled": round(avg_slots, 2),
                 "slot_fill_rate_pct": round(avg_slots / top_n * 100, 1) if top_n else 0,
@@ -1852,6 +1931,14 @@ def run_target_weight_rotation_backtest(
                 ),
                 "target_weight_turnover_per_year": round(
                     total_turnover / capital / years * 100, 1
+                ) if capital > 0 else 0,
+                "rebalance_tolerance_skipped_trades": skipped_tolerance_trades,
+                "rebalance_tolerance_skipped_sell_trades": skipped_tolerance_sell_trades,
+                "rebalance_tolerance_skipped_buy_trades": skipped_tolerance_buy_trades,
+                "rebalance_tolerance_skipped_notional": round(skipped_tolerance_notional, 2),
+                "rebalance_tolerance_skipped_notional_pct_of_capital": round(
+                    skipped_tolerance_notional / capital * 100,
+                    2,
                 ) if capital > 0 else 0,
             },
         }
