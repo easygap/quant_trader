@@ -248,6 +248,8 @@ def _provisional_metrics():
         "wf_windows": 6,
         "wf_total_trades": 120,
         "sharpe": 0.7,
+        "benchmark_excess_return": 2.0,
+        "benchmark_excess_sharpe": 0.2,
         "ev_per_trade": 1000.0,
         "cost_adjusted_cagr": 8.0,
         "turnover_per_year": 300.0,
@@ -315,6 +317,85 @@ def test_build_promotion_results_blocks_stale_paper_evidence(tmp_path):
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "paper evidence stale" in promotions[strategy]["reason"]
     assert metrics[strategy]["paper_evidence_fresh"] is False
+
+
+def test_build_promotion_results_blocks_when_canonical_benchmark_coverage_invalid(tmp_path):
+    from tools.evaluate_and_promote import build_data_snapshot_manifest, build_promotion_results
+
+    strategy = "paper_ready_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+    manifest = build_data_snapshot_manifest(
+        provider="test-provider",
+        universe_rule="top liquidity",
+        eval_start="2025-01-01",
+        eval_end="2025-12-31",
+        universe_lookback_start="2024-10-01",
+        universe_lookback_end="2024-12-31",
+        universe=["005930", "000660"],
+        liquidity_coverage={
+            "005930": {"rows": 62, "start": "2024-10-01", "end": "2024-12-31"},
+            "000660": {"rows": 61, "start": "2024-10-01", "end": "2024-12-31"},
+        },
+        benchmark_coverage={
+            "005930": {"rows": 245, "start": "2025-01-01", "end": "2025-12-31"},
+        },
+        fetch_errors={},
+    )
+    metadata = {
+        "data_snapshot_hash": manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": manifest,
+        "evaluation_errors": {},
+        "walk_forward_errors": {},
+    }
+
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=metadata,
+    )
+
+    assert promotions[strategy]["status"] == "paper_only"
+    assert "canonical data integrity failed" in promotions[strategy]["reason"]
+    assert "벤치마크 coverage 누락" in promotions[strategy]["reason"]
+    assert metrics[strategy]["canonical_data_integrity_ok"] is False
+
+
+def test_build_promotion_results_requires_positive_benchmark_excess(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_no_alpha_strategy"
+    metrics = {strategy: {
+        **_provisional_metrics(),
+        "benchmark_excess_return": 0.0,
+        "benchmark_excess_sharpe": 0.2,
+    }}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "paper_only"
+    assert "benchmark excess return 0.0 <= 0" in promotions[strategy]["reason"]
+
+
+def test_build_promotion_results_requires_benchmark_excess_fields(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_missing_benchmark_strategy"
+    metric = _provisional_metrics()
+    metric.pop("benchmark_excess_return")
+    metric.pop("benchmark_excess_sharpe")
+    metrics = {strategy: metric}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "paper_only"
+    assert "benchmark excess return missing" in promotions[strategy]["reason"]
+    assert "benchmark excess Sharpe missing" in promotions[strategy]["reason"]
 
 
 def test_build_promotion_results_stays_provisional_when_paper_evidence_missing(tmp_path):
