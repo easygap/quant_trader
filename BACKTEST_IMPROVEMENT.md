@@ -105,7 +105,7 @@
 
 | 과제 | 우선순위 | 상태 |
 |------|----------|------|
-| 유니버스 전체 (코스피200) 백테스트 | 높음 | 준비 보강 — `research_candidate_sweep --top-n 200` 요청 시 후보 스캔이 100개로 잘리지 않도록 `--universe-scan-limit`과 artifact 범위 기록을 추가. 대형 유니버스에서 기존 best 후보만 먼저 재검증할 수 있도록 `--candidate-id` 단일/다중 후보 필터도 추가. 실제 200종목 장기 검증 실행은 별도 필요 |
+| 유니버스 전체 (코스피200) 백테스트 | 높음 | 1차 실행 완료 — `--top-n 200 --candidate-id target_weight_rotation_top5_60_120_floor0_hold3_risk60_35` full sweep에서 200개 중 유동성 통과 164개, benchmark coverage 100%, return +110.39%, raw excess +78.50%p였지만 MDD -25.79%, turnover/year 1097.1%로 `paper_only`. 다음은 보수 overlay/tolerance 후보로 drawdown·turnover 동시 완화 검증 |
 | Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | **완료 — `backtest.cost_impact`가 비용 차감 전/후 수익률, 비용 드래그, 비용/순손익, status를 표준 집계하고 백테스트 리포트에 노출** |
 | 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
