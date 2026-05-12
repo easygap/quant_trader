@@ -67,6 +67,8 @@ class StrategyMetrics:
     target_weight_all_promotable_days_verified: Optional[bool] = None
     target_weight_params_hash_consistent: Optional[bool] = None
     target_weight_params_hash: Optional[str] = None
+    target_weight_canonical_params_hash: Optional[str] = None
+    target_weight_params_hash_matches_canonical: Optional[bool] = None
 
 
 @dataclass
@@ -175,6 +177,10 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
             fails.append("target-weight params_hash not consistent")
         if not m.target_weight_params_hash:
             fails.append("target-weight params_hash missing")
+        if not m.target_weight_canonical_params_hash:
+            fails.append("target-weight canonical params_hash missing")
+        if m.target_weight_params_hash_matches_canonical is not True:
+            fails.append("target-weight evidence params_hash does not match canonical params_hash")
     if fails:
         return False, "live 미달: " + ", ".join(fails)
     return True, "live_candidate 충족"
@@ -326,10 +332,49 @@ def attach_paper_evidence_metrics(
         "target_weight_all_promotable_days_verified",
         "target_weight_params_hash_consistent",
         "target_weight_params_hash",
+        "target_weight_canonical_params_hash",
+        "target_weight_params_hash_matches_canonical",
     ):
         value = paper_metrics.get(field)
         if value is not None:
             setattr(metrics, field, value)
+    return metrics
+
+
+def canonical_params_hashes_from_metadata(metadata: dict) -> dict[str, str]:
+    """canonical bundle metadata에서 candidate_id별 params_hash를 추출한다."""
+    specs = metadata.get("strategy_specs") if isinstance(metadata, dict) else None
+    if not isinstance(specs, list):
+        return {}
+    result: dict[str, str] = {}
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        candidate_id = spec.get("candidate_id")
+        params_hash = spec.get("params_hash")
+        if isinstance(candidate_id, str) and isinstance(params_hash, str) and params_hash:
+            result[candidate_id] = params_hash
+    return result
+
+
+def attach_target_weight_canonical_hash_check(
+    strategy_name: str,
+    paper_metrics: dict[str, object],
+    canonical_params_hashes: dict[str, str],
+) -> dict[str, object]:
+    """target-weight paper evidence hash와 canonical 후보 hash를 연결한다."""
+    if not str(strategy_name).startswith("target_weight_"):
+        return paper_metrics
+    metrics = dict(paper_metrics)
+    canonical_hash = canonical_params_hashes.get(strategy_name)
+    evidence_hash = metrics.get("target_weight_params_hash")
+    if canonical_hash:
+        metrics["target_weight_canonical_params_hash"] = canonical_hash
+    metrics["target_weight_params_hash_matches_canonical"] = (
+        bool(canonical_hash)
+        and isinstance(evidence_hash, str)
+        and evidence_hash == canonical_hash
+    )
     return metrics
 
 
@@ -409,6 +454,7 @@ def load_metrics_from_artifact(
         return {}
 
     result = {}
+    canonical_params_hashes = canonical_params_hashes_from_metadata(metadata)
     excess_return = benchmark_raw.get("strategy_excess_return_pct", {})
     excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
@@ -431,6 +477,11 @@ def load_metrics_from_artifact(
                 if m.get(key) is not None
             },
         }
+        paper_metrics = attach_target_weight_canonical_hash_check(
+            name,
+            paper_metrics,
+            canonical_params_hashes,
+        )
         result[name] = attach_paper_evidence_metrics(StrategyMetrics(
             name=name,
             total_return=m.get("total_return", 0),
