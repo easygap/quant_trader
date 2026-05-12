@@ -361,12 +361,54 @@ def test_build_promotion_results_promotes_target_weight_with_verified_proof(tmp_
         target_weight_params_hash="hash",
     )
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        strategy_specs=[{"candidate_id": strategy, "params_hash": "hash"}],
+    )
 
     assert promotions[strategy]["status"] == "live_candidate"
     assert "live" in promotions[strategy]["allowed_modes"]
     assert metrics[strategy]["target_weight_verified_pilot_days"] == 60
     assert metrics[strategy]["target_weight_params_hash"] == "hash"
+    assert metrics[strategy]["target_weight_canonical_params_hash"] == "hash"
+    assert metrics[strategy]["target_weight_params_hash_matches_canonical"] is True
+
+
+def test_build_promotion_results_blocks_target_weight_hash_mismatch(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "target_weight_rotation_test"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "params_hash": "old-hash",
+            "params_hashes": ["old-hash"],
+            "params_hash_consistent": True,
+            "all_promotable_days_verified": True,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+        target_weight_params_hash="old-hash",
+    )
+
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        strategy_specs=[{"candidate_id": strategy, "params_hash": "current-hash"}],
+    )
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "does not match canonical" in promotions[strategy]["reason"]
+    assert metrics[strategy]["target_weight_canonical_params_hash"] == "current-hash"
+    assert metrics[strategy]["target_weight_params_hash_matches_canonical"] is False
 
 
 def test_build_promotion_results_blocks_target_weight_mixed_params_hash(tmp_path):
