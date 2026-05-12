@@ -17,7 +17,7 @@
 > - Research sweep: 기존 top-20 all-family 후보 재검증도 `NO_ALPHA_CANDIDATE`; `pullback`, benchmark-relative momentum, risk-budget, cash-switch, benchmark-aware rotation, target-weight top-N rotation/score-floor 후보군과 exposure-matched benchmark 진단을 research-only로 추가
 > - target-weight 리스크 완화 top-200 sweep: 최상위 tolerance 후보도 수익/초과수익은 개선됐지만 MDD·회전율 게이트 미통과로 전 후보 `paper_only`
 > - target-weight 저회전 top-200 sweep: 격월/분기 후보가 회전율은 낮췄지만 benchmark excess Sharpe와 MDD 게이트 미통과로 `NO_ALPHA_CANDIDATE`
-> - target-weight 변동성 타깃 후보군: benchmark 실현 변동성과 낙폭 기준으로 목표 노출을 직접 축소하는 research-only family 추가
+> - target-weight 변동성 타깃 top-200 sweep: 최상위 후보는 초과수익이 양수였지만 전 후보가 MDD 게이트 미통과로 `KEEP_RESEARCH_ONLY`
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
@@ -259,7 +259,9 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-12 리스크 완화 top-200 follow-up: `--candidate-family target_weight_risk_relief --top-n 200` full sweep에서 10개 후보를 비교했습니다. 최상위 후보 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5`는 return=+125.61%, raw excess=+93.72%p, exposure-matched excess=+104.53%p, avg exposure=68.5%, Sharpe=0.91, PF=2.19, WF positive=83.3%, WF Sharpe+=100%로 기존 단일 후보보다 수익성은 개선됐습니다. 다만 전체 후보가 MDD -25.27%~-32.14%, turnover/year 1027.2%~1344.3% 구간에 있어 `mdd < -20`와 `turnover_per_year >= 1000` 병목을 넘지 못했고, 판정은 `KEEP_RESEARCH_ONLY`입니다. sweep data fetch cache는 unique_fetches=1155, cache_hits=10395로 동작을 확인했습니다. 다음 연구는 리밸런싱 빈도 자체를 낮추는 격월/분기 리밸런싱, 변동성 타깃, 낙폭 차단, 회전율 패널티 랭킹을 우선합니다.
 
-2026-05-12 저회전 top-200 follow-up: `--candidate-family target_weight_turnover_relief --top-n 200` full sweep에서 격월/분기 리밸런싱 후보 6개를 검증했습니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk90_35_bimonthly`는 return=+85.72%, raw excess=+53.83%p, exposure-matched excess=+68.63%p, Sharpe=0.73, PF=1.86, turnover/year=616.7%였습니다. 분기 후보의 turnover/year는 456.1~476.9%까지 내려갔지만, 전 후보가 benchmark excess Sharpe<=0 및 MDD -25.35%~-35.12%로 막혀 판정은 `NO_ALPHA_CANDIDATE`입니다. 즉 단순 리밸런싱 빈도 축소는 회전율 병목은 완화하지만 위험조정 alpha와 낙폭 문제를 해결하지 못했습니다. 다음 연구는 변동성 타깃과 낙폭 차단을 실제 포지션 크기 산식에 넣는 방향으로 좁힙니다.
+2026-05-12 저회전 top-200 follow-up: `--candidate-family target_weight_turnover_relief --top-n 200` full sweep에서 격월/분기 리밸런싱 후보 6개를 검증했습니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk90_35_bimonthly`는 return=+85.72%, raw excess=+53.83%p, exposure-matched excess=+68.63%p, Sharpe=0.73, PF=1.86, turnover/year=616.7%였습니다. 분기 후보의 turnover/year는 456.1~476.9%까지 내려갔지만, 전 후보가 benchmark excess Sharpe<=0 및 MDD -25.35%~-35.12%로 막혀 판정은 `NO_ALPHA_CANDIDATE`입니다. 즉 단순 리밸런싱 빈도 축소는 회전율 병목은 완화하지만 위험조정 alpha와 낙폭 문제를 해결하지 못했고, 이 판단을 바탕으로 변동성 타깃과 낙폭 차단을 실제 포지션 크기 산식에 넣는 후보군을 이어서 검증했습니다.
+
+2026-05-12 변동성 타깃 top-200 follow-up: `--candidate-family target_weight_volatility_target --top-n 200` full sweep에서 benchmark 실현 변동성 타깃과 drawdown floor 후보 6개를 검증했습니다. best=`target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_vol16_dd8_floor35`는 return=+105.18%, raw excess=+73.29%p, exposure-matched excess=+91.35%p, avg exposure=71.7%, Sharpe=0.81, PF=2.03, turnover/year=958.0%였습니다. 다만 전 후보가 MDD -24.26%~-31.04%로 provisional MDD 게이트를 통과하지 못했고, 5개 후보는 benchmark excess Sharpe도 0 이하라 판정은 `KEEP_RESEARCH_ONLY`입니다. 변동성 기반 노출 축소만으로는 낙폭 병목이 충분히 풀리지 않았으므로 다음 연구는 목표 노출 산식보다 종목 선별 랭킹에 낙폭·하방변동성·상관/업종 집중 페널티를 넣는 방향으로 전환합니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
