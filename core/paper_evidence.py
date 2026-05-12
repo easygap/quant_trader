@@ -71,6 +71,19 @@ def _annualized_sharpe_from_daily_returns(daily_returns: list[float]) -> Optiona
     return mean / std * math.sqrt(252)
 
 
+def _normalize_mdd_value(mdd: object) -> float | None:
+    """MDD를 paper evidence 표준인 음수 drawdown(%)으로 정규화한다."""
+    if mdd is None:
+        return None
+    try:
+        value = float(mdd)
+    except (TypeError, ValueError):
+        return None
+    if value == 0:
+        return 0.0
+    return -abs(value)
+
+
 # ─── 데이터 구조 ────────────────────────────────────────────
 
 @dataclass
@@ -297,7 +310,7 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
                 "invested": snap.invested or 0,
                 "daily_return": snap.daily_return,
                 "cumulative_return": snap.cumulative_return,
-                "mdd": snap.mdd,
+                "mdd": _normalize_mdd_value(snap.mdd),
                 "position_count": snap.position_count or 0,
             }
 
@@ -336,7 +349,7 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
             "invested": prev_snap.invested or 0,
             "daily_return": 0.0,  # 가치 불변 = 수익률 0%
             "cumulative_return": prev_snap.cumulative_return,
-            "mdd": prev_snap.mdd,
+            "mdd": _normalize_mdd_value(prev_snap.mdd),
             "position_count": prev_snap.position_count or 0,
             "_inferred_from_previous": True,  # 추론 출처 표시
         }
@@ -672,7 +685,7 @@ def _detect_anomalies(ops: dict, portfolio: dict) -> list[dict]:
             "detail": f"reconcile_count={ops['reconcile_count']}",
         })
 
-    mdd = portfolio.get("mdd")
+    mdd = _normalize_mdd_value(portfolio.get("mdd"))
     dr = portfolio.get("daily_return")
     if (mdd is not None and mdd < _DEEP_DD_MDD) or (dr is not None and dr < _DEEP_DD_DAILY):
         anomalies.append({
@@ -945,7 +958,7 @@ def collect_daily_evidence(
         invested=portfolio.get("invested", 0),
         daily_return=portfolio.get("daily_return"),
         cumulative_return=portfolio.get("cumulative_return"),
-        mdd=portfolio.get("mdd"),
+        mdd=_normalize_mdd_value(portfolio.get("mdd")),
         position_count=portfolio.get("position_count", 0),
         # trades
         total_trades=trades.get("total_trades", 0),
@@ -1069,7 +1082,7 @@ def finalize_daily_evidence(
         updated["cash"] = portfolio.get("cash", 0)
         updated["invested"] = portfolio.get("invested", 0)
         updated["cumulative_return"] = portfolio.get("cumulative_return")
-        updated["mdd"] = portfolio.get("mdd")
+        updated["mdd"] = _normalize_mdd_value(portfolio.get("mdd"))
         updated["position_count"] = portfolio.get("position_count", 0)
 
     _append_jsonl(jsonl_path, updated)
@@ -1326,7 +1339,11 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     avg_daily_return = sum(daily_returns) / len(daily_returns) if daily_returns else 0
     paper_sharpe = _annualized_sharpe_from_daily_returns(daily_returns)
     cumulative = records[-1].get("cumulative_return", 0)
-    mdds = [r.get("mdd") for r in records if r.get("mdd") is not None]
+    mdds = [
+        normalized
+        for r in records
+        if (normalized := _normalize_mdd_value(r.get("mdd"))) is not None
+    ]
     max_mdd = min(mdds) if mdds else 0
 
     win = sum(r.get("winning_trades", 0) for r in records)
