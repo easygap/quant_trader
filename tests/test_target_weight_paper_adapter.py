@@ -558,6 +558,169 @@ def test_target_weight_pilot_help_lists_shadow_days():
     assert "--allow-rerun" in result.stdout
 
 
+def test_target_weight_daily_ops_cli_marks_not_checked_gates(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    not_checked_day = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution trade day check not required",
+    }
+    not_checked_session = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution market session check not required",
+    }
+    not_checked_auth = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "pilot authorization snapshot check not required",
+    }
+
+    def fake_run_daily_ops_summary(**kwargs):
+        return {
+            "daily_ops_summary": {
+                "candidate_id": "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+                "trade_day": "2026-04-10",
+                "status": "READY_TO_ENABLE_CAPS",
+                "next_step": "추천 cap 승인 후 readiness audit 재실행",
+                "decision": {
+                    "blocking_reasons": [],
+                    "warning_reasons": [],
+                    "execution_trade_day_check": not_checked_day,
+                    "execution_market_session_check": not_checked_session,
+                    "pilot_authorization_snapshot_check": not_checked_auth,
+                },
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "remaining_pilot_days": 60,
+                    "shadow_days": 3,
+                    "invalid_execution_days": 0,
+                },
+            },
+            "artifact_path": tmp_path / "readiness.json",
+            "experiment_manifest_path": tmp_path / "manifest.json",
+            "daily_ops_summary_path": tmp_path / "summary.json",
+            "daily_ops_summary_report_path": tmp_path / "summary.md",
+        }
+
+    monkeypatch.setattr(twp, "run_daily_ops_summary", fake_run_daily_ops_summary)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--daily-ops-summary",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    twp.main()
+
+    output = capsys.readouterr().out
+    assert "execution day: N/A (NOT CHECKED)" in output
+    assert "market session: N/A (NOT CHECKED)" in output
+    assert "pilot auth snapshot: NOT CHECKED - pilot authorization snapshot check not required" in output
+    assert "execution day: N/A (PASS)" not in output
+    assert "market session: N/A (PASS)" not in output
+
+
+def test_target_weight_readiness_cli_marks_not_checked_gates(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_260_000,
+        "max_gross_exposure": 3_360_000,
+    }
+    not_checked_day = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution trade day check not required",
+    }
+    not_checked_session = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "execution market session check not required",
+    }
+    not_checked_auth = {
+        "checked": False,
+        "allowed": True,
+        "complete": True,
+        "reason": "pilot authorization snapshot check not required",
+    }
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "candidate_id": plan.candidate_id,
+                "trade_day": plan.trade_day,
+                "ready_for_cap_approval": True,
+                "ready_for_capped_pilot": False,
+                "next_action": "enable pilot with suggested caps, then rerun readiness audit",
+                "blocking_reasons": [],
+                "warning_reasons": [],
+                "operator_commands": {"enable_suggested_caps": "python tools/paper_pilot_control.py --enable"},
+                "plan_summary": {
+                    "score_day": plan.score_day,
+                    "order_count": len(plan.orders),
+                    "target_position_count": plan.target_position_count,
+                    "max_order_notional": plan.max_order_notional,
+                    "gross_exposure_after": plan.gross_exposure_after,
+                },
+                "launch_readiness": {
+                    "clean_final_days_current": 3,
+                    "clean_final_days_required": 3,
+                    "infra_ready": True,
+                    "pilot_authorization_present": False,
+                    "launch_ready": False,
+                },
+                "cap_recommendation": {"suggested_caps": suggested_caps},
+                "plan_validation": {"reason": "no active pilot authorization"},
+                "execution_idempotency": {"reason": "no completed session for this trade day"},
+                "pre_execution_reconciliation": {"reason": "starting positions match target-weight plan"},
+                "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+                "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+                "execution_trade_day_check": not_checked_day,
+                "execution_market_session_check": not_checked_session,
+                "pilot_authorization_snapshot_check": not_checked_auth,
+            },
+            "artifact_path": tmp_path / "readiness.json",
+            "report_path": tmp_path / "readiness.md",
+            "experiment_manifest_path": tmp_path / "manifest.json",
+        }
+
+    monkeypatch.setattr(twp, "run_pilot_readiness_audit", fake_run_pilot_readiness_audit)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--readiness-audit",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    twp.main()
+
+    output = capsys.readouterr().out
+    assert "execution day: N/A (NOT CHECKED)" in output
+    assert "market session: N/A (NOT CHECKED)" in output
+    assert "pilot auth snapshot: NOT CHECKED - pilot authorization snapshot check not required" in output
+    assert "execution day: N/A (PASS)" not in output
+    assert "market session: N/A (PASS)" not in output
+
+
 def test_target_weight_pilot_control_enable_guard_blocks_requested_caps(monkeypatch, tmp_path):
     from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
     from tools.paper_pilot_control import _target_weight_enable_guard
