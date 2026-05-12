@@ -583,6 +583,33 @@ def test_build_candidate_record_keeps_rejection_reason_for_weak_candidate():
     assert "ev_per_trade <= 0" in rec["rejection_reasons"]
 
 
+def test_summarize_rejection_reasons_counts_unique_candidate_blockers():
+    from tools.research_candidate_sweep import summarize_rejection_reasons
+
+    summary = summarize_rejection_reasons(
+        [
+            {
+                "candidate_id": "candidate_a",
+                "rejection_reasons": [
+                    "mdd < -20",
+                    "mdd < -20",
+                    "turnover_per_year >= 1000",
+                ],
+            },
+            {
+                "candidate_id": "candidate_b",
+                "rejection_reasons": ["mdd < -20"],
+            },
+        ]
+    )
+
+    assert summary[0]["reason"] == "mdd < -20"
+    assert summary[0]["count"] == 2
+    assert summary[0]["candidate_ids"] == ["candidate_a", "candidate_b"]
+    assert summary[1]["reason"] == "turnover_per_year >= 1000"
+    assert summary[1]["count"] == 1
+
+
 def test_build_candidate_record_records_diversification_budget():
     from tools.research_candidate_sweep import CandidateSpec, build_candidate_record
 
@@ -913,6 +940,7 @@ def test_write_sweep_artifact_surfaces_rejection_reasons(tmp_path):
     text = md_path.read_text(encoding="utf-8")
 
     assert "## Rejection Reasons" in text
+    assert "## Rejection Summary" in text
     assert "risk_candidate" in text
     assert "mdd < -20" in text
     assert "turnover 1097.1%/y >= 1000.0%/y" in text
