@@ -361,6 +361,27 @@ def test_build_candidate_specs_supports_target_weight_turnover_relief_family():
     assert any(spec.params.get("target_exposure") == 0.75 for spec in direct)
 
 
+def test_build_candidate_specs_supports_target_weight_volatility_target_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_volatility_target")
+    alias = build_candidate_specs("vol_target")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_hold3_vol16_dd8_floor35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_vol14_dd6_floor25",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_vol16_dd8_floor35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_vol14_dd6_floor25",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_vol16_dd8_floor35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk90_35_vol16_dd8_floor35",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["market_exposure_mode"] == "benchmark_vol_target" for spec in direct)
+    assert {spec.params["benchmark_vol_target_pct"] for spec in direct} == {14.0, 16.0}
+    assert {spec.params["bear_target_exposure"] for spec in direct} == {0.25, 0.35}
+
+
 def test_build_candidate_specs_rejects_unknown_family():
     import pytest
     from tools.research_candidate_sweep import build_candidate_specs
@@ -893,6 +914,87 @@ def test_target_weight_rebalance_days_support_lower_frequency():
     ]
     with pytest.raises(ValueError, match="unsupported_rebalance_frequency"):
         sweep.target_weight_rebalance_days(dates, "weekly")
+
+
+def test_target_weight_exposure_supports_volatility_target_and_drawdown_brake():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    calm_benchmark = pd.Series(
+        [100.0, 100.5, 101.0, 101.5],
+        index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"]),
+    )
+    volatile_benchmark = pd.Series(
+        [100.0, 120.0, 90.0, 125.0],
+        index=calm_benchmark.index,
+    )
+    drawdown_benchmark = pd.Series(
+        [100.0, 100.0, 100.0, 82.0],
+        index=calm_benchmark.index,
+    )
+    params = {
+        "target_exposure": 0.8,
+        "market_exposure_mode": "benchmark_vol_target",
+        "benchmark_vol_target_pct": 10.0,
+        "benchmark_vol_lookback": 3,
+        "benchmark_drawdown_lookback": 4,
+        "benchmark_drawdown_trigger_pct": 8.0,
+        "bear_target_exposure": 0.25,
+    }
+
+    assert sweep._target_exposure_for_day(
+        pd.Timestamp("2025-01-08"),
+        calm_benchmark,
+        params,
+    ) == 0.8
+
+    volatile_exposure = sweep._target_exposure_for_day(
+        pd.Timestamp("2025-01-08"),
+        volatile_benchmark,
+        params,
+    )
+    assert 0.25 <= volatile_exposure < 0.8
+
+    assert sweep._target_exposure_for_day(
+        pd.Timestamp("2025-01-08"),
+        drawdown_benchmark,
+        params,
+    ) == 0.25
+
+
+def test_target_weight_research_warmup_includes_exposure_lookbacks():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    class RecordingCollector:
+        quiet_ohlcv_log = False
+
+        def __init__(self):
+            self.calls = []
+
+        def fetch_korean_stock(self, symbol, start, end):
+            self.calls.append((symbol, start, end))
+            return pd.DataFrame()
+
+    collector = RecordingCollector()
+    sweep.run_target_weight_rotation_backtest(
+        ["AAA"],
+        start="2025-05-01",
+        end="2025-05-02",
+        capital=1_000.0,
+        params={
+            "target_top_n": 1,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "market_exposure_mode": "benchmark_vol_target",
+            "benchmark_vol_lookback": 100,
+            "benchmark_drawdown_lookback": 90,
+            "market_ma_period": 80,
+        },
+        collector=collector,
+    )
+
+    assert collector.calls[0][1] == "2024-07-05"
 
 
 def test_target_weight_research_honors_bimonthly_rebalance_frequency():
