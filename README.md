@@ -228,6 +228,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-08 follow-up: `PortfolioBacktester`도 단일종목 백테스터처럼 종목별 20일 평균 거래량을 `RiskManager.calculate_transaction_costs()`에 전달해 동적 슬리피지 배수를 반영합니다. 포트폴리오 거래 기록에는 `participation_rate`, `slippage_multiplier`, `slippage_cost`가 남아 거래비용 과소추정을 점검할 수 있습니다.
 
+2026-05-12 follow-up: 단일/포트폴리오 백테스트 리포트에 비용 전/후 성과 비교를 자동 노출합니다. `backtest.cost_impact`가 수수료·세금·슬리피지를 표준 집계해 비용 차감 전 추정 수익률, 비용 드래그(bp), 비용/순손익, cost impact status를 남기며, 비용 때문에 gross profit이 net loss로 뒤집히거나 비용이 순이익을 초과하면 운영 검토 신호로 표시합니다.
+
 2026-05-08 follow-up: `tools/research_candidate_sweep.py`의 target-weight 리서치 백테스트도 OHLCV `volume`으로 종목별 20일 평균 거래량을 계산해 매수·매도 비용에 전달합니다. target-weight trade와 metrics에는 `avg_daily_volume`, `participation_rate`, `slippage_multiplier`, `slippage_cost_total`이 남아 high-turnover 후보의 비용 과소추정을 더 빨리 확인할 수 있습니다.
 
 2026-05-08 follow-up: `research_candidate_sweep`의 EW B&H 벤치마크가 일부 종목 결측 상태에서 전체 capital 대비 낮게 계산되어 후보 초과수익이 과대평가되는 경로를 차단했습니다. 벤치마크 입력 universe 전체가 수집·검증되지 않으면 excess gate와 decision action은 `INSUFFICIENT_BENCHMARK_DATA`로 고정됩니다.
