@@ -15,6 +15,7 @@
   - experiment_note 필드로 운영 사실을 분리 기록.
 """
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional
 from loguru import logger
 
@@ -32,6 +33,7 @@ MIN_PROVISIONAL_PROFIT_FACTOR = 1.2
 MIN_PROVISIONAL_WF_POSITIVE_RATE = 0.6
 MIN_PROVISIONAL_WF_SHARPE_RATE = 0.6
 MAX_PROVISIONAL_TURNOVER_PCT = 1000.0
+PAPER_EVIDENCE_MAX_STALENESS_DAYS = 14
 
 
 @dataclass
@@ -61,6 +63,9 @@ class StrategyMetrics:
     paper_win_rate: Optional[float] = None
     paper_frozen_days: Optional[int] = None
     paper_cumulative_return: Optional[float] = None
+    paper_latest_evidence_date: Optional[str] = None
+    paper_evidence_age_days: Optional[int] = None
+    paper_evidence_fresh: Optional[bool] = None
     target_weight_evidence_required: Optional[bool] = None
     target_weight_verified_pilot_days: Optional[int] = None
     target_weight_invalid_days: Optional[int] = None
@@ -160,6 +165,18 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"paper frozen_days {m.paper_frozen_days} > 0")
     if m.paper_cumulative_return is None or m.paper_cumulative_return <= 0:
         fails.append(f"paper cumulative_return {m.paper_cumulative_return or 0} <= 0")
+    if m.paper_evidence_fresh is not True:
+        latest = m.paper_latest_evidence_date or "missing"
+        if m.paper_evidence_age_days is None:
+            fails.append(f"paper evidence freshness missing latest={latest}")
+        elif m.paper_evidence_age_days < 0:
+            fails.append(f"paper evidence latest date future latest={latest}")
+        else:
+            fails.append(
+                "paper evidence stale "
+                f"latest={latest} age={m.paper_evidence_age_days}d "
+                f"> {PAPER_EVIDENCE_MAX_STALENESS_DAYS}d"
+            )
     if m.name.startswith("target_weight_"):
         if m.target_weight_evidence_required is not True:
             fails.append("target-weight evidence required flag missing")
@@ -255,6 +272,38 @@ def _as_float(value) -> Optional[float]:
         return None
 
 
+def _parse_date_like(value) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _latest_evidence_date_from_package(package: dict) -> Optional[date]:
+    latest = _parse_date_like(package.get("latest_evidence_date"))
+    if latest is not None:
+        return latest
+    period = package.get("period")
+    if isinstance(period, str) and "~" in period:
+        return _parse_date_like(period.split("~")[-1].strip())
+    return None
+
+
 def load_paper_evidence_package(
     strategy_name: str,
     evidence_dir: str = PAPER_EVIDENCE_DIR,
@@ -284,11 +333,25 @@ def load_paper_evidence_package(
     return payload
 
 
-def paper_evidence_metrics_from_package(package: Optional[dict]) -> dict[str, object]:
+def paper_evidence_metrics_from_package(
+    package: Optional[dict],
+    reference_date: object | None = None,
+) -> dict[str, object]:
     """promotion package를 StrategyMetrics의 paper_* 필드로 변환한다."""
     if not isinstance(package, dict):
         return {}
     target_weight_evidence = package.get("target_weight_evidence") or {}
+    latest_evidence_date = _latest_evidence_date_from_package(package)
+    reference = _parse_date_like(reference_date) or datetime.now().date()
+    evidence_age_days = (
+        (reference - latest_evidence_date).days
+        if latest_evidence_date is not None
+        else None
+    )
+    evidence_fresh = (
+        evidence_age_days is not None
+        and 0 <= evidence_age_days <= PAPER_EVIDENCE_MAX_STALENESS_DAYS
+    )
     return {
         "paper_days": _as_int(
             package.get("promotable_evidence_days", package.get("real_paper_days"))
@@ -301,6 +364,13 @@ def paper_evidence_metrics_from_package(package: Optional[dict]) -> dict[str, ob
         "paper_win_rate": _as_float(package.get("win_rate")),
         "paper_frozen_days": _as_int(package.get("frozen_days")),
         "paper_cumulative_return": _as_float(package.get("cumulative_return")),
+        "paper_latest_evidence_date": (
+            latest_evidence_date.isoformat()
+            if latest_evidence_date is not None
+            else None
+        ),
+        "paper_evidence_age_days": evidence_age_days,
+        "paper_evidence_fresh": evidence_fresh,
         "target_weight_evidence_required": target_weight_evidence.get("required"),
         "target_weight_verified_pilot_days": _as_int(package.get("target_weight_verified_pilot_days")),
         "target_weight_invalid_days": _as_int(package.get("target_weight_invalid_days")),
@@ -326,6 +396,9 @@ def attach_paper_evidence_metrics(
         "paper_win_rate",
         "paper_frozen_days",
         "paper_cumulative_return",
+        "paper_latest_evidence_date",
+        "paper_evidence_age_days",
+        "paper_evidence_fresh",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
@@ -455,12 +528,16 @@ def load_metrics_from_artifact(
 
     result = {}
     canonical_params_hashes = canonical_params_hashes_from_metadata(metadata)
+    paper_reference_date = metadata.get("generated_at")
     excess_return = benchmark_raw.get("strategy_excess_return_pct", {})
     excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
         wf = wf_raw.get(name, {})
         paper_metrics = {
-            **paper_evidence_metrics_from_package(load_paper_evidence_package(name, evidence_dir)),
+            **paper_evidence_metrics_from_package(
+                load_paper_evidence_package(name, evidence_dir),
+                reference_date=paper_reference_date,
+            ),
             **{
                 key: m.get(key)
                 for key in (
