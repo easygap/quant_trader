@@ -143,6 +143,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "benchmark_aware_rotation_60_120_dense" in ids
     assert "target_weight_rotation_top3_60_120_excess" in ids
     assert "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk60" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -402,6 +403,63 @@ def test_build_candidate_specs_supports_target_weight_downside_rank_relief_famil
     assert {spec.params["rank_penalty_lookback"] for spec in direct} == {60, 90}
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
     assert any(spec.params.get("target_exposure") == 0.75 for spec in direct)
+
+
+def test_build_candidate_specs_supports_target_weight_churn_relief_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_churn_relief")
+    alias = build_candidate_specs("rank_churn_relief")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew1",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_bimonthly_maxnew2",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60_maxnew2",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_bimonthly_maxnew2",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["rank_penalty_mode"] == "downside_risk" for spec in direct)
+    assert {spec.params["max_new_targets_per_rebalance"] for spec in direct} == {1, 2}
+    assert any(spec.params["rebalance_frequency"] == "bimonthly" for spec in direct)
+    assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
+
+
+def test_select_target_weight_targets_limits_new_entries_per_rebalance():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    score_row = pd.Series(
+        [0.5, 0.4, 0.3, 0.2, 0.1],
+        index=["NEW1", "NEW2", "OLD1", "OLD2", "OLD3"],
+    )
+    prices = {sym: 100.0 for sym in score_row.index}
+    positions = {
+        "OLD1": {"qty": 1.0},
+        "OLD2": {"qty": 1.0},
+        "OLD3": {"qty": 1.0},
+    }
+
+    limited = sweep._select_target_weight_targets(
+        score_row,
+        prices,
+        positions,
+        top_n=3,
+        hold_rank_buffer=0,
+        max_new_targets_per_rebalance=1,
+    )
+    no_new = sweep._select_target_weight_targets(
+        score_row,
+        prices,
+        positions,
+        top_n=3,
+        hold_rank_buffer=0,
+        max_new_targets_per_rebalance=0,
+    )
+
+    assert limited == ["NEW1", "OLD1", "OLD2"]
+    assert no_new == ["OLD1", "OLD2", "OLD3"]
 
 
 def test_build_candidate_specs_rejects_unknown_family():
