@@ -355,6 +355,80 @@ def _seed_day(session, day_date, account_key, scenario, models):
     session.commit()
 
 
+def _append_eligible_promotion_records(evidence_dir, strategy: str):
+    from core.paper_evidence import _append_jsonl
+
+    jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+    start = datetime(2026, 1, 5)
+    for i in range(60):
+        _append_jsonl(jsonl_path, {
+            "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+            "day_number": i + 1,
+            "strategy": strategy,
+            "total_value": 12_000_000,
+            "cash": 3_000_000,
+            "invested": 9_000_000,
+            "daily_return": 0.1,
+            "cumulative_return": 6.0,
+            "mdd": -2.0,
+            "position_count": 2,
+            "total_trades": 2,
+            "buy_count": 1,
+            "sell_count": 1,
+            "winning_trades": 1,
+            "losing_trades": 0,
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.03,
+            "cash_adjusted_excess": 0.02,
+            "benchmark_status": "final",
+            "benchmark_meta": {"completeness": 1.0},
+            "raw_fill_rate": 1.0,
+            "reject_count": 0,
+            "phantom_position_count": 0,
+            "stale_pending_count": 0,
+            "duplicate_blocked_count": 0,
+            "restart_recovery_count": 0,
+            "anomalies": [],
+            "cross_validation_warnings": [],
+            "status": "normal",
+            "record_version": 1,
+            "schema_version": 2,
+            "diagnostics": [],
+            "evidence_mode": "real_paper",
+            "execution_backed": True,
+        })
+
+
+def _seed_paper_trade(account_key: str, **overrides):
+    from database.models import TradeHistory, get_session
+
+    payload = {
+        "account_key": account_key,
+        "symbol": "005930",
+        "action": "BUY",
+        "price": 106.0,
+        "quantity": 10,
+        "total_amount": 1060.0,
+        "commission": 0.0,
+        "tax": 0.0,
+        "slippage": 0.0,
+        "expected_price": 100.0,
+        "actual_slippage_pct": 6.0,
+        "strategy": account_key,
+        "reason": "paper fill quality fixture",
+        "mode": "paper",
+        "executed_at": datetime(2026, 1, 10, 10, 0),
+        "price_gap": 6.0,
+    }
+    payload.update(overrides)
+    session = get_session()
+    try:
+        session.add(TradeHistory(**payload))
+        session.commit()
+    finally:
+        session.close()
+
+
 class TestEndToEndReplay:
     """7영업일 synthetic replay → evidence + anomaly + weekly + package 검증."""
 
@@ -680,6 +754,43 @@ class TestEndToEndReplay:
         assert pkg["recommendation"] == "BLOCKED"
         assert pkg["max_mdd"] == -21.0
         assert any("max_mdd=-21.0%" in reason for reason in pkg["block_reasons"])
+
+    def test_promotion_blocks_adverse_fill_quality_gap(self, evidence_dir, fresh_db):
+        """paper 성과가 좋아도 실제 체결 갭 비용이 크면 승격 package를 차단한다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_gap"
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trade(strategy)
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "review"
+        assert pkg["trade_quality"]["adverse_gap_bps_of_notional"] > 50
+        assert any("fill_quality_adverse_gap_bps=" in reason for reason in pkg["block_reasons"])
+
+    def test_promotion_blocks_missing_expected_price_quality(self, evidence_dir, fresh_db):
+        """expected_price가 없는 paper 체결은 슬리피지 검증 불가라 승격 package를 차단한다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_missing_expected"
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trade(
+            strategy,
+            expected_price=None,
+            price_gap=None,
+            actual_slippage_pct=None,
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality"]["missing_expected_price_count"] == 1
+        assert pkg["trade_quality"]["missing_expected_price_ratio"] == 1.0
+        assert "fill_quality_expected_price_missing=1/1" in pkg["block_reasons"]
 
     def test_promotion_package_uses_chronological_canonical_records(self, evidence_dir):
         """나중에 append된 오래된 backfill이 promotion period/latest cumulative를 흔들지 않음."""
