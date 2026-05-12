@@ -432,6 +432,7 @@ def test_build_promotion_results_does_not_promote_live_when_evidence_blocked(tmp
 
 def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
     from tools.evaluate_and_promote import (
+        build_promotion_blocker_source_hash,
         build_promotion_blocker_summary,
         write_promotion_blocker_summary,
     )
@@ -485,6 +486,12 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
     json_path, md_path = write_promotion_blocker_summary(summary, tmp_path)
 
     assert summary["artifact_type"] == "promotion_blocker_summary"
+    assert summary["source_artifact_hash"] == build_promotion_blocker_source_hash(
+        promotions,
+        metrics,
+        {"generated_at": "2026-05-12T09:00:00"},
+    )
+    assert len(summary["source_artifact_hash"]) == 64
     assert summary["summary"]["total_strategies"] == 3
     assert summary["summary"]["live_ready_count"] == 1
     assert summary["summary"]["blocked_from_live_count"] == 2
@@ -534,10 +541,81 @@ def test_load_promotion_blocker_summary_from_existing_artifacts(tmp_path):
     json_path, md_path = write_promotion_blocker_summary(summary, artifact_dir)
 
     assert summary["generated_at"] == "2026-05-12T10:00:00"
+    assert len(summary["source_artifact_hash"]) == 64
     assert summary["summary"]["blocked_from_live_count"] == 1
     assert summary["strategies"]["paper_blocked_strategy"]["metrics"]["total_return"] == 7.5
     assert json_path.name == "promotion_blocker_summary.json"
     assert "benchmark excess return missing" in md_path.read_text(encoding="utf-8")
+
+
+def test_validate_promotion_blocker_summary_detects_stale_summary(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_promotion_blocker_summary_from_artifacts,
+        validate_promotion_blocker_summary_artifact,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    promotion_path = artifact_dir / "promotion_result.json"
+    promotion_path.write_text(
+        json.dumps({
+            "paper_blocked_strategy": {
+                "status": "paper_only",
+                "allowed_modes": ["backtest", "paper"],
+                "reason": "paper_only 충족; provisional 차단: benchmark excess return missing",
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps({
+            "paper_blocked_strategy": {
+                "total_return": 7.5,
+                "sharpe": 0.4,
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps({
+            "generated_at": "2026-05-12T10:00:00",
+            "data_snapshot_hash": "snapshot-a",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    write_promotion_blocker_summary(
+        load_promotion_blocker_summary_from_artifacts(artifact_dir),
+        artifact_dir,
+    )
+
+    assert validate_promotion_blocker_summary_artifact(artifact_dir) == []
+
+    promotion_path.write_text(
+        json.dumps({
+            "paper_blocked_strategy": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "reason": "provisional_paper_candidate 충족; live 차단: paper evidence stale",
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_promotion_blocker_summary_artifact(artifact_dir)
+    assert any("source_artifact_hash 불일치" in issue for issue in issues)
+    assert any("summary 내용 불일치" in issue for issue in issues)
+    assert any("strategies 내용 불일치" in issue for issue in issues)
+
+
+def test_validate_promotion_blocker_summary_requires_summary_file(tmp_path):
+    from tools.evaluate_and_promote import validate_promotion_blocker_summary_artifact
+
+    issues = validate_promotion_blocker_summary_artifact(tmp_path / "promotion")
+
+    assert issues
+    assert "promotion_blocker_summary.json 없음" in issues[0]
 
 
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
