@@ -10,6 +10,7 @@ import numpy as np
 from loguru import logger
 
 from config.config_loader import Config
+from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
 _FULL_EXIT_SELL_ACTIONS = frozenset(
@@ -222,22 +223,25 @@ class Backtester:
             pd.Series (index=df.index):
               "bullish" (정상), "caution" (포지션 축소), "bearish" (매수 차단)
         """
-        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
+        regime_cfg = resolve_market_regime_config(self.config, for_backtest=True)
         default = pd.Series("bullish", index=df.index)
 
-        if not regime_cfg.get("enabled", False):
+        if not regime_cfg["enabled"]:
             return default
 
-        index_symbol = regime_cfg.get("index_symbol", "KS11")
-        ma_days = max(20, int(regime_cfg.get("ma_days", 200)))
-        short_days = max(1, int(regime_cfg.get("short_momentum_days", 20)))
-        short_threshold = float(regime_cfg.get("short_momentum_threshold", -5.0))
+        index_symbol = regime_cfg["index_symbol"]
+        ma_days = regime_cfg["ma_days"]
+        short_days = regime_cfg["short_momentum_days"]
+        short_threshold = regime_cfg["short_momentum_threshold"]
+        ma_cross_enabled = regime_cfg["ma_cross_enabled"]
+        ma_short = regime_cfg["ma_short"]
+        ma_mid = regime_cfg["ma_mid"]
 
         # 지수 데이터 로드 — 백테스트 기간 + 이동평균 계산에 필요한 과거 데이터
         try:
             from core.data_collector import DataCollector
             collector = DataCollector()
-            margin_days = ma_days + 60  # MA 계산에 충분한 여유
+            margin_days = max(ma_days, ma_mid, short_days) + 60
             first_date = df.index[0]
             if hasattr(first_date, "strftime"):
                 from datetime import timedelta
@@ -259,6 +263,12 @@ class Backtester:
         idx_close = index_df["close"].astype(float)
         idx_ma = idx_close.rolling(ma_days, min_periods=ma_days).mean()
         idx_momentum = idx_close.pct_change(short_days) * 100  # N일 수익률(%)
+        if ma_cross_enabled:
+            idx_ma_short = idx_close.rolling(ma_short, min_periods=ma_short).mean()
+            idx_ma_mid = idx_close.rolling(ma_mid, min_periods=ma_mid).mean()
+        else:
+            idx_ma_short = None
+            idx_ma_mid = None
 
         # 날짜별 regime 판별 — T일 regime은 T-1일 지수 데이터까지만 사용
         regime_map = {}
@@ -276,8 +286,14 @@ class Backtester:
 
             below_ma = prev_close < float(prev_ma)
             momentum_triggered = float(prev_momentum) <= short_threshold
+            ma_cross_triggered = False
+            if ma_cross_enabled:
+                prev_ma_short = idx_ma_short.iloc[prev_idx]
+                prev_ma_mid = idx_ma_mid.iloc[prev_idx]
+                if not pd.isna(prev_ma_short) and not pd.isna(prev_ma_mid):
+                    ma_cross_triggered = float(prev_ma_short) < float(prev_ma_mid)
 
-            triggered = sum([below_ma, momentum_triggered])
+            triggered = sum([below_ma, momentum_triggered, ma_cross_triggered])
             if triggered >= 2:
                 regime_map[idx_dates[i]] = "bearish"
             elif triggered == 1:
@@ -379,9 +395,9 @@ class Backtester:
             return round(abs((float(execution_price) - float(ref_close)) * int(qty)), 0)
 
         # 시장국면 필터 설정 (TICKET-02)
-        regime_cfg = self.risk_params.get("backtest_regime_filter", {})
-        regime_enabled = regime_cfg.get("enabled", False) and regime_series is not None
-        caution_scale = float(regime_cfg.get("caution_scale", 0.5))
+        regime_cfg = resolve_market_regime_config(self.config, for_backtest=True)
+        regime_enabled = regime_cfg["enabled"] and regime_series is not None
+        caution_scale = regime_cfg["caution_scale"]
         regime_buy_blocks = 0   # bearish에서 차단된 매수 신호 수 (메트릭용)
         regime_caution_buys = 0  # caution에서 축소된 매수 수 (메트릭용)
 
