@@ -2297,6 +2297,173 @@ def _plan_summary(plan: TargetWeightPlan) -> dict[str, Any]:
     }
 
 
+def _normalize_diagnostic_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    if not clean:
+        return None
+    try:
+        return datetime.fromisoformat(clean.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return clean[:10]
+
+
+def _plan_data_quality_symbols(plan: TargetWeightPlan) -> list[str]:
+    symbols: set[str] = set(plan.symbols)
+    symbols.update(plan.targets)
+    symbols.update(plan.prices)
+    symbols.update(order.symbol for order in plan.orders)
+    symbols.update(
+        symbol
+        for symbol, quantity in (plan.position_quantities_before or {}).items()
+        if int(quantity or 0) > 0
+    )
+    symbols.update(
+        symbol
+        for symbol, quantity in (plan.target_quantities_after or {}).items()
+        if int(quantity or 0) > 0
+    )
+    return sorted(str(symbol) for symbol in symbols if str(symbol).strip())
+
+
+def data_quality_check_not_available(
+    reason: str = "target_weight_data_quality_not_checked",
+) -> dict[str, Any]:
+    return {
+        "checked": False,
+        "complete": False,
+        "reason": reason,
+        "trade_day": None,
+        "score_day": None,
+        "symbols_checked": 0,
+        "required_symbols": [],
+        "price_last_dates": {},
+        "missing_price_last_date_symbols": [],
+        "stale_price_symbols": [],
+        "missing_symbols": [],
+        "missing_position_symbols": [],
+        "benchmark_symbol": None,
+        "benchmark_last_date": None,
+        "benchmark_stale": False,
+        "violations": [reason],
+        "warnings": [],
+    }
+
+
+def assess_plan_data_quality(plan: TargetWeightPlan) -> dict[str, Any]:
+    """Validate target-weight price freshness diagnostics before operator action."""
+    diagnostics = plan.diagnostics or {}
+    price_last_dates = diagnostics.get("price_last_dates") or {}
+    if not isinstance(price_last_dates, dict):
+        price_last_dates = {}
+
+    required_symbols = _plan_data_quality_symbols(plan)
+    trade_day = _normalize_diagnostic_date(plan.trade_day)
+    score_day = _normalize_diagnostic_date(plan.score_day)
+    normalized_price_dates = {
+        str(symbol): _normalize_diagnostic_date(day)
+        for symbol, day in price_last_dates.items()
+    }
+    missing_symbols = sorted(str(symbol) for symbol in diagnostics.get("missing_symbols") or [])
+    missing_position_symbols = sorted(
+        str(symbol) for symbol in diagnostics.get("missing_position_symbols") or []
+    )
+    violations: list[str] = []
+    warnings: list[str] = []
+
+    if missing_symbols:
+        violations.append(f"missing universe price data: {', '.join(missing_symbols[:10])}")
+    if missing_position_symbols:
+        violations.append(
+            f"positions without price data: {', '.join(missing_position_symbols[:10])}"
+        )
+    if not normalized_price_dates:
+        violations.append("missing price_last_dates diagnostics")
+
+    missing_price_last_date_symbols = [
+        symbol for symbol in required_symbols if symbol not in normalized_price_dates
+    ]
+    if missing_price_last_date_symbols:
+        violations.append(
+            "missing price freshness dates: "
+            + ", ".join(missing_price_last_date_symbols[:10])
+        )
+
+    stale_price_symbols: dict[str, str] = {}
+    invalid_price_date_symbols: list[str] = []
+    for symbol in required_symbols:
+        price_day = normalized_price_dates.get(symbol)
+        if not price_day:
+            if symbol in normalized_price_dates:
+                invalid_price_date_symbols.append(symbol)
+            continue
+        if trade_day and price_day < trade_day:
+            stale_price_symbols[symbol] = price_day
+    if invalid_price_date_symbols:
+        violations.append(
+            "invalid price freshness dates: "
+            + ", ".join(invalid_price_date_symbols[:10])
+        )
+    if stale_price_symbols:
+        preview = ", ".join(
+            f"{symbol}={day}" for symbol, day in list(stale_price_symbols.items())[:10]
+        )
+        violations.append(f"stale symbol price data: {preview}")
+
+    benchmark_symbol = diagnostics.get("benchmark_symbol")
+    benchmark_last_date = _normalize_diagnostic_date(diagnostics.get("benchmark_last_date"))
+    benchmark_stale = False
+    if benchmark_symbol and score_day:
+        if not benchmark_last_date:
+            violations.append(
+                f"missing benchmark_last_date: benchmark={benchmark_symbol} score_day={score_day}"
+            )
+        elif benchmark_last_date < score_day:
+            benchmark_stale = True
+            violations.append(
+                "stale benchmark price data: "
+                f"benchmark={benchmark_symbol} latest={benchmark_last_date} score_day={score_day}"
+            )
+        elif trade_day and benchmark_last_date < trade_day:
+            warnings.append(
+                "benchmark_latest_before_trade_day: "
+                f"benchmark={benchmark_symbol} latest={benchmark_last_date} trade_day={trade_day}"
+            )
+
+    complete = not violations
+    reason = "target_weight_data_quality_passed"
+    if not complete:
+        preview = "; ".join(violations[:5])
+        if len(violations) > 5:
+            preview = f"{preview}; +{len(violations) - 5} more"
+        reason = f"target_weight_data_quality_failed: {preview}"
+
+    return {
+        "checked": True,
+        "complete": complete,
+        "reason": reason,
+        "trade_day": trade_day,
+        "score_day": score_day,
+        "symbols_checked": len(required_symbols),
+        "required_symbols": required_symbols,
+        "price_last_dates": {
+            symbol: normalized_price_dates.get(symbol)
+            for symbol in required_symbols
+            if symbol in normalized_price_dates
+        },
+        "missing_price_last_date_symbols": missing_price_last_date_symbols,
+        "stale_price_symbols": stale_price_symbols,
+        "missing_symbols": missing_symbols,
+        "missing_position_symbols": missing_position_symbols,
+        "benchmark_symbol": benchmark_symbol,
+        "benchmark_last_date": benchmark_last_date,
+        "benchmark_stale": benchmark_stale,
+        "violations": violations,
+        "warnings": warnings,
+    }
+
+
 def assess_plan_liquidity(
     plan: TargetWeightPlan,
     *,
@@ -2725,9 +2892,18 @@ def build_pilot_readiness_audit(
     suggested_preview = cap_recommendation.get("suggested_preview", {})
     blockers: list[str] = []
     warnings: list[str] = []
+    data_quality_check = assess_plan_data_quality(plan)
 
     if trading_mode == "live":
         blockers.append("trading_mode: target-weight pilot requires paper mode, not live")
+
+    if not data_quality_check.get("complete", False):
+        blockers.append(
+            "data_quality: "
+            f"{data_quality_check.get('reason', 'target-weight data quality check failed')}"
+        )
+    for warning in data_quality_check.get("warnings") or []:
+        warnings.append(f"data_quality: {warning}")
 
     if preflight_refresh.get("checked", False) and not preflight_refresh.get("complete", False):
         blockers.append(
@@ -2807,6 +2983,7 @@ def build_pilot_readiness_audit(
         and bool(execution_idempotency.get("allowed", False))
         and bool(execution_trade_day_check.get("allowed", False))
         and bool(pre_execution_reconciliation.get("complete", False))
+        and bool(data_quality_check.get("complete", False))
         and bool(liquidity_check.get("complete", False))
         and bool(pre_trade_risk_check.get("complete", False))
         and bool(suggested_preview.get("allowed", False))
@@ -2875,6 +3052,7 @@ def build_pilot_readiness_audit(
         "execution_market_session_check": execution_market_session_check,
         "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
         "pre_execution_reconciliation": pre_execution_reconciliation,
+        "data_quality_check": data_quality_check,
         "liquidity_check": liquidity_check,
         "pre_trade_risk_check": pre_trade_risk_check,
         "no_order_safety": {
@@ -2976,6 +3154,7 @@ def build_target_weight_experiment_manifest(
             ),
             "blocking_reasons": list((readiness_audit or {}).get("blocking_reasons") or []),
             "warning_reasons": list((readiness_audit or {}).get("warning_reasons") or []),
+            "data_quality_check": (readiness_audit or {}).get("data_quality_check"),
         },
         "no_order_safety": {
             "orders_submitted": False,
@@ -3074,6 +3253,7 @@ def build_target_weight_daily_ops_summary(
     evidence_progress: dict[str, Any],
 ) -> dict[str, Any]:
     """readiness audit와 evidence progress를 하루 운영 판단용 artifact로 묶는다."""
+    data_quality_check = audit.get("data_quality_check") or data_quality_check_not_available()
     execution_market_session_check = (
         audit.get("execution_market_session_check")
         or execution_market_session_check_not_required()
@@ -3082,10 +3262,14 @@ def build_target_weight_daily_ops_summary(
         bool((audit.get("launch_readiness") or {}).get("launch_ready", False))
         and bool((audit.get("plan_validation") or {}).get("allowed", False))
         and bool((audit.get("pilot_authorization_snapshot_check") or {}).get("allowed", False))
+        and bool(data_quality_check.get("complete", False))
     )
-    if audit.get("ready_for_capped_pilot"):
+    if audit.get("ready_for_capped_pilot") and data_quality_check.get("complete", False):
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
+    elif not data_quality_check.get("complete", False):
+        status = "BLOCKED"
+        next_step = "target-weight 데이터 품질 진단 해소 후 readiness 재점검"
     elif (
         audit.get("ready_for_cap_approval")
         and capped_launch_ready
@@ -3128,12 +3312,16 @@ def build_target_weight_daily_ops_summary(
             "execution_trade_day_check": execution_trade_day_check,
             "execution_market_session_check": execution_market_session_check,
             "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
+            "data_quality_check": data_quality_check,
         },
         "risk_snapshot": {
             "orders": plan.get("order_count", 0),
             "target_positions": plan.get("target_position_count", 0),
             "max_order_notional": plan.get("max_order_notional", 0),
             "gross_exposure_after": plan.get("gross_exposure_after", 0),
+            "data_quality_complete": bool(data_quality_check.get("complete", False)),
+            "data_quality_reason": data_quality_check.get("reason", "not checked"),
+            "price_symbols_checked": int(data_quality_check.get("symbols_checked", 0) or 0),
             "liquidity_complete": bool(liquidity.get("complete", False)),
             "liquidity_reason": liquidity.get("reason", "not checked"),
             "pre_trade_risk_complete": bool(pre_trade_risk.get("complete", False)),
@@ -3150,6 +3338,7 @@ def build_target_weight_daily_ops_summary(
                 "not checked",
             ),
         },
+        "data_quality_snapshot": data_quality_check,
         "operator_commands": dict(audit.get("operator_commands") or {}),
         "manifest_hash": experiment_manifest.get("manifest_hash"),
         "no_order_safety": {
@@ -3168,6 +3357,18 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
     progress = summary["evidence_progress"]
     decision = summary["decision"]
     risk = summary["risk_snapshot"]
+    data_quality = (
+        summary.get("data_quality_snapshot")
+        or decision.get("data_quality_check")
+        or data_quality_check_not_available()
+    )
+    data_quality_status = (
+        "PASS"
+        if data_quality.get("complete")
+        else "NOT CHECKED"
+        if not data_quality.get("checked")
+        else "BLOCKED"
+    )
     commands = summary.get("operator_commands", {})
     execution_day = decision.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     market_session = (
@@ -3226,6 +3427,20 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
             f"{'PASS' if authorization_snapshot.get('allowed') else 'BLOCKED'} - "
             f"{authorization_snapshot.get('reason', 'not checked')}"
         ),
+        (
+            f"- Data quality: "
+            f"{data_quality_status} - {data_quality.get('reason', 'not checked')}"
+        ),
+        "",
+        "## Data Quality",
+        f"- Status: {data_quality_status}",
+        f"- Reason: {data_quality.get('reason', 'not checked')}",
+        f"- Price symbols checked: {data_quality.get('symbols_checked', 0)}",
+        f"- Trade day: {data_quality.get('trade_day') or 'N/A'}",
+        f"- Benchmark: {data_quality.get('benchmark_symbol') or 'N/A'}",
+        f"- Benchmark latest: {data_quality.get('benchmark_last_date') or 'N/A'}",
+        f"- Missing price date symbols: {', '.join(data_quality.get('missing_price_last_date_symbols') or []) or 'none'}",
+        f"- Stale price symbols: {', '.join((data_quality.get('stale_price_symbols') or {}).keys()) or 'none'}",
         "",
         "## Blocking Reasons",
     ]
@@ -3308,6 +3523,14 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
     plan = audit["plan_summary"]
     launch = audit["launch_readiness"]
     caps = audit["cap_recommendation"]["suggested_caps"]
+    data_quality = audit.get("data_quality_check") or data_quality_check_not_available()
+    data_quality_status = (
+        "PASS"
+        if data_quality.get("complete")
+        else "NOT CHECKED"
+        if not data_quality.get("checked")
+        else "BLOCKED"
+    )
     liquidity = audit.get("liquidity_check", {})
     pre_trade_risk = audit.get("pre_trade_risk_check", {})
     execution_day = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
@@ -3355,6 +3578,16 @@ def render_pilot_readiness_audit_markdown(audit: dict[str, Any]) -> str:
         f"- Max order notional: {plan['max_order_notional']:,.0f}",
         f"- Gross exposure after rebalance: {plan['gross_exposure_after']:,.0f}",
         f"- Target exposure: {plan['target_exposure']:.2%}",
+        "",
+        "## Data Quality",
+        f"- Status: {data_quality_status}",
+        f"- Reason: {data_quality.get('reason', 'not checked')}",
+        f"- Price symbols checked: {data_quality.get('symbols_checked', 0)}",
+        f"- Trade day: {data_quality.get('trade_day') or 'N/A'}",
+        f"- Benchmark: {data_quality.get('benchmark_symbol') or 'N/A'}",
+        f"- Benchmark latest: {data_quality.get('benchmark_last_date') or 'N/A'}",
+        f"- Missing price date symbols: {', '.join(data_quality.get('missing_price_last_date_symbols') or []) or 'none'}",
+        f"- Stale price symbols: {', '.join((data_quality.get('stale_price_symbols') or {}).keys()) or 'none'}",
         "",
         "## Launch Readiness",
         f"- Clean final days: {launch['clean_final_days_current']}/{launch['clean_final_days_required']}",
