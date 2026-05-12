@@ -48,6 +48,43 @@ def test_parse_symbols_restores_numeric_codes_losing_leading_zeroes():
     assert parse_symbols("5930,660,035720") == ["005930", "000660", "035720"]
 
 
+def test_select_canonical_universe_scans_past_legacy_100_for_large_top_n(monkeypatch):
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    codes = [f"{i:05d}0" for i in range(1, 151)]
+    fetched = []
+
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({
+            "Code": codes,
+            "Marcap": [200_000_000_000] * len(codes),
+        })
+    )
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            fetched.append(symbol)
+            return pd.DataFrame({"close": [float(symbol)], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+
+    universe = select_canonical_universe(120)
+
+    assert len(fetched) == 150
+    assert len(universe) == 120
+    assert "001500" in universe
+    assert "001000" in universe
+
+
 def test_build_candidate_specs_supports_all_families():
     from tools.research_candidate_sweep import build_candidate_specs
 
