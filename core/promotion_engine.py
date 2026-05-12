@@ -50,6 +50,9 @@ class StrategyMetrics:
     sharpe: float                 # full-period Sharpe ratio
     benchmark_excess_return: Optional[float] = None  # %p, same-universe EW B&H 대비
     benchmark_excess_sharpe: Optional[float] = None
+    canonical_benchmark_required: bool = False
+    canonical_data_integrity_ok: Optional[bool] = None
+    canonical_data_integrity_issues: Optional[list[str]] = None
     ev_per_trade: Optional[float] = None              # 원/trade
     cost_adjusted_cagr: Optional[float] = None        # %
     turnover_per_year: Optional[float] = None         # %/year
@@ -133,6 +136,18 @@ def _check_provisional_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"cost_adjusted_cagr {m.cost_adjusted_cagr}% <= 0")
     if m.turnover_per_year is not None and m.turnover_per_year >= MAX_PROVISIONAL_TURNOVER_PCT:
         fails.append(f"turnover {m.turnover_per_year}%/y >= {MAX_PROVISIONAL_TURNOVER_PCT}%/y")
+    if m.canonical_benchmark_required:
+        if m.benchmark_excess_return is None:
+            fails.append("benchmark excess return missing")
+        elif m.benchmark_excess_return <= 0:
+            fails.append(f"benchmark excess return {m.benchmark_excess_return} <= 0")
+        if m.benchmark_excess_sharpe is None:
+            fails.append("benchmark excess Sharpe missing")
+        elif m.benchmark_excess_sharpe <= 0:
+            fails.append(f"benchmark excess Sharpe {m.benchmark_excess_sharpe} <= 0")
+    if m.canonical_data_integrity_ok is False:
+        detail = "; ".join((m.canonical_data_integrity_issues or [])[:3])
+        fails.append(f"canonical data integrity failed: {detail or 'unknown'}")
     if fails:
         return False, "provisional 미달: " + ", ".join(fails)
     return True, "provisional_paper_candidate 충족"
@@ -216,21 +231,22 @@ def promote(m: StrategyMetrics, experiment_note: str = "") -> PromotionResult:
         )
 
     # provisional_paper_candidate 체크
-    ok, reason = _check_provisional_candidate(m)
-    if ok:
+    provisional_ok, provisional_reason = _check_provisional_candidate(m)
+    if provisional_ok:
         return PromotionResult(
             name=m.name, status="provisional_paper_candidate",
             allowed_modes=["backtest", "paper"],
-            reason=f"{reason}; live 차단: {live_reason}", experiment_note=experiment_note,
+            reason=f"{provisional_reason}; live 차단: {live_reason}", experiment_note=experiment_note,
         )
 
     # paper_only 체크
     ok, reason = _check_paper_only(m)
     if ok:
+        detailed_reason = f"{reason}; provisional 차단: {provisional_reason}"
         return PromotionResult(
             name=m.name, status="paper_only",
             allowed_modes=["backtest", "paper"],
-            reason=reason, experiment_note=experiment_note,
+            reason=detailed_reason, experiment_note=experiment_note,
         )
 
     # research_only
@@ -571,6 +587,7 @@ def load_metrics_from_artifact(
             sharpe=m.get("sharpe", 0),
             benchmark_excess_return=m.get("benchmark_excess_return", excess_return.get(name)),
             benchmark_excess_sharpe=m.get("benchmark_excess_sharpe", excess_sharpe.get(name)),
+            canonical_benchmark_required=True,
             ev_per_trade=m.get("ev_per_trade"),
             cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
             turnover_per_year=m.get("turnover_per_year"),

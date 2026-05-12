@@ -266,7 +266,13 @@ def attach_canonical_walk_forward_metrics(metrics, window_metrics):
     }
 
 
-def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", strategy_specs=None):
+def build_promotion_results(
+    metrics_all,
+    evidence_dir="reports/paper_evidence",
+    strategy_specs=None,
+    canonical_metadata=None,
+):
+    from core.live_gate import validate_canonical_metadata_integrity
     from core.promotion_engine import (
         StrategyMetrics,
         attach_paper_evidence_metrics,
@@ -284,6 +290,16 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", 
         and isinstance(spec.get("candidate_id"), str)
         and isinstance(spec.get("params_hash"), str)
     }
+    canonical_integrity_issues = (
+        validate_canonical_metadata_integrity(canonical_metadata)
+        if isinstance(canonical_metadata, dict)
+        else []
+    )
+    canonical_integrity_ok = (
+        not canonical_integrity_issues
+        if isinstance(canonical_metadata, dict)
+        else None
+    )
     paper_fields = (
         "paper_days",
         "paper_sharpe",
@@ -321,6 +337,9 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", 
             value = paper_metrics.get(key)
             if value is not None:
                 m[key] = value
+        if canonical_integrity_ok is not None:
+            m["canonical_data_integrity_ok"] = canonical_integrity_ok
+            m["canonical_data_integrity_issues"] = canonical_integrity_issues
 
         sm = attach_paper_evidence_metrics(StrategyMetrics(
             name=name,
@@ -334,6 +353,9 @@ def build_promotion_results(metrics_all, evidence_dir="reports/paper_evidence", 
             sharpe=m.get("sharpe", 0),
             benchmark_excess_return=m.get("benchmark_excess_return"),
             benchmark_excess_sharpe=m.get("benchmark_excess_sharpe"),
+            canonical_benchmark_required=True,
+            canonical_data_integrity_ok=m.get("canonical_data_integrity_ok"),
+            canonical_data_integrity_issues=m.get("canonical_data_integrity_issues"),
             ev_per_trade=m.get("ev_per_trade"),
             cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
             turnover_per_year=m.get("turnover_per_year"),
@@ -590,13 +612,6 @@ def run_canonical():
         for spec in research_specs
     ]
 
-    # ── Promotion 계산 ──
-    promotions = build_promotion_results(metrics_all, strategy_specs=strategy_specs_metadata)
-
-    # ── Artifact 저장 ──
-    out_dir = Path("reports/promotion")
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     data_snapshot_manifest = build_data_snapshot_manifest(
         provider="FinanceDataReader/DataCollector",
         universe_rule=UNIVERSE_RULE,
@@ -632,6 +647,17 @@ def run_canonical():
         "config_resolved_hash": Config.get().resolved_hash,
         "generated_at": datetime.now().isoformat(),
     }
+
+    # ── Promotion 계산 ──
+    promotions = build_promotion_results(
+        metrics_all,
+        strategy_specs=strategy_specs_metadata,
+        canonical_metadata=metadata,
+    )
+
+    # ── Artifact 저장 ──
+    out_dir = Path("reports/promotion")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     artifacts = {
         "run_metadata.json": metadata,
