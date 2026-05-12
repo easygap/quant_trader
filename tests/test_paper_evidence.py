@@ -736,6 +736,8 @@ class TestEndToEndReplay:
         pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
 
         assert pkg["period"] == "2026-01-01 ~ 2026-03-01"
+        assert pkg["earliest_evidence_date"] == "2026-01-01"
+        assert pkg["latest_evidence_date"] == "2026-03-01"
         assert pkg["cumulative_return"] == 60.0
 
     @patch("core.paper_evidence._compute_benchmark_excess")
