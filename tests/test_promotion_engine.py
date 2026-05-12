@@ -150,6 +150,17 @@ class TestPromotionRules:
         r = promote(m)
         assert r.status == "paper_only"
 
+    def test_provisional_requires_benchmark_excess_when_canonical_required(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            benchmark_excess_return=0.0,
+                            benchmark_excess_sharpe=0.2,
+                            canonical_benchmark_required=True)
+        r = promote(m)
+        assert r.status == "paper_only"
+        assert "benchmark excess return 0.0 <= 0" in r.reason
+
     def test_provisional_requires_ev_when_present(self):
         m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
                             wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
