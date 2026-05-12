@@ -182,6 +182,14 @@ class TestAnomalyDetection:
         anomalies = _detect_anomalies(ops, {"mdd": -18.0, "daily_return": 0})
         assert any(a["type"] == "deep_drawdown" for a in anomalies)
 
+    def test_deep_drawdown_mdd_accepts_positive_snapshot_mdd(self):
+        """PortfolioSnapshot의 양수 MDD도 paper evidence에서는 손실 낙폭으로 해석한다."""
+        from core.paper_evidence import _detect_anomalies
+        ops = {"reject_count": 0, "phantom_position_count": 0, "stale_pending_count": 0,
+               "duplicate_blocked_count": 0, "reconcile_count": 0}
+        anomalies = _detect_anomalies(ops, {"mdd": 18.0, "daily_return": 0})
+        assert any(a["type"] == "deep_drawdown" for a in anomalies)
+
     def test_deep_drawdown_daily(self):
         from core.paper_evidence import _detect_anomalies
         ops = {"reject_count": 0, "phantom_position_count": 0, "stale_pending_count": 0,
@@ -620,6 +628,58 @@ class TestEndToEndReplay:
         assert "non_positive_same_universe_excess" in block_str
         assert "non_positive_cash_adjusted_excess" in block_str
         assert "non_positive_cumulative_return" in block_str
+
+    def test_positive_mdd_blocks_promotion_after_normalization(self, evidence_dir):
+        """양수 MDD로 저장된 snapshot record도 -MDD로 정규화해 승격을 차단한다."""
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "positive_mdd_block"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": strategy,
+                "total_value": 12_000_000,
+                "cash": 3_000_000,
+                "invested": 9_000_000,
+                "daily_return": 0.1,
+                "cumulative_return": 20.0,
+                "mdd": 21.0,
+                "position_count": 2,
+                "total_trades": 2,
+                "buy_count": 1,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.03,
+                "cash_adjusted_excess": 0.02,
+                "benchmark_status": "final",
+                "benchmark_meta": {"completeness": 1.0},
+                "raw_fill_rate": 1.0,
+                "reject_count": 0,
+                "phantom_position_count": 0,
+                "stale_pending_count": 0,
+                "duplicate_blocked_count": 0,
+                "restart_recovery_count": 0,
+                "anomalies": [],
+                "cross_validation_warnings": [],
+                "status": "normal",
+                "record_version": 1,
+                "schema_version": 2,
+                "diagnostics": [],
+                "evidence_mode": "real_paper",
+                "execution_backed": True,
+            })
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["max_mdd"] == -21.0
+        assert any("max_mdd=-21.0%" in reason for reason in pkg["block_reasons"])
 
     def test_promotion_package_uses_chronological_canonical_records(self, evidence_dir):
         """나중에 append된 오래된 backfill이 promotion period/latest cumulative를 흔들지 않음."""
@@ -1143,6 +1203,30 @@ class TestCashOnlyPortfolioMetrics:
         result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
         assert result["daily_return"] == 1.0
         assert "_inferred_from_previous" not in result
+
+    def test_snapshot_positive_mdd_is_normalized(self, fresh_db):
+        """PortfolioManager가 저장한 양수 MDD는 evidence에서 음수 낙폭으로 정규화한다."""
+        from database.models import PortfolioSnapshot, get_session
+        from core.paper_evidence import _collect_portfolio_metrics
+
+        session = get_session()
+        session.add(PortfolioSnapshot(
+            account_key="scoring",
+            date=datetime(2026, 4, 8, 15, 35),
+            total_value=8_200_000.0,
+            cash=2_000_000.0,
+            invested=6_200_000.0,
+            daily_return=-1.0,
+            cumulative_return=-18.0,
+            mdd=18.0,
+            position_count=2,
+        ))
+        session.commit()
+        session.close()
+
+        result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+
+        assert result["mdd"] == -18.0
 
 
 class TestZeroReturnBenchmark:
