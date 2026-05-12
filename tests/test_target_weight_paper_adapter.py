@@ -2142,6 +2142,123 @@ def test_readiness_and_daily_ops_mark_not_checked_authorization_snapshot():
     assert summary["risk_snapshot"]["execution_market_session_status"] == "NOT CHECKED"
 
 
+def test_unchecked_execution_gates_do_not_mark_capped_pilot_ready():
+    from tools.target_weight_rotation_pilot import (
+        build_pilot_readiness_audit,
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        preview_plan_against_caps,
+        recommend_pilot_caps,
+        render_pilot_readiness_audit_markdown,
+        validate_plan_against_pilot,
+    )
+
+    plan = _adapter_plan()
+    pilot_check = _pilot_check_for_plan(plan)
+    validation = validate_plan_against_pilot(plan, pilot_check)
+    cap_preview = preview_plan_against_caps(plan)
+    cap_recommendation = recommend_pilot_caps(plan)
+
+    audit = build_pilot_readiness_audit(
+        plan=plan,
+        pilot_check=pilot_check,
+        validation=validation,
+        cap_preview=cap_preview,
+        cap_recommendation=cap_recommendation,
+        preflight_refresh={
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+        },
+        launch_readiness={
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+        execution_idempotency={
+            "checked": True,
+            "allowed": True,
+            "reason": "no completed session for this trade day",
+        },
+        execution_trade_day_check={
+            "checked": False,
+            "allowed": True,
+            "complete": True,
+            "reason": "execution trade day check not required",
+        },
+        execution_market_session_check={
+            "checked": False,
+            "allowed": True,
+            "complete": True,
+            "reason": "execution market session check not required",
+        },
+        pilot_authorization_snapshot_check={
+            "checked": False,
+            "allowed": True,
+            "complete": True,
+            "reason": "pilot authorization snapshot check not required",
+            "mismatches": [],
+        },
+        pre_execution_reconciliation={
+            "checked": True,
+            "complete": True,
+            "reason": "starting positions match target-weight plan",
+        },
+        liquidity_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+        },
+        pre_trade_risk_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+        },
+        trading_mode="paper",
+    )
+    readiness_report = render_pilot_readiness_audit_markdown(audit)
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 12,
+        "remaining_pilot_days": 48,
+        "progress_ratio": 0.2,
+        "shadow_days": 3,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 15,
+        "latest_record_date": "2026-04-10",
+        "latest_verified_pilot_date": "2026-04-10",
+        "latest_shadow_date": "2026-04-03",
+        "ready_for_promotion_day_count": False,
+    }
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+
+    assert audit["ready_for_cap_approval"] is True
+    assert audit["ready_for_capped_pilot"] is False
+    assert audit["next_action"] == "enable pilot with suggested caps, then rerun readiness audit"
+    assert "Status: **CAP_APPROVAL_READY**" in readiness_report
+    assert "Status: **READY**" not in readiness_report
+    assert summary["status"] == "READY_TO_ENABLE_CAPS"
+    assert summary["risk_snapshot"]["execution_trade_day_status"] == "NOT CHECKED"
+    assert summary["risk_snapshot"]["execution_market_session_status"] == "NOT CHECKED"
+    assert summary["risk_snapshot"]["pilot_authorization_snapshot_status"] == "NOT CHECKED"
+
+
 def test_assess_plan_liquidity_blocks_large_adv_order():
     from tools.target_weight_rotation_pilot import assess_plan_liquidity
 
