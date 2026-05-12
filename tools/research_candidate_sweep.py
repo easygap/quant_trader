@@ -972,6 +972,28 @@ def _target_weight_spec_with_rank_penalty(
     )
 
 
+def _target_weight_spec_with_churn_control(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    max_new_targets_per_rebalance: int,
+    extra_params: dict[str, Any] | None = None,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        **(extra_params or {}),
+        "max_new_targets_per_rebalance": int(max_new_targets_per_rebalance),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1098,6 +1120,48 @@ def build_target_weight_downside_rank_relief_candidate_specs() -> list[Candidate
     ]
 
 
+def build_target_weight_churn_relief_candidate_specs() -> list[CandidateSpec]:
+    """Rank-penalty target-weight variants with explicit new-entry limits."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_downside_rank_relief_candidate_specs()
+    }
+    return [
+        _target_weight_spec_with_churn_control(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60"],
+            suffix="maxnew2",
+            max_new_targets_per_rebalance=2,
+            description="rank-penalty risk-overlay rotation with at most 2 new names per rebalance",
+        ),
+        _target_weight_spec_with_churn_control(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60"],
+            suffix="maxnew1",
+            max_new_targets_per_rebalance=1,
+            description="rank-penalty risk-overlay rotation with at most 1 new name per rebalance",
+        ),
+        _target_weight_spec_with_churn_control(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60"],
+            suffix="bimonthly_maxnew2",
+            max_new_targets_per_rebalance=2,
+            extra_params={"rebalance_frequency": "bimonthly"},
+            description="bimonthly rank-penalty risk-overlay rotation with limited new entries",
+        ),
+        _target_weight_spec_with_churn_control(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60"],
+            suffix="maxnew2",
+            max_new_targets_per_rebalance=2,
+            description="rank-penalty risk-overlay rotation with limited new entries",
+        ),
+        _target_weight_spec_with_churn_control(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90"],
+            suffix="bimonthly_maxnew2",
+            max_new_targets_per_rebalance=2,
+            extra_params={"rebalance_frequency": "bimonthly"},
+            description="75pct exposure rank-penalty rotation with bimonthly limited new entries",
+        ),
+    ]
+
+
 def build_target_weight_turnover_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for lower rebalance-frequency relief sweeps."""
     specs_by_id = {
@@ -1204,6 +1268,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "downside_rank_relief",
     ):
         return build_target_weight_downside_rank_relief_candidate_specs()
+    if family in (
+        "target_weight_churn_relief",
+        "target_weight_rank_churn_relief",
+        "target_weight_churn_control",
+        "churn_relief",
+        "rank_churn_relief",
+    ):
+        return build_target_weight_churn_relief_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -1218,13 +1290,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_target_weight_turnover_relief_candidate_specs(),
             *build_target_weight_volatility_target_candidate_specs(),
             *build_target_weight_downside_rank_relief_candidate_specs(),
+            *build_target_weight_churn_relief_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
         "target_weight_rotation, target_weight_risk_relief, "
         "target_weight_turnover_relief, target_weight_volatility_target, "
-        "target_weight_downside_rank_relief, all"
+        "target_weight_downside_rank_relief, target_weight_churn_relief, all"
     )
 
 
@@ -1818,6 +1891,7 @@ def _select_target_weight_targets(
     positions: dict[str, dict[str, float]],
     top_n: int,
     hold_rank_buffer: int,
+    max_new_targets_per_rebalance: int | None = None,
 ) -> list[str]:
     ranked = [
         sym
@@ -1826,7 +1900,15 @@ def _select_target_weight_targets(
     ]
     targets = ranked[:top_n]
     if hold_rank_buffer <= 0 or not positions:
-        return targets
+        if max_new_targets_per_rebalance is None or not positions:
+            return targets
+        return _limit_new_target_churn(
+            ranked=ranked,
+            targets=targets,
+            positions=positions,
+            top_n=top_n,
+            max_new_targets_per_rebalance=max_new_targets_per_rebalance,
+        )
 
     retention_pool = ranked[top_n : top_n + hold_rank_buffer]
     for held in [sym for sym in retention_pool if sym in positions]:
@@ -1839,7 +1921,53 @@ def _select_target_weight_targets(
         if replacement_idx is None:
             break
         targets[replacement_idx] = held
-    return targets
+
+    if max_new_targets_per_rebalance is None:
+        return targets
+
+    return _limit_new_target_churn(
+        ranked=ranked,
+        targets=targets,
+        positions=positions,
+        top_n=top_n,
+        max_new_targets_per_rebalance=max_new_targets_per_rebalance,
+    )
+
+
+def _limit_new_target_churn(
+    *,
+    ranked: list[str],
+    targets: list[str],
+    positions: dict[str, dict[str, float]],
+    top_n: int,
+    max_new_targets_per_rebalance: int,
+) -> list[str]:
+    max_new = max(0, int(max_new_targets_per_rebalance))
+    current_positions = {
+        sym
+        for sym, pos in positions.items()
+        if float(pos.get("qty", 0.0) or 0.0) > 1e-9
+    }
+    if not current_positions:
+        return targets
+
+    selected: list[str] = []
+    new_count = 0
+    for sym in targets:
+        if sym in selected:
+            continue
+        if sym in current_positions:
+            selected.append(sym)
+        elif new_count < max_new:
+            selected.append(sym)
+            new_count += 1
+
+    for sym in ranked:
+        if len(selected) >= top_n:
+            break
+        if sym in current_positions and sym not in selected:
+            selected.append(sym)
+    return selected
 
 
 def _execute_target_weight_rebalance(
@@ -2074,6 +2202,11 @@ def run_target_weight_rotation_backtest(
                 "target_weight_metrics": {
                     "target_top_n": int(params.get("target_top_n", 0) or 0),
                     "rebalance_frequency": str(params.get("rebalance_frequency", "monthly") or "monthly"),
+                    "max_new_targets_per_rebalance": (
+                        max(0, int(params.get("max_new_targets_per_rebalance")))
+                        if params.get("max_new_targets_per_rebalance") is not None
+                        else None
+                    ),
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
@@ -2118,6 +2251,12 @@ def run_target_weight_rotation_backtest(
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
+        max_new_targets_raw = params.get("max_new_targets_per_rebalance")
+        max_new_targets_per_rebalance = (
+            max(0, int(max_new_targets_raw))
+            if max_new_targets_raw is not None
+            else None
+        )
         rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
         rank_penalty_active = rank_penalty_mode not in ("none", "off", "disabled", "")
         benchmark_freshness_checked = _benchmark_required_for_target_weight(params)
@@ -2215,9 +2354,17 @@ def run_target_weight_rotation_backtest(
                     min_score_floor = params.get("min_score_floor_pct")
                     if min_score_floor is not None:
                         score_row = score_row[score_row >= float(min_score_floor) / 100.0]
+                    targets = _select_target_weight_targets(
+                        score_row,
+                        close_prices,
+                        positions,
+                        top_n,
+                        hold_rank_buffer,
+                        max_new_targets_per_rebalance,
+                    )
                     missing_target_execution_symbols = [
                         sym
-                        for sym in score_row.index.tolist()[:top_n]
+                        for sym in targets
                         if sym not in execution_prices
                         and sym not in positions
                     ]
@@ -2229,13 +2376,6 @@ def run_target_weight_rotation_backtest(
                             f"missing_target_open_symbols={missing_text}; "
                             "refresh OHLCV open data before target-weight research backtest"
                         )
-                    targets = _select_target_weight_targets(
-                        score_row,
-                        execution_prices,
-                        positions,
-                        top_n,
-                        hold_rank_buffer,
-                    )
                 missing_held_execution_symbols = sorted(
                     sym
                     for sym, pos in positions.items()
@@ -2360,6 +2500,7 @@ def run_target_weight_rotation_backtest(
                 "target_top_n": top_n,
                 "rebalance_frequency": rebalance_frequency,
                 "hold_rank_buffer": hold_rank_buffer,
+                "max_new_targets_per_rebalance": max_new_targets_per_rebalance,
                 "rank_penalty_mode": rank_penalty_mode if rank_penalty_active else "none",
                 "rank_penalty_lookback": max(
                     0,
@@ -3270,6 +3411,7 @@ def main() -> None:
             "target_weight_turnover_relief",
             "target_weight_volatility_target",
             "target_weight_downside_rank_relief",
+            "target_weight_churn_relief",
             "all",
         ],
         help="Research candidate family to evaluate.",
