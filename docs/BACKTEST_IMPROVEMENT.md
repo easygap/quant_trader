@@ -138,6 +138,7 @@
 | 벤치마크 거래비용 반영 | 높음 | **완료 — `_buy_and_hold_metrics`에 commission/tax/slippage 적용** |
 | Paper Evidence 수집 체계 | 높음 | **완료 — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate** |
 | Paper Evidence canonical 정렬 | 높음 | 완료 — append-only JSONL에서 같은 날짜의 최신 record만 canonical로 유지하고 날짜순으로 반환. backfill/finalize/shadow append 순서와 무관하게 freshness, 최근 10일, promotion period가 실제 날짜 기준으로 계산됨 |
+| Paper Evidence 최신성 승격 gate | 높음 | 완료 — promotion package에 `earliest_evidence_date`/`latest_evidence_date`를 기록하고, live_candidate 판정은 canonical 평가 기준 최신 evidence age 14일 이내만 허용한다. 날짜 누락, 미래일, 14일 초과 package는 fail-closed로 막아 오래된 60영업일 증거 재사용을 차단 |
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
 | Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡 + fail-closed/audited entry guard** |
