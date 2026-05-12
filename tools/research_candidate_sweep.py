@@ -952,6 +952,26 @@ def _target_weight_spec_with_exposure_overlay(
     )
 
 
+def _target_weight_spec_with_rank_penalty(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    penalty_params: dict[str, Any],
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        **penalty_params,
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1022,6 +1042,58 @@ def build_target_weight_volatility_target_candidate_specs() -> list[CandidateSpe
             suffix="vol16_dd8_floor35",
             overlay_params=vol16_floor35,
             description="risk90/35 top-5 rotation with volatility target sizing",
+        ),
+    ]
+
+
+def build_target_weight_downside_rank_relief_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight shortlist that penalizes high downside-risk names before top-N selection."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_rotation_candidate_specs()
+    }
+    rankrisk60 = {
+        "rank_penalty_mode": "downside_risk",
+        "rank_penalty_lookback": 60,
+        "downside_vol_penalty_weight": 0.35,
+        "drawdown_penalty_weight": 0.45,
+    }
+    rankrisk90 = {
+        "rank_penalty_mode": "downside_risk",
+        "rank_penalty_lookback": 90,
+        "downside_vol_penalty_weight": 0.45,
+        "drawdown_penalty_weight": 0.55,
+    }
+    return [
+        _target_weight_spec_with_rank_penalty(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3"],
+            suffix="rankrisk60",
+            penalty_params=rankrisk60,
+            description="top-5 hold-buffer rotation with downside-risk rank penalty",
+        ),
+        _target_weight_spec_with_rank_penalty(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3"],
+            suffix="rankrisk90",
+            penalty_params=rankrisk90,
+            description="top-5 hold-buffer rotation with stronger 90-day downside-risk penalty",
+        ),
+        _target_weight_spec_with_rank_penalty(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"],
+            suffix="rankrisk60",
+            penalty_params=rankrisk60,
+            description="risk-overlay top-5 rotation with downside-risk rank penalty",
+        ),
+        _target_weight_spec_with_rank_penalty(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5"],
+            suffix="rankrisk60",
+            penalty_params=rankrisk60,
+            description="5pct tolerance risk-overlay rotation with downside-risk rank penalty",
+        ),
+        _target_weight_spec_with_rank_penalty(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75"],
+            suffix="rankrisk90",
+            penalty_params=rankrisk90,
+            description="75pct exposure top-5 rotation with stronger downside-risk rank penalty",
         ),
     ]
 
@@ -1124,6 +1196,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "vol_target",
     ):
         return build_target_weight_volatility_target_candidate_specs()
+    if family in (
+        "target_weight_downside_rank_relief",
+        "target_weight_rank_relief",
+        "target_weight_rank_penalty",
+        "rank_relief",
+        "downside_rank_relief",
+    ):
+        return build_target_weight_downside_rank_relief_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -1137,12 +1217,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_target_weight_rotation_candidate_specs(),
             *build_target_weight_turnover_relief_candidate_specs(),
             *build_target_weight_volatility_target_candidate_specs(),
+            *build_target_weight_downside_rank_relief_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
         "benchmark_relative, risk_budget, cash_switch, benchmark_aware_rotation, "
         "target_weight_rotation, target_weight_risk_relief, "
-        "target_weight_turnover_relief, target_weight_volatility_target, all"
+        "target_weight_turnover_relief, target_weight_volatility_target, "
+        "target_weight_downside_rank_relief, all"
     )
 
 
@@ -1579,6 +1661,44 @@ def _benchmark_required_for_target_weight(params: dict[str, Any]) -> bool:
     return score_mode == "benchmark_excess" or exposure_mode.startswith("benchmark_")
 
 
+def _target_weight_rank_penalty_panel(
+    close_panel: pd.DataFrame,
+    params: dict[str, Any],
+) -> pd.DataFrame | None:
+    mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
+    if mode in ("none", "off", "disabled", ""):
+        return None
+    if mode not in ("downside_risk", "downside", "risk"):
+        raise ValueError(
+            "unsupported_rank_penalty_mode: "
+            f"{mode}; expected downside_risk, downside, risk, or none"
+        )
+
+    lookback = max(2, int(params.get("rank_penalty_lookback", 60) or 60))
+    min_periods = max(
+        2,
+        min(lookback, int(params.get("rank_penalty_min_periods", lookback) or lookback)),
+    )
+    downside_weight = max(0.0, float(params.get("downside_vol_penalty_weight", 0.0) or 0.0))
+    drawdown_weight = max(0.0, float(params.get("drawdown_penalty_weight", 0.0) or 0.0))
+    penalty = pd.DataFrame(0.0, index=close_panel.index, columns=close_panel.columns)
+
+    if downside_weight > 0:
+        downside_returns = close_panel.pct_change().clip(upper=0.0)
+        downside_vol = (
+            downside_returns.rolling(lookback, min_periods=min_periods).std()
+            * np.sqrt(252)
+        )
+        penalty = penalty + downside_vol.fillna(0.0) * downside_weight
+
+    if drawdown_weight > 0:
+        rolling_peak = close_panel.rolling(lookback, min_periods=min_periods).max()
+        drawdown = (close_panel / rolling_peak - 1.0).clip(upper=0.0).abs()
+        penalty = penalty + drawdown.fillna(0.0) * drawdown_weight
+
+    return penalty
+
+
 def _target_weight_score_panel(
     close_panel: pd.DataFrame,
     benchmark_close: pd.Series,
@@ -1594,17 +1714,22 @@ def _target_weight_score_panel(
         + (1.0 - short_w) * close_panel.pct_change(long_lb)
     )
     if score_mode != "benchmark_excess":
-        return composite
+        score = composite
+    else:
+        if benchmark_close.empty:
+            score = pd.DataFrame(np.nan, index=close_panel.index, columns=close_panel.columns)
+        else:
+            benchmark_composite = (
+                short_w * benchmark_close.pct_change(short_lb)
+                + (1.0 - short_w) * benchmark_close.pct_change(long_lb)
+            )
+            aligned = benchmark_composite.reindex(close_panel.index, method="ffill")
+            score = composite.sub(aligned, axis=0)
 
-    if benchmark_close.empty:
-        return pd.DataFrame(np.nan, index=close_panel.index, columns=close_panel.columns)
-
-    benchmark_composite = (
-        short_w * benchmark_close.pct_change(short_lb)
-        + (1.0 - short_w) * benchmark_close.pct_change(long_lb)
-    )
-    aligned = benchmark_composite.reindex(close_panel.index, method="ffill")
-    return composite.sub(aligned, axis=0)
+    rank_penalty = _target_weight_rank_penalty_panel(close_panel, params)
+    if rank_penalty is None:
+        return score
+    return score - rank_penalty
 
 
 def _target_exposure_for_day(
@@ -1909,6 +2034,7 @@ def run_target_weight_rotation_backtest(
             "market_ma_period",
             "benchmark_drawdown_lookback",
             "benchmark_vol_lookback",
+            "rank_penalty_lookback",
         )
     ]
     warmup_days = max(long_lb * 3, 180, *(lookback * 3 for lookback in exposure_lookbacks))
@@ -1992,6 +2118,8 @@ def run_target_weight_rotation_backtest(
         top_n = max(1, int(params.get("target_top_n", 3)))
         tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
         hold_rank_buffer = max(0, int(params.get("hold_rank_buffer", 0) or 0))
+        rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
+        rank_penalty_active = rank_penalty_mode not in ("none", "off", "disabled", "")
         benchmark_freshness_checked = _benchmark_required_for_target_weight(params)
         if benchmark_freshness_checked:
             benchmark_actual_days = pd.DatetimeIndex(benchmark_close.dropna().index).normalize()
@@ -2232,6 +2360,19 @@ def run_target_weight_rotation_backtest(
                 "target_top_n": top_n,
                 "rebalance_frequency": rebalance_frequency,
                 "hold_rank_buffer": hold_rank_buffer,
+                "rank_penalty_mode": rank_penalty_mode if rank_penalty_active else "none",
+                "rank_penalty_lookback": max(
+                    0,
+                    int(params.get("rank_penalty_lookback", 0) or 0),
+                ) if rank_penalty_active else 0,
+                "downside_vol_penalty_weight": round(
+                    max(0.0, float(params.get("downside_vol_penalty_weight", 0.0) or 0.0)),
+                    4,
+                ) if rank_penalty_active else 0.0,
+                "drawdown_penalty_weight": round(
+                    max(0.0, float(params.get("drawdown_penalty_weight", 0.0) or 0.0)),
+                    4,
+                ) if rank_penalty_active else 0.0,
                 "rebalance_tolerance_pct": round(tolerance * 100, 2),
                 "rebalance_count": rebalance_count,
                 "avg_slots_filled": round(avg_slots, 2),
@@ -3128,6 +3269,7 @@ def main() -> None:
             "target_weight_risk_relief",
             "target_weight_turnover_relief",
             "target_weight_volatility_target",
+            "target_weight_downside_rank_relief",
             "all",
         ],
         help="Research candidate family to evaluate.",
