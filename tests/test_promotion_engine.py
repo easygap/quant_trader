@@ -235,6 +235,29 @@ class TestPromotionRules:
         assert ok is False
         assert "paper evidence recommendation" in reason
 
+    def test_live_candidate_reason_includes_paper_package_block_reasons(self):
+        m = StrategyMetrics(
+            "test",
+            total_return=20, profit_factor=1.5, mdd=-10,
+            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.8,
+            wf_windows=6, wf_total_trades=120, sharpe=0.8,
+            benchmark_excess_return=2.0, benchmark_excess_sharpe=0.2,
+            canonical_benchmark_required=True, canonical_data_integrity_ok=True,
+            paper_days=60, paper_sharpe=0.6, paper_excess=0.1,
+            paper_evidence_recommendation="BLOCKED",
+            paper_evidence_block_reasons=["fill_quality_adverse_gap_bps=56.60"],
+            paper_benchmark_final_ratio=0.9,
+            paper_sell_count=8, paper_win_rate=55,
+            paper_frozen_days=0, paper_cumulative_return=5,
+            **_fresh_paper_evidence_kwargs(),
+        )
+
+        r = promote(m)
+
+        assert r.status == "provisional_paper_candidate"
+        assert "paper evidence recommendation BLOCKED != ELIGIBLE" in r.reason
+        assert "fill_quality_adverse_gap_bps=56.60" in r.reason
+
     def test_target_weight_live_requires_canonical_params_hash_match(self):
         m = StrategyMetrics(
             "target_weight_rotation_test",
@@ -643,6 +666,44 @@ class TestArtifactLoading:
         assert metrics["scoring"].paper_days == 60
         assert metrics["scoring"].paper_sharpe == 0.55
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
+
+    def test_paper_evidence_metrics_exposes_trade_quality_blockers(self):
+        from core.promotion_engine import paper_evidence_metrics_from_package
+
+        metrics = paper_evidence_metrics_from_package({
+            "strategy": "scoring",
+            "period": "2026-01-01 ~ 2026-05-01",
+            "latest_evidence_date": _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"],
+            "recommendation": "BLOCKED",
+            "block_reasons": [
+                "fill_quality_adverse_gap_bps=56.60",
+                "fill_quality_expected_price_missing=1/3",
+            ],
+            "promotable_evidence_days": 60,
+            "paper_sharpe": 0.55,
+            "avg_same_universe_excess": 0.2,
+            "benchmark_final_ratio": 0.9,
+            "sell_count": 8,
+            "win_rate": 55.0,
+            "frozen_days": 0,
+            "cumulative_return": 4.0,
+            "trade_quality": {
+                "status": "review",
+                "adverse_gap_bps_of_notional": 56.6,
+                "missing_expected_price_ratio": 0.3333,
+                "missing_expected_price_count": 1,
+            },
+        })
+
+        assert metrics["paper_evidence_recommendation"] == "BLOCKED"
+        assert metrics["paper_evidence_block_reasons"] == [
+            "fill_quality_adverse_gap_bps=56.60",
+            "fill_quality_expected_price_missing=1/3",
+        ]
+        assert metrics["paper_trade_quality_status"] == "review"
+        assert metrics["paper_trade_quality_adverse_gap_bps"] == 56.6
+        assert metrics["paper_trade_quality_missing_expected_ratio"] == 0.3333
+        assert metrics["paper_trade_quality_missing_expected_count"] == 1
 
     def test_load_metrics_blocks_target_weight_hash_mismatch(self):
         """paper evidence hash가 canonical 후보 hash와 다르면 live 승격 입력에서 차단된다."""

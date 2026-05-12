@@ -459,6 +459,15 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
                 "paper evidence stale latest=2026-01-01 age=120d > 14d"
             ),
         },
+        "paper_fill_quality_strategy": {
+            "status": "provisional_paper_candidate",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": (
+                "provisional_paper_candidate 충족; live 차단: "
+                "paper evidence recommendation BLOCKED != ELIGIBLE: "
+                "fill_quality_adverse_gap_bps=56.60"
+            ),
+        },
     }
     metrics = {
         "paper_ready_strategy": {
@@ -476,6 +485,13 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
             "paper_latest_evidence_date": "2026-01-01",
             "paper_evidence_fresh": False,
         },
+        "paper_fill_quality_strategy": {
+            "total_return": 18.0,
+            "paper_evidence_recommendation": "BLOCKED",
+            "paper_trade_quality_status": "review",
+            "paper_trade_quality_adverse_gap_bps": 56.6,
+            "paper_trade_quality_missing_expected_ratio": 0.0,
+        },
     }
 
     summary = build_promotion_blocker_summary(
@@ -492,12 +508,17 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
         {"generated_at": "2026-05-12T09:00:00"},
     )
     assert len(summary["source_artifact_hash"]) == 64
-    assert summary["summary"]["total_strategies"] == 3
+    assert summary["summary"]["total_strategies"] == 4
     assert summary["summary"]["live_ready_count"] == 1
-    assert summary["summary"]["blocked_from_live_count"] == 2
+    assert summary["summary"]["blocked_from_live_count"] == 3
     assert summary["strategies"]["paper_blocked_strategy"]["next_action"].startswith("canonical")
     assert summary["strategies"]["paper_stale_strategy"]["next_action"].startswith("paper evidence")
+    assert summary["strategies"]["paper_fill_quality_strategy"]["next_action"].startswith("paper 체결")
     assert summary["strategies"]["paper_ready_strategy"]["metrics"]["paper_days"] == 60
+    assert (
+        summary["strategies"]["paper_fill_quality_strategy"]["metrics"]["paper_trade_quality_adverse_gap_bps"]
+        == 56.6
+    )
     assert json.loads(json_path.read_text(encoding="utf-8"))["summary"]["live_ready_count"] == 1
     report = md_path.read_text(encoding="utf-8")
     assert "# Promotion Blocker Summary" in report
