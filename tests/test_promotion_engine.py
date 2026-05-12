@@ -195,6 +195,81 @@ class TestPromotionRules:
         assert ok is False
         assert "paper evidence recommendation" in reason
 
+    def test_target_weight_live_requires_canonical_params_hash_match(self):
+        m = StrategyMetrics(
+            "target_weight_rotation_test",
+            total_return=24,
+            profit_factor=1.55,
+            mdd=-8,
+            wf_positive_rate=0.8,
+            wf_sharpe_positive_rate=0.8,
+            wf_windows=6,
+            wf_total_trades=120,
+            sharpe=0.75,
+            ev_per_trade=5000,
+            cost_adjusted_cagr=9.0,
+            turnover_per_year=350.0,
+            paper_days=60,
+            paper_sharpe=0.55,
+            paper_excess=0.2,
+            paper_evidence_recommendation="ELIGIBLE",
+            paper_benchmark_final_ratio=0.9,
+            paper_sell_count=60,
+            paper_win_rate=55.0,
+            paper_frozen_days=0,
+            paper_cumulative_return=4.0,
+            target_weight_evidence_required=True,
+            target_weight_verified_pilot_days=60,
+            target_weight_invalid_days=0,
+            target_weight_all_promotable_days_verified=True,
+            target_weight_params_hash_consistent=True,
+            target_weight_params_hash="old-hash",
+            target_weight_canonical_params_hash="current-hash",
+            target_weight_params_hash_matches_canonical=False,
+        )
+
+        r = promote(m)
+
+        assert r.status != "live_candidate"
+        assert "does not match canonical" in r.reason
+
+    def test_target_weight_live_allows_matching_canonical_params_hash(self):
+        m = StrategyMetrics(
+            "target_weight_rotation_test",
+            total_return=24,
+            profit_factor=1.55,
+            mdd=-8,
+            wf_positive_rate=0.8,
+            wf_sharpe_positive_rate=0.8,
+            wf_windows=6,
+            wf_total_trades=120,
+            sharpe=0.75,
+            ev_per_trade=5000,
+            cost_adjusted_cagr=9.0,
+            turnover_per_year=350.0,
+            paper_days=60,
+            paper_sharpe=0.55,
+            paper_excess=0.2,
+            paper_evidence_recommendation="ELIGIBLE",
+            paper_benchmark_final_ratio=0.9,
+            paper_sell_count=60,
+            paper_win_rate=55.0,
+            paper_frozen_days=0,
+            paper_cumulative_return=4.0,
+            target_weight_evidence_required=True,
+            target_weight_verified_pilot_days=60,
+            target_weight_invalid_days=0,
+            target_weight_all_promotable_days_verified=True,
+            target_weight_params_hash_consistent=True,
+            target_weight_params_hash="current-hash",
+            target_weight_canonical_params_hash="current-hash",
+            target_weight_params_hash_matches_canonical=True,
+        )
+
+        r = promote(m)
+
+        assert r.status == "live_candidate"
+
     def test_experiment_note_does_not_affect_status(self):
         m = StrategyMetrics("test", total_return=-5, profit_factor=0.8, mdd=-10,
                             wf_positive_rate=0, wf_sharpe_positive_rate=0,
@@ -523,3 +598,94 @@ class TestArtifactLoading:
         assert metrics["scoring"].paper_days == 60
         assert metrics["scoring"].paper_sharpe == 0.55
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
+
+    def test_load_metrics_blocks_target_weight_hash_mismatch(self):
+        """paper evidence hash가 canonical 후보 hash와 다르면 live 승격 입력에서 차단된다."""
+        import tempfile, json
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        from core.promotion_engine import load_metrics_from_artifact
+
+        strategy = "target_weight_rotation_test"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = root / "promotion"
+            evidence_dir = root / "paper_evidence"
+            base.mkdir()
+            evidence_dir.mkdir()
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    strategy: {
+                        "total_return": 24.0,
+                        "profit_factor": 1.55,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 6,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.75,
+                        "ev_per_trade": 5000,
+                        "cost_adjusted_cagr": 9.0,
+                        "turnover_per_year": 350.0,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({strategy: {"total_trades": 120}}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {strategy: 4.0},
+                    "strategy_excess_sharpe": {strategy: 0.25},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    "strategy_specs": [{
+                        "candidate_id": strategy,
+                        "params_hash": "current-hash",
+                    }],
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+            (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
+                json.dumps({
+                    "strategy": strategy,
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                    "paper_sharpe": 0.55,
+                    "avg_same_universe_excess": 0.2,
+                    "benchmark_final_ratio": 0.9,
+                    "sell_count": 60,
+                    "win_rate": 55.0,
+                    "frozen_days": 0,
+                    "cumulative_return": 4.0,
+                    "target_weight_verified_pilot_days": 60,
+                    "target_weight_invalid_days": 0,
+                    "target_weight_params_hash": "old-hash",
+                    "target_weight_evidence": {
+                        "required": True,
+                        "all_promotable_days_verified": True,
+                        "params_hash_consistent": True,
+                        "params_hash": "old-hash",
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics_from_artifact(str(base), evidence_dir=str(evidence_dir))
+
+        m = metrics[strategy]
+        assert m.target_weight_canonical_params_hash == "current-hash"
+        assert m.target_weight_params_hash == "old-hash"
+        assert m.target_weight_params_hash_matches_canonical is False
+        r = promote(m)
+        assert r.status != "live_candidate"
+        assert "does not match canonical" in r.reason
