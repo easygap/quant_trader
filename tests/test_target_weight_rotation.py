@@ -760,6 +760,67 @@ def test_target_weight_rotation_benchmark_risk_uses_prior_day_benchmark():
     assert result["target_weight_metrics"]["risk_off_rebalance_count"] == 0
 
 
+def test_target_weight_rotation_portfolio_drawdown_guard_uses_prior_equity_and_cooldown():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    dates = pd.to_datetime(
+        [
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-03",
+            "2025-02-04",
+            "2025-03-03",
+            "2025-03-04",
+            "2025-04-01",
+        ]
+    )
+    frames = {
+        "AAA": _ohlcv(dates, [100, 110, 100, 80, 80, 160, 160]),
+        "BBB": _ohlcv(dates, [100, 100, 100, 70, 70, 70, 70]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-04-01",
+        capital=100_000.0,
+        params={
+            "target_top_n": 1,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "portfolio_drawdown_guard_trigger_pct": 10.0,
+            "portfolio_drawdown_guard_exposure": 0.35,
+            "portfolio_drawdown_guard_cooldown_rebalances": 1,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    equity = result["equity_curve"].set_index("date")
+    feb_exposure = 1 - equity.loc[pd.Timestamp("2025-02-03"), "cash"] / equity.loc[pd.Timestamp("2025-02-03"), "value"]
+    mar_exposure = 1 - equity.loc[pd.Timestamp("2025-03-03"), "cash"] / equity.loc[pd.Timestamp("2025-03-03"), "value"]
+    apr_exposure = 1 - equity.loc[pd.Timestamp("2025-04-01"), "cash"] / equity.loc[pd.Timestamp("2025-04-01"), "value"]
+    metrics = result["target_weight_metrics"]
+
+    assert feb_exposure >= 0.99
+    assert 0.34 <= mar_exposure <= 0.36
+    assert 0.34 <= apr_exposure <= 0.36
+    assert metrics["portfolio_drawdown_guard_enabled"] is True
+    assert metrics["portfolio_drawdown_guard_trigger_count"] == 1
+    assert metrics["portfolio_drawdown_guard_rebalance_count"] == 2
+    assert metrics["portfolio_drawdown_guard_rebalance_pct"] == pytest.approx(66.7)
+    assert metrics["portfolio_drawdown_guard_worst_drawdown_pct"] == pytest.approx(-20.0)
+    assert metrics["avg_target_exposure_pct"] == pytest.approx(56.7)
+    assert metrics["min_target_exposure_pct"] == 35.0
+    assert metrics["risk_off_rebalance_count"] == 0
+
+
 def test_target_weight_rotation_score_floor_leaves_weak_slots_in_cash():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
