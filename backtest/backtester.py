@@ -10,6 +10,11 @@ import numpy as np
 from loguru import logger
 
 from config.config_loader import Config
+from backtest.cost_impact import (
+    cost_impact_metric_fields,
+    render_cost_impact_text,
+    summarize_cost_impact,
+)
 from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
@@ -1053,7 +1058,7 @@ class Backtester:
         gross_return = (gross_pnl / initial_capital * 100) if initial_capital > 0 else 0
         cost_drag = round(gross_return - total_return, 2)
 
-        return {
+        metrics = {
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
             "cagr": round(cagr, 2),
@@ -1097,6 +1102,10 @@ class Backtester:
             "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
             "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
         }
+        cost_impact = summarize_cost_impact(metrics, trades)
+        metrics.update(cost_impact_metric_fields(cost_impact))
+        metrics["cost_impact"] = cost_impact
+        return metrics
 
     @staticmethod
     def _empty_metrics():
@@ -1120,6 +1129,11 @@ class Backtester:
             "monthly_returns": {},
             "gross_return": 0,
             "cost_drag_pct": 0,
+            "cost_drag_bps": 0,
+            "cost_to_initial_capital_pct": 0,
+            "cost_impact_status": "pass",
+            "cost_impact_issues": [],
+            "cost_impact": summarize_cost_impact({"initial_capital": 0, "final_value": 0, "total_return": 0}, []),
             "regime_buy_blocks": 0,
             "regime_caution_buys": 0,
             "gap_down_exits": 0,
@@ -1165,18 +1179,8 @@ class Backtester:
         print(f"  평균 손실     : {m['avg_loss']:>14,.0f}원")
         print("-" * 60)
         print(f"  평균 보유 기간 : {m.get('avg_holding_days', 0):>11.1f}일")
-        n_trades = m.get("total_trades", 0)
-        total_comm = m.get("total_commission", 0)
-        total_tax = m.get("total_tax", 0)
-        total_slip = m.get("total_slippage_cost", 0)
-        total_tx_cost = m.get("total_transaction_cost", 0)
-        cnp = m.get("cost_to_net_profit_pct")
-        cnp_s = f"{cnp:.1f}%" if cnp is not None else "N/A"
-        print(f"  총 수수료     : {total_comm:>14,.0f}원 (거래 {n_trades}회)")
-        print(f"  총 세금       : {total_tax:>14,.0f}원")
-        print(f"  총 슬리피지   : {total_slip:>14,.0f}원")
-        print("  " + "─" * 29)
-        print(f"  총 거래비용   : {total_tx_cost:>14,.0f}원 (수익의 {cnp_s})")
+        for line in render_cost_impact_text(m.get("cost_impact") or summarize_cost_impact(m, result.get("trades", []))):
+            print(line)
         cpr = m.get("commission_to_profit_ratio")
         cpr_s = f"{cpr * 100:.2f}%" if cpr is not None else "N/A"
         print(f"  수수료/총이익 : {cpr_s:>13}")
