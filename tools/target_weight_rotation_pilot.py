@@ -2360,6 +2360,17 @@ def _check_display_status(check: dict[str, Any] | None) -> str:
     return "BLOCKED"
 
 
+def _check_passed(check: dict[str, Any] | None) -> bool:
+    payload = check or {}
+    if not payload.get("checked", False):
+        return False
+    if "allowed" in payload and not payload.get("allowed", False):
+        return False
+    if "complete" in payload and not payload.get("complete", False):
+        return False
+    return "allowed" in payload or "complete" in payload
+
+
 def assess_plan_data_quality(plan: TargetWeightPlan) -> dict[str, Any]:
     """Validate target-weight price freshness diagnostics before operator action."""
     diagnostics = plan.diagnostics or {}
@@ -2997,12 +3008,16 @@ def build_pilot_readiness_audit(
         and bool(pre_trade_risk_check.get("complete", False))
         and bool(suggested_preview.get("allowed", False))
     )
+    trade_day_passed = _check_passed(execution_trade_day_check)
+    market_session_passed = _check_passed(execution_market_session_check)
+    authorization_snapshot_passed = _check_passed(pilot_authorization_snapshot_check)
     ready_for_capped_pilot = (
         ready_for_cap_approval
         and bool(launch_readiness.get("launch_ready", False))
         and bool(getattr(validation, "allowed", False))
-        and bool(execution_market_session_check.get("allowed", False))
-        and bool(pilot_authorization_snapshot_check.get("allowed", False))
+        and trade_day_passed
+        and market_session_passed
+        and authorization_snapshot_passed
         and not blockers
     )
 
@@ -3023,7 +3038,8 @@ def build_pilot_readiness_audit(
         and ready_for_cap_approval
         and bool(launch_readiness.get("launch_ready", False))
         and bool(getattr(validation, "allowed", False))
-        and bool(pilot_authorization_snapshot_check.get("allowed", False))
+        and trade_day_passed
+        and authorization_snapshot_passed
     ):
         next_action = "wait for KRX regular session, then rerun readiness audit before executing pilot"
     elif ready_for_cap_approval:
@@ -3267,16 +3283,29 @@ def build_target_weight_daily_ops_summary(
         audit.get("execution_market_session_check")
         or execution_market_session_check_not_required()
     )
+    pilot_authorization_snapshot_check = audit.get(
+        "pilot_authorization_snapshot_check"
+    ) or _authorization_snapshot_not_required(
+        "pilot authorization snapshot check not required"
+    )
+    execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
+    execution_ready_checks_passed = (
+        _check_passed(data_quality_check)
+        and _check_passed(execution_trade_day_check)
+        and _check_passed(execution_market_session_check)
+        and _check_passed(pilot_authorization_snapshot_check)
+    )
     capped_launch_ready = (
         bool((audit.get("launch_readiness") or {}).get("launch_ready", False))
         and bool((audit.get("plan_validation") or {}).get("allowed", False))
-        and bool((audit.get("pilot_authorization_snapshot_check") or {}).get("allowed", False))
-        and bool(data_quality_check.get("complete", False))
+        and _check_passed(execution_trade_day_check)
+        and _check_passed(pilot_authorization_snapshot_check)
+        and _check_passed(data_quality_check)
     )
-    if audit.get("ready_for_capped_pilot") and data_quality_check.get("complete", False):
+    if audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
-    elif not data_quality_check.get("complete", False):
+    elif not _check_passed(data_quality_check):
         status = "BLOCKED"
         next_step = "target-weight 데이터 품질 진단 해소 후 readiness 재점검"
     elif (
@@ -3297,12 +3326,6 @@ def build_target_weight_daily_ops_summary(
     plan = audit.get("plan_summary") or {}
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
-    execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
-    pilot_authorization_snapshot_check = audit.get(
-        "pilot_authorization_snapshot_check"
-    ) or _authorization_snapshot_not_required(
-        "pilot authorization snapshot check not required"
-    )
     summary = {
         "artifact_type": "target_weight_daily_ops_summary",
         "schema_version": 1,
@@ -3515,17 +3538,29 @@ def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
 
 
 def _audit_display_status(audit: dict[str, Any]) -> str:
-    if audit.get("ready_for_capped_pilot"):
-        return "READY"
+    trade_day = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     market_session = (
         audit.get("execution_market_session_check")
         or execution_market_session_check_not_required()
     )
+    authorization_snapshot = audit.get(
+        "pilot_authorization_snapshot_check"
+    ) or _authorization_snapshot_not_required(
+        "pilot authorization snapshot check not required"
+    )
+    if (
+        audit.get("ready_for_capped_pilot")
+        and _check_passed(trade_day)
+        and _check_passed(market_session)
+        and _check_passed(authorization_snapshot)
+    ):
+        return "READY"
     if (
         audit.get("ready_for_cap_approval")
         and bool((audit.get("launch_readiness") or {}).get("launch_ready", False))
         and bool((audit.get("plan_validation") or {}).get("allowed", False))
-        and bool((audit.get("pilot_authorization_snapshot_check") or {}).get("allowed", False))
+        and _check_passed(trade_day)
+        and _check_passed(authorization_snapshot)
         and market_session.get("checked", False)
         and not market_session.get("allowed", False)
     ):
