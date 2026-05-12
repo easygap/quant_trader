@@ -498,6 +498,48 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
     assert "canonical data integrity failed" in report
 
 
+def test_load_promotion_blocker_summary_from_existing_artifacts(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_promotion_blocker_summary_from_artifacts,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps({
+            "paper_blocked_strategy": {
+                "status": "paper_only",
+                "allowed_modes": ["backtest", "paper"],
+                "reason": "paper_only 충족; provisional 차단: benchmark excess return missing",
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps({
+            "paper_blocked_strategy": {
+                "total_return": 7.5,
+                "sharpe": 0.4,
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps({"generated_at": "2026-05-12T10:00:00"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = load_promotion_blocker_summary_from_artifacts(artifact_dir)
+    json_path, md_path = write_promotion_blocker_summary(summary, artifact_dir)
+
+    assert summary["generated_at"] == "2026-05-12T10:00:00"
+    assert summary["summary"]["blocked_from_live_count"] == 1
+    assert summary["strategies"]["paper_blocked_strategy"]["metrics"]["total_return"] == 7.5
+    assert json_path.name == "promotion_blocker_summary.json"
+    assert "benchmark excess return missing" in md_path.read_text(encoding="utf-8")
+
+
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
