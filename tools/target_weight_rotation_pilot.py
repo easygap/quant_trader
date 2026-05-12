@@ -4708,13 +4708,22 @@ def main() -> None:
         print(
             "  execution day: "
             f"{execution_day.get('execution_day', 'N/A')} "
-            f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
+            f"({_check_display_status(execution_day)})"
         )
         market_session = summary["decision"].get("execution_market_session_check", {})
         print(
             "  market session: "
             f"{market_session.get('execution_time', 'N/A')} "
-            f"({'PASS' if market_session.get('allowed') else 'BLOCKED'})"
+            f"({_check_display_status(market_session)})"
+        )
+        authorization_snapshot = summary["decision"].get(
+            "pilot_authorization_snapshot_check",
+            {},
+        )
+        print(
+            "  pilot auth snapshot: "
+            f"{_check_display_status(authorization_snapshot)} - "
+            f"{authorization_snapshot.get('reason', 'not checked')}"
         )
         print(f"  status: {summary['status']}")
         print(
@@ -4768,13 +4777,19 @@ def main() -> None:
         print(
             "  execution day: "
             f"{execution_day.get('execution_day', 'N/A')} "
-            f"({'PASS' if execution_day.get('allowed') else 'BLOCKED'})"
+            f"({_check_display_status(execution_day)})"
         )
         market_session = audit.get("execution_market_session_check", {})
         print(
             "  market session: "
             f"{market_session.get('execution_time', 'N/A')} "
-            f"({'PASS' if market_session.get('allowed') else 'BLOCKED'})"
+            f"({_check_display_status(market_session)})"
+        )
+        authorization_snapshot = audit.get("pilot_authorization_snapshot_check", {})
+        print(
+            "  pilot auth snapshot: "
+            f"{_check_display_status(authorization_snapshot)} - "
+            f"{authorization_snapshot.get('reason', 'not checked')}"
         )
         print(f"  status: {status}")
         print(
