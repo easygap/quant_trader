@@ -2641,6 +2641,27 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             f"{m.get('avg_exposure_pct', 0):.1f}% | {m.get('sharpe', 0):.2f} | "
             f"{m.get('profit_factor', 0):.2f} | {m.get('mdd', 0):.2f}% | {m.get('total_trades', 0)} |"
         )
+    rejection_rows = [
+        rec for rec in bundle.get("candidates", [])
+        if rec.get("rejection_reasons") or rec.get("promotion", {}).get("reason")
+    ]
+    if rejection_rows:
+        lines.extend([
+            "",
+            "## Rejection Reasons",
+            "| Candidate | Status | Reasons | Promotion reason |",
+            "|-----------|--------|---------|------------------|",
+        ])
+        for rec in rejection_rows:
+            reasons = ", ".join(rec.get("rejection_reasons") or ["none"])
+            promotion = rec.get("promotion", {})
+            lines.append(
+                "| "
+                f"{markdown_table_cell(rec.get('candidate_id'))} | "
+                f"{markdown_table_cell(promotion.get('status'))} | "
+                f"{markdown_table_cell(reasons)} | "
+                f"{markdown_table_cell(promotion.get('reason'))} |"
+            )
     lines.extend(
         [
             "",
@@ -2650,6 +2671,10 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
     )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, md_path
+
+
+def markdown_table_cell(value: Any) -> str:
+    return str(value or "").replace("\n", " ").replace("|", "/").strip()
 
 
 def parse_symbols(value: str | None) -> list[str] | None:
