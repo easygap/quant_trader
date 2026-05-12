@@ -50,6 +50,8 @@ PROMOTION_MIN_AVG_EXCESS = 0.0    # benchmark 대비 평균 excess는 양수여�
 PROMOTION_MIN_CUMULATIVE_RETURN = 0.0
 PROMOTION_MIN_SELL_TRADES = 5
 PROMOTION_MIN_WIN_RATE = 45.0
+PROMOTION_MAX_ADVERSE_FILL_GAP_BPS = 50.0
+PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO = 0.0
 
 
 def _annualized_sharpe_from_daily_returns(daily_returns: list[float]) -> Optional[float]:
@@ -1278,6 +1280,130 @@ def _is_promotable_paper_evidence(record: dict) -> bool:
     }
 
 
+def _parse_evidence_date(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date: object) -> dict:
+    """promotion 기간의 paper TradeHistory 체결 품질을 요약한다."""
+    from database.models import TradeHistory, get_session
+
+    start_dt = _parse_evidence_date(start_date)
+    end_dt = _parse_evidence_date(end_date)
+    session = get_session()
+    try:
+        query = session.query(TradeHistory).filter(
+            TradeHistory.mode == "paper",
+            TradeHistory.account_key == (strategy or ""),
+        )
+        if start_dt is not None:
+            query = query.filter(TradeHistory.executed_at >= start_dt.replace(hour=0, minute=0, second=0, microsecond=0))
+        if end_dt is not None:
+            query = query.filter(TradeHistory.executed_at < end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        trades = query.all()
+    finally:
+        session.close()
+
+    trade_count = len(trades)
+    if trade_count == 0:
+        return {
+            "status": "no_trades",
+            "trade_count": 0,
+            "missing_expected_price_count": 0,
+            "missing_expected_price_ratio": None,
+            "total_notional": 0.0,
+            "signed_gap_cost": 0.0,
+            "adverse_gap_cost": 0.0,
+            "adverse_gap_bps_of_notional": None,
+            "total_slippage_cost": 0.0,
+            "avg_abs_actual_slippage_pct": None,
+            "issues": [],
+        }
+
+    missing_expected = 0
+    total_notional = 0.0
+    signed_gap_cost = 0.0
+    adverse_gap_cost = 0.0
+    total_slippage_cost = 0.0
+    slippage_pcts: list[float] = []
+    for trade in trades:
+        action = (getattr(trade, "action", "") or "").upper()
+        price = float(getattr(trade, "price", 0) or 0)
+        quantity = int(getattr(trade, "quantity", 0) or 0)
+        total_notional += abs(price * quantity)
+        total_slippage_cost += float(getattr(trade, "slippage", 0) or 0)
+        actual_slippage_pct = getattr(trade, "actual_slippage_pct", None)
+        if actual_slippage_pct is not None:
+            try:
+                slippage_pcts.append(float(actual_slippage_pct))
+            except (TypeError, ValueError):
+                pass
+
+        expected = getattr(trade, "expected_price", None)
+        if expected is None:
+            missing_expected += 1
+            continue
+        try:
+            expected_price = float(expected)
+        except (TypeError, ValueError):
+            missing_expected += 1
+            continue
+        price_gap = getattr(trade, "price_gap", None)
+        if price_gap is None:
+            price_gap = price - expected_price
+        try:
+            gap_value = float(price_gap)
+        except (TypeError, ValueError):
+            missing_expected += 1
+            continue
+        if action == "BUY":
+            cost = gap_value * quantity
+        else:
+            cost = -gap_value * quantity
+        signed_gap_cost += cost
+        if cost > 0:
+            adverse_gap_cost += cost
+
+    missing_ratio = missing_expected / trade_count if trade_count else None
+    adverse_gap_bps = (adverse_gap_cost / total_notional * 10000) if total_notional > 0 else None
+    avg_abs_slippage_pct = (
+        sum(abs(value) for value in slippage_pcts) / len(slippage_pcts)
+        if slippage_pcts else None
+    )
+    issues = []
+    if missing_ratio is not None and missing_ratio > PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO:
+        issues.append(
+            "expected_price_missing=%d/%d" % (missing_expected, trade_count)
+        )
+    if adverse_gap_bps is not None and adverse_gap_bps > PROMOTION_MAX_ADVERSE_FILL_GAP_BPS:
+        issues.append(
+            "adverse_fill_gap_bps=%.2f" % adverse_gap_bps
+        )
+
+    return {
+        "status": "review" if issues else "ok",
+        "trade_count": trade_count,
+        "missing_expected_price_count": missing_expected,
+        "missing_expected_price_ratio": round(missing_ratio, 4) if missing_ratio is not None else None,
+        "total_notional": round(total_notional, 2),
+        "signed_gap_cost": round(signed_gap_cost, 2),
+        "adverse_gap_cost": round(adverse_gap_cost, 2),
+        "adverse_gap_bps_of_notional": round(adverse_gap_bps, 2) if adverse_gap_bps is not None else None,
+        "total_slippage_cost": round(total_slippage_cost, 2),
+        "avg_abs_actual_slippage_pct": round(avg_abs_slippage_pct, 4) if avg_abs_slippage_pct is not None else None,
+        "thresholds": {
+            "max_adverse_gap_bps": PROMOTION_MAX_ADVERSE_FILL_GAP_BPS,
+            "max_missing_expected_price_ratio": PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO,
+        },
+        "issues": issues,
+    }
+
+
 def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]:
     """
     60일 누적 evidence에서 promotion package + approval checklist 생성.
@@ -1450,6 +1576,34 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
             "low_win_rate=%.1f%% < %.1f%%" % (win_rate, PROMOTION_MIN_WIN_RATE)
         )
 
+    trade_quality = _collect_promotion_trade_quality(
+        strategy,
+        records[0]["date"],
+        records[-1]["date"],
+    )
+    if trade_quality.get("trade_count", 0) > 0:
+        missing_ratio = trade_quality.get("missing_expected_price_ratio")
+        if (
+            missing_ratio is not None
+            and missing_ratio > PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO
+        ):
+            blocked = True
+            block_reasons.append(
+                "fill_quality_expected_price_missing=%d/%d" % (
+                    trade_quality.get("missing_expected_price_count", 0),
+                    trade_quality.get("trade_count", 0),
+                )
+            )
+        adverse_gap_bps = trade_quality.get("adverse_gap_bps_of_notional")
+        if (
+            adverse_gap_bps is not None
+            and adverse_gap_bps > PROMOTION_MAX_ADVERSE_FILL_GAP_BPS
+        ):
+            blocked = True
+            block_reasons.append(
+                "fill_quality_adverse_gap_bps=%.2f" % adverse_gap_bps
+            )
+
     package = {
         "strategy": strategy,
         "generated_at": datetime.now().isoformat(),
@@ -1516,6 +1670,8 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         "target_weight_params_hash": target_weight_params_hash,
         "target_weight_verified_pilot_days": len(target_weight_valid_records),
         "target_weight_invalid_days": len(target_weight_invalid_records),
+        "trade_quality": trade_quality,
+        "trade_quality_status": trade_quality.get("status"),
         # backward compat aliases
         "real_paper_days": promotable_days,
         "promotable_evidence_days": promotable_days,
@@ -1583,6 +1739,10 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("## Operational Health")
     lines.append("- Avg Fill Rate: " + str(avg_fill))
     lines.append("- Total Rejects: " + str(total_rej))
+    tq = package.get("trade_quality") or {}
+    lines.append("- Trade Quality Status: " + str(package.get("trade_quality_status", "N/A")))
+    lines.append("- Trade Quality Adverse Gap bp: " + str(tq.get("adverse_gap_bps_of_notional", "N/A")))
+    lines.append("- Trade Quality Missing Expected Price: " + str(tq.get("missing_expected_price_count", "N/A")))
     lines.append("- Degraded Days: " + str(package["degraded_days"]))
     lines.append("- Frozen Days: " + str(package["frozen_days"]))
     lines.append("- Anomaly Summary: " + anom_json)
