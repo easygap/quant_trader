@@ -640,6 +640,39 @@ def test_target_weight_rotation_hold_rank_buffer_reduces_symbol_churn():
     )
 
 
+def test_target_weight_rotation_limits_new_entries_per_rebalance():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-10",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "max_new_targets_per_rebalance": 0,
+        },
+        collector=FakeCollector(_frames_for_rotation()),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    march_symbols = {
+        t["symbol"]
+        for t in result["trades"]
+        if t["date"] >= pd.Timestamp("2025-03-03")
+    }
+
+    assert "CCC" not in march_symbols
+    assert result["target_weight_metrics"]["max_new_targets_per_rebalance"] == 0
+
+
 def test_target_weight_rotation_benchmark_risk_overlay_reduces_exposure():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
