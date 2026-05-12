@@ -136,6 +136,13 @@ def _adapter_plan():
         diagnostics={
             "missing_symbols": [],
             "benchmark_symbol": "KS11",
+            "price_last_dates": {
+                "AAA": "2026-04-10",
+                "BBB": "2026-04-10",
+                "CCC": "2026-04-10",
+            },
+            "benchmark_last_date": "2026-04-10",
+            "missing_position_symbols": [],
             "position_avg_prices_before": {},
             "liquidity": {
                 "lookback_days": 20,
@@ -1733,6 +1740,29 @@ def test_build_target_weight_daily_ops_summary_writes_operator_view(tmp_path):
             "max_order_notional": 1_200_000.0,
             "gross_exposure_after": 3_200_000.0,
         },
+        "data_quality_check": {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_data_quality_passed",
+            "trade_day": plan.trade_day,
+            "score_day": plan.score_day,
+            "symbols_checked": 3,
+            "required_symbols": ["AAA", "BBB", "CCC"],
+            "price_last_dates": {
+                "AAA": plan.trade_day,
+                "BBB": plan.trade_day,
+                "CCC": plan.trade_day,
+            },
+            "missing_price_last_date_symbols": [],
+            "stale_price_symbols": {},
+            "missing_symbols": [],
+            "missing_position_symbols": [],
+            "benchmark_symbol": "KS11",
+            "benchmark_last_date": plan.trade_day,
+            "benchmark_stale": False,
+            "violations": [],
+            "warnings": [],
+        },
         "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
         "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
     }
@@ -1811,6 +1841,29 @@ def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_pa
             "max_order_notional": 1_200_000.0,
             "gross_exposure_after": 3_200_000.0,
         },
+        "data_quality_check": {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_data_quality_passed",
+            "trade_day": plan.trade_day,
+            "score_day": plan.score_day,
+            "symbols_checked": 3,
+            "required_symbols": ["AAA", "BBB", "CCC"],
+            "price_last_dates": {
+                "AAA": plan.trade_day,
+                "BBB": plan.trade_day,
+                "CCC": plan.trade_day,
+            },
+            "missing_price_last_date_symbols": [],
+            "stale_price_symbols": {},
+            "missing_symbols": [],
+            "missing_position_symbols": [],
+            "benchmark_symbol": "KS11",
+            "benchmark_last_date": plan.trade_day,
+            "benchmark_stale": False,
+            "violations": [],
+            "warnings": [],
+        },
         "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
         "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
     }
@@ -1853,6 +1906,118 @@ def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_pa
     assert "READY_TO_ENABLE_CAPS" not in report
     assert "Execution day check: BLOCKED" in report
     assert "target_weight_execution_trade_day_mismatch" in report
+
+
+def test_assess_plan_data_quality_blocks_stale_symbol_price():
+    from tools.target_weight_rotation_pilot import assess_plan_data_quality
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["price_last_dates"] = {
+        "AAA": "2026-04-10",
+        "BBB": "2026-04-09",
+        "CCC": "2026-04-10",
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+
+    quality = assess_plan_data_quality(plan)
+
+    assert quality["checked"] is True
+    assert quality["complete"] is False
+    assert quality["stale_price_symbols"] == {"BBB": "2026-04-09"}
+    assert "target_weight_data_quality_failed" in quality["reason"]
+
+
+def test_build_pilot_readiness_audit_blocks_data_quality_issue():
+    from tools.target_weight_rotation_pilot import (
+        build_pilot_readiness_audit,
+        preview_plan_against_caps,
+        recommend_pilot_caps,
+        render_pilot_readiness_audit_markdown,
+        validate_plan_against_pilot,
+    )
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["price_last_dates"] = {
+        "AAA": "2026-04-10",
+        "BBB": "2026-04-09",
+        "CCC": "2026-04-10",
+    }
+    plan = replace(plan, diagnostics=diagnostics)
+    pilot_check = _pilot_check_for_plan(plan)
+    validation = validate_plan_against_pilot(plan, pilot_check)
+    cap_preview = preview_plan_against_caps(plan)
+    cap_recommendation = recommend_pilot_caps(plan)
+
+    audit = build_pilot_readiness_audit(
+        plan=plan,
+        pilot_check=pilot_check,
+        validation=validation,
+        cap_preview=cap_preview,
+        cap_recommendation=cap_recommendation,
+        preflight_refresh={
+            "checked": True,
+            "complete": True,
+            "reason": "paper preflight refreshed",
+        },
+        launch_readiness={
+            "clean_final_days_current": 3,
+            "clean_final_days_required": 3,
+            "pilot_authorization_present": True,
+            "infra_ready": True,
+            "launch_ready": True,
+            "blocking_requirements": [],
+            "runtime_state": "normal",
+        },
+        execution_idempotency={
+            "checked": True,
+            "allowed": True,
+            "reason": "no completed session for this trade day",
+        },
+        execution_trade_day_check={
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight execution trade day matches current KST date",
+        },
+        execution_market_session_check={
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight execution market session is open",
+        },
+        pilot_authorization_snapshot_check={
+            "checked": True,
+            "allowed": True,
+            "complete": True,
+            "reason": "target-weight pilot authorization snapshot matches current plan",
+            "mismatches": [],
+        },
+        pre_execution_reconciliation={
+            "checked": True,
+            "complete": True,
+            "reason": "starting positions match target-weight plan",
+        },
+        liquidity_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+        },
+        pre_trade_risk_check={
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+        },
+        trading_mode="paper",
+    )
+    report = render_pilot_readiness_audit_markdown(audit)
+
+    assert audit["data_quality_check"]["complete"] is False
+    assert audit["ready_for_cap_approval"] is False
+    assert any("data_quality:" in reason for reason in audit["blocking_reasons"])
+    assert "Data Quality" in report
+    assert "stale symbol price data" in report
 
 
 def test_assess_plan_liquidity_blocks_large_adv_order():
