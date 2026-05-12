@@ -2195,6 +2195,37 @@ def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, An
     return reasons
 
 
+def summarize_rejection_reasons(
+    candidates: list[dict[str, Any]],
+    *,
+    max_candidate_ids: int = 8,
+) -> list[dict[str, Any]]:
+    """Aggregate gate blockers so multi-candidate sweeps point to the next fix."""
+    grouped: dict[str, list[str]] = {}
+    for rec in candidates:
+        candidate_id = str(rec.get("candidate_id") or "")
+        seen: set[str] = set()
+        for reason in rec.get("rejection_reasons") or []:
+            normalized = str(reason).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            grouped.setdefault(normalized, []).append(candidate_id)
+
+    summary = []
+    for reason, candidate_ids in grouped.items():
+        summary.append(
+            {
+                "reason": reason,
+                "count": len(candidate_ids),
+                "candidate_ids": candidate_ids[:max_candidate_ids],
+                "truncated": len(candidate_ids) > max_candidate_ids,
+                "total_candidate_ids": len(candidate_ids),
+            }
+        )
+    return sorted(summary, key=lambda item: (-int(item["count"]), str(item["reason"])))
+
+
 def sort_candidate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         records,
@@ -2513,6 +2544,7 @@ def run_candidate_sweep(
             "by canonical promotion and evidence gates"
         ),
         "decision": decision,
+        "rejection_summary": summarize_rejection_reasons(ranked),
         "candidates": ranked,
         "summary": {
             "evaluated": len(ranked),
@@ -2641,6 +2673,26 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             f"{m.get('avg_exposure_pct', 0):.1f}% | {m.get('sharpe', 0):.2f} | "
             f"{m.get('profit_factor', 0):.2f} | {m.get('mdd', 0):.2f}% | {m.get('total_trades', 0)} |"
         )
+    rejection_summary = bundle.get("rejection_summary") or summarize_rejection_reasons(bundle.get("candidates", []))
+    if rejection_summary:
+        lines.extend([
+            "",
+            "## Rejection Summary",
+            "| Reason | Count | Candidates |",
+            "|--------|-------|------------|",
+        ])
+        for row in rejection_summary:
+            candidate_ids = list(row.get("candidate_ids") or [])
+            candidates_text = ", ".join(candidate_ids)
+            if row.get("truncated"):
+                total = int(row.get("total_candidate_ids", len(candidate_ids)) or len(candidate_ids))
+                candidates_text = f"{candidates_text}, +{total - len(candidate_ids)} more"
+            lines.append(
+                "| "
+                f"{markdown_table_cell(row.get('reason'))} | "
+                f"{int(row.get('count', 0) or 0)} | "
+                f"{markdown_table_cell(candidates_text)} |"
+            )
     rejection_rows = [
         rec for rec in bundle.get("candidates", [])
         if rec.get("rejection_reasons") or rec.get("promotion", {}).get("reason")
