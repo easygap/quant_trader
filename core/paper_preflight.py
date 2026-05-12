@@ -53,6 +53,8 @@ class PreflightResult:
     excess_non_null_ratio: Optional[float] = None
     eligible_records: int = 0
     quarantined_records: int = 0
+    test_artifact_count: int = 0
+    test_artifact_examples: list = field(default_factory=list)
     has_real_evidence: bool = False
     real_paper_days: int = 0
     shadow_days: int = 0
@@ -95,19 +97,22 @@ def run_preflight(strategy: str, date: str | None = None,
     # ── 2. Evidence freshness / legacy ──
     _check_evidence(strategy, date, result, checks, operator_actions)
 
-    # ── 3. DB health ──
+    # ── 3. Test artifact quarantine ──
+    _check_test_artifacts(result, checks, operator_actions)
+
+    # ── 4. DB health ──
     _check_db_health(checks)
 
-    # ── 4. Pending orders / open positions ──
+    # ── 5. Pending orders / open positions ──
     _check_positions_orders(strategy, result, checks, operator_actions)
 
-    # ── 5. Stale anomalies ──
+    # ── 6. Stale anomalies ──
     _check_stale_anomalies(strategy, checks, operator_actions)
 
-    # ── 6. Notifier health ──
+    # ── 7. Notifier health ──
     _check_notifier_health(result, checks, operator_actions, send_test_notification)
 
-    # ── 7. Market session ──
+    # ── 8. Market session ──
     _check_market_session(date, checks)
 
     # ── Overall 판정 ──
@@ -254,6 +259,33 @@ def _check_evidence(strategy, date, result, checks, actions):
                           f"{len(quarantined)} legacy records quarantined (excluded from runtime)"))
     except Exception as e:
         checks.append(PreflightCheck("evidence", "fail", f"exception: {e}"))
+
+
+def _check_test_artifacts(result, checks, actions):
+    """reports 운영 산출물에 test/demo artifact가 섞였는지 경고한다."""
+    try:
+        from tools.quarantine_test_artifacts import scan_test_artifacts
+
+        reports_dir = RUNTIME_DIR.parent
+        artifacts = scan_test_artifacts(reports_dir)
+        result.test_artifact_count = len(artifacts)
+        result.test_artifact_examples = [
+            str(path.relative_to(reports_dir)).replace("\\", "/")
+            for path in artifacts[:5]
+        ]
+        if artifacts:
+            checks.append(PreflightCheck(
+                "test_artifacts",
+                "warn",
+                f"{len(artifacts)} test/demo artifact(s) found in reports",
+            ))
+            actions.append(
+                f"python tools/quarantine_test_artifacts.py --reports-dir {reports_dir}"
+            )
+        else:
+            checks.append(PreflightCheck("test_artifacts", "pass", "no test/demo artifacts found"))
+    except Exception as e:
+        checks.append(PreflightCheck("test_artifacts", "warn", f"exception: {e}"))
 
 
 def _check_db_health(checks):
@@ -524,6 +556,7 @@ def _format_preflight_md(result: PreflightResult) -> list[str]:
         f"- Freshness: {result.evidence_freshness}",
         f"- Eligible Records: {result.eligible_records}",
         f"- Quarantined (legacy): {result.quarantined_records}",
+        f"- Test Artifacts: {result.test_artifact_count}",
         f"- Has Real Evidence: {'YES' if result.has_real_evidence else 'NO'}",
         f"- Real Paper Days: {result.real_paper_days}",
         f"- Shadow Days: {result.shadow_days}",
@@ -579,6 +612,16 @@ def _format_preflight_md(result: PreflightResult) -> list[str]:
             f"> {result.quarantined_records} legacy (v1) record(s) quarantined.",
             "> runtime/promotion 계산에 미반영. 향후 제거 예정 (운영상 무해).",
         ])
+
+    if result.test_artifact_count > 0:
+        lines.extend([
+            "",
+            "## Test Artifact Note",
+            f"> {result.test_artifact_count} test/demo artifact(s) detected under reports.",
+            "> 운영 판단 전에 quarantine 도구로 격리하세요.",
+        ])
+        for path in result.test_artifact_examples:
+            lines.append(f"> - {path}")
 
     return lines
 
