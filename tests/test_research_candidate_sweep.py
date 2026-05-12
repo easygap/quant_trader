@@ -277,6 +277,35 @@ def test_build_candidate_specs_supports_target_weight_rotation_aliases():
     assert direct[-1].params["market_exposure_mode"] == "benchmark_sma"
 
 
+def test_build_candidate_specs_supports_target_weight_risk_relief_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_risk_relief")
+    alias = build_candidate_specs("risk_relief")
+    all_target = {
+        spec.candidate_id
+        for spec in build_candidate_specs("target_weight_rotation")
+    }
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk90_35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk90_45",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk120_55",
+        "target_weight_rotation_top5_60_120_floor0_hold3_sma120_55",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol3",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5",
+        "target_weight_rotation_top5_60_120_floor0_exp80_tol3",
+        "target_weight_rotation_top5_60_120_floor0_exp75",
+        "target_weight_rotation_top5_60_120_floor0_tol3",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.candidate_id for spec in direct}.issubset(all_target)
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
+    assert any(spec.params.get("bear_target_exposure") == 0.35 for spec in direct)
+
+
 def test_build_candidate_specs_rejects_unknown_family():
     import pytest
     from tools.research_candidate_sweep import build_candidate_specs
