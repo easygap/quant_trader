@@ -2,6 +2,7 @@
 Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 
 실행: python tools/evaluate_and_promote.py --canonical
+요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
 출력: reports/promotion/
   - metrics_summary.json
   - walk_forward_summary.json
@@ -503,6 +504,24 @@ def write_promotion_blocker_summary(summary: dict, output_dir: str | Path) -> tu
     return json_path, md_path
 
 
+def load_promotion_blocker_summary_from_artifacts(artifact_dir: str | Path = "reports/promotion") -> dict:
+    """기존 promotion artifact에서 blocker summary를 재구성한다."""
+    base = Path(artifact_dir)
+    promotion_path = base / "promotion_result.json"
+    metrics_path = base / "metrics_summary.json"
+    metadata_path = base / "run_metadata.json"
+    promotions = json.loads(promotion_path.read_text(encoding="utf-8"))
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    if not isinstance(promotions, dict):
+        raise ValueError(f"{promotion_path} top-level JSON is not an object")
+    if not isinstance(metrics, dict):
+        raise ValueError(f"{metrics_path} top-level JSON is not an object")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{metadata_path} top-level JSON is not an object")
+    return build_promotion_blocker_summary(promotions, metrics, metadata)
+
+
 def run_canonical():
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
@@ -828,10 +847,24 @@ def main():
     parser = argparse.ArgumentParser(description="Canonical 평가 + 승격 판정")
     parser.add_argument("--canonical", action="store_true", help="전체 평가 실행")
     parser.add_argument("--check-only", action="store_true", help="기존 artifact 검증만")
+    parser.add_argument(
+        "--blocker-summary",
+        action="store_true",
+        help="기존 promotion artifact에서 blocker summary JSON/MD 재생성",
+    )
     args = parser.parse_args()
 
     if args.canonical:
         run_canonical()
+    elif args.blocker_summary:
+        out_dir = Path("reports/promotion")
+        try:
+            summary = load_promotion_blocker_summary_from_artifacts(out_dir)
+            json_path, md_path = write_promotion_blocker_summary(summary, out_dir)
+        except Exception as exc:
+            print(f"FAIL: blocker summary 생성 실패: {exc}")
+            sys.exit(1)
+        print(f"OK: blocker summary 생성 성공\n  {json_path}\n  {md_path}")
     elif args.check_only:
         from core.promotion_engine import load_promotion_artifact
         result = load_promotion_artifact()
