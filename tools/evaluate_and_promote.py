@@ -28,6 +28,8 @@ logger.add(sys.stderr, level="WARNING")
 
 CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
 )
 
 
@@ -141,10 +143,19 @@ def get_git_hash() -> str:
 
 def build_canonical_research_candidate_specs(candidate_ids=None):
     """Return research candidates that are promoted into canonical evaluation."""
-    from tools.research_candidate_sweep import build_target_weight_rotation_candidate_specs
+    from tools.research_candidate_sweep import (
+        build_target_weight_drawdown_guard_candidate_specs,
+        build_target_weight_rotation_candidate_specs,
+    )
 
     wanted = tuple(candidate_ids or CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS)
-    specs = {spec.candidate_id: spec for spec in build_target_weight_rotation_candidate_specs()}
+    specs = {
+        spec.candidate_id: spec
+        for spec in (
+            *build_target_weight_rotation_candidate_specs(),
+            *build_target_weight_drawdown_guard_candidate_specs(),
+        )
+    }
     missing = [candidate_id for candidate_id in wanted if candidate_id not in specs]
     if missing:
         raise ValueError(f"canonical research candidate missing: {', '.join(missing)}")
