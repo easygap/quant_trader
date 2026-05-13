@@ -171,6 +171,58 @@ def test_target_weight_plan_rejects_research_only_params_before_fetch():
         )
 
 
+def test_target_weight_plan_rejects_non_monthly_rebalance_frequency_before_fetch():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class FailingCollector:
+        def fetch_korean_stock(self, *_args, **_kwargs):
+            raise AssertionError("collector should not be called")
+
+    with pytest.raises(ValueError, match="rebalance_frequency"):
+        build_target_weight_plan(
+            candidate_id="target_weight_bimonthly",
+            symbols=["005930", "000660"],
+            params={
+                "target_top_n": 2,
+                "short_lookback": 20,
+                "long_lookback": 60,
+                "rebalance_frequency": "bimonthly",
+            },
+            cash=1_000_000.0,
+            positions={},
+            as_of_date="2025-01-31",
+            collector=FailingCollector(),
+        )
+
+
+def test_target_weight_plan_accepts_monthly_rebalance_frequency():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    plan = build_target_weight_plan(
+        candidate_id="target_weight_monthly",
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "rebalance_frequency": "monthly",
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-03-10",
+        collector=FakeCollector(_frames_for_rotation()),
+    )
+
+    assert plan.candidate_id == "target_weight_monthly"
+    assert plan.targets
+    assert plan.target_exposure == 0.80
+
+
 def test_target_weight_plan_rejects_portfolio_drawdown_guard_without_state_before_fetch():
     from core.target_weight_rotation import build_target_weight_plan
 
