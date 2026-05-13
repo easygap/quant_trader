@@ -15,6 +15,7 @@ python tools/paper_launch_readiness.py --strategy scoring --generate-runbook
 - 신규 BUY는 runtime `entry` 허용 또는 현재 pilot authorization 재검증이 있어야 실행되는지
 - auto-entry 후보는 주문 직전 최신 데이터로 BUY 신호를 재검증하며, 재조회/API/전략 계산 실패 시 주문하지 않고 후보를 다음 루프로 보류하는지
 - 신규 BUY 주문 직전 20일 평균 거래량이 전달되며, 누락/0 또는 평균 거래대금 하한 미달이면 주문이 차단되는지
+- 갭업 차단용 최근 가격 조회가 실패하거나 데이터가 부족하면 신규 BUY가 차단되는지
 - exit/finalize/evidence action이 허용되는지
 - Discord notifier 설정 여부
 - clean final days, benchmark final ratio, evidence freshness
