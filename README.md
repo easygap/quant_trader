@@ -6,7 +6,7 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-05-12)**:
+> **현재 상태 (2026-05-13)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
 > - Paper Evidence 런타임: v2 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
@@ -20,7 +20,7 @@
 > - target-weight 변동성 타깃 top-200 sweep: 최상위 후보는 초과수익이 양수였지만 전 후보가 MDD 게이트 미통과로 `KEEP_RESEARCH_ONLY`
 > - target-weight 리스크 페널티 랭킹 top-200 sweep: 수익·초과수익은 개선됐지만 MDD·회전율 게이트 미통과로 `KEEP_RESEARCH_ONLY`
 > - target-weight 손실방어 top-200 sweep: pdd8/floor25/cooldown1 후보가 MDD -19.56%, turnover/year 296.4%로 개선되어 research sweep 기준 `RUN_CANONICAL_EVALUATION`
-> - target-weight 손실방어 canonical 평가: pdd8 후보는 벤치마크 초과수익 -6.46%p, exp75 후보는 turnover/year 1026.3%, exp75 tol3 후보는 turnover/year 1009.0%로 모두 `paper_only`; 기존 risk-overlay 후보만 provisional 유지
+> - target-weight 손실방어 canonical 평가: pdd8 후보는 benchmark excess -6.46%p, exp75 원본/tol3 후보는 turnover/year 1026.3%/1009.0%, exp75 tol4 후보는 turnover/year 986.5%로 회전율은 통과했지만 MDD -20.25%라 모두 `paper_only`; 기존 risk-overlay 후보만 provisional 유지
 > - scoring: **paper_only** (관찰 가능하지만 Sharpe/PF/WF 안정성 미달)
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
@@ -278,7 +278,7 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-13 손실방어 canonical follow-up: `tools/evaluate_and_promote.py --canonical`에 eligible 2개 손실방어 후보를 포함해 재평가했습니다. 기존 `target_weight_rotation_top5_60_120_floor0_hold3_risk60_35`는 return=+171.20%, benchmark excess=+21.81%p, Sharpe=1.41, PF=4.24, MDD=-19.90%, turnover/year=794.0%, WF positive=100%, WF Sharpe+=83.3%로 `provisional_paper_candidate`를 유지했습니다. pdd8/floor25 후보는 return=+142.93%, Sharpe=1.43, PF=7.69, MDD=-15.89%, turnover/year=530.8%로 방어력은 좋아졌지만 canonical benchmark excess=-6.46%p라 `paper_only`입니다. exp75/rankrisk90/pdd10/floor40 후보는 return=+180.40%, benchmark excess=+31.01%p, Sharpe=1.49, PF=4.85, MDD=-19.24%, WF positive/Sh+=100%였지만 turnover/year=1026.3%로 게이트를 넘겨 `paper_only`입니다. 다음 연구는 exp75 계열에 tolerance 또는 신규 편입 제한을 결합해 초과수익과 WF 안정성은 유지하면서 turnover/year를 1000% 아래로 낮추는 방향입니다.
 
-2026-05-13 exp75 회전율 완화 follow-up: `target_weight_drawdown_guard` family에 exp75/rankrisk90/pdd10/floor40 기반 `tol3`, `tol5`, `maxnew2`, `tol3_maxnew2` 변형을 추가했습니다. `--candidate-family target_weight_drawdown_guard --top-n 200` 재검증에서는 후보 9개 중 3개가 canonical 평가 대상으로 남았고, 새 `tol3` 후보는 return=+78.19%, raw excess=+46.30%p, exposure-matched excess=+63.92%p, MDD=-19.50%, turnover/year=887.6%, WF positive/Sh+=100%로 기존 exp75 후보와 거의 같은 성과를 유지하면서 trades 129→107로 줄었습니다. canonical 재평가에서는 `target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1`가 return=+184.09%, benchmark excess=+34.70%p, Sharpe=1.51, PF=4.90, MDD=-19.24%, WF positive/Sh+=100%였지만 turnover/year=1009.0%로 1000%/y 게이트를 근소하게 넘겨 `paper_only`입니다. 다음은 tol4/tol5 canonical 재검증 또는 turnover 비용 민감도 기준을 별도로 확인하되, 현재 live/paper 전환 대상은 기존 risk-overlay 후보만 유지합니다.
+2026-05-13 exp75 회전율 완화 follow-up: `target_weight_drawdown_guard` family에 exp75/rankrisk90/pdd10/floor40 기반 `tol3`, `tol4`, `tol5`, `maxnew2`, `tol3_maxnew2` 변형을 추가했습니다. `--candidate-family target_weight_drawdown_guard --top-n 200` 재검증에서는 후보 10개 중 4개가 canonical 평가 대상으로 남았고, 새 `tol4` 후보는 return=+81.19%, raw excess=+49.30%p, exposure-matched excess=+66.89%p, MDD=-19.33%, turnover/year=886.7%, WF positive/Sh+=100%로 research 기준을 통과했습니다. canonical 재평가에서는 `target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1`가 return=+183.02%, benchmark excess=+33.63%p, Sharpe=1.50, PF=4.82, turnover/year=986.5%로 회전율 게이트는 통과했지만 MDD=-20.25%가 -20% 제한을 0.25%p 초과해 `paper_only`입니다. tol3는 turnover/year=1009.0%, 원본은 1026.3%로 각각 회전율 미달입니다. 다음 연구는 tol4의 낮아진 회전율을 유지하면서 drawdown floor/cooldown 또는 ranking risk penalty를 더 보수화해 MDD를 -20% 안쪽으로 되돌리는 방향이며, 현재 live/paper 전환 대상은 기존 risk-overlay 후보만 유지합니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
