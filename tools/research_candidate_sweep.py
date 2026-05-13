@@ -36,6 +36,7 @@ DEFAULT_UNIVERSE_SCAN_LIMIT = 100
 DEFAULT_CANDIDATE_FAMILY = "rotation"
 DEFAULT_OUTPUT_DIR = Path("reports/research_sweeps")
 TARGET_WEIGHT_EXECUTION_PRICE_MODE = "next_open"
+TARGET_WEIGHT_SECTOR_MAP_CACHE: dict[str, str] | None = None
 DEFAULT_RESEARCH_DIVERSIFICATION = {
     "max_positions": 2,
     "max_position_ratio": 0.45,
@@ -1014,6 +1015,26 @@ def _target_weight_spec_with_portfolio_drawdown_guard(
     )
 
 
+def _target_weight_spec_with_sector_cap(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    max_targets_per_sector: int,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "max_targets_per_sector": max(1, int(max_targets_per_sector)),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1281,6 +1302,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         overlay_params={"target_tolerance_pct": 4.0},
         description="75pct exposure longer rank-penalty rotation with 4pct tolerance",
     )
+    exp75_rankrisk90_tol4_sectorcap2 = _target_weight_spec_with_sector_cap(
+        exp75_rankrisk90_tol4,
+        suffix="sectorcap2",
+        max_targets_per_sector=2,
+        description="75pct exposure rank-penalty rotation with 4pct tolerance and sector cap",
+    )
+    exp75_rankrisk90_tol4_sectorcap1 = _target_weight_spec_with_sector_cap(
+        exp75_rankrisk90_tol4,
+        suffix="sectorcap1",
+        max_targets_per_sector=1,
+        description="75pct exposure rank-penalty rotation with 4pct tolerance and strict sector cap",
+    )
+    exp75_rankrisk120_tol4_sectorcap2 = _target_weight_spec_with_sector_cap(
+        exp75_rankrisk120_tol4,
+        suffix="sectorcap2",
+        max_targets_per_sector=2,
+        description="75pct exposure longer rank-penalty rotation with 4pct tolerance and sector cap",
+    )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
         suffix="maxnew2",
@@ -1372,6 +1411,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure longer rank-penalty rotation with 4pct tolerance and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap2,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with sector cap and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap1,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with strict sector cap and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk120_tol4_sectorcap2,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure longer rank-penalty rotation with sector cap and portfolio guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
@@ -2135,6 +2192,8 @@ def _select_target_weight_targets(
     top_n: int,
     hold_rank_buffer: int,
     max_new_targets_per_rebalance: int | None = None,
+    max_targets_per_sector: int | None = None,
+    sector_map: dict[str, str] | None = None,
 ) -> list[str]:
     ranked = [
         sym
@@ -2144,13 +2203,26 @@ def _select_target_weight_targets(
     targets = ranked[:top_n]
     if hold_rank_buffer <= 0 or not positions:
         if max_new_targets_per_rebalance is None or not positions:
-            return targets
-        return _limit_new_target_churn(
+            return _limit_targets_per_sector(
+                ranked=ranked,
+                targets=targets,
+                top_n=top_n,
+                max_targets_per_sector=max_targets_per_sector,
+                sector_map=sector_map,
+            )
+        targets = _limit_new_target_churn(
             ranked=ranked,
             targets=targets,
             positions=positions,
             top_n=top_n,
             max_new_targets_per_rebalance=max_new_targets_per_rebalance,
+        )
+        return _limit_targets_per_sector(
+            ranked=ranked,
+            targets=targets,
+            top_n=top_n,
+            max_targets_per_sector=max_targets_per_sector,
+            sector_map=sector_map,
         )
 
     retention_pool = ranked[top_n : top_n + hold_rank_buffer]
@@ -2166,15 +2238,82 @@ def _select_target_weight_targets(
         targets[replacement_idx] = held
 
     if max_new_targets_per_rebalance is None:
-        return targets
+        return _limit_targets_per_sector(
+            ranked=ranked,
+            targets=targets,
+            top_n=top_n,
+            max_targets_per_sector=max_targets_per_sector,
+            sector_map=sector_map,
+        )
 
-    return _limit_new_target_churn(
+    targets = _limit_new_target_churn(
         ranked=ranked,
         targets=targets,
         positions=positions,
         top_n=top_n,
         max_new_targets_per_rebalance=max_new_targets_per_rebalance,
     )
+    return _limit_targets_per_sector(
+        ranked=ranked,
+        targets=targets,
+        top_n=top_n,
+        max_targets_per_sector=max_targets_per_sector,
+        sector_map=sector_map,
+    )
+
+
+def _sector_for_symbol(symbol: str, sector_map: dict[str, str]) -> str:
+    raw = str(symbol).strip()
+    sector = str(sector_map.get(raw, "") or "").strip()
+    if sector:
+        return sector
+    if raw.isdigit():
+        return str(sector_map.get(raw.zfill(6), "") or "").strip()
+    return ""
+
+
+def _limit_targets_per_sector(
+    *,
+    ranked: list[str],
+    targets: list[str],
+    top_n: int,
+    max_targets_per_sector: int | None,
+    sector_map: dict[str, str] | None,
+) -> list[str]:
+    if max_targets_per_sector is None or int(max_targets_per_sector) <= 0 or not sector_map:
+        return targets
+
+    cap = max(1, int(max_targets_per_sector))
+    selected: list[str] = []
+    sector_counts: dict[str, int] = {}
+
+    def can_add(symbol: str) -> bool:
+        if symbol in selected:
+            return False
+        sector = _sector_for_symbol(symbol, sector_map)
+        if not sector:
+            return True
+        return sector_counts.get(sector, 0) < cap
+
+    def add(symbol: str) -> None:
+        selected.append(symbol)
+        sector = _sector_for_symbol(symbol, sector_map)
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+    for sym in targets:
+        if len(selected) >= top_n:
+            break
+        if can_add(sym):
+            add(sym)
+
+    for sym in ranked:
+        if len(selected) >= top_n:
+            break
+        if can_add(sym):
+            add(sym)
+
+    return selected
 
 
 def _limit_new_target_churn(
@@ -2391,6 +2530,7 @@ def run_target_weight_rotation_backtest(
     *,
     collector=None,
     risk_manager=None,
+    sector_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Research-only monthly top-N target-weight rotation backtest."""
     from core.data_collector import DataCollector
@@ -2448,6 +2588,11 @@ def run_target_weight_rotation_backtest(
                     "max_new_targets_per_rebalance": (
                         max(0, int(params.get("max_new_targets_per_rebalance")))
                         if params.get("max_new_targets_per_rebalance") is not None
+                        else None
+                    ),
+                    "max_targets_per_sector": (
+                        max(1, int(params.get("max_targets_per_sector")))
+                        if params.get("max_targets_per_sector") is not None
                         else None
                     ),
                     "portfolio_drawdown_guard_enabled": bool(
@@ -2516,6 +2661,19 @@ def run_target_weight_rotation_backtest(
             if max_new_targets_raw is not None
             else None
         )
+        max_targets_per_sector_raw = params.get("max_targets_per_sector")
+        max_targets_per_sector = (
+            max(1, int(max_targets_per_sector_raw))
+            if max_targets_per_sector_raw is not None
+            else None
+        )
+        sector_map_for_selection = sector_map
+        if max_targets_per_sector is not None and sector_map_for_selection is None:
+            global TARGET_WEIGHT_SECTOR_MAP_CACHE
+            if TARGET_WEIGHT_SECTOR_MAP_CACHE is None:
+                TARGET_WEIGHT_SECTOR_MAP_CACHE = DataCollector.get_sector_map()
+            sector_map_for_selection = TARGET_WEIGHT_SECTOR_MAP_CACHE
+        sector_map_for_selection = sector_map_for_selection or {}
         portfolio_drawdown_guard_trigger_pct = max(
             0.0,
             float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
@@ -2590,6 +2748,7 @@ def run_target_weight_rotation_backtest(
         missing_held_open_events = 0
         missing_held_open_symbol_set: set[str] = set()
         missing_held_open_samples: list[str] = []
+        selected_sector_max_counts: list[int] = []
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
@@ -2647,7 +2806,17 @@ def run_target_weight_rotation_backtest(
                         top_n,
                         hold_rank_buffer,
                         max_new_targets_per_rebalance,
+                        max_targets_per_sector,
+                        sector_map_for_selection,
                     )
+                    if max_targets_per_sector is not None and sector_map_for_selection and targets:
+                        sector_counts: dict[str, int] = {}
+                        for sym in targets:
+                            sector = _sector_for_symbol(sym, sector_map_for_selection)
+                            if sector:
+                                sector_counts[sector] = sector_counts.get(sector, 0) + 1
+                        if sector_counts:
+                            selected_sector_max_counts.append(max(sector_counts.values()))
                     missing_target_execution_symbols = [
                         sym
                         for sym in targets
@@ -2810,6 +2979,17 @@ def run_target_weight_rotation_backtest(
                 "rebalance_frequency": rebalance_frequency,
                 "hold_rank_buffer": hold_rank_buffer,
                 "max_new_targets_per_rebalance": max_new_targets_per_rebalance,
+                "max_targets_per_sector": max_targets_per_sector,
+                "sector_map_size": (
+                    len(sector_map_for_selection)
+                    if max_targets_per_sector is not None
+                    else 0
+                ),
+                "max_selected_targets_per_sector": (
+                    max(selected_sector_max_counts)
+                    if selected_sector_max_counts
+                    else 0
+                ),
                 "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
                 "portfolio_drawdown_guard_trigger_pct": round(
                     portfolio_drawdown_guard_trigger_pct,
