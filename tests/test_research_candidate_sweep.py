@@ -1862,6 +1862,74 @@ def test_run_candidate_sweep_skips_evaluation_when_liquidity_filter_removes_all(
     assert "Candidate evaluation: skipped_due_to_data=2" in text
 
 
+def test_run_candidate_sweep_fail_closed_when_canonical_universe_selection_fails(monkeypatch, tmp_path):
+    import config.config_loader as config_loader
+    import tools.research_candidate_sweep as sweep
+
+    class _Config:
+        yaml_hash = "yaml"
+        resolved_hash = "resolved"
+        risk_params = {"liquidity_filter": {"enabled": True, "strict": True}}
+
+    def fake_filter(symbols, config, *, as_of_end):
+        assert symbols == []
+        return [], {
+            "enabled": True,
+            "input_symbols": [],
+            "passed_symbols": [],
+            "excluded_symbols": [],
+            "strict": True,
+            "symbols": {},
+        }
+
+    def fail_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark must not run when universe selection fails")
+
+    def fail_evaluate(*args, **kwargs):
+        raise AssertionError("candidate evaluation must not run when universe selection fails")
+
+    def fail_select_canonical_universe(*args, **kwargs):
+        raise RuntimeError("KRX listing blocked")
+
+    monkeypatch.setattr(config_loader.Config, "get", staticmethod(lambda: _Config()))
+    monkeypatch.setattr(sweep, "select_canonical_universe", fail_select_canonical_universe)
+    monkeypatch.setattr(sweep, "apply_research_universe_liquidity_filter", fake_filter)
+    monkeypatch.setattr(sweep, "buy_and_hold_benchmark_with_returns", fail_benchmark)
+    monkeypatch.setattr(sweep, "evaluate_candidate", fail_evaluate)
+    monkeypatch.setattr(
+        sweep,
+        "build_candidate_specs",
+        lambda family: [
+            sweep.CandidateSpec("candidate_a", "relative_strength_rotation", {}, "A"),
+        ],
+    )
+
+    bundle = sweep.run_candidate_sweep(
+        symbols=None,
+        top_n=200,
+        universe_scan_limit=400,
+        start="2025-01-01",
+        end="2025-12-31",
+        include_walk_forward=True,
+    )
+
+    assert bundle["input_universe"] == []
+    assert bundle["universe"] == []
+    assert bundle["candidates"] == []
+    assert bundle["candidate_ids_skipped_due_to_data"] == ["candidate_a"]
+    assert bundle["benchmark"]["benchmark_unusable_reason"] == "canonical_universe_selection_failed"
+    assert bundle["decision"]["action"] == "INSUFFICIENT_BENCHMARK_DATA"
+    assert bundle["universe_selection"]["source"] == "canonical_liquidity_universe"
+    assert bundle["universe_selection"]["selection_error_type"] == "RuntimeError"
+    assert bundle["universe_selection"]["empty_universe_reason"] == "canonical_universe_selection_failed"
+    assert bundle["data_fetch_cache"]["reason"] == "canonical_universe_selection_failed"
+
+    _, md_path = sweep.write_candidate_artifacts(bundle, tmp_path)
+    text = md_path.read_text(encoding="utf-8")
+    assert "Data fetch cache: skipped (canonical_universe_selection_failed)" in text
+    assert "Candidate evaluation: skipped_due_to_data=1" in text
+
+
 def test_run_candidate_sweep_limits_to_requested_candidate_ids(monkeypatch):
     import pandas as pd
     import config.config_loader as config_loader
