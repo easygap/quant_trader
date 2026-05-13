@@ -9,7 +9,8 @@ Hard Gate (`main.py:_check_live_readiness_gate` → `core/live_gate.py`):
 6. `benchmark_comparison.json`의 전략별 excess return과 excess Sharpe가 모두 양수
 7. `reports/paper_evidence/promotion_evidence_{strategy}.json` 내부 `strategy`가 현재 전략명과 정확히 일치하고 recommendation이 `ELIGIBLE`
 8. execution-backed paper evidence 60영업일, benchmark_final_ratio >= 80%, 양의 same-universe/cash-adjusted excess와 cumulative return, sell_count >= 5, win_rate >= 45%, frozen_days = 0
-9. 데이터 health check 통과
+9. canonical `strategy_specs`가 target-weight 후보로 식별하는 전략은 verified pilot proof와 paper/canonical params hash 일치 필요
+10. 데이터 health check 통과
 
 레거시 `reports/approved_strategies.json`와 `reports/validation_walkforward_*.json`은 live 근거로 사용하지 않는다.
 
