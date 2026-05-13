@@ -202,6 +202,74 @@ class TestPilotBasic:
         assert result.allowed is False
         assert "max_orders_per_day" in result.reason
 
+    def test_candidate_notional_cannot_exceed_remaining_gross_exposure(
+        self,
+        evidence_dir,
+        runtime_dir,
+        fresh_db,
+    ):
+        """이번 주문 후 총노출이 pilot gross cap을 넘으면 entry blocked."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        _write_notifier_health(runtime_dir)
+
+        enable_pilot(
+            PILOT_STRATEGY,
+            "2026-04-01",
+            "2026-04-30",
+            max_notional=500_000,
+            max_exposure=1_000_000,
+        )
+
+        with patch("core.paper_pilot._get_gross_exposure", return_value=900_000.0):
+            result = check_pilot_entry(
+                PILOT_STRATEGY,
+                candidate_notional=200_000,
+                as_of_date="2026-04-07",
+            )
+
+        assert result.allowed is False
+        assert "max_gross_exposure" in result.reason
+        assert "projected=1,100,000" in result.reason
+        assert result.remaining_exposure == 100_000
+
+    def test_candidate_notional_can_use_remaining_gross_exposure_exactly(
+        self,
+        evidence_dir,
+        runtime_dir,
+        fresh_db,
+    ):
+        """이번 주문 후 총노출이 pilot gross cap과 같으면 entry allowed."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        _write_notifier_health(runtime_dir)
+
+        enable_pilot(
+            PILOT_STRATEGY,
+            "2026-04-01",
+            "2026-04-30",
+            max_notional=500_000,
+            max_exposure=1_000_000,
+        )
+
+        with patch("core.paper_pilot._get_gross_exposure", return_value=900_000.0):
+            result = check_pilot_entry(
+                PILOT_STRATEGY,
+                candidate_notional=100_000,
+                as_of_date="2026-04-07",
+            )
+
+        assert result.allowed is True
+        assert result.remaining_exposure == 100_000
+
     def test_pilot_expired_blocks(self, evidence_dir, runtime_dir, fresh_db):
         """pilot 기간 만료 → blocked."""
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
