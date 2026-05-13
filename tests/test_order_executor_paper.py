@@ -277,6 +277,134 @@ def test_execute_buy_quantity_blocks_when_entry_liquidity_volume_missing(fresh_d
     assert get_position("005930", account_key="missing_liquidity_quantity_test") is None
 
 
+def test_execute_buy_blocks_when_gap_risk_price_lookup_fails(fresh_db, monkeypatch):
+    """갭 리스크가 켜져 있으면 최근 가격 조회 실패 시 일반 BUY를 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    class FailingCollector:
+        def fetch_stock(self, symbol):
+            raise RuntimeError("price provider unavailable")
+
+    executor = OrderExecutor(account_key="gap_lookup_fail_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = True
+    executor.config.risk_params["gap_risk"]["gap_up_entry_block"] = 0.05
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: FailingCollector())
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="gap lookup fail test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert "갭 리스크 확인 실패" in result["reason"]
+    assert "최근 가격 조회 실패" in result["reason"]
+    assert get_position("005930", account_key="gap_lookup_fail_test") is None
+
+
+def test_execute_buy_blocks_when_gap_risk_price_data_insufficient(fresh_db, monkeypatch):
+    """갭 리스크가 켜져 있으면 최근 가격 데이터 부족도 일반 BUY를 차단한다."""
+    import pandas as pd
+
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    class ShortCollector:
+        def fetch_stock(self, symbol):
+            return pd.DataFrame({"close": [60_000], "open": [60_000]})
+
+    executor = OrderExecutor(account_key="gap_data_short_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = True
+    executor.config.risk_params["gap_risk"]["gap_up_entry_block"] = 0.05
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: ShortCollector())
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="gap data short test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert "최근 가격 데이터 부족" in result["reason"]
+    assert get_position("005930", account_key="gap_data_short_test") is None
+
+
+def test_execute_buy_blocks_when_gap_risk_price_data_not_finite(fresh_db, monkeypatch):
+    """갭 리스크 기준 가격이 정상 숫자가 아니면 일반 BUY를 차단한다."""
+    import pandas as pd
+
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    class InvalidPriceCollector:
+        def fetch_stock(self, symbol):
+            return pd.DataFrame({"close": [float("nan"), 61_000], "open": [60_000, 61_000]})
+
+    executor = OrderExecutor(account_key="gap_data_invalid_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = True
+    executor.config.risk_params["gap_risk"]["gap_up_entry_block"] = 0.05
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: InvalidPriceCollector())
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="gap invalid data test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert "기준 가격 없음" in result["reason"]
+    assert get_position("005930", account_key="gap_data_invalid_test") is None
+
+
 def test_paper_buy_quantity_fails_closed_when_runtime_unavailable(fresh_db, monkeypatch):
     """Paper 신규 진입은 runtime 조회 실패 시 주문/포지션을 만들지 않는다."""
     from core.order_executor import OrderExecutor
