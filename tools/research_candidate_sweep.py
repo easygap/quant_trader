@@ -1131,6 +1131,31 @@ def _target_weight_spec_with_position_loss_reduction(
     )
 
 
+def _target_weight_spec_with_volatility_budget(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    lookback_days: int,
+    min_periods: int,
+    max_sleeve_weight_pct: float,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "target_allocation_mode": "inverse_volatility",
+        "allocation_vol_lookback_days": max(2, int(lookback_days)),
+        "allocation_vol_min_periods": max(2, int(min_periods)),
+        "allocation_max_sleeve_weight_pct": max(1.0, float(max_sleeve_weight_pct)),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1761,6 +1786,42 @@ def build_target_weight_turnover_relief_candidate_specs() -> list[CandidateSpec]
     ]
 
 
+def build_target_weight_volatility_budget_candidate_specs() -> list[CandidateSpec]:
+    """Target-weight variants that allocate selected names by inverse realized volatility."""
+    specs_by_id = {
+        spec.candidate_id: spec
+        for spec in build_target_weight_drawdown_guard_candidate_specs()
+    }
+    return [
+        _target_weight_spec_with_volatility_budget(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1"],
+            suffix="volbudget60_cap35",
+            lookback_days=60,
+            min_periods=30,
+            max_sleeve_weight_pct=35.0,
+            description="75pct exposure rank-penalty drawdown guard with inverse-volatility target weights",
+        ),
+        _target_weight_spec_with_volatility_budget(
+            specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1"],
+            suffix="volbudget90_cap35",
+            lookback_days=90,
+            min_periods=45,
+            max_sleeve_weight_pct=35.0,
+            description="75pct exposure rank-penalty drawdown guard with longer inverse-volatility target weights",
+        ),
+        _target_weight_spec_with_volatility_budget(
+            specs_by_id[
+                "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1"
+            ],
+            suffix="volbudget60_cap35",
+            lookback_days=60,
+            min_periods=30,
+            max_sleeve_weight_pct=35.0,
+            description="sector-capped drawdown guard with inverse-volatility target weights",
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
     if family in ("rotation", "relative_strength_rotation"):
@@ -1838,6 +1899,14 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "loss_guard",
     ):
         return build_target_weight_drawdown_guard_candidate_specs()
+    if family in (
+        "target_weight_volatility_budget",
+        "target_weight_vol_budget",
+        "target_weight_risk_budget_weights",
+        "volatility_budget",
+        "vol_budget",
+    ):
+        return build_target_weight_volatility_budget_candidate_specs()
     if family == "all":
         return [
             *build_rotation_candidate_specs(),
@@ -1854,6 +1923,7 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
             *build_target_weight_downside_rank_relief_candidate_specs(),
             *build_target_weight_churn_relief_candidate_specs(),
             *build_target_weight_drawdown_guard_candidate_specs(),
+            *build_target_weight_volatility_budget_candidate_specs(),
         ]
     raise ValueError(
         "candidate_family must be one of: rotation, momentum, breakout, pullback, "
@@ -1861,7 +1931,7 @@ def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> l
         "target_weight_rotation, target_weight_risk_relief, "
         "target_weight_turnover_relief, target_weight_volatility_target, "
         "target_weight_downside_rank_relief, target_weight_churn_relief, "
-        "target_weight_drawdown_guard, all"
+        "target_weight_drawdown_guard, target_weight_volatility_budget, all"
     )
 
 
@@ -2760,6 +2830,178 @@ def _max_pairwise_correlation_for_targets(targets: list[str], correlation_matrix
     return max(values)
 
 
+def _target_weight_allocation_mode(params: dict[str, Any]) -> str:
+    mode = str(params.get("target_allocation_mode", "equal") or "equal").lower().strip()
+    if mode in ("equal", "equal_weight", "fixed", "none", "off", "disabled", ""):
+        return "equal"
+    if mode in (
+        "inverse_volatility",
+        "inverse_vol",
+        "inv_vol",
+        "volatility_budget",
+        "vol_budget",
+        "risk_parity",
+    ):
+        return "inverse_volatility"
+    raise ValueError(
+        "unsupported_target_allocation_mode: "
+        f"{mode}; expected equal or inverse_volatility"
+    )
+
+
+def _normalize_target_value_weights(
+    raw_weights: dict[str, float],
+    *,
+    max_weight: float | None = None,
+) -> dict[str, float]:
+    weights = {
+        sym: max(0.0, float(weight or 0.0))
+        for sym, weight in raw_weights.items()
+    }
+    weights = {sym: weight for sym, weight in weights.items() if weight > 0}
+    if not weights:
+        return {}
+
+    symbols = list(weights)
+    cap = None
+    if max_weight is not None:
+        cap = max(1.0 / len(symbols), min(float(max_weight), 1.0))
+
+    selected: dict[str, float] = {}
+    remaining = set(symbols)
+    remaining_weight = 1.0
+    while remaining:
+        raw_sum = sum(weights[sym] for sym in remaining)
+        if raw_sum <= 0:
+            equal = remaining_weight / len(remaining)
+            for sym in remaining:
+                selected[sym] = equal
+            break
+
+        capped_symbols = []
+        if cap is not None:
+            for sym in sorted(remaining):
+                proposed = remaining_weight * weights[sym] / raw_sum
+                if proposed > cap + 1e-12:
+                    capped_symbols.append(sym)
+
+        if not capped_symbols:
+            for sym in remaining:
+                selected[sym] = remaining_weight * weights[sym] / raw_sum
+            break
+
+        for sym in capped_symbols:
+            selected[sym] = cap
+            remaining.remove(sym)
+            remaining_weight -= cap
+            if remaining_weight <= 1e-12:
+                for other in remaining:
+                    selected[other] = 0.0
+                remaining.clear()
+                break
+
+    total = sum(selected.values())
+    if total <= 0:
+        equal = 1.0 / len(symbols)
+        return {sym: equal for sym in symbols}
+    return {sym: weight / total for sym, weight in selected.items()}
+
+
+def _target_weight_value_weights(
+    close_panel: pd.DataFrame,
+    score_day: pd.Timestamp | None,
+    targets: list[str],
+    params: dict[str, Any],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    target_symbols = [sym for sym in targets if sym in close_panel.columns]
+    if not target_symbols:
+        return {}, {
+            "mode": _target_weight_allocation_mode(params),
+            "missing_vol_symbols": [],
+            "max_weight": 0.0,
+            "min_weight": 0.0,
+        }
+
+    mode = _target_weight_allocation_mode(params)
+    equal_weights = {sym: 1.0 / len(target_symbols) for sym in target_symbols}
+    if mode == "equal" or score_day is None:
+        return equal_weights, {
+            "mode": "equal",
+            "missing_vol_symbols": [],
+            "max_weight": max(equal_weights.values()),
+            "min_weight": min(equal_weights.values()),
+        }
+
+    lookback_days = max(2, int(params.get("allocation_vol_lookback_days", 60) or 60))
+    min_periods = max(
+        2,
+        min(
+            lookback_days,
+            int(params.get("allocation_vol_min_periods", max(20, lookback_days // 2)) or 2),
+        ),
+    )
+    vol_floor_pct = max(0.1, float(params.get("allocation_vol_floor_pct", 5.0) or 5.0))
+    max_sleeve_weight_raw = params.get("allocation_max_sleeve_weight_pct", 35.0)
+    max_sleeve_weight = (
+        max(1.0 / len(target_symbols), min(float(max_sleeve_weight_raw) / 100.0, 1.0))
+        if max_sleeve_weight_raw is not None
+        else None
+    )
+
+    history = close_panel.loc[
+        close_panel.index <= pd.Timestamp(score_day),
+        target_symbols,
+    ].tail(lookback_days + 1)
+    returns = (
+        history.astype(float)
+        .pct_change(fill_method=None)
+        .replace([np.inf, -np.inf], np.nan)
+    )
+    annualized_vol: dict[str, float] = {}
+    missing_symbols: list[str] = []
+    for sym in target_symbols:
+        series = returns[sym].dropna() if sym in returns.columns else pd.Series(dtype=float)
+        if len(series) < min_periods:
+            missing_symbols.append(sym)
+            continue
+        vol_pct = float(series.std()) * np.sqrt(252) * 100
+        if not np.isfinite(vol_pct) or vol_pct <= 0:
+            missing_symbols.append(sym)
+            continue
+        annualized_vol[sym] = vol_pct
+
+    if annualized_vol:
+        fallback_vol = float(np.median(list(annualized_vol.values())))
+    else:
+        fallback_vol = vol_floor_pct
+
+    raw_weights = {
+        sym: 1.0 / max(annualized_vol.get(sym, fallback_vol), vol_floor_pct)
+        for sym in target_symbols
+    }
+    weights = _normalize_target_value_weights(
+        raw_weights,
+        max_weight=max_sleeve_weight,
+    )
+    if not weights:
+        weights = equal_weights
+
+    return weights, {
+        "mode": "inverse_volatility",
+        "vol_lookback_days": lookback_days,
+        "vol_min_periods": min_periods,
+        "vol_floor_pct": vol_floor_pct,
+        "max_sleeve_weight_pct": (
+            max_sleeve_weight * 100
+            if max_sleeve_weight is not None
+            else 100.0
+        ),
+        "missing_vol_symbols": missing_symbols,
+        "max_weight": max(weights.values()) if weights else 0.0,
+        "min_weight": min(weights.values()) if weights else 0.0,
+    }
+
+
 def _limit_new_target_churn(
     *,
     ranked: list[str],
@@ -2809,11 +3051,13 @@ def _execute_target_weight_rebalance(
     risk_manager,
     target_value_multipliers: dict[str, float] | None = None,
     tolerance_bypass_symbols: set[str] | None = None,
+    target_value_weights: dict[str, float] | None = None,
     execution_price_mode: str = "rebalance_day_price",
 ) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float, dict[str, Any]]:
     avg_daily_volumes = avg_daily_volumes or {}
     target_value_multipliers = target_value_multipliers or {}
     tolerance_bypass_symbols = tolerance_bypass_symbols or set()
+    target_value_weights = target_value_weights or {}
     diagnostics = {
         "skipped_tolerance_trades": 0,
         "skipped_tolerance_sell_trades": 0,
@@ -2829,7 +3073,19 @@ def _execute_target_weight_rebalance(
         return cash, positions, [], 0.0, diagnostics
 
     target_set = {sym for sym in targets if prices.get(sym, 0.0) > 0}
-    per_target_value = nav * target_exposure / len(target_set) if target_set else 0.0
+    normalized_target_weights = {
+        sym: float(target_value_weights.get(sym, 0.0) or 0.0)
+        for sym in target_set
+    }
+    if target_set:
+        weight_sum = sum(max(0.0, weight) for weight in normalized_target_weights.values())
+        if weight_sum <= 0:
+            normalized_target_weights = {sym: 1.0 / len(target_set) for sym in target_set}
+        else:
+            normalized_target_weights = {
+                sym: max(0.0, weight) / weight_sum
+                for sym, weight in normalized_target_weights.items()
+            }
     desired_qty: dict[str, float] = {}
     for sym in set(positions) | target_set:
         price = prices.get(sym, 0.0)
@@ -2839,7 +3095,11 @@ def _execute_target_weight_rebalance(
             0.0,
             min(float(target_value_multipliers.get(sym, 1.0) or 0.0), 1.0),
         )
-        target_value = per_target_value * target_multiplier if sym in target_set else 0.0
+        target_value = (
+            nav * target_exposure * normalized_target_weights.get(sym, 0.0) * target_multiplier
+            if sym in target_set
+            else 0.0
+        )
         desired = target_value / price if sym in target_set else 0.0
         if sym in target_value_multipliers and sym in positions:
             current_qty = float(positions.get(sym, {}).get("qty", 0.0) or 0.0)
@@ -3151,6 +3411,28 @@ def run_target_weight_rotation_backtest(
                         0,
                         int(params.get("portfolio_drawdown_guard_cooldown_rebalances", 0) or 0),
                     ),
+                    "target_allocation_mode": _target_weight_allocation_mode(params),
+                    "target_allocation_vol_lookback_days": (
+                        max(2, int(params.get("allocation_vol_lookback_days", 60) or 60))
+                        if _target_weight_allocation_mode(params) == "inverse_volatility"
+                        else 0
+                    ),
+                    "target_allocation_vol_min_periods": (
+                        max(2, int(params.get("allocation_vol_min_periods", 30) or 30))
+                        if _target_weight_allocation_mode(params) == "inverse_volatility"
+                        else 0
+                    ),
+                    "target_allocation_max_sleeve_weight_pct": (
+                        round(float(params.get("allocation_max_sleeve_weight_pct", 35.0) or 35.0), 1)
+                        if _target_weight_allocation_mode(params) == "inverse_volatility"
+                        else round(100 / max(1, int(params.get("target_top_n", 1) or 1)), 1)
+                    ),
+                    "target_allocation_weighted_rebalance_count": 0,
+                    "target_allocation_missing_vol_count": 0,
+                    "target_allocation_missing_vol_symbol_count": 0,
+                    "target_allocation_missing_vol_sample": [],
+                    "target_allocation_max_observed_sleeve_weight_pct": 0,
+                    "target_allocation_min_observed_sleeve_weight_pct": 0,
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
@@ -3183,7 +3465,8 @@ def run_target_weight_rotation_backtest(
         benchmark_close = close_series_from_ohlcv(
             collector.fetch_korean_stock(benchmark_symbol, fetch_start, end)
         )
-        benchmark_close = benchmark_close[benchmark_close.index <= pd.Timestamp(end)]
+        if not benchmark_close.empty:
+            benchmark_close = benchmark_close[benchmark_close.index <= pd.Timestamp(end)]
         score_panel = _target_weight_score_panel(close_panel, benchmark_close, params)
 
         eval_index = close_panel.loc[
@@ -3311,6 +3594,32 @@ def run_target_weight_rotation_backtest(
         )
         rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
         rank_penalty_active = rank_penalty_mode not in ("none", "off", "disabled", "")
+        target_allocation_mode = _target_weight_allocation_mode(params)
+        target_allocation_active = target_allocation_mode == "inverse_volatility"
+        target_allocation_vol_lookback_days = max(
+            2,
+            int(params.get("allocation_vol_lookback_days", 60) or 60),
+        )
+        target_allocation_vol_min_periods = max(
+            2,
+            min(
+                target_allocation_vol_lookback_days,
+                int(
+                    params.get(
+                        "allocation_vol_min_periods",
+                        max(20, target_allocation_vol_lookback_days // 2),
+                    )
+                    or 2
+                ),
+            ),
+        )
+        target_allocation_vol_floor_pct = max(
+            0.1,
+            float(params.get("allocation_vol_floor_pct", 5.0) or 5.0),
+        )
+        target_allocation_max_sleeve_weight_pct = float(
+            params.get("allocation_max_sleeve_weight_pct", 35.0) or 35.0
+        )
         benchmark_freshness_checked = _benchmark_required_for_target_weight(params)
         if benchmark_freshness_checked:
             benchmark_actual_days = pd.DatetimeIndex(benchmark_close.dropna().index).normalize()
@@ -3374,6 +3683,11 @@ def run_target_weight_rotation_backtest(
         selected_sector_max_counts: list[int] = []
         selected_pairwise_correlations: list[float] = []
         correlation_rank_score_penalties: list[float] = []
+        target_allocation_weighted_rebalance_count = 0
+        target_allocation_missing_vol_count = 0
+        target_allocation_missing_vol_symbol_set: set[str] = set()
+        target_allocation_weight_max_values: list[float] = []
+        target_allocation_weight_min_values: list[float] = []
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
@@ -3577,6 +3891,25 @@ def run_target_weight_rotation_backtest(
                     target_exposures.append(target_exposure)
                     if market_target_exposure < base_target_exposure - 1e-9:
                         risk_off_rebalance_count += 1
+                    target_value_weights: dict[str, float] | None = None
+                    if targets:
+                        target_value_weights, allocation_diagnostics = _target_weight_value_weights(
+                            raw_close_panel,
+                            score_day,
+                            targets,
+                            params,
+                        )
+                        if target_allocation_active:
+                            target_allocation_weighted_rebalance_count += 1
+                            missing_symbols = allocation_diagnostics.get("missing_vol_symbols") or []
+                            target_allocation_missing_vol_count += len(missing_symbols)
+                            target_allocation_missing_vol_symbol_set.update(str(sym) for sym in missing_symbols)
+                            target_allocation_weight_max_values.append(
+                                float(allocation_diagnostics.get("max_weight", 0.0) or 0.0)
+                            )
+                            target_allocation_weight_min_values.append(
+                                float(allocation_diagnostics.get("min_weight", 0.0) or 0.0)
+                            )
                     avg_daily_volumes: dict[str, float] = {}
                     if day in avg_volume_panel.index:
                         volume_row = avg_volume_panel.loc[day]
@@ -3620,6 +3953,7 @@ def run_target_weight_rotation_backtest(
                         risk_manager=risk_manager,
                         target_value_multipliers=target_value_multipliers,
                         tolerance_bypass_symbols=set(target_value_multipliers),
+                        target_value_weights=target_value_weights,
                         execution_price_mode=TARGET_WEIGHT_EXECUTION_PRICE_MODE,
                     )
                     trades.extend(new_trades)
@@ -3842,6 +4176,67 @@ def run_target_weight_rotation_backtest(
                     2,
                 ) if portfolio_drawdown_guard_drawdowns else 0,
                 "portfolio_drawdown_guard_remaining_cooldown": portfolio_drawdown_guard_cooldown_remaining,
+                "target_allocation_mode": target_allocation_mode,
+                "target_allocation_vol_lookback_days": (
+                    target_allocation_vol_lookback_days
+                    if target_allocation_active
+                    else 0
+                ),
+                "target_allocation_vol_min_periods": (
+                    target_allocation_vol_min_periods
+                    if target_allocation_active
+                    else 0
+                ),
+                "target_allocation_vol_floor_pct": (
+                    round(target_allocation_vol_floor_pct, 2)
+                    if target_allocation_active
+                    else 0.0
+                ),
+                "target_allocation_max_sleeve_weight_pct": (
+                    round(
+                        max(
+                            100.0 / max(1, top_n),
+                            min(target_allocation_max_sleeve_weight_pct, 100.0),
+                        ),
+                        1,
+                    )
+                    if target_allocation_active
+                    else round(100.0 / max(1, top_n), 1)
+                ),
+                "target_allocation_weighted_rebalance_count": (
+                    target_allocation_weighted_rebalance_count
+                    if target_allocation_active
+                    else 0
+                ),
+                "target_allocation_weighted_rebalance_pct": round(
+                    target_allocation_weighted_rebalance_count / rebalance_count * 100,
+                    1,
+                ) if target_allocation_active and rebalance_count else 0,
+                "target_allocation_missing_vol_count": (
+                    target_allocation_missing_vol_count
+                    if target_allocation_active
+                    else 0
+                ),
+                "target_allocation_missing_vol_symbol_count": (
+                    len(target_allocation_missing_vol_symbol_set)
+                    if target_allocation_active
+                    else 0
+                ),
+                "target_allocation_missing_vol_sample": (
+                    sorted(target_allocation_missing_vol_symbol_set)[:10]
+                    if target_allocation_active
+                    else []
+                ),
+                "target_allocation_max_observed_sleeve_weight_pct": (
+                    round(max(target_allocation_weight_max_values) * 100, 1)
+                    if target_allocation_active and target_allocation_weight_max_values
+                    else round(100.0 / max(1, top_n), 1)
+                ),
+                "target_allocation_min_observed_sleeve_weight_pct": (
+                    round(min(target_allocation_weight_min_values) * 100, 1)
+                    if target_allocation_active and target_allocation_weight_min_values
+                    else round(100.0 / max(1, top_n), 1)
+                ),
                 "rank_penalty_mode": rank_penalty_mode if rank_penalty_active else "none",
                 "rank_penalty_lookback": max(
                     0,
@@ -4848,6 +5243,7 @@ def main() -> None:
             "target_weight_downside_rank_relief",
             "target_weight_churn_relief",
             "target_weight_drawdown_guard",
+            "target_weight_volatility_budget",
             "all",
         ],
         help="Research candidate family to evaluate.",
