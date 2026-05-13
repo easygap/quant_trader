@@ -313,16 +313,13 @@ def build_promotion_results(
         load_paper_evidence_package,
         paper_evidence_metrics_from_package,
         promote,
+        target_weight_params_hashes_from_strategy_specs,
     )
 
     promotions = {}
-    canonical_params_hashes = {
-        spec.get("candidate_id"): spec.get("params_hash")
-        for spec in (strategy_specs or [])
-        if isinstance(spec, dict)
-        and isinstance(spec.get("candidate_id"), str)
-        and isinstance(spec.get("params_hash"), str)
-    }
+    target_weight_params_hashes = target_weight_params_hashes_from_strategy_specs(
+        strategy_specs or []
+    )
     canonical_integrity_issues = (
         validate_canonical_metadata_integrity(canonical_metadata)
         if isinstance(canonical_metadata, dict)
@@ -352,6 +349,7 @@ def build_promotion_results(
         "paper_trade_quality_adverse_gap_bps",
         "paper_trade_quality_missing_expected_ratio",
         "paper_trade_quality_missing_expected_count",
+        "target_weight_strategy_required",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
@@ -370,7 +368,7 @@ def build_promotion_results(
         paper_metrics = attach_target_weight_canonical_hash_check(
             name,
             paper_metrics,
-            canonical_params_hashes,
+            target_weight_params_hashes,
         )
         for key in paper_fields:
             value = paper_metrics.get(key)
@@ -429,6 +427,7 @@ PROMOTION_BLOCKER_METRIC_KEYS = (
     "paper_trade_quality_adverse_gap_bps",
     "paper_trade_quality_missing_expected_ratio",
     "paper_trade_quality_missing_expected_count",
+    "target_weight_strategy_required",
     "target_weight_verified_pilot_days",
     "target_weight_invalid_days",
     "target_weight_params_hash_matches_canonical",

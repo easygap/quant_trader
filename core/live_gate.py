@@ -22,6 +22,7 @@ LIVE_GATE_ARTIFACT_TYPE = "canonical_promotion_bundle"
 LIVE_GATE_MAX_ARTIFACT_AGE_DAYS = 7
 LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS = 14
 LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH = 64
+TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
 
 REQUIRED_PROMOTION_ARTIFACTS = (
     "metrics_summary.json",
@@ -250,7 +251,23 @@ def validate_canonical_metadata_integrity(metadata: dict[str, Any]) -> list[str]
     return issues
 
 
-def _is_target_weight_strategy(strategy_name: str) -> bool:
+def _strategy_spec_for(metadata: dict[str, Any], strategy_name: str) -> dict[str, Any] | None:
+    specs = metadata.get("strategy_specs")
+    if not isinstance(specs, list):
+        return None
+    for spec in specs:
+        if isinstance(spec, dict) and spec.get("candidate_id") == strategy_name:
+            return spec
+    return None
+
+
+def _is_target_weight_strategy(strategy_name: str, metadata: dict[str, Any] | None = None) -> bool:
+    if isinstance(metadata, dict):
+        spec = _strategy_spec_for(metadata, strategy_name)
+        if isinstance(spec, dict):
+            base_strategy = spec.get("base_strategy") or spec.get("strategy")
+            if isinstance(base_strategy, str) and base_strategy in TARGET_WEIGHT_BASE_STRATEGIES:
+                return True
     return strategy_name.startswith("target_weight_")
 
 
@@ -258,15 +275,10 @@ def _canonical_target_weight_params_hash(
     metadata: dict[str, Any],
     strategy_name: str,
 ) -> str | None:
-    specs = metadata.get("strategy_specs")
-    if not isinstance(specs, list):
-        return None
-    for spec in specs:
-        if not isinstance(spec, dict):
-            continue
-        if spec.get("candidate_id") == strategy_name:
-            params_hash = spec.get("params_hash")
-            return params_hash if isinstance(params_hash, str) and params_hash else None
+    spec = _strategy_spec_for(metadata, strategy_name)
+    if isinstance(spec, dict):
+        params_hash = spec.get("params_hash")
+        return params_hash if isinstance(params_hash, str) and params_hash else None
     return None
 
 
@@ -274,8 +286,9 @@ def _validate_target_weight_evidence_summary(
     strategy_name: str,
     evidence: dict[str, Any],
     canonical_params_hash: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> list[str]:
-    if not _is_target_weight_strategy(strategy_name):
+    if not _is_target_weight_strategy(strategy_name, metadata):
         return []
 
     summary = evidence.get("target_weight_evidence")
@@ -586,6 +599,7 @@ def validate_live_readiness(
                 strategy_name,
                 evidence,
                 canonical_params_hash=_canonical_target_weight_params_hash(metadata, strategy_name),
+                metadata=metadata,
             )
         )
 

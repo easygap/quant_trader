@@ -786,6 +786,31 @@ def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp
     assert "target-weight evidence required flag missing" in promotions[strategy]["reason"]
 
 
+def test_build_promotion_results_uses_metadata_for_target_weight_identity(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "rotation_candidate_test"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        strategy_specs=[{
+            "candidate_id": strategy,
+            "base_strategy": "target_weight_rotation",
+            "params_hash": "hash",
+        }],
+    )
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "live" not in promotions[strategy]["allowed_modes"]
+    assert "target-weight evidence required flag missing" in promotions[strategy]["reason"]
+    assert metrics[strategy]["target_weight_strategy_required"] is True
+    assert metrics[strategy]["target_weight_canonical_params_hash"] == "hash"
+
+
 def test_build_promotion_results_promotes_target_weight_with_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
