@@ -1085,6 +1085,30 @@ def _target_weight_spec_with_correlation_rank_penalty(
     )
 
 
+def _target_weight_spec_with_loss_reentry_guard(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    trigger_pct: float,
+    max_new_targets: int,
+    cooldown_rebalances: int,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "loss_reentry_guard_trigger_pct": max(0.0, float(trigger_pct)),
+        "loss_reentry_guard_max_new_targets": max(0, int(max_new_targets)),
+        "loss_reentry_guard_cooldown_rebalances": max(0, int(cooldown_rebalances)),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1421,6 +1445,30 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         mode="mean_positive",
         description="75pct exposure rank-penalty rotation with sector cap and correlation score penalty",
     )
+    exp75_rankrisk90_tol4_reentry4 = _target_weight_spec_with_loss_reentry_guard(
+        exp75_rankrisk90_tol4,
+        suffix="reentry4_maxnew0_cd1",
+        trigger_pct=4.0,
+        max_new_targets=0,
+        cooldown_rebalances=1,
+        description="75pct exposure rank-penalty rotation with post-loss re-entry guard",
+    )
+    exp75_rankrisk90_tol4_reentry3 = _target_weight_spec_with_loss_reentry_guard(
+        exp75_rankrisk90_tol4,
+        suffix="reentry3_maxnew0_cd1",
+        trigger_pct=3.0,
+        max_new_targets=0,
+        cooldown_rebalances=1,
+        description="75pct exposure rank-penalty rotation with stricter post-loss re-entry guard",
+    )
+    exp75_rankrisk90_tol4_sectorcap2_reentry4 = _target_weight_spec_with_loss_reentry_guard(
+        exp75_rankrisk90_tol4_sectorcap2,
+        suffix="reentry4_maxnew0_cd1",
+        trigger_pct=4.0,
+        max_new_targets=0,
+        cooldown_rebalances=1,
+        description="75pct exposure rank-penalty rotation with sector cap and post-loss re-entry guard",
+    )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
         suffix="maxnew2",
@@ -1566,6 +1614,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with sector/correlation score penalties and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_reentry4,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with post-loss re-entry and portfolio guards",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_reentry3,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with strict post-loss re-entry and portfolio guards",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap2_reentry4,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with sector/post-loss re-entry and portfolio guards",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
@@ -2924,6 +2990,26 @@ def run_target_weight_rotation_backtest(
                         else None
                     ),
                     "max_correlation_rank_score_penalty": 0,
+                    "loss_reentry_guard_enabled": bool(
+                        float(params.get("loss_reentry_guard_trigger_pct", 0.0) or 0.0) > 0
+                    ),
+                    "loss_reentry_guard_trigger_pct": round(
+                        max(0.0, float(params.get("loss_reentry_guard_trigger_pct", 0.0) or 0.0)),
+                        2,
+                    ),
+                    "loss_reentry_guard_max_new_targets": (
+                        max(0, int(params.get("loss_reentry_guard_max_new_targets", 0) or 0))
+                        if float(params.get("loss_reentry_guard_trigger_pct", 0.0) or 0.0) > 0
+                        else None
+                    ),
+                    "loss_reentry_guard_cooldown_rebalances": (
+                        max(0, int(params.get("loss_reentry_guard_cooldown_rebalances", 0) or 0))
+                        if float(params.get("loss_reentry_guard_trigger_pct", 0.0) or 0.0) > 0
+                        else 0
+                    ),
+                    "loss_reentry_guard_trigger_count": 0,
+                    "loss_reentry_guard_rebalance_count": 0,
+                    "loss_reentry_guard_worst_loss_pct": 0,
                     "portfolio_drawdown_guard_enabled": bool(
                         float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0) > 0
                     ),
@@ -3045,6 +3131,19 @@ def run_target_weight_rotation_backtest(
                 or 2
             ),
         )
+        loss_reentry_guard_trigger_pct = max(
+            0.0,
+            float(params.get("loss_reentry_guard_trigger_pct", 0.0) or 0.0),
+        )
+        loss_reentry_guard_enabled = loss_reentry_guard_trigger_pct > 0
+        loss_reentry_guard_max_new_targets = max(
+            0,
+            int(params.get("loss_reentry_guard_max_new_targets", 0) or 0),
+        )
+        loss_reentry_guard_cooldown_rebalances = max(
+            0,
+            int(params.get("loss_reentry_guard_cooldown_rebalances", 0) or 0),
+        )
         portfolio_drawdown_guard_trigger_pct = max(
             0.0,
             float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
@@ -3104,6 +3203,11 @@ def run_target_weight_rotation_backtest(
         portfolio_drawdown_guard_trigger_count = 0
         portfolio_drawdown_guard_rebalance_count = 0
         portfolio_drawdown_guard_drawdowns: list[float] = []
+        loss_reentry_guard_reference_value: float | None = None
+        loss_reentry_guard_cooldown_remaining = 0
+        loss_reentry_guard_trigger_count = 0
+        loss_reentry_guard_rebalance_count = 0
+        loss_reentry_guard_losses: list[float] = []
         total_turnover = 0.0
         skipped_tolerance_trades = 0
         skipped_tolerance_sell_trades = 0
@@ -3125,6 +3229,7 @@ def run_target_weight_rotation_backtest(
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
+            rebalance_executed_today = False
             close_price_row = close_panel.loc[day]
             close_prices = {
                 sym: float(close_price_row[sym])
@@ -3208,13 +3313,41 @@ def run_target_weight_rotation_backtest(
                         if max_pairwise_correlation is not None
                         else None
                     )
+                    effective_max_new_targets_per_rebalance = max_new_targets_per_rebalance
+                    if (
+                        loss_reentry_guard_enabled
+                        and positions
+                        and loss_reentry_guard_reference_value is not None
+                        and loss_reentry_guard_reference_value > 0
+                    ):
+                        reentry_loss_pct = (
+                            last_equity_value / loss_reentry_guard_reference_value - 1.0
+                        ) * 100
+                        if reentry_loss_pct <= -loss_reentry_guard_trigger_pct:
+                            loss_reentry_guard_trigger_count += 1
+                            loss_reentry_guard_cooldown_remaining = max(
+                                loss_reentry_guard_cooldown_remaining,
+                                loss_reentry_guard_cooldown_rebalances + 1,
+                            )
+                        if loss_reentry_guard_cooldown_remaining > 0:
+                            effective_max_new_targets_per_rebalance = (
+                                loss_reentry_guard_max_new_targets
+                                if effective_max_new_targets_per_rebalance is None
+                                else min(
+                                    effective_max_new_targets_per_rebalance,
+                                    loss_reentry_guard_max_new_targets,
+                                )
+                            )
+                            loss_reentry_guard_rebalance_count += 1
+                            loss_reentry_guard_losses.append(reentry_loss_pct)
+                            loss_reentry_guard_cooldown_remaining -= 1
                     targets = _select_target_weight_targets(
                         score_row,
                         close_prices,
                         positions,
                         top_n,
                         hold_rank_buffer,
-                        max_new_targets_per_rebalance,
+                        effective_max_new_targets_per_rebalance,
                         max_targets_per_sector,
                         sector_map_for_selection,
                         max_pairwise_correlation,
@@ -3325,6 +3458,7 @@ def run_target_weight_rotation_backtest(
                         rebalance_diagnostics.get("skipped_tolerance_notional", 0.0) or 0.0
                     )
                     rebalance_count += 1
+                    rebalance_executed_today = True
                     filled_slots.append(len([sym for sym in targets if sym in positions]))
 
             stale_held_symbols: list[tuple[str, str]] = []
@@ -3366,6 +3500,8 @@ def run_target_weight_rotation_backtest(
             last_equity_value = value
             if value > portfolio_peak_value:
                 portfolio_peak_value = value
+            if rebalance_executed_today and loss_reentry_guard_enabled:
+                loss_reentry_guard_reference_value = value
             equity_rows.append(
                 {
                     "date": day,
@@ -3447,6 +3583,33 @@ def run_target_weight_rotation_backtest(
                     if correlation_rank_score_penalties
                     else 0
                 ),
+                "loss_reentry_guard_enabled": loss_reentry_guard_enabled,
+                "loss_reentry_guard_trigger_pct": round(
+                    loss_reentry_guard_trigger_pct,
+                    2,
+                ) if loss_reentry_guard_enabled else 0.0,
+                "loss_reentry_guard_max_new_targets": (
+                    loss_reentry_guard_max_new_targets
+                    if loss_reentry_guard_enabled
+                    else None
+                ),
+                "loss_reentry_guard_cooldown_rebalances": (
+                    loss_reentry_guard_cooldown_rebalances
+                    if loss_reentry_guard_enabled
+                    else 0
+                ),
+                "loss_reentry_guard_trigger_count": loss_reentry_guard_trigger_count,
+                "loss_reentry_guard_rebalance_count": loss_reentry_guard_rebalance_count,
+                "loss_reentry_guard_rebalance_pct": round(
+                    loss_reentry_guard_rebalance_count / rebalance_count * 100,
+                    1,
+                ) if rebalance_count else 0,
+                "loss_reentry_guard_worst_loss_pct": (
+                    round(min(loss_reentry_guard_losses), 2)
+                    if loss_reentry_guard_losses
+                    else 0
+                ),
+                "loss_reentry_guard_remaining_cooldown": loss_reentry_guard_cooldown_remaining,
                 "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
                 "portfolio_drawdown_guard_trigger_pct": round(
                     portfolio_drawdown_guard_trigger_pct,
