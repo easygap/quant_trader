@@ -454,6 +454,58 @@ class OrderExecutor:
 
         return {"allowed": True, "reason": ""}
 
+    def _entry_liquidity_check(
+        self,
+        symbol: str,
+        price: float,
+        avg_daily_volume: float | None,
+        action: str = "BUY",
+    ) -> dict:
+        """주문 직전 유동성 데이터가 없거나 하한 미달이면 신규 BUY를 차단한다."""
+        if str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+
+        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
+        if not (liq.get("enabled", False) and liq.get("check_on_entry", True)):
+            return {"allowed": True, "reason": ""}
+
+        try:
+            current_price = float(price or 0)
+        except (TypeError, ValueError):
+            current_price = 0.0
+        if current_price <= 0:
+            reason = f"유동성 확인 실패: {symbol} 현재가 없음"
+            logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "liquidity_blocked": True}
+
+        try:
+            avg_volume = float(avg_daily_volume)
+        except (TypeError, ValueError):
+            avg_volume = 0.0
+        if avg_volume <= 0:
+            reason = f"유동성 확인 실패: {symbol} 20일 평균 거래량 데이터 없음"
+            logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "liquidity_blocked": True}
+
+        min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5e9))
+        est_trading_value = avg_volume * current_price
+        if est_trading_value < min_krw:
+            reason = (
+                f"유동성 부족: 추정 일평균 거래대금 {est_trading_value/1e8:.0f}억 원 "
+                f"< 하한 {min_krw/1e8:.0f}억 원"
+            )
+            logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, reason)
+            return {
+                "allowed": False,
+                "reason": reason,
+                "liquidity_blocked": True,
+                "avg_daily_volume": avg_volume,
+                "estimated_avg_trading_value_20d_krw": est_trading_value,
+                "min_avg_trading_value_20d_krw": min_krw,
+            }
+
+        return {"allowed": True, "reason": ""}
+
     @staticmethod
     def _is_emergency_sell_reason(reason: str) -> bool:
         """손실 방어용 청산은 최소 보유 기간보다 우선한다."""
@@ -612,20 +664,6 @@ class OrderExecutor:
                 logger.warning("종목 {} 매수 스킵 (실적 필터): {}", symbol, reason_earn)
                 return {"success": False, "reason": reason_earn}
 
-        # 진입 시점 유동성 재검증: watchlist 구축 이후 유동성이 변했을 수 있음
-        liq = (self.config.risk_params or {}).get("liquidity_filter") or {}
-        if liq.get("enabled", False) and liq.get("check_on_entry", True):
-            min_krw = float(liq.get("min_avg_trading_value_20d_krw", 5e9))
-            if avg_daily_volume is not None and price > 0:
-                est_trading_value = avg_daily_volume * price
-                if est_trading_value < min_krw:
-                    msg = (
-                        f"유동성 부족: 추정 일평균 거래대금 {est_trading_value/1e8:.0f}억 원 "
-                        f"< 하한 {min_krw/1e8:.0f}억 원"
-                    )
-                    logger.warning("종목 {} 매수 스킵 (유동성): {}", symbol, msg)
-                    return {"success": False, "reason": msg}
-
         # 분산 투자 체크 (업종 비중 포함, 상관 체크에서 이미 조회한 positions 재활용)
         sector_map = self._get_sector_map_cached()
         div_check = self.risk_manager.check_diversification(
@@ -681,6 +719,8 @@ class OrderExecutor:
             action="BUY",
             strategy=strategy,
             candidate_notional=estimated_fill_price * quantity,
+            price=price,
+            avg_daily_volume=avg_daily_volume,
         )
         if not pre_check["allowed"]:
             result = {"success": False, "reason": pre_check["reason"]}
@@ -920,6 +960,8 @@ class OrderExecutor:
             action="BUY",
             strategy=strategy,
             candidate_notional=fill_price * quantity,
+            price=price,
+            avg_daily_volume=avg_daily_volume,
         )
         if not pre_check["allowed"]:
             result = {"success": False, "reason": pre_check["reason"]}
@@ -1756,6 +1798,8 @@ class OrderExecutor:
         action: str = "BUY",
         strategy: str = "",
         candidate_notional: float | None = None,
+        price: float | None = None,
+        avg_daily_volume: float | None = None,
     ) -> dict:
         """
         주문 전 안전 체크 (거래 시간 + 블랙스완)
@@ -1776,11 +1820,22 @@ class OrderExecutor:
 
         # 페이퍼/스케줄 신규 진입은 runtime/preflight 확인에 실패하면 차단한다.
         if self.mode != "live":
-            return self._paper_entry_pre_order_check(
+            paper_check = self._paper_entry_pre_order_check(
                 action=action,
                 strategy=strategy,
                 candidate_notional=candidate_notional,
             )
+            if not paper_check["allowed"]:
+                return paper_check
+            liquidity_check = self._entry_liquidity_check(
+                symbol=symbol,
+                price=price if price is not None else 0,
+                avg_daily_volume=avg_daily_volume,
+                action=action,
+            )
+            if not liquidity_check["allowed"]:
+                return liquidity_check
+            return paper_check
 
         # 거래 시간 체크
         time_check = self.trading_hours.can_place_order()
@@ -1793,6 +1848,15 @@ class OrderExecutor:
         if not bs_check["allowed"]:
             logger.warning("🚨 주문 차단: {}", bs_check["reason"])
             return bs_check
+
+        liquidity_check = self._entry_liquidity_check(
+            symbol=symbol,
+            price=price if price is not None else 0,
+            avg_daily_volume=avg_daily_volume,
+            action=action,
+        )
+        if not liquidity_check["allowed"]:
+            return liquidity_check
 
         return {"allowed": True, "reason": ""}
 
