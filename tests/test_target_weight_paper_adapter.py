@@ -1506,7 +1506,8 @@ def test_execute_plan_uses_portfolio_current_capital_for_buy_orders():
             return 11_000_000.0
 
     with patch("core.order_executor.OrderExecutor", FakeExecutor), \
-         patch("core.portfolio_manager.PortfolioManager", FakePortfolio):
+         patch("core.portfolio_manager.PortfolioManager", FakePortfolio), \
+         patch("tools.target_weight_rotation_pilot._load_positions", lambda account_key: {}):
         execution = execute_plan(
             plan,
             config=SimpleNamespace(trading={"mode": "paper"}),
@@ -1642,6 +1643,44 @@ def test_execute_plan_blocks_stale_starting_positions_before_order_submission(mo
     assert execution["halted"] is True
     assert "target_weight_pre_execution_position_drift" in execution["halt_reason"]
     assert execution["details"][0]["status"] == "skipped_pre_execution_position_drift"
+
+
+def test_execute_plan_rechecks_positions_after_supplied_pre_execution_snapshot(monkeypatch, tmp_path):
+    from tools.target_weight_rotation_pilot import execute_plan
+
+    plan = _adapter_plan()
+    monkeypatch.setattr("core.paper_pilot.RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot._load_positions",
+        lambda account_key: {"ZZZ": SimpleNamespace(quantity=3)},
+    )
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("position drift must block before order submission"),
+    )
+
+    execution = execute_plan(
+        plan,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        dry_run=False,
+        **_execute_plan_submit_guards_ok(plan),
+        execution_idempotency={"allowed": True},
+        pre_execution_reconciliation={
+            "checked": True,
+            "complete": True,
+            "reason": "stale pre-execution snapshot looked clean",
+        },
+        liquidity_check={"checked": True, "complete": True, "reason": "ok"},
+        pre_trade_risk_check={"checked": True, "complete": True, "reason": "ok"},
+    )
+
+    assert execution["executed"] == 0
+    assert execution["skipped"] == len(plan.orders)
+    assert execution["halted"] is True
+    assert "target_weight_pre_execution_position_drift" in execution["halt_reason"]
+    assert execution["pre_execution_reconciliation"]["unexpected_positions"] == [
+        {"symbol": "ZZZ", "actual_quantity": 3}
+    ]
 
 
 def test_execute_plan_blocks_duplicate_session_before_order_submission(monkeypatch, tmp_path):
@@ -4167,6 +4206,61 @@ def test_run_pilot_blocks_order_submission_when_starting_positions_drift(monkeyp
     assert saved_sessions == []
 
 
+def test_run_pilot_rechecks_starting_positions_inside_execute_plan(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    saved_sessions = []
+    plan = _adapter_plan()
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: _pilot_check_for_plan(plan),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: saved_sessions.append(kwargs["pilot_session"]),
+    )
+    position_snapshots = iter([
+        {},
+        {"ZZZ": SimpleNamespace(quantity=3)},
+    ])
+    monkeypatch.setattr(twp, "_load_positions", lambda account_key: next(position_snapshots))
+    monkeypatch.setattr(
+        "core.order_executor.OrderExecutor",
+        lambda *args, **kwargs: pytest.fail("final position drift must block before order submission"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("blocked execution must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+
+    pre_reconciliation = result["execution_evidence"]["pre_execution_reconciliation"]
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution_evidence"]["pre_execution_complete"] is False
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_pre_execution_position_drift" in result["evidence_collection"]["reason"]
+    assert pre_reconciliation["unexpected_positions"] == [
+        {"symbol": "ZZZ", "actual_quantity": 3}
+    ]
+    assert saved_sessions == []
+
+
 def test_run_pilot_blocks_order_submission_when_liquidity_preflight_fails(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import core.paper_pilot as pp
@@ -5181,6 +5275,26 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     )
 
     assert issues == []
+
+
+def test_existing_pilot_evidence_uses_latest_same_day_record(monkeypatch):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_record = _existing_pilot_evidence_record(plan)
+    stale_record["pilot_caps_snapshot"]["target_weight_execution"]["complete"] = False
+    latest_record = _existing_pilot_evidence_record(plan)
+    monkeypatch.setattr(
+        pe,
+        "get_canonical_records",
+        lambda strategy: [stale_record, latest_record],
+    )
+
+    result = twp.verify_existing_pilot_evidence_record(plan)
+
+    assert result["valid"] is True
+    assert result["reason"] == "existing pilot_paper evidence verified"
 
 
 def test_run_pilot_accepts_verified_already_recorded_pilot_evidence(monkeypatch, tmp_path):
