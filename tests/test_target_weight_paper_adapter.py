@@ -1897,6 +1897,58 @@ def test_preview_plan_against_caps_flags_default_pilot_caps():
     assert relaxed_preview.allowed is True
 
 
+def test_pilot_plan_validation_blocks_remaining_exposure_shortfall():
+    from core.target_weight_rotation import validate_plan_against_pilot
+
+    plan = _adapter_plan()
+    validation = validate_plan_against_pilot(
+        plan,
+        SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=3_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+
+    assert validation.allowed is False
+    assert "remaining_exposure" in validation.reason
+    assert "required exposure increase" in validation.violations[0]
+
+
+def test_pilot_plan_validation_uses_net_exposure_increase_for_existing_positions():
+    from core.target_weight_rotation import validate_plan_against_pilot
+
+    plan = replace(
+        _adapter_plan(),
+        market_value_before=3_000_000.0,
+        gross_exposure_after=3_200_000.0,
+    )
+    validation = validate_plan_against_pilot(
+        plan,
+        SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=250_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+
+    assert validation.allowed is True
+
+
 def test_recommend_pilot_caps_matches_target_weight_plan():
     from tools.target_weight_rotation_pilot import recommend_pilot_caps
 
