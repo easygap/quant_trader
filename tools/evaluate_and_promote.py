@@ -30,6 +30,7 @@ CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
 )
 
 

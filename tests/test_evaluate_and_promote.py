@@ -14,6 +14,7 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
     ]
     assert specs[0].strategy == "target_weight_rotation"
     assert specs[0].params["market_exposure_mode"] == "benchmark_risk"
@@ -23,6 +24,9 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
     assert specs[1].params["portfolio_drawdown_guard_cooldown_rebalances"] == 1
     assert specs[2].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[2].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[3].params["target_tolerance_pct"] == 3.0
+    assert specs[3].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+    assert specs[3].params["portfolio_drawdown_guard_exposure"] == 0.40
 
 
 def test_canonical_research_candidate_metadata_hashes_params():
