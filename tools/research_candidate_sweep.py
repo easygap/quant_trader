@@ -1984,6 +1984,28 @@ def apply_research_universe_liquidity_filter(
     return report.get("passed_symbols", normalized), report
 
 
+def _empty_research_universe_reason(
+    input_universe: list[str],
+    liquidity_filter: dict[str, Any],
+) -> str:
+    if not input_universe:
+        return "empty_input_universe"
+    if not liquidity_filter.get("enabled"):
+        return "empty_universe_after_normalization"
+
+    symbol_details = liquidity_filter.get("symbols") or {}
+    reasons = [
+        str(detail.get("reason", "")).strip()
+        for detail in symbol_details.values()
+        if isinstance(detail, dict) and str(detail.get("reason", "")).strip()
+    ]
+    if reasons and all(reason == "missing_liquidity_data" for reason in reasons):
+        return "all_symbols_missing_liquidity_data"
+    if reasons and all(reason == "below_min_avg_trading_value" for reason in reasons):
+        return "all_symbols_below_liquidity_threshold"
+    return "empty_universe_after_liquidity_filter"
+
+
 def _benchmark_result_unavailable(
     requested_symbols: list[str],
     benchmark_symbols: list[str],
@@ -4388,14 +4410,78 @@ def run_candidate_sweep(
             len(symbols),
             start,
         )
-    benchmark, benchmark_daily_returns = buy_and_hold_benchmark_with_returns(symbols, start, end, capital)
-    windows = make_windows(start, end) if include_walk_forward else []
-    records = []
-
     specs = filter_candidate_specs(
         build_candidate_specs(candidate_family),
         candidate_ids,
     )
+    if not symbols:
+        empty_reason = _empty_research_universe_reason(input_universe, liquidity_filter)
+        benchmark = _benchmark_result_unavailable(
+            input_universe,
+            [],
+            input_universe,
+            empty_reason,
+        )
+        decision = build_decision_summary(
+            [],
+            walk_forward_enabled=include_walk_forward,
+            benchmark=benchmark,
+        )
+        family_slug = candidate_family.lower().strip()
+        run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{family_slug}"
+        return {
+            "schema_version": 1,
+            "artifact_type": "research_candidate_sweep_bundle",
+            "run_id": run_id,
+            "generated_at": datetime.now().isoformat(),
+            "commit_hash": get_git_hash(),
+            "config_yaml_hash": config.yaml_hash,
+            "config_resolved_hash": config.resolved_hash,
+            "eval_start": start,
+            "eval_end": end,
+            "initial_capital": capital,
+            "candidate_family": candidate_family,
+            "candidate_ids_requested": list(candidate_ids or []),
+            "candidate_ids_evaluated": [],
+            "candidate_ids_skipped_due_to_data": [spec.candidate_id for spec in specs],
+            "universe_selection": {
+                **universe_selection,
+                "selected_before_liquidity_filter": len(input_universe),
+                "selected_after_liquidity_filter": 0,
+                "empty_universe_reason": empty_reason,
+            },
+            "input_universe": input_universe,
+            "universe_liquidity_filter": liquidity_filter,
+            "universe": [],
+            "benchmark": benchmark,
+            "walk_forward": {
+                "enabled": include_walk_forward,
+                "windows": [],
+            },
+            "ranking_rule": (
+                "rank_score + promotion status; live/paper promotion remains controlled "
+                "by canonical promotion and evidence gates"
+            ),
+            "data_fetch_cache": {
+                "enabled": False,
+                "skipped": True,
+                "reason": empty_reason,
+            },
+            "decision": decision,
+            "rejection_summary": [],
+            "candidates": [],
+            "summary": {
+                "evaluated": 0,
+                "eligible_for_canonical_eval": 0,
+                "best_candidate_id": None,
+                "decision_action": decision["action"],
+                "skipped_due_to_data": len(specs),
+            },
+        }
+    benchmark, benchmark_daily_returns = buy_and_hold_benchmark_with_returns(symbols, start, end, capital)
+    windows = make_windows(start, end) if include_walk_forward else []
+    records = []
+
     target_weight_collector = None
     if any(spec.strategy == "target_weight_rotation" for spec in specs):
         from core.data_collector import DataCollector
@@ -4575,6 +4661,16 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             f"unique_fetches={int(fetch_cache.get('unique_fetches', 0) or 0)}, "
             f"cache_hits={int(fetch_cache.get('cache_hits', 0) or 0)}, "
             f"cached_items={int(fetch_cache.get('cached_items', 0) or 0)}"
+        )
+    elif fetch_cache.get("skipped"):
+        lines.append(
+            "Data fetch cache: skipped "
+            f"({fetch_cache.get('reason', 'unknown')})"
+        )
+    if int((bundle.get("summary") or {}).get("skipped_due_to_data", 0) or 0) > 0:
+        lines.append(
+            "Candidate evaluation: skipped_due_to_data="
+            f"{int((bundle.get('summary') or {}).get('skipped_due_to_data', 0) or 0)}"
         )
     lines.extend(
         [
