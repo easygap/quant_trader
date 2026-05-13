@@ -24,12 +24,9 @@ DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 RESEARCH_ONLY_PLAN_PARAMS = (
     "max_new_targets_per_rebalance",
     "max_pairwise_correlation",
-    "max_targets_per_sector",
     "portfolio_drawdown_guard_cooldown_rebalances",
     "portfolio_drawdown_guard_exposure",
     "portfolio_drawdown_guard_trigger_pct",
-    "position_loss_reduce_target_fraction",
-    "position_loss_reduce_trigger_pct",
     "rebalance_frequency",
 )
 
@@ -151,7 +148,7 @@ def unsupported_plan_params(params: dict[str, Any]) -> list[str]:
     unsupported = [key for key in RESEARCH_ONLY_PLAN_PARAMS if key in params]
 
     rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
-    if rank_penalty_mode not in ("", "none"):
+    if rank_penalty_mode not in ("", "none", "off", "disabled", "downside_risk", "downside", "risk"):
         unsupported.append("rank_penalty_mode")
 
     target_allocation_mode = str(
@@ -273,6 +270,44 @@ def _benchmark_required_for_target_weight(params: dict[str, Any]) -> bool:
     return score_mode == "benchmark_excess" or exposure_mode.startswith("benchmark_")
 
 
+def _target_weight_rank_penalty_panel(
+    close_panel: pd.DataFrame,
+    params: dict[str, Any],
+) -> pd.DataFrame | None:
+    mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
+    if mode in ("none", "off", "disabled", ""):
+        return None
+    if mode not in ("downside_risk", "downside", "risk"):
+        raise ValueError(
+            "unsupported_rank_penalty_mode: "
+            f"{mode}; expected downside_risk, downside, risk, or none"
+        )
+
+    lookback = max(2, int(params.get("rank_penalty_lookback", 60) or 60))
+    min_periods = max(
+        2,
+        min(lookback, int(params.get("rank_penalty_min_periods", lookback) or lookback)),
+    )
+    downside_weight = max(0.0, float(params.get("downside_vol_penalty_weight", 0.0) or 0.0))
+    drawdown_weight = max(0.0, float(params.get("drawdown_penalty_weight", 0.0) or 0.0))
+    penalty = pd.DataFrame(0.0, index=close_panel.index, columns=close_panel.columns)
+
+    if downside_weight > 0:
+        downside_returns = close_panel.pct_change().clip(upper=0.0)
+        downside_vol = (
+            downside_returns.rolling(lookback, min_periods=min_periods).std()
+            * np.sqrt(252)
+        )
+        penalty = penalty + downside_vol.fillna(0.0) * downside_weight
+
+    if drawdown_weight > 0:
+        rolling_peak = close_panel.rolling(lookback, min_periods=min_periods).max()
+        drawdown = (close_panel / rolling_peak - 1.0).clip(upper=0.0).abs()
+        penalty = penalty + drawdown.fillna(0.0) * drawdown_weight
+
+    return penalty
+
+
 def _target_weight_score_panel(
     close_panel: pd.DataFrame,
     benchmark_close: pd.Series,
@@ -288,17 +323,21 @@ def _target_weight_score_panel(
         + (1.0 - short_w) * close_panel.pct_change(long_lb)
     )
     if score_mode != "benchmark_excess":
-        return composite
+        score = composite
+    elif benchmark_close.empty:
+        score = pd.DataFrame(np.nan, index=close_panel.index, columns=close_panel.columns)
+    else:
+        benchmark_composite = (
+            short_w * benchmark_close.pct_change(short_lb)
+            + (1.0 - short_w) * benchmark_close.pct_change(long_lb)
+        )
+        aligned = benchmark_composite.reindex(close_panel.index, method="ffill")
+        score = composite.sub(aligned, axis=0)
 
-    if benchmark_close.empty:
-        return pd.DataFrame(np.nan, index=close_panel.index, columns=close_panel.columns)
-
-    benchmark_composite = (
-        short_w * benchmark_close.pct_change(short_lb)
-        + (1.0 - short_w) * benchmark_close.pct_change(long_lb)
-    )
-    aligned = benchmark_composite.reindex(close_panel.index, method="ffill")
-    return composite.sub(aligned, axis=0)
+    rank_penalty = _target_weight_rank_penalty_panel(close_panel, params)
+    if rank_penalty is None:
+        return score
+    return score - rank_penalty
 
 
 def _target_exposure_for_day(
@@ -362,6 +401,8 @@ def _select_target_weight_targets(
     current_positions: dict[str, dict[str, float]],
     top_n: int,
     hold_rank_buffer: int,
+    max_targets_per_sector: int | None = None,
+    sector_map: dict[str, str] | None = None,
 ) -> list[str]:
     ranked = [
         sym
@@ -370,7 +411,13 @@ def _select_target_weight_targets(
     ]
     targets = ranked[:top_n]
     if hold_rank_buffer <= 0 or not current_positions:
-        return targets
+        return _limit_targets_per_sector(
+            ranked=ranked,
+            targets=targets,
+            top_n=top_n,
+            max_targets_per_sector=max_targets_per_sector,
+            sector_map=sector_map,
+        )
 
     retention_pool = ranked[top_n : top_n + hold_rank_buffer]
     for held in [sym for sym in retention_pool if sym in current_positions]:
@@ -383,7 +430,69 @@ def _select_target_weight_targets(
         if replacement_idx is None:
             break
         targets[replacement_idx] = held
-    return targets
+    return _limit_targets_per_sector(
+        ranked=ranked,
+        targets=targets,
+        top_n=top_n,
+        max_targets_per_sector=max_targets_per_sector,
+        sector_map=sector_map,
+    )
+
+
+def _sector_for_symbol(symbol: str, sector_map: dict[str, str]) -> str:
+    raw = str(symbol).strip()
+    sector = str(sector_map.get(raw, "") or "").strip()
+    if sector:
+        return sector
+    if raw.isdigit():
+        return str(sector_map.get(raw.zfill(6), "") or "").strip()
+    return ""
+
+
+def _limit_targets_per_sector(
+    *,
+    ranked: list[str],
+    targets: list[str],
+    top_n: int,
+    max_targets_per_sector: int | None,
+    sector_map: dict[str, str] | None,
+) -> list[str]:
+    if max_targets_per_sector is None or int(max_targets_per_sector) <= 0:
+        return targets
+    if not sector_map:
+        return targets
+
+    cap = max(1, int(max_targets_per_sector))
+    selected: list[str] = []
+    sector_counts: dict[str, int] = {}
+
+    def can_add(symbol: str) -> bool:
+        if symbol in selected:
+            return False
+        sector = _sector_for_symbol(symbol, sector_map)
+        if sector and sector_counts.get(sector, 0) >= cap:
+            return False
+        return True
+
+    def add(symbol: str) -> None:
+        selected.append(symbol)
+        sector = _sector_for_symbol(symbol, sector_map)
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+
+    for sym in targets:
+        if len(selected) >= top_n:
+            break
+        if can_add(sym):
+            add(sym)
+
+    for sym in ranked:
+        if len(selected) >= top_n:
+            break
+        if can_add(sym):
+            add(sym)
+
+    return selected
 
 
 def _coerce_positions(positions: dict[str, Any] | None) -> dict[str, dict[str, float]]:
@@ -454,6 +563,37 @@ def build_target_weight_plan(
     start = (as_of_ts - pd.Timedelta(days=warmup_days)).strftime("%Y-%m-%d")
 
     collector = collector or DataCollector()
+    max_targets_per_sector_raw = params.get("max_targets_per_sector")
+    max_targets_per_sector = (
+        max(1, int(max_targets_per_sector_raw))
+        if max_targets_per_sector_raw is not None
+        else None
+    )
+    sector_map_for_selection: dict[str, str] | None = None
+    if max_targets_per_sector is not None:
+        try:
+            sector_map_source = (
+                collector.get_sector_map()
+                if hasattr(collector, "get_sector_map")
+                else DataCollector.get_sector_map()
+            )
+        except Exception as exc:
+            raise ValueError(
+                "target_weight_sector_map_missing: "
+                f"max_targets_per_sector={max_targets_per_sector}; "
+                f"failed to load sector map: {exc}"
+            ) from exc
+        sector_map_for_selection = {
+            normalize_symbol(symbol): str(sector).strip()
+            for symbol, sector in dict(sector_map_source or {}).items()
+            if str(sector or "").strip()
+        }
+        if not sector_map_for_selection:
+            raise ValueError(
+                "target_weight_sector_map_missing: "
+                f"max_targets_per_sector={max_targets_per_sector}; "
+                "sector map is required for sector-capped target-weight planning"
+            )
     close_parts: list[pd.Series] = []
     valid_symbols: list[str] = []
     missing_symbols: list[str] = []
@@ -494,8 +634,9 @@ def build_target_weight_plan(
     if not valid_symbols:
         raise ValueError("no valid price data for target-weight planning")
 
-    close_panel = pd.concat(close_parts, axis=1).sort_index().ffill()
-    close_panel = close_panel[~close_panel.index.duplicated(keep="last")]
+    raw_close_panel = pd.concat(close_parts, axis=1).sort_index()
+    raw_close_panel = raw_close_panel[~raw_close_panel.index.duplicated(keep="last")]
+    close_panel = raw_close_panel.ffill()
     close_panel = close_panel[close_panel.index <= as_of_ts]
     if close_panel.empty:
         raise ValueError("no price rows on or before as_of_date")
@@ -563,6 +704,8 @@ def build_target_weight_plan(
             current_positions,
             max(1, int(params.get("target_top_n", 3))),
             max(0, int(params.get("hold_rank_buffer", 0) or 0)),
+            max_targets_per_sector,
+            sector_map_for_selection,
         )
 
     target_exposure = _target_exposure_for_day(trade_day, benchmark_close, params)
@@ -582,6 +725,47 @@ def build_target_weight_plan(
     target_set = {sym for sym in targets if prices.get(sym, 0.0) > 0}
     per_target_value = nav * target_exposure / len(target_set) if target_set else 0.0
     tolerance = max(0.0, float(params.get("target_tolerance_pct", 0.0)) / 100.0)
+    position_loss_reduce_trigger_pct = max(
+        0.0,
+        float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0),
+    )
+    position_loss_reduce_target_fraction = max(
+        0.0,
+        min(float(params.get("position_loss_reduce_target_fraction", 0.50) or 0.0), 1.0),
+    )
+    position_loss_reduce_enabled = (
+        position_loss_reduce_trigger_pct > 0
+        and position_loss_reduce_target_fraction < 1.0
+    )
+    target_value_multipliers: dict[str, float] = {}
+    position_loss_reduce_losses: list[float] = []
+    position_loss_reduce_signal_prices: dict[str, float] = {}
+    if position_loss_reduce_enabled and target_set and score_day is not None:
+        raw_score_row = (
+            raw_close_panel.loc[score_day]
+            if score_day in raw_close_panel.index
+            else pd.Series(dtype=float)
+        )
+        position_loss_reduce_signal_prices = {
+            sym: float(raw_score_row[sym])
+            for sym in target_set
+            if sym in raw_score_row.index
+            and pd.notna(raw_score_row[sym])
+            and float(raw_score_row[sym]) > 0
+        }
+        for sym in sorted(target_set):
+            pos = current_positions.get(sym)
+            if not pos:
+                continue
+            qty = int(pos.get("quantity", 0) or 0)
+            avg_price = float(pos.get("avg_price", 0.0) or 0.0)
+            signal_price = float(position_loss_reduce_signal_prices.get(sym, 0.0) or 0.0)
+            if qty <= 0 or avg_price <= 0 or signal_price <= 0:
+                continue
+            loss_pct = (signal_price / avg_price - 1.0) * 100
+            if loss_pct <= -position_loss_reduce_trigger_pct:
+                target_value_multipliers[sym] = position_loss_reduce_target_fraction
+                position_loss_reduce_losses.append(loss_pct)
 
     projected_qty: dict[str, int] = {
         sym: int(pos["quantity"])
@@ -593,10 +777,18 @@ def build_target_weight_plan(
         price = prices.get(sym, 0.0)
         if price <= 0:
             continue
-        desired_qty[sym] = int(per_target_value // price) if sym in target_set else 0
+        if sym in target_set:
+            target_value = per_target_value * target_value_multipliers.get(sym, 1.0)
+            target_qty = int(target_value // price)
+            if sym in target_value_multipliers and projected_qty.get(sym, 0) > 0:
+                target_qty = min(target_qty, projected_qty.get(sym, 0))
+            desired_qty[sym] = target_qty
+        else:
+            desired_qty[sym] = 0
 
     sell_orders: list[TargetWeightOrder] = []
     skipped_tolerance: list[str] = []
+    tolerance_bypass_symbols = set(target_value_multipliers)
     for sym in sorted(desired_qty):
         current_qty = projected_qty.get(sym, 0)
         target_qty = desired_qty[sym]
@@ -606,7 +798,7 @@ def build_target_weight_plan(
         price = prices[sym]
         qty = abs(delta)
         notional = qty * price
-        if notional / nav < tolerance:
+        if notional / nav < tolerance and sym not in tolerance_bypass_symbols:
             skipped_tolerance.append(sym)
             continue
         sell_orders.append(
@@ -620,7 +812,11 @@ def build_target_weight_plan(
                 target_quantity=target_qty,
                 current_weight_pct=round(current_qty * price / nav * 100, 2),
                 target_weight_pct=round(target_qty * price / nav * 100, 2),
-                reason="target_weight_rebalance_sell",
+                reason=(
+                    "target_weight_position_loss_reduce_sell"
+                    if sym in target_value_multipliers
+                    else "target_weight_rebalance_sell"
+                ),
             )
         )
         projected_qty[sym] = target_qty
@@ -687,6 +883,15 @@ def build_target_weight_plan(
         if qty > 0 and prices.get(sym, 0.0) > 0
     )
     target_position_count = sum(1 for qty in projected_qty.values() if qty > 0)
+    selected_sector_counts: dict[str, int] = {}
+    selected_sector_missing_symbols: list[str] = []
+    if max_targets_per_sector is not None and sector_map_for_selection:
+        for sym in targets:
+            sector = _sector_for_symbol(sym, sector_map_for_selection)
+            if sector:
+                selected_sector_counts[sector] = selected_sector_counts.get(sector, 0) + 1
+            else:
+                selected_sector_missing_symbols.append(sym)
 
     return TargetWeightPlan(
         candidate_id=candidate_id,
@@ -714,6 +919,39 @@ def build_target_weight_plan(
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
+            "rank_penalty_mode": str(params.get("rank_penalty_mode", "none") or "none").lower().strip(),
+            "max_targets_per_sector": max_targets_per_sector,
+            "sector_map_size": len(sector_map_for_selection or {}),
+            "selected_sector_counts": selected_sector_counts,
+            "selected_sector_missing_symbols": selected_sector_missing_symbols,
+            "position_loss_reduce_enabled": position_loss_reduce_enabled,
+            "position_loss_reduce_trigger_pct": (
+                round(position_loss_reduce_trigger_pct, 4)
+                if position_loss_reduce_enabled
+                else 0.0
+            ),
+            "position_loss_reduce_target_fraction_pct": (
+                round(position_loss_reduce_target_fraction * 100, 2)
+                if position_loss_reduce_enabled
+                else 100.0
+            ),
+            "position_loss_reduce_symbols": sorted(target_value_multipliers),
+            "position_loss_reduce_rebalance_count": 1 if target_value_multipliers else 0,
+            "position_loss_reduce_position_count": len(target_value_multipliers),
+            "position_loss_reduce_worst_loss_pct": (
+                round(min(position_loss_reduce_losses), 2)
+                if position_loss_reduce_losses
+                else 0
+            ),
+            "position_loss_reduce_signal_price_mode": (
+                "prior_close"
+                if position_loss_reduce_enabled
+                else "none"
+            ),
+            "position_loss_reduce_signal_prices": {
+                sym: round(price, 4)
+                for sym, price in sorted(position_loss_reduce_signal_prices.items())
+            },
             "price_last_dates": _date_payload(price_last_dates),
             "benchmark_last_date": (
                 benchmark_last_date.strftime("%Y-%m-%d")
