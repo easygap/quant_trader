@@ -53,6 +53,7 @@ jobs:
             tests/test_audit_safety.py \
             tests/test_critical_fixes.py \
             tests/test_live_status_sync.py \
+            tests/test_scheduler.py \
             tests/test_target_weight_rotation.py \
             tests/test_target_weight_paper_adapter.py \
             tests/test_live_gate.py \
