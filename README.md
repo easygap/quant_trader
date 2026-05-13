@@ -292,6 +292,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-13 loss re-entry guard follow-up: 직전 실행 리밸런스 후 평가 NAV 대비 손실률이 `loss_reentry_guard_trigger_pct`를 넘으면 지정 cooldown 동안 신규 편입 수를 `loss_reentry_guard_max_new_targets`로 낮추는 옵션을 추가했습니다. `target_weight_drawdown_guard --top-n 200`에 `reentry4_maxnew0_cd1`, `reentry3_maxnew0_cd1`, `sectorcap2_reentry4_maxnew0_cd1` 후보를 추가했지만, 손실 직후 새 종목 편입을 막는 방식은 회전율만 낮추고 MDD를 악화시켰습니다. `sectorcap2_reentry4`는 return=+84.68%, raw excess=+52.79%p, turnover/year=793.8%였지만 MDD=-22.34%, `reentry4`는 return=+57.71%, MDD=-27.29%, `reentry3`은 return=+28.93%, MDD=-35.30%로 모두 `paper_only`라 canonical 평가 대상에서 제외했습니다. 다음은 보유 종목 고착을 만드는 신규 편입 차단보다, 종목별 변동성 예산이나 포지션별 손절/감산처럼 손실 원인을 직접 줄이는 제약이 우선입니다.
 
+2026-05-13 position loss reduction follow-up: 신규 편입을 막아 손실 종목을 고착시키는 대신, 직전 확정 종가 기준 보유 종목 손실률이 `position_loss_reduce_trigger_pct`를 넘으면 다음 리밸런싱 목표 금액을 `position_loss_reduce_target_fraction`까지 감산하는 research-only 옵션을 추가했습니다. 감산 매도는 기존 비용/PnL/turnover 경로를 그대로 타며, 리밸런싱 tolerance 때문에 위험 감산이 생략되지 않도록 분리했습니다. `target_weight_drawdown_guard` family에는 `posloss8_frac50`, `posloss10_frac50`, `sectorcap2_posloss8_frac50` 후보를 추가했지만, 현 세션에서는 KRX/Naver/yfinance 데이터 수집 소켓이 차단되어 신뢰 가능한 top-200 sweep은 보류했습니다. 이 후보는 회귀 테스트 통과 상태일 뿐이며, 데이터 수집 가능한 환경에서 full sweep과 canonical 재검증 전에는 paper/live 승격 대상이 아닙니다.
+
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
 | relative_strength_rotation | **provisional_paper_candidate** | +18.09 | 1.62 | 100 | 83.3 | — |

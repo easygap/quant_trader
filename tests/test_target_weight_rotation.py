@@ -748,6 +748,73 @@ def test_target_weight_rotation_loss_reentry_guard_blocks_new_names_after_loss()
     assert metrics["loss_reentry_guard_remaining_cooldown"] == 1
 
 
+def test_target_weight_rotation_position_loss_reduction_uses_prior_close_and_bypasses_tolerance():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    dates = pd.to_datetime(
+        [
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-03",
+            "2025-02-04",
+            "2025-03-03",
+        ]
+    )
+    frames = {
+        "AAA": _ohlcv(dates, [100, 110, 100, 90, 110]),
+        "BBB": _ohlcv(dates, [100, 105, 100, 90, 110]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+    params = {
+        "target_top_n": 2,
+        "target_exposure": 1.0,
+        "target_tolerance_pct": 40.0,
+        "short_lookback": 1,
+        "long_lookback": 1,
+        "short_weight": 1.0,
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+        "position_loss_reduce_trigger_pct": 8.0,
+        "position_loss_reduce_target_fraction": 0.50,
+    }
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-03-03",
+        capital=100_000.0,
+        params=params,
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    march_sells = [
+        t for t in result["trades"]
+        if t["date"] == pd.Timestamp("2025-03-03") and t["action"] == "REBALANCE_SELL"
+    ]
+    march_buys = [
+        t for t in result["trades"]
+        if t["date"] == pd.Timestamp("2025-03-03") and t["action"] == "BUY"
+    ]
+    equity = result["equity_curve"].set_index("date")
+    metrics = result["target_weight_metrics"]
+
+    assert {t["symbol"] for t in march_sells} == {"AAA", "BBB"}
+    assert march_buys == []
+    assert sum(t["quantity"] for t in march_sells) == pytest.approx(500.0)
+    assert equity.loc[pd.Timestamp("2025-03-03"), "market_value"] == pytest.approx(55_000.0)
+    assert metrics["position_loss_reduce_enabled"] is True
+    assert metrics["position_loss_reduce_trigger_pct"] == 8.0
+    assert metrics["position_loss_reduce_target_fraction_pct"] == 50.0
+    assert metrics["position_loss_reduce_rebalance_count"] == 1
+    assert metrics["position_loss_reduce_position_count"] == 2
+    assert metrics["position_loss_reduce_symbol_count"] == 2
+    assert metrics["position_loss_reduce_worst_loss_pct"] == pytest.approx(-10.0)
+    assert metrics["position_loss_reduce_signal_price_mode"] == "prior_close"
+    assert metrics["rebalance_tolerance_skipped_sell_trades"] == 0
+    assert metrics["min_realized_exposure_pct"] == 50.0
+
+
 def test_target_weight_rotation_benchmark_risk_overlay_reduces_exposure():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 

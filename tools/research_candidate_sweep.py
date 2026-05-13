@@ -1109,6 +1109,28 @@ def _target_weight_spec_with_loss_reentry_guard(
     )
 
 
+def _target_weight_spec_with_position_loss_reduction(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    trigger_pct: float,
+    target_fraction: float,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "position_loss_reduce_trigger_pct": max(0.0, float(trigger_pct)),
+        "position_loss_reduce_target_fraction": max(0.0, min(float(target_fraction), 1.0)),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1469,6 +1491,27 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         cooldown_rebalances=1,
         description="75pct exposure rank-penalty rotation with sector cap and post-loss re-entry guard",
     )
+    exp75_rankrisk90_tol4_posloss8 = _target_weight_spec_with_position_loss_reduction(
+        exp75_rankrisk90_tol4,
+        suffix="posloss8_frac50",
+        trigger_pct=8.0,
+        target_fraction=0.50,
+        description="75pct exposure rank-penalty rotation with position loss reduction",
+    )
+    exp75_rankrisk90_tol4_posloss10 = _target_weight_spec_with_position_loss_reduction(
+        exp75_rankrisk90_tol4,
+        suffix="posloss10_frac50",
+        trigger_pct=10.0,
+        target_fraction=0.50,
+        description="75pct exposure rank-penalty rotation with wider position loss reduction",
+    )
+    exp75_rankrisk90_tol4_sectorcap2_posloss8 = _target_weight_spec_with_position_loss_reduction(
+        exp75_rankrisk90_tol4_sectorcap2,
+        suffix="posloss8_frac50",
+        trigger_pct=8.0,
+        target_fraction=0.50,
+        description="75pct exposure rank-penalty rotation with sector cap and position loss reduction",
+    )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
         suffix="maxnew2",
@@ -1632,6 +1675,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with sector/post-loss re-entry and portfolio guards",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_posloss8,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with position loss reduction and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_posloss10,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with wider position loss reduction and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap2_posloss8,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with sector/position loss reduction and portfolio guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
@@ -2718,9 +2779,13 @@ def _execute_target_weight_rebalance(
     rebalance_tolerance: float,
     avg_daily_volumes: dict[str, float] | None,
     risk_manager,
+    target_value_multipliers: dict[str, float] | None = None,
+    tolerance_bypass_symbols: set[str] | None = None,
     execution_price_mode: str = "rebalance_day_price",
 ) -> tuple[float, dict[str, dict[str, float]], list[dict[str, Any]], float, dict[str, Any]]:
     avg_daily_volumes = avg_daily_volumes or {}
+    target_value_multipliers = target_value_multipliers or {}
+    tolerance_bypass_symbols = tolerance_bypass_symbols or set()
     diagnostics = {
         "skipped_tolerance_trades": 0,
         "skipped_tolerance_sell_trades": 0,
@@ -2742,7 +2807,16 @@ def _execute_target_weight_rebalance(
         price = prices.get(sym, 0.0)
         if price <= 0:
             continue
-        desired_qty[sym] = per_target_value / price if sym in target_set else 0.0
+        target_multiplier = max(
+            0.0,
+            min(float(target_value_multipliers.get(sym, 1.0) or 0.0), 1.0),
+        )
+        target_value = per_target_value * target_multiplier if sym in target_set else 0.0
+        desired = target_value / price if sym in target_set else 0.0
+        if sym in target_value_multipliers and sym in positions:
+            current_qty = float(positions.get(sym, {}).get("qty", 0.0) or 0.0)
+            desired = min(desired, current_qty)
+        desired_qty[sym] = desired
 
     trades: list[dict[str, Any]] = []
     turnover = 0.0
@@ -2755,7 +2829,7 @@ def _execute_target_weight_rebalance(
             continue
         price = prices[sym]
         skipped_notional = abs(qty_to_sell * price)
-        if skipped_notional / nav < rebalance_tolerance:
+        if sym not in tolerance_bypass_symbols and skipped_notional / nav < rebalance_tolerance:
             diagnostics["skipped_tolerance_trades"] += 1
             diagnostics["skipped_tolerance_sell_trades"] += 1
             diagnostics["skipped_tolerance_notional"] += skipped_notional
@@ -3010,6 +3084,30 @@ def run_target_weight_rotation_backtest(
                     "loss_reentry_guard_trigger_count": 0,
                     "loss_reentry_guard_rebalance_count": 0,
                     "loss_reentry_guard_worst_loss_pct": 0,
+                    "position_loss_reduce_enabled": bool(
+                        float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0) > 0
+                    ),
+                    "position_loss_reduce_trigger_pct": round(
+                        max(0.0, float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0)),
+                        2,
+                    ),
+                    "position_loss_reduce_target_fraction_pct": round(
+                        max(
+                            0.0,
+                            min(float(params.get("position_loss_reduce_target_fraction", 0.50) or 0.0), 1.0),
+                        )
+                        * 100,
+                        1,
+                    ) if float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0) > 0 else 100.0,
+                    "position_loss_reduce_rebalance_count": 0,
+                    "position_loss_reduce_position_count": 0,
+                    "position_loss_reduce_worst_loss_pct": 0,
+                    "position_loss_reduce_signal_price_mode": (
+                        "prior_close"
+                        if float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0) > 0
+                        and float(params.get("position_loss_reduce_target_fraction", 0.50) or 0.0) < 1.0
+                        else "none"
+                    ),
                     "portfolio_drawdown_guard_enabled": bool(
                         float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0) > 0
                     ),
@@ -3028,6 +3126,8 @@ def run_target_weight_rotation_backtest(
                     "rebalance_count": 0,
                     "avg_slots_filled": 0,
                     "slot_fill_rate_pct": 0,
+                    "avg_realized_exposure_pct": 0,
+                    "min_realized_exposure_pct": 0,
                     "execution_price_mode": TARGET_WEIGHT_EXECUTION_PRICE_MODE,
                 },
             }
@@ -3144,6 +3244,21 @@ def run_target_weight_rotation_backtest(
             0,
             int(params.get("loss_reentry_guard_cooldown_rebalances", 0) or 0),
         )
+        position_loss_reduce_trigger_pct = max(
+            0.0,
+            float(params.get("position_loss_reduce_trigger_pct", 0.0) or 0.0),
+        )
+        position_loss_reduce_target_fraction = max(
+            0.0,
+            min(
+                float(params.get("position_loss_reduce_target_fraction", 0.50) or 0.0),
+                1.0,
+            ),
+        )
+        position_loss_reduce_enabled = (
+            position_loss_reduce_trigger_pct > 0
+            and position_loss_reduce_target_fraction < 1.0
+        )
         portfolio_drawdown_guard_trigger_pct = max(
             0.0,
             float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
@@ -3196,6 +3311,7 @@ def run_target_weight_rotation_backtest(
         rebalance_count = 0
         filled_slots: list[int] = []
         target_exposures: list[float] = []
+        realized_exposures: list[float] = []
         risk_off_rebalance_count = 0
         portfolio_peak_value = float(capital)
         last_equity_value = float(capital)
@@ -3208,6 +3324,10 @@ def run_target_weight_rotation_backtest(
         loss_reentry_guard_trigger_count = 0
         loss_reentry_guard_rebalance_count = 0
         loss_reentry_guard_losses: list[float] = []
+        position_loss_reduce_rebalance_count = 0
+        position_loss_reduce_position_count = 0
+        position_loss_reduce_losses: list[float] = []
+        position_loss_reduce_symbol_set: set[str] = set()
         total_turnover = 0.0
         skipped_tolerance_trades = 0
         skipped_tolerance_sell_trades = 0
@@ -3252,6 +3372,7 @@ def run_target_weight_rotation_backtest(
             if day in rebalance_days:
                 score_day = _score_date_before(score_panel.index, day)
                 targets: list[str] = []
+                position_loss_signal_prices: dict[str, float] = {}
                 if score_day is not None:
                     score_row = score_panel.loc[score_day].dropna()
                     raw_score_row = (
@@ -3259,6 +3380,13 @@ def run_target_weight_rotation_backtest(
                         if score_day in raw_close_panel.index
                         else pd.Series(dtype=float)
                     )
+                    position_loss_signal_prices = {
+                        sym: float(raw_score_row[sym])
+                        for sym in valid_symbols
+                        if sym in raw_score_row.index
+                        and pd.notna(raw_score_row[sym])
+                        and float(raw_score_row[sym]) > 0
+                    }
                     fresh_score_symbols = {
                         sym
                         for sym in score_row.index
@@ -3431,6 +3559,27 @@ def run_target_weight_rotation_backtest(
                             and pd.notna(volume_row[sym])
                             and float(volume_row[sym]) > 0
                         }
+                    target_value_multipliers: dict[str, float] = {}
+                    if position_loss_reduce_enabled and targets:
+                        reduced_losses: list[float] = []
+                        for sym in targets:
+                            pos = positions.get(sym)
+                            if not pos:
+                                continue
+                            qty = float(pos.get("qty", 0.0) or 0.0)
+                            avg_price = float(pos.get("avg_price", 0.0) or 0.0)
+                            signal_price = float(position_loss_signal_prices.get(sym, 0.0) or 0.0)
+                            if qty <= 1e-9 or avg_price <= 0 or signal_price <= 0:
+                                continue
+                            position_loss_pct = (signal_price / avg_price - 1.0) * 100
+                            if position_loss_pct <= -position_loss_reduce_trigger_pct:
+                                target_value_multipliers[sym] = position_loss_reduce_target_fraction
+                                reduced_losses.append(position_loss_pct)
+                                position_loss_reduce_symbol_set.add(sym)
+                        if reduced_losses:
+                            position_loss_reduce_rebalance_count += 1
+                            position_loss_reduce_position_count += len(reduced_losses)
+                            position_loss_reduce_losses.extend(reduced_losses)
                     cash, positions, new_trades, turnover, rebalance_diagnostics = _execute_target_weight_rebalance(
                         day=day,
                         cash=cash,
@@ -3441,6 +3590,8 @@ def run_target_weight_rotation_backtest(
                         rebalance_tolerance=tolerance,
                         avg_daily_volumes=avg_daily_volumes,
                         risk_manager=risk_manager,
+                        target_value_multipliers=target_value_multipliers,
+                        tolerance_bypass_symbols=set(target_value_multipliers),
                         execution_price_mode=TARGET_WEIGHT_EXECUTION_PRICE_MODE,
                     )
                     trades.extend(new_trades)
@@ -3497,6 +3648,8 @@ def run_target_weight_rotation_backtest(
                 if close_prices.get(sym, 0.0) > 0
             )
             value = cash + market_value
+            if value > 0:
+                realized_exposures.append(market_value / value)
             last_equity_value = value
             if value > portfolio_peak_value:
                 portfolio_peak_value = value
@@ -3610,6 +3763,32 @@ def run_target_weight_rotation_backtest(
                     else 0
                 ),
                 "loss_reentry_guard_remaining_cooldown": loss_reentry_guard_cooldown_remaining,
+                "position_loss_reduce_enabled": position_loss_reduce_enabled,
+                "position_loss_reduce_trigger_pct": round(
+                    position_loss_reduce_trigger_pct,
+                    2,
+                ) if position_loss_reduce_enabled else 0.0,
+                "position_loss_reduce_target_fraction_pct": round(
+                    position_loss_reduce_target_fraction * 100,
+                    1,
+                ) if position_loss_reduce_enabled else 100.0,
+                "position_loss_reduce_rebalance_count": position_loss_reduce_rebalance_count,
+                "position_loss_reduce_rebalance_pct": round(
+                    position_loss_reduce_rebalance_count / rebalance_count * 100,
+                    1,
+                ) if rebalance_count else 0,
+                "position_loss_reduce_position_count": position_loss_reduce_position_count,
+                "position_loss_reduce_symbol_count": len(position_loss_reduce_symbol_set),
+                "position_loss_reduce_worst_loss_pct": (
+                    round(min(position_loss_reduce_losses), 2)
+                    if position_loss_reduce_losses
+                    else 0
+                ),
+                "position_loss_reduce_signal_price_mode": (
+                    "prior_close"
+                    if position_loss_reduce_enabled
+                    else "none"
+                ),
                 "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
                 "portfolio_drawdown_guard_trigger_pct": round(
                     portfolio_drawdown_guard_trigger_pct,
@@ -3658,6 +3837,12 @@ def run_target_weight_rotation_backtest(
                 "min_target_exposure_pct": round(
                     float(np.min(target_exposures)) * 100, 1
                 ) if target_exposures else 0,
+                "avg_realized_exposure_pct": round(
+                    float(np.mean(realized_exposures)) * 100, 1
+                ) if realized_exposures else 0,
+                "min_realized_exposure_pct": round(
+                    float(np.min(realized_exposures)) * 100, 1
+                ) if realized_exposures else 0,
                 "risk_off_rebalance_count": risk_off_rebalance_count,
                 "risk_off_rebalance_pct": round(
                     risk_off_rebalance_count / rebalance_count * 100, 1
