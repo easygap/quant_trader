@@ -36,8 +36,11 @@ CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap85_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen05_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen10_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrpen05_pdd10_floor40_cd1",
 )
 
 
