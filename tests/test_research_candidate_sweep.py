@@ -397,11 +397,14 @@ def test_build_candidate_specs_supports_target_weight_downside_rank_relief_famil
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60",
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_dd75",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120",
     ]
     assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
     assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
     assert all(spec.params["rank_penalty_mode"] == "downside_risk" for spec in direct)
-    assert {spec.params["rank_penalty_lookback"] for spec in direct} == {60, 90}
+    assert {spec.params["rank_penalty_lookback"] for spec in direct} == {60, 90, 120}
+    assert {spec.params["drawdown_penalty_weight"] for spec in direct} == {0.45, 0.55, 0.70, 0.75}
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
     assert any(spec.params.get("target_exposure") == 0.75 for spec in direct)
 
@@ -445,6 +448,8 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd8_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd8_floor35_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd2",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_dd75_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
