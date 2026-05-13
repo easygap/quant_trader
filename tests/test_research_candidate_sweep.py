@@ -456,6 +456,9 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap85_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap80_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen05_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen10_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrpen05_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -474,6 +477,8 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert any(spec.params.get("max_targets_per_sector") == 2 for spec in direct)
     assert any(spec.params.get("max_pairwise_correlation") == 0.85 for spec in direct)
     assert any(spec.params.get("max_pairwise_correlation") == 0.80 for spec in direct)
+    assert any(spec.params.get("correlation_rank_penalty_weight") == 0.05 for spec in direct)
+    assert any(spec.params.get("correlation_rank_penalty_weight") == 0.10 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():
@@ -639,6 +644,37 @@ def test_target_weight_correlation_matrix_uses_history_before_score_day():
     )
 
     assert corr.loc["AAA", "BBB"] > 0.99
+
+
+def test_target_weight_correlation_score_penalty_pushes_crowded_names_down():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    score_row = pd.Series(
+        [0.10, 0.095, 0.09, 0.085],
+        index=["AAA", "BBB", "CCC", "DDD"],
+    )
+    correlation_matrix = pd.DataFrame(
+        [
+            [1.00, 0.92, 0.88, 0.10],
+            [0.92, 1.00, 0.86, 0.10],
+            [0.88, 0.86, 1.00, 0.10],
+            [0.10, 0.10, 0.10, 1.00],
+        ],
+        index=score_row.index,
+        columns=score_row.index,
+    )
+
+    adjusted = sweep._apply_target_weight_correlation_score_penalty(
+        score_row,
+        correlation_matrix,
+        weight=0.08,
+        mode="mean_positive",
+    )
+
+    assert adjusted.sort_values(ascending=False).index[0] == "DDD"
+    assert adjusted["AAA"] < score_row["AAA"]
+    assert adjusted["DDD"] > adjusted["AAA"]
 
 
 def test_canonical_target_weight_specs_include_sectorcap_candidates():
@@ -1219,6 +1255,90 @@ def test_target_weight_rank_penalty_can_move_high_downside_name_below_lower_risk
     assert metrics["rank_penalty_mode"] == "downside_risk"
     assert metrics["rank_penalty_lookback"] == 4
     assert metrics["downside_vol_penalty_weight"] == 1.0
+
+
+def test_target_weight_correlation_rank_penalty_adjusts_rebalance_ranking(monkeypatch):
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    dates = pd.to_datetime(["2025-01-30", "2025-01-31", "2025-02-03"])
+    closes = {
+        "AAA": [100.0, 110.0, 110.0],
+        "BBB": [100.0, 105.0, 105.0],
+        "CCC": [100.0, 104.0, 104.0],
+        "DDD": [100.0, 109.0, 109.0],
+    }
+    correlation_matrix = pd.DataFrame(
+        [
+            [1.00, 0.92, 0.88, 0.10],
+            [0.92, 1.00, 0.86, 0.10],
+            [0.88, 0.86, 1.00, 0.10],
+            [0.10, 0.10, 0.10, 1.00],
+        ],
+        index=list(closes),
+        columns=list(closes),
+    )
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            close = closes.get(symbol, [100.0, 100.0, 100.0])
+            return pd.DataFrame(
+                {
+                    "open": [100.0, 100.0, 100.0],
+                    "close": close,
+                    "volume": [100.0, 100.0, 100.0],
+                },
+                index=dates,
+            )
+
+    class NoCostRiskManager:
+        def calculate_transaction_costs(self, price, quantity, side, **kwargs):
+            return {
+                "execution_price": float(price),
+                "commission": 0.0,
+                "tax": 0.0,
+                "slippage": 0.0,
+                "slippage_multiplier": 1.0,
+                "participation_rate": 0.0,
+            }
+
+    monkeypatch.setattr(
+        sweep,
+        "_target_weight_correlation_matrix",
+        lambda close_panel, score_day, symbols, lookback_days, min_periods: correlation_matrix.loc[
+            symbols,
+            symbols,
+        ],
+    )
+
+    result = sweep.run_target_weight_rotation_backtest(
+        ["AAA", "BBB", "CCC", "DDD"],
+        start="2025-02-03",
+        end="2025-02-03",
+        capital=1_000.0,
+        params={
+            "target_top_n": 1,
+            "target_exposure": 1.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "correlation_rank_penalty_weight": 0.10,
+            "correlation_rank_penalty_lookback_days": 4,
+            "correlation_rank_penalty_min_periods": 2,
+            "correlation_rank_penalty_mode": "mean_positive",
+        },
+        collector=FakeCollector(),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    assert result["trades"][0]["symbol"] == "DDD"
+    metrics = result["target_weight_metrics"]
+    assert metrics["correlation_rank_penalty_weight"] == 0.10
+    assert metrics["correlation_rank_penalty_mode"] == "mean_positive"
+    assert metrics["correlation_rank_penalty_lookback_days"] == 4
+    assert metrics["max_correlation_rank_score_penalty"] > 0
 
 
 def test_target_weight_rebalance_days_support_lower_frequency():
