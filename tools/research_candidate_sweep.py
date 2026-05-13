@@ -1214,6 +1214,12 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         overlay_params={"target_tolerance_pct": 3.0},
         description="75pct exposure rank-penalty rotation with 3pct tolerance",
     )
+    exp75_rankrisk90_tol4 = _target_weight_spec_with_exposure_overlay(
+        exp75_rankrisk90,
+        suffix="tol4",
+        overlay_params={"target_tolerance_pct": 4.0},
+        description="75pct exposure rank-penalty rotation with 4pct tolerance",
+    )
     exp75_rankrisk90_tol5 = _target_weight_spec_with_exposure_overlay(
         exp75_rankrisk90,
         suffix="tol5",
@@ -1269,6 +1275,12 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with tolerance and portfolio drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with 4pct tolerance and portfolio drawdown guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,

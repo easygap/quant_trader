@@ -440,6 +440,7 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_rankrisk60_pdd10_floor35_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -452,6 +453,7 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert all(spec.params["portfolio_drawdown_guard_cooldown_rebalances"] == 1 for spec in direct)
     assert any(spec.params.get("max_new_targets_per_rebalance") == 2 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 3.0 for spec in direct)
+    assert any(spec.params.get("target_tolerance_pct") == 4.0 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
 
 
