@@ -1780,6 +1780,88 @@ def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):
     assert bundle["universe_liquidity_filter"]["excluded_symbols"] == ["BBB"]
 
 
+def test_run_candidate_sweep_skips_evaluation_when_liquidity_filter_removes_all(monkeypatch, tmp_path):
+    import config.config_loader as config_loader
+    import tools.research_candidate_sweep as sweep
+
+    class _Config:
+        yaml_hash = "yaml"
+        resolved_hash = "resolved"
+        risk_params = {
+            "liquidity_filter": {
+                "enabled": True,
+                "min_avg_trading_value_20d_krw": 5_000_000_000,
+                "strict": True,
+            }
+        }
+
+    def fake_filter(symbols, config, *, as_of_end):
+        return [], {
+            "enabled": True,
+            "input_symbols": list(symbols),
+            "passed_symbols": [],
+            "excluded_symbols": list(symbols),
+            "min_avg_trading_value_20d_krw": 5_000_000_000,
+            "strict": True,
+            "symbols": {
+                sym: {
+                    "passed": False,
+                    "avg_trading_value_20d_krw": None,
+                    "reason": "missing_liquidity_data",
+                }
+                for sym in symbols
+            },
+        }
+
+    def fail_benchmark(*args, **kwargs):
+        raise AssertionError("benchmark must not run when research universe is empty")
+
+    def fail_evaluate(*args, **kwargs):
+        raise AssertionError("candidate evaluation must not run when research universe is empty")
+
+    monkeypatch.setattr(config_loader.Config, "get", staticmethod(lambda: _Config()))
+    monkeypatch.setattr(sweep, "apply_research_universe_liquidity_filter", fake_filter)
+    monkeypatch.setattr(sweep, "buy_and_hold_benchmark_with_returns", fail_benchmark)
+    monkeypatch.setattr(sweep, "evaluate_candidate", fail_evaluate)
+    monkeypatch.setattr(
+        sweep,
+        "build_candidate_specs",
+        lambda family: [
+            sweep.CandidateSpec("candidate_a", "relative_strength_rotation", {}, "A"),
+            sweep.CandidateSpec("candidate_b", "relative_strength_rotation", {}, "B"),
+        ],
+    )
+
+    bundle = sweep.run_candidate_sweep(
+        symbols=["AAA", "BBB"],
+        start="2025-01-01",
+        end="2025-12-31",
+        include_walk_forward=True,
+    )
+
+    assert bundle["universe"] == []
+    assert bundle["candidates"] == []
+    assert bundle["candidate_ids_evaluated"] == []
+    assert bundle["candidate_ids_skipped_due_to_data"] == ["candidate_a", "candidate_b"]
+    assert bundle["benchmark"]["benchmark_unusable_reason"] == "all_symbols_missing_liquidity_data"
+    assert bundle["decision"]["action"] == "INSUFFICIENT_BENCHMARK_DATA"
+    assert bundle["summary"]["evaluated"] == 0
+    assert bundle["summary"]["skipped_due_to_data"] == 2
+    assert bundle["data_fetch_cache"] == {
+        "enabled": False,
+        "skipped": True,
+        "reason": "all_symbols_missing_liquidity_data",
+    }
+    assert bundle["walk_forward"]["windows"] == []
+    ok, reason = sweep.validate_sweep_artifact(bundle)
+    assert ok, reason
+
+    _, md_path = sweep.write_candidate_artifacts(bundle, tmp_path)
+    text = md_path.read_text(encoding="utf-8")
+    assert "Data fetch cache: skipped (all_symbols_missing_liquidity_data)" in text
+    assert "Candidate evaluation: skipped_due_to_data=2" in text
+
+
 def test_run_candidate_sweep_limits_to_requested_candidate_ids(monkeypatch):
     import pandas as pd
     import config.config_loader as config_loader
