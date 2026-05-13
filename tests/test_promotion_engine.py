@@ -710,6 +710,57 @@ class TestArtifactLoading:
         assert metrics["scoring"].paper_cash_adjusted_excess == 0.15
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
 
+    def test_load_paper_evidence_package_requires_strategy_identity(self):
+        """패키지 내부 전략명이 없거나 다르면 승격 입력으로 쓰지 않는다."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.promotion_engine import load_paper_evidence_package
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evidence_dir = Path(tmpdir)
+            path = evidence_dir / "promotion_evidence_scoring.json"
+            path.write_text(
+                json.dumps({
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                }),
+                encoding="utf-8",
+            )
+
+            assert (
+                load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
+                is None
+            )
+
+            path.write_text(
+                json.dumps({
+                    "strategy": "other_strategy",
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                }),
+                encoding="utf-8",
+            )
+
+            assert (
+                load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
+                is None
+            )
+
+            path.write_text(
+                json.dumps({
+                    "strategy": "scoring",
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                }),
+                encoding="utf-8",
+            )
+
+            assert (
+                load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
+                is not None
+            )
+
     def test_paper_evidence_metrics_exposes_trade_quality_blockers(self):
         from core.promotion_engine import paper_evidence_metrics_from_package
 
