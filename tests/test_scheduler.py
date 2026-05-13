@@ -276,6 +276,72 @@ def test_live_entry_loop_halts_when_order_requires_reconcile(monkeypatch):
         scheduler.config.trading["mode"] = old_mode
 
 
+def test_entry_candidate_revalidation_failure_holds_candidate_without_order(monkeypatch):
+    """시그널 재검증 실패 시 오래된 후보로 주문하지 않고 다음 루프까지 보류한다."""
+    from core.scheduler import Scheduler
+
+    calls = []
+    op_events = []
+
+    class FailingCollector:
+        def fetch_stock(self, symbol, start=None, end=None):
+            raise RuntimeError("temporary data outage")
+
+    class FakeStrategy:
+        def generate_signal(self, df, symbol=None):
+            pytest.fail("데이터 재조회 실패 시 전략 신호 계산까지 진행하면 안 됨")
+
+    class FakeExecutor:
+        def execute_buy(self, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "symbol": kwargs["symbol"]}
+
+    monkeypatch.setattr("core.data_collector.DataCollector", FailingCollector)
+    monkeypatch.setattr(
+        "core.market_regime.check_market_regime",
+        lambda config, collector: {"allow_buys": True, "position_scale": 1.0},
+    )
+    monkeypatch.setattr("core.scheduler.get_position", lambda symbol, account_key="": None)
+    monkeypatch.setattr(
+        "core.scheduler._log_op",
+        lambda *args, **kwargs: op_events.append((args, kwargs)),
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    candidate = {
+        "symbol": "005930",
+        "price": 50_000,
+        "timestamp": datetime.now(),
+        "reason": "pre-market candidate",
+    }
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler._entry_candidates = [candidate]
+        scheduler.portfolio = SimpleNamespace(
+            get_portfolio_summary=lambda: {
+                "total_value": 1_000_000,
+                "cash": 1_000_000,
+                "current_value": 0,
+            }
+        )
+        scheduler.blackswan = SimpleNamespace(get_recovery_scale=lambda: 1.0)
+        scheduler.discord = MagicMock()
+        scheduler._get_or_create_executor = lambda: FakeExecutor()
+        scheduler._get_strategy = lambda: FakeStrategy()
+
+        scheduler._execute_entry_candidates()
+
+        assert calls == []
+        assert scheduler._entry_candidates == [candidate]
+        assert op_events
+        assert op_events[-1][0][0] == "ENTRY_REVALIDATION_BLOCK"
+        assert op_events[-1][1]["symbol"] == "005930"
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
 def test_live_monitoring_skips_rescan_after_entry_requires_reconcile(monkeypatch):
     """live 신규 진입 실행 중 체결 확인이 보류되면 같은 루프 재스캔도 막는다."""
     from core.scheduler import Scheduler
