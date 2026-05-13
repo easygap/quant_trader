@@ -545,6 +545,34 @@ def test_target_weight_live_gate_requires_verified_pilot_evidence(tmp_path):
     assert any("target-weight invalid execution evidence" in issue for issue in issues)
 
 
+def test_target_weight_live_gate_uses_metadata_for_strategy_identity(tmp_path):
+    strategy = "rotation_candidate_test"
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(
+        promotion_dir,
+        strategy=strategy,
+        strategy_specs=[{
+            "candidate_id": strategy,
+            "base_strategy": "target_weight_rotation",
+            "params_hash": "hash",
+        }],
+    )
+    _write_evidence(evidence_dir, strategy=strategy)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        strategy,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("promotion 재계산 결과 live_candidate가 아님" in issue for issue in issues)
+    assert any("target-weight paper evidence proof summary 누락" in issue for issue in issues)
+
+
 def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
     strategy = "target_weight_rotation_test"
     promotion_dir = tmp_path / "reports" / "promotion"
