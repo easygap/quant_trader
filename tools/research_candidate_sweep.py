@@ -1429,6 +1429,12 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         max_targets_per_sector=2,
         description="75pct exposure rank-penalty rotation with 4pct tolerance and sector cap",
     )
+    exp75_rankrisk90_tol5_sectorcap2 = _target_weight_spec_with_sector_cap(
+        exp75_rankrisk90_tol5,
+        suffix="sectorcap2",
+        max_targets_per_sector=2,
+        description="75pct exposure rank-penalty rotation with 5pct tolerance and sector cap",
+    )
     exp75_rankrisk90_tol4_sectorcap1 = _target_weight_spec_with_sector_cap(
         exp75_rankrisk90_tol4,
         suffix="sectorcap1",
@@ -1536,6 +1542,20 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         trigger_pct=8.0,
         target_fraction=0.50,
         description="75pct exposure rank-penalty rotation with sector cap and position loss reduction",
+    )
+    exp75_rankrisk90_tol5_posloss8 = _target_weight_spec_with_position_loss_reduction(
+        exp75_rankrisk90_tol5,
+        suffix="posloss8_frac50",
+        trigger_pct=8.0,
+        target_fraction=0.50,
+        description="75pct exposure rank-penalty rotation with wider tolerance and position loss reduction",
+    )
+    exp75_rankrisk90_tol5_sectorcap2_posloss8 = _target_weight_spec_with_position_loss_reduction(
+        exp75_rankrisk90_tol5_sectorcap2,
+        suffix="posloss8_frac50",
+        trigger_pct=8.0,
+        target_fraction=0.50,
+        description="75pct exposure rank-penalty rotation with wider tolerance, sector cap, and position loss reduction",
     )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
@@ -1718,6 +1738,18 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with sector/position loss reduction and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol5_posloss8,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with wider tolerance, position loss reduction, and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol5_sectorcap2_posloss8,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with wider tolerance, sector/position loss reduction, and portfolio guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,

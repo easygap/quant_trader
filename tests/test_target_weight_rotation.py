@@ -147,6 +147,32 @@ def test_target_weight_rotation_holds_top_n_with_cash_buffer():
     assert 0.79 <= first_exposure <= 0.81
 
 
+def test_target_weight_plan_rejects_research_only_params_before_fetch():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class FailingCollector:
+        def fetch_korean_stock(self, *_args, **_kwargs):
+            raise AssertionError("collector should not be called")
+
+    with pytest.raises(ValueError, match="research-only params"):
+        build_target_weight_plan(
+            candidate_id="target_weight_research_only",
+            symbols=["005930", "000660"],
+            params={
+                "target_top_n": 2,
+                "short_lookback": 20,
+                "long_lookback": 60,
+                "rank_penalty_mode": "downside_risk",
+                "max_targets_per_sector": 2,
+                "position_loss_reduce_trigger_pct": 8.0,
+            },
+            cash=1_000_000.0,
+            positions={},
+            as_of_date="2025-01-31",
+            collector=FailingCollector(),
+        )
+
+
 def test_target_weight_plan_records_liquidity_diagnostics():
     from core.target_weight_rotation import build_target_weight_plan
 
