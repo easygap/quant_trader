@@ -17,6 +17,8 @@
 - `main.py:_check_live_readiness_gate()` — live gate 진입점
 - `core/live_gate.py:validate_live_readiness()` — canonical artifact + paper evidence 검증
 - `main.py:run_live_trading()` — gate 실패 시 `sys.exit(1)`
+- `main.py:run_rebalance()` / `core.basket_rebalancer.BasketRebalancer.execute()` — live 바스켓 리밸런싱 주문도 운영자 확인과 live gate 통과 없이는 실행 차단
 - 환경변수 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 이중 확인 유지
 
 생성: 2026-04-29
+최신화: 2026-05-13
