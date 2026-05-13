@@ -353,10 +353,18 @@ def load_paper_evidence_package(
     if not isinstance(payload, dict):
         logger.warning("paper evidence package schema 오류: {}", path)
         return None
-    if payload.get("strategy") not in (None, strategy_name):
+    package_strategy = payload.get("strategy")
+    if package_strategy != strategy_name:
+        if package_strategy is None:
+            logger.warning(
+                "paper evidence package strategy 누락: {} (expected={})",
+                path,
+                strategy_name,
+            )
+            return None
         logger.warning(
             "paper evidence package strategy 불일치: {} != {}",
-            payload.get("strategy"),
+            package_strategy,
             strategy_name,
         )
         return None
