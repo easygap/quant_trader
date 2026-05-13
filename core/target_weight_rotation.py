@@ -18,13 +18,12 @@ import pandas as pd
 
 
 DEFAULT_TARGET_WEIGHT_CANDIDATE_ID = (
-    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
 )
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 RESEARCH_ONLY_PLAN_PARAMS = (
     "max_new_targets_per_rebalance",
     "max_pairwise_correlation",
-    "rebalance_frequency",
 )
 
 
@@ -143,6 +142,10 @@ def params_hash(params: dict[str, Any]) -> str:
 
 def unsupported_plan_params(params: dict[str, Any]) -> list[str]:
     unsupported = [key for key in RESEARCH_ONLY_PLAN_PARAMS if key in params]
+
+    rebalance_frequency = str(params.get("rebalance_frequency", "monthly") or "monthly").lower().strip()
+    if rebalance_frequency not in ("", "monthly"):
+        unsupported.append("rebalance_frequency")
 
     rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
     if rank_penalty_mode not in ("", "none", "off", "disabled", "downside_risk", "downside", "risk"):
@@ -1117,6 +1120,18 @@ def validate_plan_against_pilot(
     remaining_orders = getattr(pilot_check, "remaining_orders", None)
     if remaining_orders is not None and len(plan.orders) > int(remaining_orders):
         violations.append(f"orders {len(plan.orders)} > remaining_orders {remaining_orders}")
+
+    remaining_exposure = getattr(pilot_check, "remaining_exposure", None)
+    if remaining_exposure is not None:
+        required_exposure_increase = max(
+            0.0,
+            float(plan.gross_exposure_after) - float(plan.market_value_before),
+        )
+        if required_exposure_increase > float(remaining_exposure) + 1e-6:
+            violations.append(
+                "required exposure increase "
+                f"{required_exposure_increase:,.0f} > remaining_exposure {float(remaining_exposure):,.0f}"
+            )
 
     max_notional = caps.get("max_notional_per_trade")
     if max_notional is not None and plan.max_order_notional > float(max_notional):
