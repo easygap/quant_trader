@@ -34,6 +34,7 @@ MIN_PROVISIONAL_WF_POSITIVE_RATE = 0.6
 MIN_PROVISIONAL_WF_SHARPE_RATE = 0.6
 MAX_PROVISIONAL_TURNOVER_PCT = 1000.0
 PAPER_EVIDENCE_MAX_STALENESS_DAYS = 14
+TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
 
 
 @dataclass
@@ -75,6 +76,7 @@ class StrategyMetrics:
     paper_trade_quality_adverse_gap_bps: Optional[float] = None
     paper_trade_quality_missing_expected_ratio: Optional[float] = None
     paper_trade_quality_missing_expected_count: Optional[int] = None
+    target_weight_strategy_required: Optional[bool] = None
     target_weight_evidence_required: Optional[bool] = None
     target_weight_verified_pilot_days: Optional[int] = None
     target_weight_invalid_days: Optional[int] = None
@@ -206,7 +208,7 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
                 f"latest={latest} age={m.paper_evidence_age_days}d "
                 f"> {PAPER_EVIDENCE_MAX_STALENESS_DAYS}d"
             )
-    if m.name.startswith("target_weight_"):
+    if m.target_weight_strategy_required is True or m.name.startswith("target_weight_"):
         if m.target_weight_evidence_required is not True:
             fails.append("target-weight evidence required flag missing")
         if m.target_weight_verified_pilot_days is None or m.target_weight_verified_pilot_days < 60:
@@ -461,6 +463,7 @@ def attach_paper_evidence_metrics(
         "paper_trade_quality_adverse_gap_bps",
         "paper_trade_quality_missing_expected_ratio",
         "paper_trade_quality_missing_expected_count",
+        "target_weight_strategy_required",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
         "target_weight_invalid_days",
@@ -476,9 +479,17 @@ def attach_paper_evidence_metrics(
     return metrics
 
 
-def canonical_params_hashes_from_metadata(metadata: dict) -> dict[str, str]:
-    """canonical bundle metadata에서 candidate_id별 params_hash를 추출한다."""
-    specs = metadata.get("strategy_specs") if isinstance(metadata, dict) else None
+def _is_target_weight_strategy_spec(spec: dict) -> bool:
+    """canonical strategy spec이 target-weight 후보인지 판정한다."""
+    base_strategy = spec.get("base_strategy") or spec.get("strategy")
+    if isinstance(base_strategy, str) and base_strategy in TARGET_WEIGHT_BASE_STRATEGIES:
+        return True
+    candidate_id = spec.get("candidate_id")
+    return isinstance(candidate_id, str) and candidate_id.startswith("target_weight_")
+
+
+def target_weight_params_hashes_from_strategy_specs(specs: object) -> dict[str, str]:
+    """canonical strategy_specs에서 target-weight candidate_id별 params_hash를 추출한다."""
     if not isinstance(specs, list):
         return {}
     result: dict[str, str] = {}
@@ -487,21 +498,37 @@ def canonical_params_hashes_from_metadata(metadata: dict) -> dict[str, str]:
             continue
         candidate_id = spec.get("candidate_id")
         params_hash = spec.get("params_hash")
-        if isinstance(candidate_id, str) and isinstance(params_hash, str) and params_hash:
+        if (
+            _is_target_weight_strategy_spec(spec)
+            and isinstance(candidate_id, str)
+            and isinstance(params_hash, str)
+            and params_hash
+        ):
             result[candidate_id] = params_hash
     return result
+
+
+def canonical_params_hashes_from_metadata(metadata: dict) -> dict[str, str]:
+    """canonical bundle metadata에서 target-weight 후보 params_hash를 추출한다."""
+    specs = metadata.get("strategy_specs") if isinstance(metadata, dict) else None
+    return target_weight_params_hashes_from_strategy_specs(specs)
 
 
 def attach_target_weight_canonical_hash_check(
     strategy_name: str,
     paper_metrics: dict[str, object],
-    canonical_params_hashes: dict[str, str],
+    target_weight_params_hashes: dict[str, str],
 ) -> dict[str, object]:
     """target-weight paper evidence hash와 canonical 후보 hash를 연결한다."""
-    if not str(strategy_name).startswith("target_weight_"):
+    is_target_weight = (
+        str(strategy_name).startswith("target_weight_")
+        or strategy_name in target_weight_params_hashes
+    )
+    if not is_target_weight:
         return paper_metrics
     metrics = dict(paper_metrics)
-    canonical_hash = canonical_params_hashes.get(strategy_name)
+    metrics["target_weight_strategy_required"] = True
+    canonical_hash = target_weight_params_hashes.get(strategy_name)
     evidence_hash = metrics.get("target_weight_params_hash")
     if canonical_hash:
         metrics["target_weight_canonical_params_hash"] = canonical_hash
