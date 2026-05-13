@@ -381,6 +381,35 @@ def test_validate_pilot_authorization_snapshot_accepts_matching_plan():
     assert check["mismatches"] == []
 
 
+def test_validate_pilot_authorization_snapshot_requires_snapshot_for_prefixless_plan():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = replace(_adapter_plan(), candidate_id="risk_overlay_candidate")
+    pilot_check = SimpleNamespace(
+        allowed=True,
+        reason="ok",
+        auth={"strategy": plan.candidate_id, "enabled": True},
+        caps_snapshot={"max_orders_per_day": 10},
+    )
+
+    check = twp.validate_pilot_authorization_snapshot(plan, pilot_check)
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert "target_weight_pilot_authorization_snapshot_missing" in check["reason"]
+
+
+def test_validate_pilot_authorization_snapshot_accepts_prefixless_matching_plan():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = replace(_adapter_plan(), candidate_id="risk_overlay_candidate")
+    check = twp.validate_pilot_authorization_snapshot(plan, _pilot_check_for_plan(plan))
+
+    assert check["allowed"] is True
+    assert check["complete"] is True
+    assert check["mismatches"] == []
+
+
 def test_validate_pilot_authorization_snapshot_allows_small_money_drift():
     import tools.target_weight_rotation_pilot as twp
 
@@ -1011,6 +1040,67 @@ def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weig
         "max_notional_per_trade": 1_500_000,
         "max_gross_exposure": 4_000_000,
     }
+
+
+def test_target_weight_pilot_control_enable_guard_uses_canonical_metadata_for_prefixless_candidate(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "risk_overlay_candidate"
+    metadata_path = tmp_path / "run_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "strategy_specs": [
+                    {
+                        "candidate_id": strategy,
+                        "base_strategy": "target_weight_rotation",
+                        "params_hash": "hash-risk-overlay",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ppc, "PROMOTION_METADATA_PATH", metadata_path)
+
+    calls = {}
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        calls["audit"] = kwargs
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "proposed pilot caps satisfied",
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=strategy,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=4,
+        max_notional=1_500_000,
+        max_exposure=4_000_000,
+    )
+
+    result = ppc._target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+    assert calls["audit"]["candidate_id"] == strategy
+    assert calls["audit"]["as_of_date"] == "2026-04-10"
 
 
 def test_target_weight_pilot_control_enable_guard_skips_non_target_weight(monkeypatch):
