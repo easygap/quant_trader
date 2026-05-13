@@ -21,6 +21,17 @@ DEFAULT_TARGET_WEIGHT_CANDIDATE_ID = (
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35"
 )
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
+RESEARCH_ONLY_PLAN_PARAMS = (
+    "max_new_targets_per_rebalance",
+    "max_pairwise_correlation",
+    "max_targets_per_sector",
+    "portfolio_drawdown_guard_cooldown_rebalances",
+    "portfolio_drawdown_guard_exposure",
+    "portfolio_drawdown_guard_trigger_pct",
+    "position_loss_reduce_target_fraction",
+    "position_loss_reduce_trigger_pct",
+    "rebalance_frequency",
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,30 @@ def normalize_symbols(symbols: list[Any]) -> list[str]:
 def params_hash(params: dict[str, Any]) -> str:
     payload = json.dumps(params, sort_keys=True, ensure_ascii=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def unsupported_plan_params(params: dict[str, Any]) -> list[str]:
+    unsupported = [key for key in RESEARCH_ONLY_PLAN_PARAMS if key in params]
+
+    rank_penalty_mode = str(params.get("rank_penalty_mode", "none") or "none").lower().strip()
+    if rank_penalty_mode not in ("", "none"):
+        unsupported.append("rank_penalty_mode")
+
+    target_allocation_mode = str(
+        params.get("target_allocation_mode", "equal") or "equal"
+    ).lower().strip()
+    if target_allocation_mode not in ("", "equal"):
+        unsupported.append("target_allocation_mode")
+
+    for key in (
+        "correlation_rank_penalty_weight",
+        "loss_reentry_guard_trigger_pct",
+    ):
+        value = params.get(key)
+        if value is not None and float(value or 0.0) != 0.0:
+            unsupported.append(key)
+
+    return sorted(set(unsupported))
 
 
 def close_series_from_ohlcv(df: pd.DataFrame | None) -> pd.Series:
@@ -390,6 +425,13 @@ def build_target_weight_plan(
     Scores and benchmark risk overlays always use the latest trading day before
     the planned trade day, matching the research backtest's no-lookahead rule.
     """
+    plan_params_unsupported = unsupported_plan_params(dict(params))
+    if plan_params_unsupported:
+        raise ValueError(
+            "target-weight plan does not yet support research-only params: "
+            + ", ".join(plan_params_unsupported)
+        )
+
     from core.data_collector import DataCollector
 
     symbols = normalize_symbols(symbols)
