@@ -182,6 +182,7 @@ class TestPromotionRules:
                             wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
                             wf_windows=6, wf_total_trades=100, sharpe=0.5,
                             paper_days=60, paper_sharpe=0.5, paper_excess=1.0,
+                            paper_cash_adjusted_excess=0.8,
                             paper_evidence_recommendation="ELIGIBLE",
                             paper_benchmark_final_ratio=0.9,
                             paper_sell_count=6,
@@ -192,6 +193,44 @@ class TestPromotionRules:
         r = promote(m)
         assert r.status == "live_candidate"
         assert "live" in r.allowed_modes
+
+    def test_live_candidate_requires_positive_paper_excesses(self):
+        base = dict(
+            name="test",
+            total_return=10,
+            profit_factor=1.5,
+            mdd=-8,
+            wf_positive_rate=0.8,
+            wf_sharpe_positive_rate=0.6,
+            wf_windows=6,
+            wf_total_trades=100,
+            sharpe=0.5,
+            paper_days=60,
+            paper_sharpe=0.5,
+            paper_evidence_recommendation="ELIGIBLE",
+            paper_benchmark_final_ratio=0.9,
+            paper_sell_count=6,
+            paper_win_rate=50.0,
+            paper_frozen_days=0,
+            paper_cumulative_return=2.0,
+            **_fresh_paper_evidence_kwargs(),
+        )
+
+        same_universe_zero = StrategyMetrics(
+            **base,
+            paper_excess=0.0,
+            paper_cash_adjusted_excess=0.8,
+        )
+        cash_adjusted_zero = StrategyMetrics(
+            **base,
+            paper_excess=1.0,
+            paper_cash_adjusted_excess=0.0,
+        )
+
+        assert promote(same_universe_zero).status != "live_candidate"
+        assert "paper same-universe excess 0 <= 0" in promote(same_universe_zero).reason
+        assert promote(cash_adjusted_zero).status != "live_candidate"
+        assert "paper cash-adjusted excess 0 <= 0" in promote(cash_adjusted_zero).reason
 
     def test_live_candidate_blocks_stale_paper_evidence(self):
         m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
@@ -275,6 +314,7 @@ class TestPromotionRules:
             paper_days=60,
             paper_sharpe=0.55,
             paper_excess=0.2,
+            paper_cash_adjusted_excess=0.1,
             paper_evidence_recommendation="ELIGIBLE",
             paper_benchmark_final_ratio=0.9,
             paper_sell_count=60,
@@ -314,6 +354,7 @@ class TestPromotionRules:
             paper_days=60,
             paper_sharpe=0.55,
             paper_excess=0.2,
+            paper_cash_adjusted_excess=0.1,
             paper_evidence_recommendation="ELIGIBLE",
             paper_benchmark_final_ratio=0.9,
             paper_sell_count=60,
@@ -652,6 +693,7 @@ class TestArtifactLoading:
                     "promotable_evidence_days": 60,
                     "paper_sharpe": 0.55,
                     "avg_same_universe_excess": 0.2,
+                    "avg_cash_adjusted_excess": 0.15,
                     "benchmark_final_ratio": 0.9,
                     "sell_count": 8,
                     "win_rate": 55.0,
@@ -665,6 +707,7 @@ class TestArtifactLoading:
 
         assert metrics["scoring"].paper_days == 60
         assert metrics["scoring"].paper_sharpe == 0.55
+        assert metrics["scoring"].paper_cash_adjusted_excess == 0.15
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
 
     def test_paper_evidence_metrics_exposes_trade_quality_blockers(self):
@@ -682,6 +725,7 @@ class TestArtifactLoading:
             "promotable_evidence_days": 60,
             "paper_sharpe": 0.55,
             "avg_same_universe_excess": 0.2,
+            "avg_cash_adjusted_excess": 0.15,
             "benchmark_final_ratio": 0.9,
             "sell_count": 8,
             "win_rate": 55.0,
@@ -771,6 +815,7 @@ class TestArtifactLoading:
                     "promotable_evidence_days": 60,
                     "paper_sharpe": 0.55,
                     "avg_same_universe_excess": 0.2,
+                    "avg_cash_adjusted_excess": 0.15,
                     "benchmark_final_ratio": 0.9,
                     "sell_count": 60,
                     "win_rate": 55.0,
