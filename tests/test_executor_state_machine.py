@@ -69,6 +69,7 @@ class TestExecutorUsesStateMachine:
         config = Config.get()
         executor = OrderExecutor(config, account_key="test_sm")
         executor.config.risk_params.setdefault("liquidity_filter", {})["enabled"] = False
+        executor.config.risk_params.setdefault("gap_risk", {})["enabled"] = False
         return executor
 
     def test_buy_creates_order_record(self):
