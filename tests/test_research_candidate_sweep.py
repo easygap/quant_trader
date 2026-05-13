@@ -453,6 +453,9 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap1_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap85_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap80_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -469,6 +472,8 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
     assert any(spec.params.get("max_targets_per_sector") == 1 for spec in direct)
     assert any(spec.params.get("max_targets_per_sector") == 2 for spec in direct)
+    assert any(spec.params.get("max_pairwise_correlation") == 0.85 for spec in direct)
+    assert any(spec.params.get("max_pairwise_correlation") == 0.80 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():
@@ -535,6 +540,105 @@ def test_select_target_weight_targets_limits_targets_per_sector():
     )
 
     assert limited == ["NEW1", "OLD1", "OLD2"]
+
+
+def test_select_target_weight_targets_limits_pairwise_correlation():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    score_row = pd.Series(
+        [0.5, 0.4, 0.3, 0.2],
+        index=["AAA", "BBB", "CCC", "DDD"],
+    )
+    prices = {sym: 100.0 for sym in score_row.index}
+    correlation_matrix = pd.DataFrame(
+        [
+            [1.00, 0.95, 0.20, 0.10],
+            [0.95, 1.00, 0.15, 0.20],
+            [0.20, 0.15, 1.00, 0.30],
+            [0.10, 0.20, 0.30, 1.00],
+        ],
+        index=score_row.index,
+        columns=score_row.index,
+    )
+
+    limited = sweep._select_target_weight_targets(
+        score_row,
+        prices,
+        positions={},
+        top_n=3,
+        hold_rank_buffer=0,
+        max_pairwise_correlation=0.80,
+        correlation_matrix=correlation_matrix,
+    )
+
+    assert limited == ["AAA", "CCC", "DDD"]
+
+
+def test_select_target_weight_targets_combines_sector_and_correlation_caps():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    score_row = pd.Series(
+        [0.5, 0.4, 0.3, 0.2, 0.1],
+        index=["AAA", "BBB", "CCC", "DDD", "EEE"],
+    )
+    prices = {sym: 100.0 for sym in score_row.index}
+    sector_map = {
+        "AAA": "Tech",
+        "BBB": "Tech",
+        "CCC": "Finance",
+        "DDD": "Industrial",
+        "EEE": "Healthcare",
+    }
+    correlation_matrix = pd.DataFrame(
+        [
+            [1.00, 0.20, 0.95, 0.20, 0.10],
+            [0.20, 1.00, 0.10, 0.20, 0.10],
+            [0.95, 0.10, 1.00, 0.30, 0.10],
+            [0.20, 0.20, 0.30, 1.00, 0.10],
+            [0.10, 0.10, 0.10, 0.10, 1.00],
+        ],
+        index=score_row.index,
+        columns=score_row.index,
+    )
+
+    limited = sweep._select_target_weight_targets(
+        score_row,
+        prices,
+        positions={},
+        top_n=3,
+        hold_rank_buffer=0,
+        max_targets_per_sector=1,
+        sector_map=sector_map,
+        max_pairwise_correlation=0.80,
+        correlation_matrix=correlation_matrix,
+    )
+
+    assert limited == ["AAA", "DDD", "EEE"]
+
+
+def test_target_weight_correlation_matrix_uses_history_before_score_day():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    close_panel = pd.DataFrame(
+        {
+            "AAA": [100, 101, 102, 103, 300],
+            "BBB": [50, 51, 52, 53, 10],
+        },
+        index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"]),
+    )
+
+    corr = sweep._target_weight_correlation_matrix(
+        close_panel,
+        pd.Timestamp("2024-01-05"),
+        ["AAA", "BBB"],
+        lookback_days=3,
+        min_periods=2,
+    )
+
+    assert corr.loc["AAA", "BBB"] > 0.99
 
 
 def test_canonical_target_weight_specs_include_sectorcap_candidates():
