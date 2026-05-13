@@ -159,22 +159,12 @@ class Scheduler:
 
         # 전략 상태 체크: disabled/research_only는 paper/schedule 모드 진입 차단
         if self._mode in ("paper", "schedule", "live"):
-            from strategies import get_strategy_names, is_strategy_allowed
+            from strategies import is_strategy_allowed
             allowed, reason = is_strategy_allowed(strategy_name, self._mode)
             if not allowed:
-                if (
-                    self._mode == "live"
-                    and live_gate_validated
-                    and strategy_name in get_strategy_names()
-                ):
-                    logger.warning(
-                        "전략 상태 레지스트리는 live 미허용이지만 live readiness gate 검증 완료로 진행: {}",
-                        reason,
-                    )
-                else:
-                    raise ValueError(
-                        f"전략 '{strategy_name}' {self._mode} 모드 불허: {reason}"
-                    )
+                raise ValueError(
+                    f"전략 '{strategy_name}' {self._mode} 모드 불허: {reason}"
+                )
             if allowed and self._mode == "live" and not live_gate_validated:
                 raise ValueError(
                     f"전략 '{strategy_name}' live 모드는 run_live_trading live readiness gate 통과 후만 허용"
