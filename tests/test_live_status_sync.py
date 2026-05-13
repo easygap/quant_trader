@@ -12,7 +12,35 @@ class DummyConfig:
         self.auto_entry_source = "test"
 
 
-def test_run_live_trading_uses_canonical_gate_when_registry_status_is_stale(monkeypatch):
+def test_run_live_trading_blocks_when_registry_disallows_live(monkeypatch):
+    import main as main_mod
+
+    config = DummyConfig()
+    gate_called = False
+
+    def fake_gate(cfg, strategy):
+        nonlocal gate_called
+        gate_called = True
+        return []
+
+    monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+    monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setattr(main_mod, "_check_live_readiness_gate", fake_gate)
+
+    class DummyKIS:
+        def __init__(self, *args, **kwargs):
+            pytest.fail("registry live 불허 시 KIS 연결을 시도하면 안 됨")
+
+    monkeypatch.setattr("api.kis_api.KISApi", DummyKIS)
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod.run_live_trading(SimpleNamespace(strategy="scoring", confirm_live=True))
+
+    assert exc.value.code == 1
+    assert gate_called is False
+
+
+def test_run_live_trading_starts_after_registry_and_canonical_gate_pass(monkeypatch):
     import main as main_mod
 
     config = DummyConfig()
@@ -21,6 +49,12 @@ def test_run_live_trading_uses_canonical_gate_when_registry_status_is_stale(monk
     monkeypatch.setattr(main_mod.Config, "get", lambda: config)
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
     monkeypatch.setattr(main_mod, "_check_live_readiness_gate", lambda cfg, strategy: [])
+    monkeypatch.setattr(
+        "strategies.is_strategy_allowed",
+        lambda strategy, mode: (True, "status=live_candidate, live 허용")
+        if mode == "live"
+        else (False, "unexpected mode"),
+    )
 
     class DummyKIS:
         def authenticate(self):
@@ -94,6 +128,12 @@ def test_run_live_trading_blocks_when_kis_connection_check_fails(monkeypatch):
     monkeypatch.setattr(main_mod.Config, "get", lambda: config)
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
     monkeypatch.setattr(main_mod, "_check_live_readiness_gate", lambda cfg, strategy: [])
+    monkeypatch.setattr(
+        "strategies.is_strategy_allowed",
+        lambda strategy, mode: (True, "status=live_candidate, live 허용")
+        if mode == "live"
+        else (False, "unexpected mode"),
+    )
 
     class DummyKIS:
         def authenticate(self):
@@ -132,6 +172,12 @@ def test_run_live_trading_blocks_when_initial_broker_sync_fails(monkeypatch):
     monkeypatch.setattr(main_mod.Config, "get", lambda: config)
     monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
     monkeypatch.setattr(main_mod, "_check_live_readiness_gate", lambda cfg, strategy: [])
+    monkeypatch.setattr(
+        "strategies.is_strategy_allowed",
+        lambda strategy, mode: (True, "status=live_candidate, live 허용")
+        if mode == "live"
+        else (False, "unexpected mode"),
+    )
 
     class DummyKIS:
         def authenticate(self):
@@ -176,12 +222,18 @@ def test_scheduler_live_requires_explicit_live_gate_validation(monkeypatch):
 
     config = DummyConfig(mode="live")
 
+    monkeypatch.setattr(
+        "strategies.is_strategy_allowed",
+        lambda strategy, mode: (True, "status=live_candidate, live 허용")
+        if mode == "live"
+        else (False, "unexpected mode"),
+    )
     monkeypatch.setattr(scheduler_mod, "TradingHours", lambda cfg: SimpleNamespace())
     monkeypatch.setattr(scheduler_mod, "BlackSwanDetector", lambda cfg: SimpleNamespace())
     monkeypatch.setattr(scheduler_mod, "PortfolioManager", lambda cfg, account_key: SimpleNamespace())
     monkeypatch.setattr(scheduler_mod, "Notifier", lambda cfg: SimpleNamespace())
 
-    with pytest.raises(ValueError, match="live 모드 불허"):
+    with pytest.raises(ValueError, match="live readiness gate"):
         scheduler_mod.Scheduler("scoring", config=config)
 
     scheduler = scheduler_mod.Scheduler(
@@ -191,6 +243,24 @@ def test_scheduler_live_requires_explicit_live_gate_validation(monkeypatch):
     )
 
     assert scheduler.strategy_name == "scoring"
+
+
+def test_scheduler_live_gate_validation_does_not_override_registry_block(monkeypatch):
+    import core.scheduler as scheduler_mod
+
+    config = DummyConfig(mode="live")
+
+    monkeypatch.setattr(scheduler_mod, "TradingHours", lambda cfg: SimpleNamespace())
+    monkeypatch.setattr(scheduler_mod, "BlackSwanDetector", lambda cfg: SimpleNamespace())
+    monkeypatch.setattr(scheduler_mod, "PortfolioManager", lambda cfg, account_key: SimpleNamespace())
+    monkeypatch.setattr(scheduler_mod, "Notifier", lambda cfg: SimpleNamespace())
+
+    with pytest.raises(ValueError, match="live 모드 불허"):
+        scheduler_mod.Scheduler(
+            "scoring",
+            config=config,
+            live_gate_validated=True,
+        )
 
 
 def test_scheduler_live_gate_validation_does_not_allow_unknown_strategy(monkeypatch):
