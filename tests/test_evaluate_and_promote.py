@@ -14,10 +14,12 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
         "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_dd75_tol4_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
     ]
     assert specs[0].strategy == "target_weight_rotation"
     assert specs[0].params["market_exposure_mode"] == "benchmark_risk"
@@ -29,17 +31,24 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
     assert specs[2].params["downside_vol_penalty_weight"] == 0.50
     assert specs[2].params["drawdown_penalty_weight"] == 0.70
     assert specs[2].params["target_tolerance_pct"] == 4.0
-    assert specs[3].params["rank_penalty_lookback"] == 90
-    assert specs[3].params["drawdown_penalty_weight"] == 0.75
+    assert specs[3].params["rank_penalty_lookback"] == 120
+    assert specs[3].params["max_targets_per_sector"] == 2
     assert specs[3].params["target_tolerance_pct"] == 4.0
-    assert specs[4].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
-    assert specs[4].params["portfolio_drawdown_guard_exposure"] == 0.40
-    assert specs[5].params["target_tolerance_pct"] == 3.0
+    assert specs[4].params["rank_penalty_lookback"] == 90
+    assert specs[4].params["drawdown_penalty_weight"] == 0.75
+    assert specs[4].params["target_tolerance_pct"] == 4.0
     assert specs[5].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[5].params["portfolio_drawdown_guard_exposure"] == 0.40
-    assert specs[6].params["target_tolerance_pct"] == 4.0
+    assert specs[6].params["target_tolerance_pct"] == 3.0
     assert specs[6].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[6].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[7].params["target_tolerance_pct"] == 4.0
+    assert specs[7].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+    assert specs[7].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[8].params["max_targets_per_sector"] == 2
+    assert specs[8].params["target_tolerance_pct"] == 4.0
+    assert specs[8].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+    assert specs[8].params["portfolio_drawdown_guard_exposure"] == 0.40
 
 
 def test_canonical_research_candidate_metadata_hashes_params():
