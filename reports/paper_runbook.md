@@ -1,6 +1,6 @@
 # Paper Runbook
 
-최종 수정: 2026-04-29
+최종 수정: 2026-05-13
 
 ## 1. 시작 전 점검
 
@@ -13,6 +13,7 @@ python tools/paper_launch_readiness.py --strategy scoring --generate-runbook
 - runtime state가 `frozen`이 아닌지
 - `preflight_status_{strategy}.json`이 생성되어 있고 critical fail이 아닌지
 - 신규 BUY는 runtime `entry` 허용 또는 현재 pilot authorization 재검증이 있어야 실행되는지
+- auto-entry 후보는 주문 직전 최신 데이터로 BUY 신호를 재검증하며, 재조회/API/전략 계산 실패 시 주문하지 않고 후보를 다음 루프로 보류하는지
 - exit/finalize/evidence action이 허용되는지
 - Discord notifier 설정 여부
 - clean final days, benchmark final ratio, evidence freshness
