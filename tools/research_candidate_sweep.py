@@ -1059,6 +1059,32 @@ def _target_weight_spec_with_correlation_cap(
     )
 
 
+def _target_weight_spec_with_correlation_rank_penalty(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    penalty_weight: float,
+    lookback_days: int,
+    min_periods: int,
+    mode: str,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "correlation_rank_penalty_weight": round(float(penalty_weight), 4),
+        "correlation_rank_penalty_lookback_days": max(2, int(lookback_days)),
+        "correlation_rank_penalty_min_periods": max(2, int(min_periods)),
+        "correlation_rank_penalty_mode": mode,
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1368,6 +1394,33 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         min_periods=45,
         description="75pct exposure rank-penalty rotation with sector and correlation caps",
     )
+    exp75_rankrisk90_tol4_corrpen05 = _target_weight_spec_with_correlation_rank_penalty(
+        exp75_rankrisk90_tol4,
+        suffix="corrpen05",
+        penalty_weight=0.05,
+        lookback_days=90,
+        min_periods=45,
+        mode="mean_positive",
+        description="75pct exposure rank-penalty rotation with correlation score penalty",
+    )
+    exp75_rankrisk90_tol4_corrpen10 = _target_weight_spec_with_correlation_rank_penalty(
+        exp75_rankrisk90_tol4,
+        suffix="corrpen10",
+        penalty_weight=0.10,
+        lookback_days=90,
+        min_periods=45,
+        mode="mean_positive",
+        description="75pct exposure rank-penalty rotation with stronger correlation score penalty",
+    )
+    exp75_rankrisk90_tol4_sectorcap2_corrpen05 = _target_weight_spec_with_correlation_rank_penalty(
+        exp75_rankrisk90_tol4_sectorcap2,
+        suffix="corrpen05",
+        penalty_weight=0.05,
+        lookback_days=90,
+        min_periods=45,
+        mode="mean_positive",
+        description="75pct exposure rank-penalty rotation with sector cap and correlation score penalty",
+    )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
         suffix="maxnew2",
@@ -1495,6 +1548,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with sector/correlation caps and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_corrpen05,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with correlation score penalty and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_corrpen10,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with stronger correlation score penalty and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap2_corrpen05,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with sector/correlation score penalties and portfolio guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
@@ -2462,6 +2533,64 @@ def _target_weight_correlation_matrix(
     return returns.corr(min_periods=max(2, int(min_periods)))
 
 
+def _target_weight_correlation_rank_penalty(
+    correlation_matrix: pd.DataFrame | None,
+    symbols: list[str],
+    mode: str = "mean_positive",
+) -> pd.Series:
+    if correlation_matrix is None or correlation_matrix.empty or len(symbols) < 2:
+        return pd.Series(0.0, index=symbols, dtype=float)
+
+    normalized_mode = str(mode or "mean_positive").lower().strip()
+    if normalized_mode not in ("mean_positive", "positive_mean", "mean_abs", "max_positive"):
+        raise ValueError(
+            "unsupported_correlation_rank_penalty_mode: "
+            f"{normalized_mode}; expected mean_positive, mean_abs, or max_positive"
+        )
+
+    penalties: dict[str, float] = {}
+    for symbol in symbols:
+        if symbol not in correlation_matrix.index:
+            penalties[symbol] = 0.0
+            continue
+        peers = [
+            peer
+            for peer in symbols
+            if peer != symbol and peer in correlation_matrix.columns
+        ]
+        if not peers:
+            penalties[symbol] = 0.0
+            continue
+        row = pd.to_numeric(correlation_matrix.loc[symbol, peers], errors="coerce")
+        row = row.replace([np.inf, -np.inf], np.nan).dropna()
+        if row.empty:
+            penalties[symbol] = 0.0
+        elif normalized_mode in ("mean_positive", "positive_mean"):
+            penalties[symbol] = float(row.clip(lower=0.0).mean())
+        elif normalized_mode == "mean_abs":
+            penalties[symbol] = float(row.abs().mean())
+        else:
+            penalties[symbol] = float(row.clip(lower=0.0).max())
+    return pd.Series(penalties, dtype=float).reindex(symbols).fillna(0.0)
+
+
+def _apply_target_weight_correlation_score_penalty(
+    score_row: pd.Series,
+    correlation_matrix: pd.DataFrame | None,
+    weight: float,
+    mode: str = "mean_positive",
+) -> pd.Series:
+    penalty_weight = max(0.0, float(weight or 0.0))
+    if score_row.empty or penalty_weight <= 0:
+        return score_row
+    penalty = _target_weight_correlation_rank_penalty(
+        correlation_matrix,
+        score_row.index.tolist(),
+        mode,
+    )
+    return score_row.sub(penalty * penalty_weight, fill_value=0.0)
+
+
 def _max_pairwise_correlation_for_targets(targets: list[str], correlation_matrix: pd.DataFrame | None) -> float | None:
     if correlation_matrix is None or correlation_matrix.empty or len(targets) < 2:
         return None
@@ -2706,6 +2835,8 @@ def run_target_weight_rotation_backtest(
             "benchmark_drawdown_lookback",
             "benchmark_vol_lookback",
             "rank_penalty_lookback",
+            "correlation_rank_penalty_lookback_days",
+            "correlation_lookback_days",
         )
     ]
     warmup_days = max(long_lb * 3, 180, *(lookback * 3 for lookback in exposure_lookbacks))
@@ -2770,6 +2901,29 @@ def run_target_weight_rotation_backtest(
                         if params.get("correlation_min_periods") is not None
                         else None
                     ),
+                    "correlation_rank_penalty_weight": round(
+                        max(
+                            0.0,
+                            float(params.get("correlation_rank_penalty_weight", 0.0) or 0.0),
+                        ),
+                        4,
+                    ),
+                    "correlation_rank_penalty_mode": (
+                        str(params.get("correlation_rank_penalty_mode", "none") or "none")
+                        if float(params.get("correlation_rank_penalty_weight", 0.0) or 0.0) > 0
+                        else "none"
+                    ),
+                    "correlation_rank_penalty_lookback_days": (
+                        max(2, int(params.get("correlation_rank_penalty_lookback_days")))
+                        if params.get("correlation_rank_penalty_lookback_days") is not None
+                        else None
+                    ),
+                    "correlation_rank_penalty_min_periods": (
+                        max(2, int(params.get("correlation_rank_penalty_min_periods")))
+                        if params.get("correlation_rank_penalty_min_periods") is not None
+                        else None
+                    ),
+                    "max_correlation_rank_score_penalty": 0,
                     "portfolio_drawdown_guard_enabled": bool(
                         float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0) > 0
                     ),
@@ -2863,6 +3017,34 @@ def run_target_weight_rotation_backtest(
             2,
             int(params.get("correlation_min_periods", max(20, correlation_lookback_days // 2)) or 2),
         )
+        correlation_rank_penalty_weight = max(
+            0.0,
+            float(params.get("correlation_rank_penalty_weight", 0.0) or 0.0),
+        )
+        correlation_rank_penalty_active = correlation_rank_penalty_weight > 0
+        correlation_rank_penalty_mode = str(
+            params.get("correlation_rank_penalty_mode", "mean_positive") or "mean_positive"
+        ).lower().strip()
+        correlation_rank_penalty_lookback_days = max(
+            2,
+            int(
+                params.get(
+                    "correlation_rank_penalty_lookback_days",
+                    params.get("correlation_lookback_days", 90),
+                )
+                or 90
+            ),
+        )
+        correlation_rank_penalty_min_periods = max(
+            2,
+            int(
+                params.get(
+                    "correlation_rank_penalty_min_periods",
+                    params.get("correlation_min_periods", max(20, correlation_rank_penalty_lookback_days // 2)),
+                )
+                or 2
+            ),
+        )
         portfolio_drawdown_guard_trigger_pct = max(
             0.0,
             float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
@@ -2939,6 +3121,7 @@ def run_target_weight_rotation_backtest(
         missing_held_open_samples: list[str] = []
         selected_sector_max_counts: list[int] = []
         selected_pairwise_correlations: list[float] = []
+        correlation_rank_score_penalties: list[float] = []
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
@@ -2985,6 +3168,31 @@ def run_target_weight_rotation_backtest(
                         stale_score_symbols_excluded += len(stale_score_symbols)
                         stale_score_symbol_set.update(stale_score_symbols)
                         score_row = score_row[score_row.index.isin(fresh_score_symbols)]
+                    correlation_penalty_matrix = (
+                        _target_weight_correlation_matrix(
+                            close_panel,
+                            score_day,
+                            score_row.index.tolist(),
+                            correlation_rank_penalty_lookback_days,
+                            correlation_rank_penalty_min_periods,
+                        )
+                        if correlation_rank_penalty_active
+                        else None
+                    )
+                    if correlation_rank_penalty_active:
+                        score_penalty = _target_weight_correlation_rank_penalty(
+                            correlation_penalty_matrix,
+                            score_row.index.tolist(),
+                            correlation_rank_penalty_mode,
+                        )
+                        if not score_penalty.empty:
+                            correlation_rank_score_penalties.append(
+                                float(score_penalty.max() * correlation_rank_penalty_weight)
+                            )
+                        score_row = score_row.sub(
+                            score_penalty * correlation_rank_penalty_weight,
+                            fill_value=0.0,
+                        )
                     score_row = score_row.sort_values(ascending=False)
                     min_score_floor = params.get("min_score_floor_pct")
                     if min_score_floor is not None:
@@ -3020,7 +3228,10 @@ def run_target_weight_rotation_backtest(
                                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
                         if sector_counts:
                             selected_sector_max_counts.append(max(sector_counts.values()))
-                    max_selected_corr = _max_pairwise_correlation_for_targets(targets, correlation_matrix)
+                    max_selected_corr = _max_pairwise_correlation_for_targets(
+                        targets,
+                        correlation_matrix if correlation_matrix is not None else correlation_penalty_matrix,
+                    )
                     if max_selected_corr is not None:
                         selected_pairwise_correlations.append(max_selected_corr)
                     missing_target_execution_symbols = [
@@ -3210,6 +3421,30 @@ def run_target_weight_rotation_backtest(
                 "max_selected_pairwise_correlation": (
                     round(max(selected_pairwise_correlations), 4)
                     if selected_pairwise_correlations
+                    else 0
+                ),
+                "correlation_rank_penalty_weight": round(
+                    correlation_rank_penalty_weight,
+                    4,
+                ) if correlation_rank_penalty_active else 0.0,
+                "correlation_rank_penalty_mode": (
+                    correlation_rank_penalty_mode
+                    if correlation_rank_penalty_active
+                    else "none"
+                ),
+                "correlation_rank_penalty_lookback_days": (
+                    correlation_rank_penalty_lookback_days
+                    if correlation_rank_penalty_active
+                    else None
+                ),
+                "correlation_rank_penalty_min_periods": (
+                    correlation_rank_penalty_min_periods
+                    if correlation_rank_penalty_active
+                    else None
+                ),
+                "max_correlation_rank_score_penalty": (
+                    round(max(correlation_rank_score_penalties), 4)
+                    if correlation_rank_score_penalties
                     else 0
                 ),
                 "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
