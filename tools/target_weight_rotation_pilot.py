@@ -859,17 +859,7 @@ def execute_plan(
         return blocked_execution_for_duplicate_execution(plan, execution_idempotency)
 
     if pre_execution_reconciliation is None:
-        try:
-            pre_execution_reconciliation = reconcile_plan_starting_positions(
-                plan,
-                _load_positions(plan.candidate_id),
-            )
-        except Exception as exc:
-            logger.exception(
-                "target-weight pre-execution position reconciliation failed for {}",
-                plan.candidate_id,
-            )
-            pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
+        pre_execution_reconciliation = load_starting_position_reconciliation(plan)
     if not pre_execution_reconciliation["complete"]:
         return blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
 
@@ -897,6 +887,11 @@ def execute_plan(
             pre_trade_risk_check = failed_pre_trade_risk_validation(plan, exc)
     if pre_trade_risk_check is not None and not pre_trade_risk_check.get("complete", False):
         return blocked_execution_for_pre_trade_risk(plan, pre_trade_risk_check)
+
+    pre_execution_reconciliation = load_starting_position_reconciliation(plan)
+    if not pre_execution_reconciliation["complete"]:
+        return blocked_execution_for_pre_execution_drift(plan, pre_execution_reconciliation)
+    results["pre_execution_reconciliation"] = pre_execution_reconciliation
 
     from core.order_executor import OrderExecutor
     from core.portfolio_manager import PortfolioManager
@@ -1248,6 +1243,20 @@ def failed_starting_position_reconciliation(plan: TargetWeightPlan, error: Excep
         ],
         "unexpected_positions": [],
     }
+
+
+def load_starting_position_reconciliation(plan: TargetWeightPlan) -> dict[str, Any]:
+    try:
+        return reconcile_plan_starting_positions(
+            plan,
+            _load_positions(plan.candidate_id),
+        )
+    except Exception as exc:
+        logger.exception(
+            "target-weight pre-execution position reconciliation failed for {}",
+            plan.candidate_id,
+        )
+        return failed_starting_position_reconciliation(plan, exc)
 
 
 def blocked_execution_for_pre_execution_drift(
@@ -2034,10 +2043,11 @@ def build_pilot_evidence_caps_snapshot(
 def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] | None:
     from core.paper_evidence import get_canonical_records
 
+    latest_record = None
     for record in get_canonical_records(plan.candidate_id):
         if record.get("date") == plan.trade_day:
-            return record
-    return None
+            latest_record = record
+    return latest_record
 
 
 def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, Any]:
@@ -4364,17 +4374,7 @@ def run_pilot(
         and execution_idempotency
         and execution_idempotency["allowed"]
     ):
-        try:
-            pre_execution_reconciliation = reconcile_plan_starting_positions(
-                plan,
-                _load_positions(plan.candidate_id),
-            )
-        except Exception as exc:
-            logger.exception(
-                "target-weight pre-execution position reconciliation failed for {}",
-                plan.candidate_id,
-            )
-            pre_execution_reconciliation = failed_starting_position_reconciliation(plan, exc)
+        pre_execution_reconciliation = load_starting_position_reconciliation(plan)
 
     execution_session_id: str | None = None
     if execute and not preflight_refresh["complete"]:
@@ -4418,6 +4418,8 @@ def run_pilot(
             execution_session_id=execution_session_id,
         )
     execution_session_id = str(execution.get("execution_session_id") or execution_session_id or "")
+    if execution.get("pre_execution_reconciliation") is not None:
+        pre_execution_reconciliation = execution["pre_execution_reconciliation"]
 
     fill_reconciliation = None
     position_reconciliation = None
