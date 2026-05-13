@@ -13,6 +13,7 @@
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡 + fail-closed/audited entry guard)
 > - Paper 신규 진입 실행 경계 fail-closed: preflight 상태 누락/손상 또는 runtime 조회 실패 시 BUY 제출 전 차단, SELL 청산은 유지
+> - 장중 auto-entry 후보는 주문 직전 현재 데이터로 BUY 시그널을 재검증하며, 데이터/API/전략 계산 오류로 재검증에 실패하면 해당 루프 주문을 보류하고 후보를 다음 루프로 넘김
 > - `QUANT_AUTO_ENTRY` 해석 단일화: YAML hash와 resolved hash를 분리해 실험 설정 drift 감지
 > - Research sweep: 기존 top-20 all-family 후보 재검증도 `NO_ALPHA_CANDIDATE`; `pullback`, benchmark-relative momentum, risk-budget, cash-switch, benchmark-aware rotation, target-weight top-N rotation/score-floor 후보군과 exposure-matched benchmark 진단을 research-only로 추가
 > - target-weight 리스크 완화 top-200 sweep: 최상위 tolerance 후보도 수익/초과수익은 개선됐지만 MDD·회전율 게이트 미통과로 전 후보 `paper_only`
@@ -131,6 +132,7 @@ python main.py --update-holidays
 ```
 
 Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json`이 존재하고, runtime state 조회가 성공하며, `entry` 허용 또는 현재 pilot authorization이 재검증될 때만 실행됩니다. preflight 누락/손상, runtime 조회 실패, critical fail은 주문 생성 전 차단되며 기존 포지션 SELL 청산은 차단하지 않습니다.
+장전/장중 auto-entry 후보는 주문 제출 직전에 최신 OHLCV와 전략 신호로 다시 확인합니다. 재조회 또는 신호 계산이 실패하면 stale 후보로 매수하지 않고 `ENTRY_REVALIDATION_BLOCK` 이벤트를 남긴 뒤 후보를 다음 루프까지 보류합니다.
 
 Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
 
@@ -148,6 +150,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문 상태 대조 완료 처리
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
+- auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
 - live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
 - HTTP 긴급 청산 트리거 live 실행은 별도 확인 환경변수 없이는 차단
 - HTTP 긴급 청산은 개별 매도 실패가 있으면 실패 응답으로 노출
