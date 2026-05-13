@@ -149,6 +149,7 @@
 | Paper Evidence 최신성 승격 gate | 높음 | 완료 — promotion package에 `earliest_evidence_date`/`latest_evidence_date`를 기록하고, live_candidate 판정은 canonical 평가 기준 최신 evidence age 14일 이내만 허용한다. 날짜 누락, 미래일, 14일 초과 package는 fail-closed로 막아 오래된 60영업일 증거 재사용을 차단 |
 | Live gate Paper Evidence 최신성 검증 | 높음 | 완료 — `core/live_gate.py`가 live 진입 직전에 promotion evidence의 `latest_evidence_date` 또는 `period` 종료일을 확인한다. 최신 증거가 14일을 초과하거나 날짜가 누락/미래이면 promotion_result가 live_candidate여도 실전 전환을 차단 |
 | Live gate 승격 재계산 검증 | 높음 | 완료 — `core/live_gate.py`가 `promotion_result.json`의 status를 확인한 뒤 canonical metrics와 paper evidence를 `promotion_engine`으로 다시 로딩해 `promote()` 결과를 재계산한다. 파일상 live_candidate라도 현재 승격 규칙의 MDD/PF/WF/turnover/benchmark/evidence 조건을 통과하지 못하면 실전 전환을 fail-closed 차단 |
+| Live 전략 상태 emergency disable | 높음 | 완료 — `run_live_trading()`과 live `Scheduler`가 전략 상태 레지스트리의 live 미허용을 warning으로 넘기지 않고 fail-closed 차단한다. canonical live gate가 통과해도 운영자가 registry 상태를 낮춘 전략은 실전 시작 불가 |
 | Paper excess 승격 기준 정합성 | 높음 | 완료 — `promotion_engine` live_candidate 조건에 same-universe excess > 0과 cash-adjusted excess > 0을 모두 요구한다. live gate와 promotion_result 기준을 맞춰 현금 보정 기준으로 손실인 paper evidence가 live 후보로 표시되는 경로를 차단 |
 | Paper Evidence 전략 식별 검증 | 높음 | 완료 — `promotion_evidence_{strategy}.json` 내부 `strategy`가 현재 전략명과 정확히 일치하지 않으면 promotion engine, promotion result 생성, live gate가 해당 package를 승격/라이브 증거로 쓰지 않는다. 전략명 누락 또는 다른 전략 evidence 재사용을 fail-closed로 차단 |
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |

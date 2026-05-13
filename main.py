@@ -840,6 +840,14 @@ def run_live_trading(args):
         example=f"python main.py --mode live --strategy {strategy_name} --confirm-live",
     )
 
+    allowed, reason = is_strategy_allowed(strategy_name, "live")
+    if not allowed:
+        logger.error(
+            "🚫 Live 전략 실행 차단: 전략 상태 레지스트리가 live를 허용하지 않습니다: {}",
+            reason,
+        )
+        sys.exit(1)
+
     # ── 라이브 전 필수 검증 게이트 (우회 불가) ──
     gate_issues = _check_live_readiness_gate(config, strategy_name)
     if gate_issues:
@@ -851,13 +859,6 @@ def run_live_trading(args):
         logger.error("=" * 50)
         sys.exit(1)
     logger.info("✅ 라이브 전 검증 게이트 통과")
-
-    allowed, reason = is_strategy_allowed(strategy_name, "live")
-    if not allowed:
-        logger.warning(
-            "전략 상태 레지스트리는 live 미허용이지만 canonical live gate가 통과하여 진행합니다: {}",
-            reason,
-        )
 
     logger.info("=" * 50)
     logger.info("🔴 실전 매매 모드 시작 (이중 확인 완료)")
