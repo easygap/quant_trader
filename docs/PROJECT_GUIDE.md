@@ -39,7 +39,7 @@
    **모의 전용 무한 루프**. `config.trading.mode`가 `live`이면 거부(실전은 `--mode live --confirm-live`). `core/runtime_lock.py`로 `data/.scheduler.lock` 파일 락을 잡은 뒤 `Scheduler.run()` — 장전/장중/장마감 루프가 paper와 동일하게 동작하며 프로세스를 유지(systemd 상시 구동용). 기본은 signal-only이며, full paper는 `QUANT_AUTO_ENTRY=true`로만 켠다.
 
 5. **실전 (live)**  
-   `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. KIS API 인증 → `PortfolioManager.sync_with_broker()` → `Scheduler` 무한 루프.  
+   `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 레지스트리의 live 허용 + canonical live gate 통과 필수. KIS API 인증 → `PortfolioManager.sync_with_broker()` → `Scheduler` 무한 루프.
    - **장전(08:50)** 데이터 수집·전략 분석·**시장 국면 필터** 확인 후 매수 후보 선정(`auto_entry: true` 시 장중 매수).  
    - **장중(09:00~15:30)** 10분 간격으로 최대 보유 기간 초과 정리·신호·손절/익절 확인 → **시장 국면 필터** 통과 시에만 진입 후보 실행 → `OrderExecutor`가 KIS API로 실제 주문. live에서는 장중 모니터링 루프에서 설정 주기(`sync_broker_interval_minutes`)에 따라 KIS↔DB 잔고를 먼저 크로스체크하며, 실패하거나 불일치하면 신규 진입 후보 실행·재스캔은 보류하고 exit 계열 점검은 유지한다. 주문 전 OrderGuard·KIS 미체결 조회로 중복 방지하며, 조회 실패는 “미체결 없음”이 아니라 주문 보류로 처리한다. live 주문 ACK 후 체결가·수량이 확인되지 않거나 부분체결이면 `order_pending=True`, `requires_reconcile=True`로 장부 반영을 보류하고 같은 장중 루프의 남은 신규 진입도 중단한다.
    - **장마감(15:35)** 일일 리포트·스냅샷·KIS 크로스체크·DB 백업(설정 시)·디스코드.
@@ -56,7 +56,7 @@
 | **validate** | `run_strategy_validation(args)` | backtest.strategy_validator (3~5년, 샤프·MDD·벤치마크 KS11·코스피 상위 50 동일비중, in/out-of-sample, **손익비 자동 경고+디스코드**). `--no-benchmark-top50` 으로 Top50 비활성화 |
 | **paper** | `run_paper_trading(args)` | WatchlistManager, DataCollector, 전략, OrderExecutor(paper), Notifier |
 | **schedule** | `run_scheduler_loop(args)` | `runtime_lock.scheduler_lock`, Scheduler (무한 루프, paper 전용). 기본 signal-only, `QUANT_AUTO_ENTRY=true` 시 full paper. runtime state가 entry만 차단해도 exit/finalize/evidence는 유지 |
-| **live** | `run_live_trading(args)` | 4중 보안(전략 상태·환경변수·CLI 플래그·hard gate 5조건) → KISApi, PortfolioManager(sync), Scheduler |
+| **live** | `run_live_trading(args)` | 4중 보안(전략 상태 live 허용·환경변수·CLI 플래그·hard gate 5조건) → KISApi, PortfolioManager(sync), Scheduler |
 | **liquidate** | `run_emergency_liquidate(args)` | live에서는 KIS↔DB 잔고 동기화로 KIS-only 보유를 먼저 DB에 반영 → DB 포지션 조회 → 종목별 매도(KIS 현재가 주문). 결과 summary는 통합 알림으로 전파한다. `trading.mode=live`에서는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수 |
 | **compare** | `run_compare_paper_backtest(args)` | backtest.paper_compare (run_compare + **check_live_readiness**), divergence 경고 + **실전 전환 준비 자동 평가·디스코드 알림** |
 | **optimize** | `run_param_optimize(args)` | backtest.param_optimizer (Grid/Bayesian), Backtester.run(param_overrides=) |
@@ -382,6 +382,7 @@ quant_trader/
 | **test_order_lifecycle_integration.py** | E2E 주문 흐름 통합 테스트. |
 | **test_audit_safety.py** | 안전성 감시: live gate, 전략 레지스트리, 데이터 소스, WebSocket gap 임계값 검증. |
 | **test_critical_fixes.py** | live hard gate, 긴급 청산 확인 플래그, 브로커 동기화, 주문 상태·벤치마크 비용 회귀 검증. |
+| **test_live_status_sync.py** | live 시작 경계: registry live 허용, canonical gate, KIS 연결, 초기 브로커 동기화, Scheduler live 검증 플래그 정합성. |
 | **test_positive_path.py** | 성공 경로 (happy path) 검증. |
 | **test_watchlist_manager.py** | watchlist 모드별 resolve. |
 | **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행). |
@@ -599,9 +600,10 @@ main.py (--mode rebalance --basket kr_blue_chip --dry-run)
 5. `reports/promotion/` canonical bundle이 현재 git commit, `Config.yaml_hash`, `Config.resolved_hash`와 일치해야 함
 6. `promotion_result.json`의 해당 전략 status가 `live_candidate`이고 `allowed_modes`에 `live`가 있어야 함
 7. live gate가 같은 canonical bundle과 paper evidence를 `promotion_engine`으로 재로딩해 승격 상태를 다시 계산하며, 재계산 결과도 `live_candidate`이고 `live` 허용이어야 함
-8. `benchmark_comparison.json`에 전략별 양의 excess return과 excess Sharpe가 있어야 하며, canonical promotion 계산 단계에서도 이 값이 양수가 아니면 provisional/live 승격이 차단됨
-9. `reports/paper_evidence/promotion_evidence_{strategy}.json` recommendation이 `ELIGIBLE`이어야 하며, 60영업일 execution-backed evidence, benchmark_final_ratio 80% 이상, 양의 same-universe/cash-adjusted excess와 cumulative return, 최소 sell 5건, win_rate 45% 이상, frozen day 0, 최신 evidence date 기준 14일 이내 freshness, expected_price 누락 없음, 불리한 체결 갭 50bp 이하를 만족해야 함
-10. canonical/evidence gate 통과 후 데이터 소스 health check를 수행
+8. 운영자가 registry 상태를 live 미허용으로 낮춘 경우 canonical live gate가 통과해도 `run_live_trading()`과 `Scheduler(live_gate_validated=True)` 모두 실전 시작을 차단
+9. `benchmark_comparison.json`에 전략별 양의 excess return과 excess Sharpe가 있어야 하며, canonical promotion 계산 단계에서도 이 값이 양수가 아니면 provisional/live 승격이 차단됨
+10. `reports/paper_evidence/promotion_evidence_{strategy}.json` recommendation이 `ELIGIBLE`이어야 하며, 60영업일 execution-backed evidence, benchmark_final_ratio 80% 이상, 양의 same-universe/cash-adjusted excess와 cumulative return, 최소 sell 5건, win_rate 45% 이상, frozen day 0, 최신 evidence date 기준 14일 이내 freshness, expected_price 누락 없음, 불리한 체결 갭 50bp 이하를 만족해야 함
+11. canonical/evidence gate 통과 후 데이터 소스 health check를 수행
 
 레거시 `reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json`은 live 근거로 사용하지 않는다. 이 파일들이 남아 있어도 canonical bundle과 paper evidence가 현재 코드·설정과 맞지 않으면 live는 차단된다.
 
