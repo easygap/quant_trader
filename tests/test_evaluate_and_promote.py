@@ -19,7 +19,9 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap85_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
     ]
     assert specs[0].strategy == "target_weight_rotation"
     assert specs[0].params["market_exposure_mode"] == "benchmark_risk"
@@ -45,10 +47,20 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
     assert specs[7].params["target_tolerance_pct"] == 4.0
     assert specs[7].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[7].params["portfolio_drawdown_guard_exposure"] == 0.40
-    assert specs[8].params["max_targets_per_sector"] == 2
+    assert specs[8].params["max_pairwise_correlation"] == 0.85
+    assert specs[8].params["correlation_lookback_days"] == 90
     assert specs[8].params["target_tolerance_pct"] == 4.0
     assert specs[8].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[8].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[9].params["max_targets_per_sector"] == 2
+    assert specs[9].params["target_tolerance_pct"] == 4.0
+    assert specs[9].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+    assert specs[9].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[10].params["max_targets_per_sector"] == 2
+    assert specs[10].params["max_pairwise_correlation"] == 0.85
+    assert specs[10].params["target_tolerance_pct"] == 4.0
+    assert specs[10].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+    assert specs[10].params["portfolio_drawdown_guard_exposure"] == 0.40
 
 
 def test_canonical_research_candidate_metadata_hashes_params():
