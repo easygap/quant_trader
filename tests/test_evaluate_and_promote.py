@@ -407,6 +407,29 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     assert metrics[strategy]["paper_evidence_fresh"] is True
 
 
+def test_build_promotion_results_requires_paper_evidence_strategy_identity(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_missing_identity_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+    evidence_path = evidence_dir / f"promotion_evidence_{strategy}.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["strategy"] = None
+    evidence_path.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "live" not in promotions[strategy]["allowed_modes"]
+    assert "paper evidence recommendation missing" in promotions[strategy]["reason"]
+    assert metrics[strategy].get("paper_evidence_recommendation") is None
+
+
 def test_build_promotion_results_blocks_stale_paper_evidence(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
