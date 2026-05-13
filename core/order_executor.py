@@ -1661,7 +1661,14 @@ class OrderExecutor:
             if (symbol, broker_order_id) in broker_open_keys:
                 continue
 
-            execution = self._lookup_persistent_order_execution(record) or {}
+            execution = self._lookup_persistent_order_execution(record)
+            if not execution:
+                logger.warning(
+                    "[복구] DB 미완료 주문 체결 상태 불명확 — 열린 상태 유지: {} {}",
+                    symbol,
+                    record.get("broker_order_id"),
+                )
+                continue
             filled_qty = execution.get("filled_qty")
             filled_price = execution.get("fill_price")
             remaining_qty = execution.get("remaining_qty")
@@ -1683,18 +1690,13 @@ class OrderExecutor:
             except (TypeError, ValueError):
                 resolved_remaining_qty = 0
 
-            reason = (
-                "broker_open_order_absent_after_recovery_check"
-                if not execution
-                else "broker_execution_confirmed_after_recovery_check"
-            )
             updated = reconcile_order_record(
                 record["order_id"],
                 status=OrderStatus.RECONCILED.value,
                 filled_qty=resolved_filled_qty,
                 filled_price=resolved_filled_price,
                 remaining_qty=max(resolved_remaining_qty, 0),
-                reason=reason,
+                reason="broker_execution_confirmed_after_recovery_check",
             )
             if updated:
                 OrderGuard.clear(symbol)

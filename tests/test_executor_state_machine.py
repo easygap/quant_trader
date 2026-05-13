@@ -511,6 +511,55 @@ class TestExecutorUsesStateMachine:
         finally:
             session.close()
 
+    def test_recovery_keeps_persistent_order_open_when_execution_lookup_unclear(self):
+        """KIS 미체결 목록에서 사라져도 체결 조회가 불명확하면 DB open order를 닫지 않는다."""
+        from core.order_guard import OrderGuard
+        from core.order_state import OrderRecord
+        from database.models import OrderRecord as DbOrderRecord, get_session
+        from database.repositories import get_open_order_records, save_order_record
+
+        order = OrderRecord(
+            "ORD-UNCLEAR",
+            "005930",
+            "BUY",
+            3,
+            60_000,
+            strategy="scoring",
+            account_key="test_sm",
+            mode="live",
+        )
+        order.transition(OrderStatus.SUBMITTED)
+        order.transition(OrderStatus.ACKED, broker_order_id="000125")
+        save_order_record(order)
+        OrderGuard.mark_pending("005930", ttl_seconds=600)
+
+        class UnclearExecutionKIS:
+            _access_token = "token"
+
+            def get_open_orders_status(self):
+                return {"checked": True, "reason": "ok", "orders": []}
+
+            def get_order_execution_after_order(self, symbol, order_output, **kwargs):
+                raise RuntimeError("execution lookup unavailable")
+
+        executor = self._prepare_live_executor(self._make_executor(), UnclearExecutionKIS())
+
+        open_orders = executor.reconcile_open_orders_after_crash()
+
+        assert open_orders == []
+        assert get_open_order_records("005930", account_key="test_sm", mode="live")
+        assert OrderGuard.has_pending("005930")
+        assert executor.last_open_order_reconcile_status["persistent_order_reconciliations"] == []
+
+        session = get_session()
+        try:
+            record = session.query(DbOrderRecord).filter_by(order_id="ORD-UNCLEAR").one()
+            assert record.status == OrderStatus.ACKED.value
+            assert record.reject_reason in (None, "")
+        finally:
+            session.close()
+            OrderGuard.clear("005930")
+
     def test_recovery_keeps_persistent_order_open_when_broker_still_reports_unfilled(self):
         """KIS 미체결 목록에 같은 주문번호가 남아 있으면 DB open order를 닫지 않는다."""
         from core.order_guard import OrderGuard
