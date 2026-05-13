@@ -491,6 +491,20 @@ def check_pilot_entry(
             caps=caps,
             remaining_exposure=0,
         )
+    if candidate_notional > 0 and candidate_notional > remaining_exposure:
+        projected_exposure = current_exposure + candidate_notional
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=(
+                f"max_gross_exposure={auth.max_gross_exposure:,} would be exceeded "
+                f"(current={current_exposure:,.0f}, candidate={candidate_notional:,.0f}, "
+                f"projected={projected_exposure:,.0f})"
+            ),
+            auth=auth,
+            caps=caps,
+            remaining_exposure=max(0, int(remaining_exposure)),
+        )
 
     return _pilot_check_result(
         strategy,
