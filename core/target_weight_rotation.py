@@ -24,9 +24,6 @@ DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 RESEARCH_ONLY_PLAN_PARAMS = (
     "max_new_targets_per_rebalance",
     "max_pairwise_correlation",
-    "portfolio_drawdown_guard_cooldown_rebalances",
-    "portfolio_drawdown_guard_exposure",
-    "portfolio_drawdown_guard_trigger_pct",
     "rebalance_frequency",
 )
 
@@ -395,6 +392,117 @@ def _target_exposure_for_day(
     return bear_exposure() if risk_off else base
 
 
+def _portfolio_drawdown_guard_enabled(params: dict[str, Any]) -> bool:
+    return max(
+        0.0,
+        float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
+    ) > 0
+
+
+def _raise_portfolio_drawdown_guard_state_required() -> None:
+    raise ValueError(
+        "target_weight_portfolio_drawdown_guard_state_required: "
+        "portfolio drawdown guard needs explicit prior equity/peak/cooldown state"
+    )
+
+
+def _apply_portfolio_drawdown_guard(
+    *,
+    target_exposure: float,
+    base_target_exposure: float,
+    nav: float,
+    params: dict[str, Any],
+    state: dict[str, Any] | None,
+) -> tuple[float, dict[str, Any]]:
+    trigger_pct = max(
+        0.0,
+        float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
+    )
+    enabled = trigger_pct > 0
+    if not enabled:
+        return target_exposure, {
+            "enabled": False,
+            "active": False,
+            "triggered": False,
+            "reason": "portfolio drawdown guard disabled",
+            "trigger_pct": 0.0,
+            "exposure_pct": 0.0,
+            "cooldown_rebalances": 0,
+            "cooldown_before": 0,
+            "cooldown_after_trigger": 0,
+            "cooldown_after_plan": 0,
+            "drawdown_pct": 0.0,
+            "last_equity_value": round(float(nav), 2),
+            "peak_value": round(float(nav), 2),
+            "target_exposure_before": round(target_exposure, 4),
+            "target_exposure_after": round(target_exposure, 4),
+            "state_source": "disabled",
+        }
+
+    if state is None:
+        _raise_portfolio_drawdown_guard_state_required()
+
+    raw_state = dict(state)
+    last_equity = float(
+        raw_state.get("last_equity_value", raw_state.get("last_evidence_value", nav)) or nav
+    )
+    if last_equity <= 0:
+        last_equity = float(nav)
+    peak_value = float(raw_state.get("peak_value", last_equity) or last_equity)
+    peak_value = max(peak_value, last_equity)
+    cooldown_before = max(0, int(raw_state.get("cooldown_remaining", 0) or 0))
+    guard_exposure = max(
+        0.0,
+        min(
+            float(
+                params.get(
+                    "portfolio_drawdown_guard_exposure",
+                    params.get("bear_target_exposure", base_target_exposure),
+                )
+                or 0.0
+            ),
+            base_target_exposure,
+        ),
+    )
+    cooldown_rebalances = max(
+        0,
+        int(params.get("portfolio_drawdown_guard_cooldown_rebalances", 0) or 0),
+    )
+    drawdown_pct = (last_equity / peak_value - 1.0) * 100 if peak_value > 0 else 0.0
+    triggered = drawdown_pct <= -trigger_pct
+    cooldown_after_trigger = cooldown_before
+    if triggered:
+        cooldown_after_trigger = max(cooldown_after_trigger, cooldown_rebalances + 1)
+
+    active = cooldown_after_trigger > 0
+    exposure_after = min(target_exposure, guard_exposure) if active else target_exposure
+    cooldown_after_plan = max(0, cooldown_after_trigger - 1) if active else cooldown_after_trigger
+    return exposure_after, {
+        "enabled": True,
+        "active": active,
+        "triggered": triggered,
+        "reason": (
+            "portfolio drawdown guard reduced target exposure"
+            if active
+            else "portfolio drawdown guard observed without exposure reduction"
+        ),
+        "trigger_pct": round(trigger_pct, 4),
+        "exposure_pct": round(guard_exposure * 100, 2),
+        "cooldown_rebalances": cooldown_rebalances,
+        "cooldown_before": cooldown_before,
+        "cooldown_after_trigger": cooldown_after_trigger,
+        "cooldown_after_plan": cooldown_after_plan,
+        "drawdown_pct": round(drawdown_pct, 2),
+        "last_equity_value": round(last_equity, 2),
+        "peak_value": round(peak_value, 2),
+        "target_exposure_before": round(target_exposure, 4),
+        "target_exposure_after": round(exposure_after, 4),
+        "state_source": str(raw_state.get("source", "explicit")),
+        "state_record_count": int(raw_state.get("record_count", 0) or 0),
+        "latest_record_date": raw_state.get("latest_record_date"),
+    }
+
+
 def _select_target_weight_targets(
     score_row: pd.Series,
     prices: dict[str, float],
@@ -528,6 +636,7 @@ def build_target_weight_plan(
     positions: dict[str, Any] | None = None,
     as_of_date: str | datetime | None = None,
     collector: Any | None = None,
+    portfolio_drawdown_guard_state: dict[str, Any] | None = None,
 ) -> TargetWeightPlan:
     """Build a one-day target-weight rebalance plan.
 
@@ -540,6 +649,8 @@ def build_target_weight_plan(
             "target-weight plan does not yet support research-only params: "
             + ", ".join(plan_params_unsupported)
         )
+    if _portfolio_drawdown_guard_enabled(dict(params)) and portfolio_drawdown_guard_state is None:
+        _raise_portfolio_drawdown_guard_state_required()
 
     from core.data_collector import DataCollector
 
@@ -710,7 +821,7 @@ def build_target_weight_plan(
 
     target_exposure = _target_exposure_for_day(trade_day, benchmark_close, params)
     base_target_exposure = max(0.0, min(float(params.get("target_exposure", 0.85)), 1.0))
-    risk_off = target_exposure < base_target_exposure - 1e-9
+    market_target_exposure = target_exposure
 
     market_value_before = sum(
         pos["quantity"] * prices.get(symbol, 0.0)
@@ -721,6 +832,15 @@ def build_target_weight_plan(
     nav = cash_before + market_value_before
     if nav <= 0:
         raise ValueError("nav must be positive for target-weight planning")
+
+    target_exposure, portfolio_drawdown_guard = _apply_portfolio_drawdown_guard(
+        target_exposure=target_exposure,
+        base_target_exposure=base_target_exposure,
+        nav=nav,
+        params=params,
+        state=portfolio_drawdown_guard_state,
+    )
+    risk_off = target_exposure < base_target_exposure - 1e-9
 
     target_set = {sym for sym in targets if prices.get(sym, 0.0) > 0}
     per_target_value = nav * target_exposure / len(target_set) if target_set else 0.0
@@ -919,6 +1039,13 @@ def build_target_weight_plan(
             "skipped_tolerance_symbols": skipped_tolerance,
             "buy_scale": round(buy_scale, 4),
             "benchmark_symbol": benchmark_symbol,
+            "market_target_exposure": round(market_target_exposure, 4),
+            "portfolio_drawdown_guard": portfolio_drawdown_guard,
+            "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard["enabled"],
+            "portfolio_drawdown_guard_active": portfolio_drawdown_guard["active"],
+            "portfolio_drawdown_guard_triggered": portfolio_drawdown_guard["triggered"],
+            "portfolio_drawdown_guard_drawdown_pct": portfolio_drawdown_guard["drawdown_pct"],
+            "portfolio_drawdown_guard_cooldown_after_plan": portfolio_drawdown_guard["cooldown_after_plan"],
             "rank_penalty_mode": str(params.get("rank_penalty_mode", "none") or "none").lower().strip(),
             "max_targets_per_sector": max_targets_per_sector,
             "sector_map_size": len(sector_map_for_selection or {}),
