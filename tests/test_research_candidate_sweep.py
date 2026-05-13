@@ -716,6 +716,8 @@ def test_canonical_target_weight_specs_include_sectorcap_candidates():
 
     assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1" in ids
     assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget60_cap35" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1_volbudget60_cap35" in ids
 
 
 def test_build_candidate_specs_rejects_unknown_family():
