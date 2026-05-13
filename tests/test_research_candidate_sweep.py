@@ -450,6 +450,9 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd2",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_dd75_tol4_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap1_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -464,6 +467,8 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert any(spec.params.get("target_tolerance_pct") == 3.0 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 4.0 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 5.0 for spec in direct)
+    assert any(spec.params.get("max_targets_per_sector") == 1 for spec in direct)
+    assert any(spec.params.get("max_targets_per_sector") == 2 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():
@@ -500,6 +505,45 @@ def test_select_target_weight_targets_limits_new_entries_per_rebalance():
 
     assert limited == ["NEW1", "OLD1", "OLD2"]
     assert no_new == ["OLD1", "OLD2", "OLD3"]
+
+
+def test_select_target_weight_targets_limits_targets_per_sector():
+    import pandas as pd
+    import tools.research_candidate_sweep as sweep
+
+    score_row = pd.Series(
+        [0.5, 0.4, 0.3, 0.2, 0.1],
+        index=["NEW1", "NEW2", "NEW3", "OLD1", "OLD2"],
+    )
+    prices = {sym: 100.0 for sym in score_row.index}
+    sector_map = {
+        "NEW1": "Tech",
+        "NEW2": "Tech",
+        "NEW3": "Tech",
+        "OLD1": "Finance",
+        "OLD2": "Industrial",
+    }
+
+    limited = sweep._select_target_weight_targets(
+        score_row,
+        prices,
+        positions={},
+        top_n=3,
+        hold_rank_buffer=0,
+        max_targets_per_sector=1,
+        sector_map=sector_map,
+    )
+
+    assert limited == ["NEW1", "OLD1", "OLD2"]
+
+
+def test_canonical_target_weight_specs_include_sectorcap_candidates():
+    from tools.evaluate_and_promote import build_canonical_research_candidate_specs
+
+    ids = {spec.candidate_id for spec in build_canonical_research_candidate_specs()}
+
+    assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1" in ids
 
 
 def test_build_candidate_specs_rejects_unknown_family():
