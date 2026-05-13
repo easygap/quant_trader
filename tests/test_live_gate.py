@@ -493,6 +493,28 @@ def test_valid_canonical_bundle_and_paper_evidence_pass(tmp_path):
     assert issues == []
 
 
+def test_paper_evidence_strategy_is_required(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    evidence_path = evidence_dir / "promotion_evidence_scoring.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload.pop("strategy")
+    _write_json(evidence_path, payload)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("paper evidence strategy 누락" in issue for issue in issues)
+
+
 def test_target_weight_live_gate_requires_verified_pilot_evidence(tmp_path):
     strategy = "target_weight_rotation_test"
     promotion_dir = tmp_path / "reports" / "promotion"
