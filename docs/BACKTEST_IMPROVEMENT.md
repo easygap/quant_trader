@@ -142,6 +142,7 @@
 | Debiased 전략 재평가 | 높음 | **완료 — 거래대금 기반 ex-ante proxy 20종목, portfolio WF 6 windows** |
 | 승격 규칙 v3 자동 판정 | 높음 | **완료 — `core/promotion_engine.py` + `tools/evaluate_and_promote.py` artifact-driven** |
 | 주문 상태기계 | 높음 | **완료 — OrderStatus 9개 상태, FILLED 전 position 반영 없음, live/paper 회귀 테스트 green** |
+| Safety Regression CI 확대 | 높음 | **완료 — PR/main 안전 회귀에 `test_audit_safety.py`와 `test_critical_fixes.py`를 포함해 live hard gate, 긴급 청산 확인 플래그, 데이터 소스, WebSocket gap 임계값 회귀를 자동 검증** |
 | 벤치마크 거래비용 반영 | 높음 | **완료 — `_buy_and_hold_metrics`에 commission/tax/slippage 적용** |
 | Paper Evidence 수집 체계 | 높음 | **완료 — `core/paper_evidence.py` 일별 22개 지표, 6 anomaly rule, 9 approval gate** |
 | Paper Evidence canonical 정렬 | 높음 | 완료 — append-only JSONL에서 같은 날짜의 최신 record만 canonical로 유지하고 날짜순으로 반환. backfill/finalize/shadow append 순서와 무관하게 freshness, 최근 10일, promotion period가 실제 날짜 기준으로 계산됨 |
