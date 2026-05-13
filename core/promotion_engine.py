@@ -60,6 +60,7 @@ class StrategyMetrics:
     paper_days: Optional[int] = None
     paper_sharpe: Optional[float] = None
     paper_excess: Optional[float] = None  # same-universe excess return
+    paper_cash_adjusted_excess: Optional[float] = None
     paper_evidence_recommendation: Optional[str] = None
     paper_evidence_block_reasons: Optional[list[str]] = None
     paper_benchmark_final_ratio: Optional[float] = None
@@ -169,8 +170,10 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"paper {m.paper_days or 0}일 < 60일")
     if m.paper_sharpe is None or m.paper_sharpe < 0.3:
         fails.append(f"paper Sharpe {m.paper_sharpe or 0} < 0.3")
-    if m.paper_excess is None or m.paper_excess < 0:
-        fails.append(f"paper excess {m.paper_excess or 0} < 0")
+    if m.paper_excess is None or m.paper_excess <= 0:
+        fails.append(f"paper same-universe excess {m.paper_excess or 0} <= 0")
+    if m.paper_cash_adjusted_excess is None or m.paper_cash_adjusted_excess <= 0:
+        fails.append(f"paper cash-adjusted excess {m.paper_cash_adjusted_excess or 0} <= 0")
     if m.paper_evidence_recommendation != "ELIGIBLE":
         detail = ""
         if m.paper_evidence_block_reasons:
@@ -389,6 +392,9 @@ def paper_evidence_metrics_from_package(
         ),
         "paper_sharpe": _as_float(package.get("paper_sharpe", package.get("sharpe"))),
         "paper_excess": _as_float(package.get("avg_same_universe_excess")),
+        "paper_cash_adjusted_excess": _as_float(
+            package.get("avg_cash_adjusted_excess", package.get("cash_adjusted_excess"))
+        ),
         "paper_evidence_recommendation": package.get("recommendation"),
         "paper_evidence_block_reasons": [str(reason) for reason in block_reasons],
         "paper_benchmark_final_ratio": _as_float(package.get("benchmark_final_ratio")),
@@ -432,6 +438,7 @@ def attach_paper_evidence_metrics(
         "paper_days",
         "paper_sharpe",
         "paper_excess",
+        "paper_cash_adjusted_excess",
         "paper_evidence_recommendation",
         "paper_evidence_block_reasons",
         "paper_benchmark_final_ratio",
@@ -591,6 +598,7 @@ def load_metrics_from_artifact(
                     "paper_days",
                     "paper_sharpe",
                     "paper_excess",
+                    "paper_cash_adjusted_excess",
                     "paper_evidence_recommendation",
                     "paper_benchmark_final_ratio",
                     "paper_sell_count",
