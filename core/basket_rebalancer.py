@@ -296,21 +296,43 @@ class BasketRebalancer:
 
         return ordered
 
-    def execute(self, orders: list[RebalanceOrder], dry_run: bool = False) -> dict:
+    def execute(
+        self,
+        orders: list[RebalanceOrder],
+        dry_run: bool = False,
+        *,
+        live_confirmed: bool = False,
+    ) -> dict:
         """
         리밸런싱 주문 실행.
 
         Args:
             orders: plan_rebalance()가 반환한 주문 목록
             dry_run: True이면 실제 주문 없이 로그만 출력
+            live_confirmed: live 주문 경로의 운영자 확인/live gate 통과 여부
 
         Returns:
             {"executed": int, "skipped": int, "failed": int, "details": list}
         """
-        from core.order_executor import OrderExecutor
-
-        executor = OrderExecutor(self.config, account_key=self.account_key)
         results = {"executed": 0, "skipped": 0, "failed": 0, "details": []}
+        mode = str(self.config.trading.get("mode", "paper")).lower()
+        if mode == "live" and not dry_run and not live_confirmed and orders:
+            reason = "live 리밸런싱은 운영자 확인 및 live gate 통과 후만 실행 가능합니다."
+            logger.error(reason)
+            results["failed"] = len(orders)
+            results["blocked"] = True
+            results["reason"] = reason
+            results["details"] = [
+                {"order": repr(order), "status": "blocked", "reason": reason}
+                for order in orders
+            ]
+            return results
+
+        executor = None
+        if not dry_run:
+            from core.order_executor import OrderExecutor
+
+            executor = OrderExecutor(self.config, account_key=self.account_key)
 
         for order in orders:
             if dry_run:
