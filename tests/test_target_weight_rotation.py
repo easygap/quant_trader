@@ -673,6 +673,81 @@ def test_target_weight_rotation_limits_new_entries_per_rebalance():
     assert result["target_weight_metrics"]["max_new_targets_per_rebalance"] == 0
 
 
+def test_target_weight_rotation_loss_reentry_guard_blocks_new_names_after_loss():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    dates = pd.to_datetime(
+        [
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-03",
+            "2025-02-04",
+            "2025-03-03",
+        ]
+    )
+    frames = {
+        "AAA": _ohlcv(dates, [100, 110, 100, 80, 80]),
+        "BBB": _ohlcv(dates, [100, 105, 100, 80, 80]),
+        "CCC": _ohlcv(dates, [100, 100, 100, 130, 130]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+    params = {
+        "target_top_n": 2,
+        "target_exposure": 1.0,
+        "target_tolerance_pct": 0.0,
+        "short_lookback": 1,
+        "long_lookback": 1,
+        "short_weight": 1.0,
+        "score_mode": "benchmark_excess",
+        "benchmark_symbol": "KS11",
+    }
+
+    base = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-03",
+        capital=100_000.0,
+        params=params,
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+    guarded = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB", "CCC"],
+        start="2025-02-03",
+        end="2025-03-03",
+        capital=100_000.0,
+        params={
+            **params,
+            "loss_reentry_guard_trigger_pct": 5.0,
+            "loss_reentry_guard_max_new_targets": 0,
+            "loss_reentry_guard_cooldown_rebalances": 1,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    base_march_symbols = {
+        t["symbol"]
+        for t in base["trades"]
+        if t["date"] >= pd.Timestamp("2025-03-03")
+    }
+    guarded_march_symbols = {
+        t["symbol"]
+        for t in guarded["trades"]
+        if t["date"] >= pd.Timestamp("2025-03-03")
+    }
+    metrics = guarded["target_weight_metrics"]
+
+    assert "CCC" in base_march_symbols
+    assert "CCC" not in guarded_march_symbols
+    assert metrics["loss_reentry_guard_enabled"] is True
+    assert metrics["loss_reentry_guard_trigger_count"] == 1
+    assert metrics["loss_reentry_guard_rebalance_count"] == 1
+    assert metrics["loss_reentry_guard_rebalance_pct"] == 50.0
+    assert metrics["loss_reentry_guard_worst_loss_pct"] == pytest.approx(-20.0)
+    assert metrics["loss_reentry_guard_remaining_cooldown"] == 1
+
+
 def test_target_weight_rotation_benchmark_risk_overlay_reduces_exposure():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
