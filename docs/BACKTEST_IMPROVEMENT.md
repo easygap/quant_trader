@@ -147,6 +147,7 @@
 | Paper Evidence canonical 정렬 | 높음 | 완료 — append-only JSONL에서 같은 날짜의 최신 record만 canonical로 유지하고 날짜순으로 반환. backfill/finalize/shadow append 순서와 무관하게 freshness, 최근 10일, promotion period가 실제 날짜 기준으로 계산됨 |
 | Paper Evidence 최신성 승격 gate | 높음 | 완료 — promotion package에 `earliest_evidence_date`/`latest_evidence_date`를 기록하고, live_candidate 판정은 canonical 평가 기준 최신 evidence age 14일 이내만 허용한다. 날짜 누락, 미래일, 14일 초과 package는 fail-closed로 막아 오래된 60영업일 증거 재사용을 차단 |
 | Live gate Paper Evidence 최신성 검증 | 높음 | 완료 — `core/live_gate.py`가 live 진입 직전에 promotion evidence의 `latest_evidence_date` 또는 `period` 종료일을 확인한다. 최신 증거가 14일을 초과하거나 날짜가 누락/미래이면 promotion_result가 live_candidate여도 실전 전환을 차단 |
+| Live gate 승격 재계산 검증 | 높음 | 완료 — `core/live_gate.py`가 `promotion_result.json`의 status를 확인한 뒤 canonical metrics와 paper evidence를 `promotion_engine`으로 다시 로딩해 `promote()` 결과를 재계산한다. 파일상 live_candidate라도 현재 승격 규칙의 MDD/PF/WF/turnover/benchmark/evidence 조건을 통과하지 못하면 실전 전환을 fail-closed 차단 |
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
 | Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡 + fail-closed/audited entry guard** |

@@ -313,6 +313,33 @@ def _validate_target_weight_evidence_summary(
     return issues
 
 
+def _recalculate_promotion_result(
+    strategy_name: str,
+    promotion_base: Path,
+    evidence_base: Path,
+) -> tuple[str | None, list[str], str | None]:
+    """JSON status를 그대로 믿지 않고 canonical artifact 기준으로 승격을 재계산한다."""
+    try:
+        from core.promotion_engine import load_metrics_from_artifact, promote
+    except Exception as exc:
+        return None, [], f"promotion engine 로드 실패: {exc}"
+
+    try:
+        metrics_by_strategy = load_metrics_from_artifact(
+            str(promotion_base),
+            evidence_dir=str(evidence_base),
+        )
+    except Exception as exc:
+        return None, [], f"promotion 재계산 실패: {exc}"
+
+    metrics = metrics_by_strategy.get(strategy_name)
+    if metrics is None:
+        return None, [], f"promotion 재계산 metrics 없음: {strategy_name}"
+
+    result = promote(metrics)
+    return result.status, result.allowed_modes, result.reason
+
+
 def validate_live_readiness(
     config: Any,
     strategy_name: str,
@@ -410,6 +437,18 @@ def validate_live_readiness(
                 f"전략 '{strategy_name}'은 live_candidate가 아님 "
                 f"(status={status}, allowed_modes={allowed_modes})."
             )
+
+    recalculated_status, recalculated_modes, recalculated_reason = _recalculate_promotion_result(
+        strategy_name,
+        promotion_base,
+        evidence_base,
+    )
+    if recalculated_status != "live_candidate" or "live" not in recalculated_modes:
+        issues.append(
+            f"전략 '{strategy_name}' promotion 재계산 결과 live_candidate가 아님 "
+            f"(status={recalculated_status}, allowed_modes={recalculated_modes}, "
+            f"reason={recalculated_reason})."
+        )
 
     metrics = artifacts["metrics_summary.json"].get(strategy_name)
     if not isinstance(metrics, dict):
