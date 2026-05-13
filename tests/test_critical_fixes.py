@@ -97,6 +97,108 @@ class TestForceLiveRemoved:
 
         get_positions.assert_not_called()
 
+    def test_live_rebalance_requires_env_confirmation_before_basket_execution(self, monkeypatch):
+        """live 설정의 rebalance는 환경변수 확인 없이는 바스켓 실행 전 종료해야 한다."""
+        import main as main_mod
+
+        config = SimpleNamespace(trading={"mode": "live"}, active_strategy="scoring")
+        basket_cls = MagicMock()
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", basket_cls)
+        monkeypatch.setattr(
+            "core.notifier.Notifier",
+            lambda cfg: SimpleNamespace(send_message=lambda message: None),
+        )
+        monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+
+        with pytest.raises(SystemExit):
+            main_mod.run_rebalance(SimpleNamespace(
+                basket="test_basket",
+                dry_run=False,
+                confirm_live=False,
+                strategy="scoring",
+            ))
+
+        basket_cls.assert_not_called()
+
+    def test_live_rebalance_gate_failure_blocks_before_basket_execution(self, monkeypatch):
+        """확인 플래그가 있어도 live gate 실패 시 리밸런싱 주문 계획으로 넘어가지 않는다."""
+        import main as main_mod
+
+        config = SimpleNamespace(trading={"mode": "live"}, active_strategy="scoring")
+        basket_cls = MagicMock()
+        gate = MagicMock(return_value=["promotion evidence 부족"])
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(main_mod, "_check_live_readiness_gate", gate)
+        monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", basket_cls)
+        monkeypatch.setattr(
+            "core.notifier.Notifier",
+            lambda cfg: SimpleNamespace(send_message=lambda message: None),
+        )
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.run_rebalance(SimpleNamespace(
+                basket="test_basket",
+                dry_run=False,
+                confirm_live=True,
+                strategy="scoring",
+            ))
+
+        assert exc.value.code == 1
+        gate.assert_called_once_with(config, "scoring")
+        basket_cls.assert_not_called()
+
+    def test_live_rebalance_passes_confirmed_gate_to_executor(self, monkeypatch):
+        """live gate를 통과한 rebalance만 core 실행부에 confirmed 상태로 전달한다."""
+        import main as main_mod
+
+        calls = {}
+        config = SimpleNamespace(trading={"mode": "live"}, active_strategy="scoring")
+
+        class FakeRebalancer:
+            def __init__(self, basket_name, config):
+                calls["basket_name"] = basket_name
+                calls["config"] = config
+
+            def get_status_report(self):
+                return "status"
+
+            def should_rebalance(self):
+                return True, "드리프트"
+
+            def plan_rebalance(self):
+                return ["order"]
+
+            def execute(self, orders, dry_run=False, live_confirmed=False):
+                calls["execute"] = {
+                    "orders": orders,
+                    "dry_run": dry_run,
+                    "live_confirmed": live_confirmed,
+                }
+                return {"executed": 1, "skipped": 0, "failed": 0}
+
+        gate = MagicMock(return_value=[])
+        notifier = SimpleNamespace(send_message=MagicMock())
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(main_mod, "_check_live_readiness_gate", gate)
+        monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
+        monkeypatch.setattr("core.notifier.Notifier", lambda cfg: notifier)
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        main_mod.run_rebalance(SimpleNamespace(
+            basket="test_basket",
+            dry_run=False,
+            confirm_live=True,
+            strategy="scoring",
+        ))
+
+        gate.assert_called_once_with(config, "scoring")
+        assert calls["basket_name"] == "test_basket"
+        assert calls["execute"]["live_confirmed"] is True
+        assert calls["execute"]["dry_run"] is False
+        notifier.send_message.assert_called_once()
+
     def test_live_liquidate_syncs_broker_positions_before_loading_db_positions(self, monkeypatch):
         """live 긴급 청산은 KIS-only 포지션을 DB에 보정한 뒤 청산 대상을 읽는다."""
         import main as main_mod
