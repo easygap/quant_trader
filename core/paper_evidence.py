@@ -26,6 +26,7 @@ from loguru import logger
 
 # ─── 상수 ───────────────────────────────────────────────────
 EVIDENCE_DIR = Path("reports/paper_evidence")
+PROMOTION_DIR = Path("reports/promotion")
 RF_ANNUAL = 0.035  # 한국 국채 근사
 
 # Anomaly thresholds
@@ -1190,8 +1191,49 @@ def generate_weekly_summary(strategy: str, week_end_date: str | None = None) -> 
 # Promotion Package (60일)
 # ═══════════════════════════════════════════════════════════════
 
-def _is_target_weight_strategy(strategy: str) -> bool:
-    return strategy.startswith("target_weight_")
+def _load_canonical_promotion_metadata(
+    promotion_dir: str | Path = PROMOTION_DIR,
+) -> dict | None:
+    path = Path(promotion_dir) / "run_metadata.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("canonical promotion metadata 로드 실패: {} ({})", path, exc)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _target_weight_metadata_identity(
+    strategy: str,
+    canonical_metadata: dict | None,
+) -> tuple[bool, str | None]:
+    specs = canonical_metadata.get("strategy_specs") if isinstance(canonical_metadata, dict) else None
+    if not isinstance(specs, list):
+        return False, None
+    for spec in specs:
+        if not isinstance(spec, dict) or spec.get("candidate_id") != strategy:
+            continue
+        base_strategy = spec.get("base_strategy") or spec.get("strategy")
+        candidate_id = spec.get("candidate_id")
+        is_target_weight = (
+            base_strategy == "target_weight_rotation"
+            or (isinstance(candidate_id, str) and candidate_id.startswith("target_weight_"))
+        )
+        if not is_target_weight:
+            return False, None
+        params_hash = spec.get("params_hash")
+        return True, params_hash if isinstance(params_hash, str) and params_hash else None
+    return False, None
+
+
+def _is_target_weight_strategy(
+    strategy: str,
+    canonical_metadata: dict | None = None,
+) -> bool:
+    metadata_required, _ = _target_weight_metadata_identity(strategy, canonical_metadata)
+    return metadata_required or strategy.startswith("target_weight_")
 
 
 def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[bool, str]:
@@ -1404,12 +1446,24 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
     }
 
 
-def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]:
+def generate_promotion_package(
+    strategy: str,
+    *,
+    canonical_metadata: dict | None = None,
+    promotion_dir: str | Path = PROMOTION_DIR,
+) -> tuple[Path | None, Path | None]:
     """
     60일 누적 evidence에서 promotion package + approval checklist 생성.
     Returns (package_path, checklist_path) or (None, None).
     live eligibility는 절대 수정하지 않는다.
     """
+    if canonical_metadata is None:
+        canonical_metadata = _load_canonical_promotion_metadata(promotion_dir)
+    metadata_target_weight, target_weight_canonical_params_hash = _target_weight_metadata_identity(
+        strategy,
+        canonical_metadata,
+    )
+
     all_records = get_canonical_records(strategy)
     if not all_records:
         logger.warning("Promotion package: no evidence for {}", strategy)
@@ -1418,7 +1472,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
     # provenance 분리: 명시적인 real/pilot paper 실행 record만 승격 카운트
     execution_records = [r for r in all_records if _is_promotable_paper_evidence(r)]
     shadow_records = [r for r in all_records if not _is_promotable_paper_evidence(r)]
-    target_weight_required = _is_target_weight_strategy(strategy)
+    target_weight_required = _is_target_weight_strategy(strategy, canonical_metadata)
     target_weight_valid_records: list[dict] = []
     target_weight_invalid_records: list[dict] = []
     target_weight_invalid_reasons: dict[str, int] = {}
@@ -1522,6 +1576,17 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
         block_reasons.append(
             "target_weight_invalid_execution_evidence=%d" % len(target_weight_invalid_records)
         )
+    if target_weight_required and metadata_target_weight and not target_weight_canonical_params_hash:
+        blocked = True
+        block_reasons.append("target_weight_canonical_params_hash_missing")
+    if (
+        target_weight_required
+        and target_weight_canonical_params_hash
+        and target_weight_params_hash
+        and target_weight_params_hash != target_weight_canonical_params_hash
+    ):
+        blocked = True
+        block_reasons.append("target_weight_canonical_params_hash_mismatch")
     if target_weight_required and target_weight_valid_records and not target_weight_params_hash_consistent:
         blocked = True
         block_reasons.append(
@@ -1655,8 +1720,14 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
             "invalid_days": len(target_weight_invalid_records),
             "invalid_reasons": target_weight_invalid_reasons,
             "params_hash": target_weight_params_hash,
+            "canonical_params_hash": target_weight_canonical_params_hash,
             "params_hashes": target_weight_params_hashes,
             "params_hash_consistent": target_weight_params_hash_consistent,
+            "identity_source": (
+                "canonical_metadata"
+                if metadata_target_weight
+                else ("name_prefix" if strategy.startswith("target_weight_") else None)
+            ),
             "all_promotable_days_verified": (
                 not target_weight_required
                 or (
@@ -1668,6 +1739,7 @@ def generate_promotion_package(strategy: str) -> tuple[Path | None, Path | None]
             ),
         },
         "target_weight_params_hash": target_weight_params_hash,
+        "target_weight_canonical_params_hash": target_weight_canonical_params_hash,
         "target_weight_verified_pilot_days": len(target_weight_valid_records),
         "target_weight_invalid_days": len(target_weight_invalid_records),
         "trade_quality": trade_quality,
