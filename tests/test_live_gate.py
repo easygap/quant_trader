@@ -81,7 +81,19 @@ def _write_bundle(
     elif strategy.startswith("target_weight_"):
         metadata["strategy_specs"] = [{"candidate_id": strategy, "params_hash": "hash"}]
     _write_json(promotion_dir / "run_metadata.json", metadata)
-    metrics = {"total_return": 12.0, "sharpe": 0.6, "profit_factor": 1.3}
+    metrics = {
+        "total_return": 12.0,
+        "sharpe": 0.6,
+        "profit_factor": 1.3,
+        "mdd": -8.0,
+        "wf_positive_rate": 0.8,
+        "wf_sharpe_positive_rate": 0.8,
+        "wf_windows": 5,
+        "wf_total_trades": 80,
+        "ev_per_trade": 1000.0,
+        "cost_adjusted_cagr": 6.0,
+        "turnover_per_year": 350.0,
+    }
     metrics.update(metric_overrides or {})
     _write_json(
         promotion_dir / "metrics_summary.json",
@@ -163,6 +175,30 @@ def test_provisional_candidate_cannot_pass_live_gate(tmp_path):
     )
 
     assert any("live_candidate가 아님" in issue for issue in issues)
+
+
+def test_live_gate_recomputes_promotion_status_from_artifact_metrics(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(
+        promotion_dir,
+        status="live_candidate",
+        allowed_modes=["backtest", "paper", "live"],
+        metric_overrides={"mdd": -25.0},
+    )
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("promotion 재계산 결과 live_candidate가 아님" in issue for issue in issues)
+    assert any("MDD -25.0% < -20%" in issue for issue in issues)
 
 
 def test_commit_and_config_mismatch_block_live_gate(tmp_path):
