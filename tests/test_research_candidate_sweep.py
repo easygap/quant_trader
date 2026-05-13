@@ -459,6 +459,9 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen05_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrpen10_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrpen05_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_reentry4_maxnew0_cd1_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_reentry3_maxnew0_cd1_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_reentry4_maxnew0_cd1_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -479,6 +482,8 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert any(spec.params.get("max_pairwise_correlation") == 0.80 for spec in direct)
     assert any(spec.params.get("correlation_rank_penalty_weight") == 0.05 for spec in direct)
     assert any(spec.params.get("correlation_rank_penalty_weight") == 0.10 for spec in direct)
+    assert any(spec.params.get("loss_reentry_guard_trigger_pct") == 4.0 for spec in direct)
+    assert any(spec.params.get("loss_reentry_guard_trigger_pct") == 3.0 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():
