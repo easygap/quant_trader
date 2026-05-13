@@ -1035,6 +1035,30 @@ def _target_weight_spec_with_sector_cap(
     )
 
 
+def _target_weight_spec_with_correlation_cap(
+    base_spec: CandidateSpec,
+    *,
+    suffix: str,
+    max_pairwise_correlation: float,
+    lookback_days: int,
+    min_periods: int,
+    description: str,
+) -> CandidateSpec:
+    params = {
+        **base_spec.params,
+        "max_pairwise_correlation": round(float(max_pairwise_correlation), 4),
+        "correlation_lookback_days": max(2, int(lookback_days)),
+        "correlation_min_periods": max(2, int(min_periods)),
+    }
+    return CandidateSpec(
+        candidate_id=f"{base_spec.candidate_id}_{suffix}",
+        strategy=base_spec.strategy,
+        params=params,
+        description=description,
+        diversification=base_spec.diversification,
+    )
+
+
 def build_target_weight_risk_relief_candidate_specs() -> list[CandidateSpec]:
     """Target-weight shortlist for follow-up MDD/turnover relief sweeps."""
     specs_by_id = {
@@ -1320,6 +1344,30 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         max_targets_per_sector=2,
         description="75pct exposure longer rank-penalty rotation with 4pct tolerance and sector cap",
     )
+    exp75_rankrisk90_tol4_corr85 = _target_weight_spec_with_correlation_cap(
+        exp75_rankrisk90_tol4,
+        suffix="corrcap85",
+        max_pairwise_correlation=0.85,
+        lookback_days=90,
+        min_periods=45,
+        description="75pct exposure rank-penalty rotation with 4pct tolerance and correlation cap",
+    )
+    exp75_rankrisk90_tol4_corr80 = _target_weight_spec_with_correlation_cap(
+        exp75_rankrisk90_tol4,
+        suffix="corrcap80",
+        max_pairwise_correlation=0.80,
+        lookback_days=90,
+        min_periods=45,
+        description="75pct exposure rank-penalty rotation with 4pct tolerance and stricter correlation cap",
+    )
+    exp75_rankrisk90_tol4_sectorcap2_corr85 = _target_weight_spec_with_correlation_cap(
+        exp75_rankrisk90_tol4_sectorcap2,
+        suffix="corrcap85",
+        max_pairwise_correlation=0.85,
+        lookback_days=90,
+        min_periods=45,
+        description="75pct exposure rank-penalty rotation with sector and correlation caps",
+    )
     exp75_rankrisk90_maxnew2 = _target_weight_spec_with_churn_control(
         exp75_rankrisk90,
         suffix="maxnew2",
@@ -1429,6 +1477,24 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure longer rank-penalty rotation with sector cap and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_corr85,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with correlation cap and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_corr80,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with strict correlation cap and portfolio guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4_sectorcap2_corr85,
+            suffix="pdd10_floor40_cd1",
+            guard_params=guard10_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with sector/correlation caps and portfolio guard",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
@@ -2194,6 +2260,8 @@ def _select_target_weight_targets(
     max_new_targets_per_rebalance: int | None = None,
     max_targets_per_sector: int | None = None,
     sector_map: dict[str, str] | None = None,
+    max_pairwise_correlation: float | None = None,
+    correlation_matrix: pd.DataFrame | None = None,
 ) -> list[str]:
     ranked = [
         sym
@@ -2203,12 +2271,14 @@ def _select_target_weight_targets(
     targets = ranked[:top_n]
     if hold_rank_buffer <= 0 or not positions:
         if max_new_targets_per_rebalance is None or not positions:
-            return _limit_targets_per_sector(
+            return _limit_targets_by_diversification(
                 ranked=ranked,
                 targets=targets,
                 top_n=top_n,
                 max_targets_per_sector=max_targets_per_sector,
                 sector_map=sector_map,
+                max_pairwise_correlation=max_pairwise_correlation,
+                correlation_matrix=correlation_matrix,
             )
         targets = _limit_new_target_churn(
             ranked=ranked,
@@ -2217,12 +2287,14 @@ def _select_target_weight_targets(
             top_n=top_n,
             max_new_targets_per_rebalance=max_new_targets_per_rebalance,
         )
-        return _limit_targets_per_sector(
+        return _limit_targets_by_diversification(
             ranked=ranked,
             targets=targets,
             top_n=top_n,
             max_targets_per_sector=max_targets_per_sector,
             sector_map=sector_map,
+            max_pairwise_correlation=max_pairwise_correlation,
+            correlation_matrix=correlation_matrix,
         )
 
     retention_pool = ranked[top_n : top_n + hold_rank_buffer]
@@ -2238,12 +2310,14 @@ def _select_target_weight_targets(
         targets[replacement_idx] = held
 
     if max_new_targets_per_rebalance is None:
-        return _limit_targets_per_sector(
+        return _limit_targets_by_diversification(
             ranked=ranked,
             targets=targets,
             top_n=top_n,
             max_targets_per_sector=max_targets_per_sector,
             sector_map=sector_map,
+            max_pairwise_correlation=max_pairwise_correlation,
+            correlation_matrix=correlation_matrix,
         )
 
     targets = _limit_new_target_churn(
@@ -2253,12 +2327,14 @@ def _select_target_weight_targets(
         top_n=top_n,
         max_new_targets_per_rebalance=max_new_targets_per_rebalance,
     )
-    return _limit_targets_per_sector(
+    return _limit_targets_by_diversification(
         ranked=ranked,
         targets=targets,
         top_n=top_n,
         max_targets_per_sector=max_targets_per_sector,
         sector_map=sector_map,
+        max_pairwise_correlation=max_pairwise_correlation,
+        correlation_matrix=correlation_matrix,
     )
 
 
@@ -2280,25 +2356,74 @@ def _limit_targets_per_sector(
     max_targets_per_sector: int | None,
     sector_map: dict[str, str] | None,
 ) -> list[str]:
-    if max_targets_per_sector is None or int(max_targets_per_sector) <= 0 or not sector_map:
+    return _limit_targets_by_diversification(
+        ranked=ranked,
+        targets=targets,
+        top_n=top_n,
+        max_targets_per_sector=max_targets_per_sector,
+        sector_map=sector_map,
+        max_pairwise_correlation=None,
+        correlation_matrix=None,
+    )
+
+
+def _pairwise_correlation(symbol: str, selected_symbol: str, correlation_matrix: pd.DataFrame | None) -> float | None:
+    if correlation_matrix is None or correlation_matrix.empty:
+        return None
+    if symbol not in correlation_matrix.index or selected_symbol not in correlation_matrix.columns:
+        return None
+    value = correlation_matrix.loc[symbol, selected_symbol]
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def _limit_targets_by_diversification(
+    *,
+    ranked: list[str],
+    targets: list[str],
+    top_n: int,
+    max_targets_per_sector: int | None,
+    sector_map: dict[str, str] | None,
+    max_pairwise_correlation: float | None,
+    correlation_matrix: pd.DataFrame | None,
+) -> list[str]:
+    sector_cap_enabled = (
+        max_targets_per_sector is not None
+        and int(max_targets_per_sector) > 0
+        and bool(sector_map)
+    )
+    correlation_cap_enabled = (
+        max_pairwise_correlation is not None
+        and correlation_matrix is not None
+        and not correlation_matrix.empty
+    )
+    if not sector_cap_enabled and not correlation_cap_enabled:
         return targets
 
-    cap = max(1, int(max_targets_per_sector))
+    sector_cap = max(1, int(max_targets_per_sector)) if sector_cap_enabled else None
+    correlation_cap = float(max_pairwise_correlation) if correlation_cap_enabled else None
     selected: list[str] = []
     sector_counts: dict[str, int] = {}
 
     def can_add(symbol: str) -> bool:
         if symbol in selected:
             return False
-        sector = _sector_for_symbol(symbol, sector_map)
-        if not sector:
-            return True
-        return sector_counts.get(sector, 0) < cap
+        if sector_cap_enabled:
+            sector = _sector_for_symbol(symbol, sector_map or {})
+            if sector and sector_counts.get(sector, 0) >= int(sector_cap):
+                return False
+        if correlation_cap_enabled:
+            for selected_symbol in selected:
+                corr = _pairwise_correlation(symbol, selected_symbol, correlation_matrix)
+                if corr is not None and corr > float(correlation_cap):
+                    return False
+        return True
 
     def add(symbol: str) -> None:
         selected.append(symbol)
-        sector = _sector_for_symbol(symbol, sector_map)
-        if sector:
+        sector = _sector_for_symbol(symbol, sector_map or {})
+        if sector_cap_enabled and sector:
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
     for sym in targets:
@@ -2314,6 +2439,41 @@ def _limit_targets_per_sector(
             add(sym)
 
     return selected
+
+
+def _target_weight_correlation_matrix(
+    close_panel: pd.DataFrame,
+    score_day: pd.Timestamp,
+    symbols: list[str],
+    lookback_days: int,
+    min_periods: int,
+) -> pd.DataFrame:
+    columns = [sym for sym in symbols if sym in close_panel.columns]
+    if not columns:
+        return pd.DataFrame()
+    history = close_panel.loc[close_panel.index <= pd.Timestamp(score_day), columns].tail(
+        max(2, int(lookback_days)) + 1
+    )
+    if history.empty:
+        return pd.DataFrame()
+    returns = history.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
+    if returns.empty:
+        return pd.DataFrame()
+    return returns.corr(min_periods=max(2, int(min_periods)))
+
+
+def _max_pairwise_correlation_for_targets(targets: list[str], correlation_matrix: pd.DataFrame | None) -> float | None:
+    if correlation_matrix is None or correlation_matrix.empty or len(targets) < 2:
+        return None
+    values: list[float] = []
+    for idx, sym in enumerate(targets):
+        for other in targets[idx + 1 :]:
+            corr = _pairwise_correlation(sym, other, correlation_matrix)
+            if corr is not None:
+                values.append(corr)
+    if not values:
+        return None
+    return max(values)
 
 
 def _limit_new_target_churn(
@@ -2595,6 +2755,21 @@ def run_target_weight_rotation_backtest(
                         if params.get("max_targets_per_sector") is not None
                         else None
                     ),
+                    "max_pairwise_correlation": (
+                        float(params.get("max_pairwise_correlation"))
+                        if params.get("max_pairwise_correlation") is not None
+                        else None
+                    ),
+                    "correlation_lookback_days": (
+                        max(2, int(params.get("correlation_lookback_days")))
+                        if params.get("correlation_lookback_days") is not None
+                        else None
+                    ),
+                    "correlation_min_periods": (
+                        max(2, int(params.get("correlation_min_periods")))
+                        if params.get("correlation_min_periods") is not None
+                        else None
+                    ),
                     "portfolio_drawdown_guard_enabled": bool(
                         float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0) > 0
                     ),
@@ -2674,6 +2849,20 @@ def run_target_weight_rotation_backtest(
                 TARGET_WEIGHT_SECTOR_MAP_CACHE = DataCollector.get_sector_map()
             sector_map_for_selection = TARGET_WEIGHT_SECTOR_MAP_CACHE
         sector_map_for_selection = sector_map_for_selection or {}
+        max_pairwise_correlation_raw = params.get("max_pairwise_correlation")
+        max_pairwise_correlation = (
+            max(-1.0, min(float(max_pairwise_correlation_raw), 1.0))
+            if max_pairwise_correlation_raw is not None
+            else None
+        )
+        correlation_lookback_days = max(
+            2,
+            int(params.get("correlation_lookback_days", 90) or 90),
+        )
+        correlation_min_periods = max(
+            2,
+            int(params.get("correlation_min_periods", max(20, correlation_lookback_days // 2)) or 2),
+        )
         portfolio_drawdown_guard_trigger_pct = max(
             0.0,
             float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
@@ -2749,6 +2938,7 @@ def run_target_weight_rotation_backtest(
         missing_held_open_symbol_set: set[str] = set()
         missing_held_open_samples: list[str] = []
         selected_sector_max_counts: list[int] = []
+        selected_pairwise_correlations: list[float] = []
 
         for day in eval_index:
             day = pd.Timestamp(day).normalize()
@@ -2799,6 +2989,17 @@ def run_target_weight_rotation_backtest(
                     min_score_floor = params.get("min_score_floor_pct")
                     if min_score_floor is not None:
                         score_row = score_row[score_row >= float(min_score_floor) / 100.0]
+                    correlation_matrix = (
+                        _target_weight_correlation_matrix(
+                            close_panel,
+                            score_day,
+                            score_row.index.tolist(),
+                            correlation_lookback_days,
+                            correlation_min_periods,
+                        )
+                        if max_pairwise_correlation is not None
+                        else None
+                    )
                     targets = _select_target_weight_targets(
                         score_row,
                         close_prices,
@@ -2808,6 +3009,8 @@ def run_target_weight_rotation_backtest(
                         max_new_targets_per_rebalance,
                         max_targets_per_sector,
                         sector_map_for_selection,
+                        max_pairwise_correlation,
+                        correlation_matrix,
                     )
                     if max_targets_per_sector is not None and sector_map_for_selection and targets:
                         sector_counts: dict[str, int] = {}
@@ -2817,6 +3020,9 @@ def run_target_weight_rotation_backtest(
                                 sector_counts[sector] = sector_counts.get(sector, 0) + 1
                         if sector_counts:
                             selected_sector_max_counts.append(max(sector_counts.values()))
+                    max_selected_corr = _max_pairwise_correlation_for_targets(targets, correlation_matrix)
+                    if max_selected_corr is not None:
+                        selected_pairwise_correlations.append(max_selected_corr)
                     missing_target_execution_symbols = [
                         sym
                         for sym in targets
@@ -2988,6 +3194,22 @@ def run_target_weight_rotation_backtest(
                 "max_selected_targets_per_sector": (
                     max(selected_sector_max_counts)
                     if selected_sector_max_counts
+                    else 0
+                ),
+                "max_pairwise_correlation": max_pairwise_correlation,
+                "correlation_lookback_days": (
+                    correlation_lookback_days
+                    if max_pairwise_correlation is not None
+                    else None
+                ),
+                "correlation_min_periods": (
+                    correlation_min_periods
+                    if max_pairwise_correlation is not None
+                    else None
+                ),
+                "max_selected_pairwise_correlation": (
+                    round(max(selected_pairwise_correlations), 4)
+                    if selected_pairwise_correlations
                     else 0
                 ),
                 "portfolio_drawdown_guard_enabled": portfolio_drawdown_guard_enabled,
