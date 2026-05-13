@@ -8,6 +8,7 @@
 - 재시작 복구: `reconcile_open_orders_after_crash()`로 KIS 미체결 목록 확인·로깅 (잔고 정합은 `PortfolioManager.sync_with_broker`)
 """
 
+import math
 import time as time_mod
 from datetime import datetime, timedelta
 from loguru import logger
@@ -506,6 +507,59 @@ class OrderExecutor:
 
         return {"allowed": True, "reason": ""}
 
+    def _gap_up_entry_check(self, symbol: str, price: float) -> dict:
+        """갭업 추격매수 방지용 최근 가격 조회는 실패 시 신규 BUY를 차단한다."""
+        gap_cfg = (self.config.risk_params or {}).get("gap_risk", {})
+        if not (gap_cfg.get("enabled", False) and gap_cfg.get("gap_up_entry_block", 0) > 0):
+            return {"allowed": True, "reason": ""}
+
+        try:
+            from core.data_collector import DataCollector
+
+            df_recent = DataCollector().fetch_stock(symbol)
+        except Exception as exc:
+            reason = f"갭 리스크 확인 실패: {symbol} 최근 가격 조회 실패 ({exc})"
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
+
+        if df_recent is None or len(df_recent) < 2 or "close" not in df_recent.columns:
+            reason = f"갭 리스크 확인 실패: {symbol} 최근 가격 데이터 부족"
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
+
+        try:
+            prev_close = float(df_recent["close"].iloc[-2])
+            today_open = (
+                float(df_recent["open"].iloc[-1])
+                if "open" in df_recent.columns
+                else float(price or 0)
+            )
+        except (TypeError, ValueError) as exc:
+            reason = f"갭 리스크 확인 실패: {symbol} 가격 데이터 해석 실패 ({exc})"
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
+
+        if (
+            not math.isfinite(prev_close)
+            or not math.isfinite(today_open)
+            or prev_close <= 0
+            or today_open <= 0
+        ):
+            reason = f"갭 리스크 확인 실패: {symbol} 기준 가격 없음"
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
+
+        gap_pct = (today_open - prev_close) / prev_close
+        if gap_pct >= gap_cfg["gap_up_entry_block"]:
+            reason = (
+                f"갭업 +{gap_pct*100:.1f}% "
+                f"(기준 +{gap_cfg['gap_up_entry_block']*100:.0f}%) — 추격매수 차단"
+            )
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
+            return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
+
+        return {"allowed": True, "reason": ""}
+
     @staticmethod
     def _is_emergency_sell_reason(reason: str) -> bool:
         """손실 방어용 청산은 최소 보유 기간보다 우선한다."""
@@ -638,22 +692,9 @@ class OrderExecutor:
             quantity = scaled_qty
 
         # 갭 리스크 체크: 당일 시가가 전일 종가 대비 큰 폭 갭업이면 매수 차단
-        gap_cfg = (self.config.risk_params or {}).get("gap_risk", {})
-        if gap_cfg.get("enabled", False) and gap_cfg.get("gap_up_entry_block", 0) > 0:
-            try:
-                from core.data_collector import DataCollector
-                df_recent = DataCollector().fetch_stock(symbol)
-                if df_recent is not None and len(df_recent) >= 2:
-                    prev_close = float(df_recent["close"].iloc[-2])
-                    today_open = float(df_recent["open"].iloc[-1]) if "open" in df_recent.columns else price
-                    if prev_close > 0:
-                        gap_pct = (today_open - prev_close) / prev_close
-                        if gap_pct >= gap_cfg["gap_up_entry_block"]:
-                            msg = f"갭업 +{gap_pct*100:.1f}% (기준 +{gap_cfg['gap_up_entry_block']*100:.0f}%) — 추격매수 차단"
-                            logger.warning("종목 {} 매수 스킵: {}", symbol, msg)
-                            return {"success": False, "reason": msg}
-            except Exception as e:
-                logger.debug("갭 리스크 체크 스킵: {}", e)
+        gap_check = self._gap_up_entry_check(symbol, price)
+        if not gap_check["allowed"]:
+            return {"success": False, "reason": gap_check["reason"]}
 
         # 실적 발표일 필터: 전후 N일 이내이면 신규 매수 금지
         skip_earnings_days = int(self.config.trading.get("skip_earnings_days", 0))
