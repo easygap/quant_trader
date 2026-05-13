@@ -436,6 +436,162 @@ def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
     assert check["mismatches"][0]["field"] == "params_hash"
 
 
+def test_load_portfolio_drawdown_guard_state_uses_prior_evidence_peak_and_cooldown(monkeypatch):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(
+        pe,
+        "get_canonical_records",
+        lambda candidate_id: [
+            {
+                "date": "2026-04-08",
+                "strategy": candidate_id,
+                "total_value": 10_000_000.0,
+                "pilot_caps_snapshot": {
+                    "target_weight_plan": {
+                        "portfolio_drawdown_guard": {"cooldown_after_plan": 0},
+                    },
+                },
+            },
+            {
+                "date": "2026-04-09",
+                "strategy": candidate_id,
+                "portfolio_value": 8_900_000.0,
+                "pilot_caps_snapshot": {
+                    "target_weight_plan": {
+                        "portfolio_drawdown_guard": {"cooldown_after_plan": 1},
+                    },
+                },
+            },
+            {
+                "date": "2026-04-10",
+                "strategy": candidate_id,
+                "total_value": 9_500_000.0,
+            },
+        ],
+    )
+
+    state = twp.load_portfolio_drawdown_guard_state(
+        "target_weight_candidate",
+        as_of_date="2026-04-10",
+    )
+
+    assert state["source"] == "paper_evidence"
+    assert state["record_count"] == 2
+    assert state["latest_record_date"] == "2026-04-09"
+    assert state["peak_value"] == 10_000_000.0
+    assert state["last_equity_value"] == 8_900_000.0
+    assert state["last_evidence_value"] == 8_900_000.0
+    assert state["cooldown_remaining"] == 1
+
+
+def test_build_plan_passes_portfolio_drawdown_guard_state(monkeypatch):
+    import tools.target_weight_rotation_pilot as twp
+
+    state = {
+        "source": "paper_evidence",
+        "record_count": 2,
+        "peak_value": 10_000_000.0,
+        "last_equity_value": 8_900_000.0,
+        "cooldown_remaining": 1,
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        twp,
+        "load_canonical_target_weight_spec",
+        lambda candidate_id: SimpleNamespace(
+            params={
+                "target_top_n": 2,
+                "short_lookback": 20,
+                "long_lookback": 60,
+                "portfolio_drawdown_guard_trigger_pct": 10.0,
+                "portfolio_drawdown_guard_exposure": 0.40,
+                "portfolio_drawdown_guard_cooldown_rebalances": 1,
+            },
+        ),
+    )
+    monkeypatch.setattr(twp, "_load_symbols", lambda config, raw_symbols: ["AAA", "BBB"])
+    monkeypatch.setattr(twp, "_load_positions", lambda candidate_id: {})
+    monkeypatch.setattr(twp, "_portfolio_cash", lambda config, candidate_id, cash: 1_000_000.0)
+    monkeypatch.setattr(
+        twp,
+        "load_portfolio_drawdown_guard_state",
+        lambda candidate_id, *, as_of_date=None: state,
+    )
+
+    def build_target_weight_plan(**kwargs):
+        captured.update(kwargs)
+        return _adapter_plan()
+
+    monkeypatch.setattr(twp, "build_target_weight_plan", build_target_weight_plan)
+
+    plan = twp.build_plan(
+        candidate_id="target_weight_candidate",
+        as_of_date="2026-04-10",
+        config=SimpleNamespace(),
+    )
+
+    assert plan.candidate_id == "target_weight_candidate"
+    assert captured["portfolio_drawdown_guard_state"] is state
+    assert captured["as_of_date"] == "2026-04-10"
+
+
+def test_authorization_snapshot_tracks_portfolio_drawdown_guard():
+    import tools.target_weight_rotation_pilot as twp
+
+    guard = {
+        "enabled": True,
+        "active": True,
+        "triggered": True,
+        "drawdown_pct": -11.0,
+        "cooldown_after_plan": 1,
+    }
+    plan = _adapter_plan()
+    plan = replace(plan, diagnostics={**plan.diagnostics, "portfolio_drawdown_guard": guard})
+
+    snapshot = twp.build_pilot_authorization_snapshot(plan)
+    stale_snapshot = deepcopy(snapshot)
+    stale_snapshot["portfolio_drawdown_guard"] = {**guard, "cooldown_after_plan": 0}
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+
+    assert snapshot["portfolio_drawdown_guard"] == guard
+    assert check["allowed"] is False
+    assert check["mismatches"][0]["field"] == "portfolio_drawdown_guard"
+
+
+def test_build_pilot_evidence_caps_snapshot_persists_portfolio_drawdown_guard():
+    import tools.target_weight_rotation_pilot as twp
+
+    guard = {
+        "enabled": True,
+        "active": True,
+        "triggered": False,
+        "drawdown_pct": -3.0,
+        "cooldown_after_plan": 0,
+    }
+    plan = _adapter_plan()
+    plan = replace(plan, diagnostics={**plan.diagnostics, "portfolio_drawdown_guard": guard})
+
+    caps = twp.build_pilot_evidence_caps_snapshot(
+        plan,
+        SimpleNamespace(caps_snapshot={}),
+        {
+            "executed": 0,
+            "failed": 0,
+            "skipped": len(plan.orders),
+            "halted": True,
+            "details": [],
+        },
+    )
+
+    assert caps["target_weight_plan"]["portfolio_drawdown_guard"] == guard
+
+
 def _existing_pilot_evidence_record(plan):
     return {
         "date": plan.trade_day,
