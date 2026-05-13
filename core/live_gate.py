@@ -526,10 +526,16 @@ def validate_live_readiness(
             "tools/run_paper_evidence_pipeline.py로 60영업일 증거 패키지를 생성하세요."
         )
     else:
-        if evidence.get("strategy") not in (None, strategy_name):
-            issues.append(
-                f"paper evidence strategy 불일치: {evidence.get('strategy')} != {strategy_name}"
-            )
+        evidence_strategy = evidence.get("strategy")
+        if evidence_strategy != strategy_name:
+            if evidence_strategy is None:
+                issues.append(
+                    f"paper evidence strategy 누락: {strategy_name} 패키지에 strategy 필드가 필요함."
+                )
+            else:
+                issues.append(
+                    f"paper evidence strategy 불일치: {evidence_strategy} != {strategy_name}"
+                )
         if evidence.get("recommendation") != "ELIGIBLE":
             issues.append(
                 f"paper evidence recommendation={evidence.get('recommendation')} "
