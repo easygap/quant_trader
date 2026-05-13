@@ -13,6 +13,7 @@
 
 import re
 import time as time_module
+import warnings
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -27,7 +28,9 @@ except ImportError:
     logger.warning("FinanceDataReader가 설치되지 않았습니다. pip install FinanceDataReader")
 
 try:
-    from pykrx import stock as _pykrx_stock
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="pkg_resources is deprecated.*", category=UserWarning)
+        from pykrx import stock as _pykrx_stock
     HAS_PYKRX = True
 except ImportError:
     HAS_PYKRX = False
@@ -735,32 +738,144 @@ class DataCollector:
     def get_sector_map() -> dict[str, str]:
         """
         KRX 종목코드 → 업종(Sector) 매핑 딕셔너리 반환.
-        FDR StockListing('KRX')의 Sector 컬럼을 사용한다.
-        FDR 미설치·조회 실패 시 빈 dict 반환.
+        우선 FDR StockListing('KRX')의 Sector 컬럼을 사용하고,
+        FDR에 업종 컬럼이 없으면 KRX KIND 상장법인 목록과 pykrx 업종 분류로 보강한다.
         """
+        mapping = DataCollector._get_sector_map_from_fdr()
+        if mapping:
+            return mapping
+        mapping = DataCollector._get_sector_map_from_kind()
+        if mapping:
+            return mapping
+        return DataCollector._get_sector_map_from_pykrx()
+
+    @staticmethod
+    def _sector_map_from_listing(stocks: pd.DataFrame) -> dict[str, str]:
+        if stocks is None or stocks.empty:
+            return {}
+
+        def find_code_col() -> str | None:
+            exact = ["Code", "code", "Symbol", "symbol", "Ticker", "ticker", "티커", "종목코드", "단축코드"]
+            found = next((c for c in exact if c in stocks.columns), None)
+            if found is not None:
+                return found
+            return next(
+                (
+                    c
+                    for c in stocks.columns
+                    if "코드" in str(c) or "ticker" in str(c).lower()
+                ),
+                None,
+            )
+
+        def find_sector_col() -> str | None:
+            exact = ["Sector", "sector", "Industry", "industry", "업종", "업종명", "산업", "산업명"]
+            found = next((c for c in exact if c in stocks.columns), None)
+            if found is not None:
+                return found
+            return next(
+                (
+                    c
+                    for c in stocks.columns
+                    if "업종" in str(c)
+                    or "산업" in str(c)
+                    or "sector" in str(c).lower()
+                    or "industry" in str(c).lower()
+                ),
+                None,
+            )
+
+        code_col = find_code_col()
+        sector_col = find_sector_col()
+        if code_col is None or sector_col is None:
+            return {}
+
+        mapping = {}
+        for _, row in stocks.iterrows():
+            code = str(row[code_col]).strip()
+            if not code:
+                continue
+            code = code.zfill(6)[-6:]
+            sector = str(row[sector_col]).strip() if pd.notna(row[sector_col]) else ""
+            if code and sector and sector.lower() != "nan":
+                mapping[code] = sector
+        return mapping
+
+    @staticmethod
+    def _get_sector_map_from_fdr() -> dict[str, str]:
         if not HAS_FDR:
-            logger.debug("FDR 미설치 — 업종 매핑 불가")
+            logger.debug("FDR 미설치 — FDR 업종 매핑 스킵")
             return {}
         try:
             stocks = fdr.StockListing("KRX")
-            if stocks.empty:
+            mapping = DataCollector._sector_map_from_listing(stocks)
+            if not mapping:
+                logger.debug("KRX 리스트에 업종 컬럼 없음 — KRX KIND/pykrx 업종 매핑 폴백")
                 return {}
-            code_col = next((c for c in ["Code", "code", "Symbol", "symbol"] if c in stocks.columns), None)
-            sector_col = next((c for c in ["Sector", "sector"] if c in stocks.columns), None)
-            if code_col is None or sector_col is None:
-                logger.debug("KRX 리스트에 Code/Sector 컬럼 없음")
-                return {}
-            mapping = {}
-            for _, row in stocks.iterrows():
-                code = str(row[code_col]).strip().zfill(6)
-                sector = str(row[sector_col]).strip() if pd.notna(row[sector_col]) else ""
-                if code and sector:
-                    mapping[code] = sector
-            logger.debug("업종 매핑 {}개 종목 로드", len(mapping))
+            logger.debug("FDR 업종 매핑 {}개 종목 로드", len(mapping))
             return mapping
         except Exception as e:
-            logger.warning("업종 매핑 조회 실패: {}", e)
+            logger.warning("FDR 업종 매핑 조회 실패: {}", e)
             return {}
+
+    @staticmethod
+    def _get_sector_map_from_kind() -> dict[str, str]:
+        try:
+            from io import StringIO
+
+            import requests
+
+            url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            response.encoding = "euc-kr"
+            tables = pd.read_html(StringIO(response.text), flavor="lxml")
+            if not tables:
+                logger.debug("KRX KIND 상장법인 목록 결과 없음")
+                return {}
+            mapping = DataCollector._sector_map_from_listing(tables[0])
+            if mapping:
+                logger.debug("KRX KIND 업종 매핑 {}개 종목 로드", len(mapping))
+            else:
+                logger.debug("KRX KIND 목록에 업종 컬럼 없음")
+            return mapping
+        except Exception as e:
+            logger.debug("KRX KIND 업종 매핑 조회 실패: {}", e)
+            return {}
+
+    @staticmethod
+    def _get_sector_map_from_pykrx(as_of_date: Optional[str] = None) -> dict[str, str]:
+        if not HAS_PYKRX or _pykrx_stock is None:
+            logger.debug("pykrx 미설치 — pykrx 업종 매핑 스킵")
+            return {}
+
+        base_date = (as_of_date or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+        try:
+            base = datetime.strptime(base_date, "%Y%m%d")
+        except ValueError:
+            base = datetime.now()
+
+        last_error = None
+        for delta in range(0, 10):
+            date_str = (base - timedelta(days=delta)).strftime("%Y%m%d")
+            mapping: dict[str, str] = {}
+            for market in ("KOSPI", "KOSDAQ"):
+                try:
+                    stocks = _pykrx_stock.get_market_sector_classifications(date_str, market)
+                except Exception as e:
+                    last_error = e
+                    logger.debug("pykrx 업종 매핑 조회 실패 (market={}, as_of={}): {}", market, date_str, e)
+                    continue
+                mapping.update(DataCollector._sector_map_from_listing(stocks))
+            if mapping:
+                logger.debug("pykrx 업종 매핑 {}개 종목 로드 (기준일={})", len(mapping), date_str)
+                return mapping
+
+        if last_error is not None:
+            logger.warning("pykrx 업종 매핑 조회 실패: {}", last_error)
+        else:
+            logger.debug("pykrx 업종 매핑 결과 없음")
+        return {}
 
     @staticmethod
     def _get_kospi200_constituents(as_of_date: Optional[str]) -> pd.DataFrame:

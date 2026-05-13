@@ -10,9 +10,12 @@ scipy>=1.14.0
 pandas-ta>=0.4.67b0
 
 # 데이터 수집 (국내: pykrx / 해외: yfinance)
+# pykrx는 런타임에 pkg_resources를 import하므로 setuptools 81+ 환경에서는 실패할 수 있다.
+setuptools>=61,<81
 pykrx>=0.1.0
 finance-datareader>=0.9.50
 yfinance>=0.2.18
+lxml>=5.0.0
 
 # HTTP
 requests>=2.32.0
