@@ -188,3 +188,40 @@ class TestExecute:
         result = rebalancer.execute(orders, dry_run=True)
         assert result["skipped"] == 1
         assert result["executed"] == 0
+
+    def test_live_execute_requires_confirmed_gate(self, rebalancer, monkeypatch):
+        """live 리밸런싱은 확인 게이트 없이 주문 실행부에 도달하면 안 된다."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.config.trading["mode"] = "live"
+        executor_cls = MagicMock()
+        monkeypatch.setattr("core.order_executor.OrderExecutor", executor_cls)
+
+        result = rebalancer.execute([
+            RebalanceOrder("005930", "SELL", 3, 70000, "테스트"),
+        ])
+
+        assert result["blocked"] is True
+        assert result["failed"] == 1
+        assert result["details"][0]["status"] == "blocked"
+        executor_cls.assert_not_called()
+
+    def test_live_execute_allows_confirmed_gate(self, rebalancer, monkeypatch):
+        """확인 게이트를 통과한 live 리밸런싱만 주문 실행부로 넘긴다."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.config.trading["mode"] = "live"
+        fake_executor = MagicMock()
+        fake_executor.execute_sell.return_value = {"success": True}
+        executor_cls = MagicMock(return_value=fake_executor)
+        monkeypatch.setattr("core.order_executor.OrderExecutor", executor_cls)
+
+        result = rebalancer.execute(
+            [RebalanceOrder("005930", "SELL", 3, 70000, "테스트")],
+            live_confirmed=True,
+        )
+
+        assert result["executed"] == 1
+        assert result["failed"] == 0
+        executor_cls.assert_called_once()
+        fake_executor.execute_sell.assert_called_once()

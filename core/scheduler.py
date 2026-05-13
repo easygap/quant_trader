@@ -119,7 +119,8 @@ class Scheduler:
     ):
         self.config = config or Config.get()
         self.strategy_name = strategy_name
-        self._mode = self.config.trading.get("mode", "paper")
+        self._mode = str(self.config.trading.get("mode", "paper")).lower()
+        self._live_gate_validated = bool(live_gate_validated)
         self.trading_hours = TradingHours(self.config)
         self.blackswan = BlackSwanDetector(self.config)
         self.portfolio = PortfolioManager(self.config, account_key=self.strategy_name)
@@ -1492,7 +1493,12 @@ class Scheduler:
                     if not orders:
                         continue
 
-                    result = rebalancer.execute(orders)
+                    result = rebalancer.execute(
+                        orders,
+                        live_confirmed=(
+                            self._mode == "live" and self._live_gate_validated
+                        ),
+                    )
                     summary = (
                         f"🔄 바스켓 '{name}' 리밸런싱 완료: "
                         f"실행 {result['executed']}건, 실패 {result['failed']}건"
