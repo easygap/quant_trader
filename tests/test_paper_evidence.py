@@ -31,6 +31,7 @@ def _isolate_evidence_dir(monkeypatch, tmp_path):
     """모든 테스트에서 evidence 출력을 tmp_path로 격리."""
     import core.paper_evidence as pe
     monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pe, "PROMOTION_DIR", tmp_path / "promotion")
     return tmp_path / "paper_evidence"
 
 
@@ -1635,6 +1636,122 @@ class TestShadowEvidenceNotPromotable:
         assert pkg["target_weight_evidence"]["invalid_days"] == 60
         assert "target_weight_invalid_execution_evidence=60" in pkg["block_reasons"]
         assert "insufficient_days=0/60" in pkg["block_reasons"]
+
+    def test_metadata_target_weight_promotion_requires_verified_pilot_execution(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "rotation_candidate_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            _append_jsonl(jsonl_path, {
+                "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+                "day_number": i + 1,
+                "strategy": strategy,
+                "execution_backed": True,
+                "evidence_mode": "real_paper",
+                "session_mode": "normal_paper",
+                "pilot_authorized": False,
+                "daily_return": 0.1,
+                "cumulative_return": 6.0,
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": 0.05,
+                "exposure_matched_excess": 0.04,
+                "cash_adjusted_excess": 0.03,
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            })
+
+        pkg_path, _ = generate_promotion_package(
+            strategy,
+            canonical_metadata={
+                "strategy_specs": [{
+                    "candidate_id": strategy,
+                    "base_strategy": "target_weight_rotation",
+                    "params_hash": "hash",
+                }]
+            },
+        )
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 0
+        assert pkg["target_weight_evidence"]["required"] is True
+        assert pkg["target_weight_evidence"]["identity_source"] == "canonical_metadata"
+        assert pkg["target_weight_evidence"]["canonical_params_hash"] == "hash"
+        assert pkg["target_weight_evidence"]["valid_pilot_days"] == 0
+        assert pkg["target_weight_evidence"]["invalid_days"] == 60
+        assert "target_weight_invalid_execution_evidence=60" in pkg["block_reasons"]
+
+    def test_metadata_target_weight_promotion_blocks_canonical_hash_mismatch(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "rotation_candidate_hash_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        record_date = "2026-01-05"
+        _append_jsonl(jsonl_path, {
+            "date": record_date,
+            "day_number": 1,
+            "strategy": strategy,
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "pilot_caps_snapshot": {
+                "target_weight_plan": {
+                    "candidate_id": strategy,
+                    "trade_day": record_date,
+                    "params_hash": "old-hash",
+                },
+                "target_weight_execution": {
+                    "complete": True,
+                    "params_hash": "old-hash",
+                    "execution_trade_day_allowed": True,
+                    "execution_market_session_allowed": True,
+                    "pilot_authorization_snapshot_allowed": True,
+                    "liquidity_complete": True,
+                    "pre_trade_risk_complete": True,
+                    "order_result_complete": True,
+                    "fill_complete": True,
+                    "position_reconciliation": {"complete": True},
+                },
+            },
+            "daily_return": 0.1,
+            "cumulative_return": 1.0,
+            "mdd": -1.0,
+            "total_trades": 2,
+            "sell_count": 1,
+            "winning_trades": 1,
+            "losing_trades": 0,
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.04,
+            "cash_adjusted_excess": 0.03,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+        pkg_path, _ = generate_promotion_package(
+            strategy,
+            canonical_metadata={
+                "strategy_specs": [{
+                    "candidate_id": strategy,
+                    "base_strategy": "target_weight_rotation",
+                    "params_hash": "current-hash",
+                }]
+            },
+        )
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["target_weight_params_hash"] == "old-hash"
+        assert pkg["target_weight_canonical_params_hash"] == "current-hash"
+        assert "target_weight_canonical_params_hash_mismatch" in pkg["block_reasons"]
 
     def test_target_weight_promotion_counts_verified_pilot_execution(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
