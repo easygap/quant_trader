@@ -25,6 +25,8 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrpen05_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget60_cap35",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1_volbudget60_cap35",
     ]
     assert specs[0].strategy == "target_weight_rotation"
     assert specs[0].params["market_exposure_mode"] == "benchmark_risk"
@@ -79,6 +81,14 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
     assert specs[13].params["target_tolerance_pct"] == 4.0
     assert specs[13].params["portfolio_drawdown_guard_trigger_pct"] == 10.0
     assert specs[13].params["portfolio_drawdown_guard_exposure"] == 0.40
+    assert specs[14].params["target_allocation_mode"] == "inverse_volatility"
+    assert specs[14].params["allocation_vol_lookback_days"] == 60
+    assert specs[14].params["allocation_vol_min_periods"] == 30
+    assert specs[14].params["allocation_max_sleeve_weight_pct"] == 35.0
+    assert specs[15].params["max_targets_per_sector"] == 2
+    assert specs[15].params["target_allocation_mode"] == "inverse_volatility"
+    assert specs[15].params["allocation_vol_lookback_days"] == 60
+    assert specs[15].params["allocation_max_sleeve_weight_pct"] == 35.0
 
 
 def test_canonical_research_candidate_metadata_hashes_params():
