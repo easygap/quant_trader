@@ -209,6 +209,7 @@ def build_pilot_authorization_snapshot(
     *,
     readiness_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    portfolio_drawdown_guard = plan.diagnostics.get("portfolio_drawdown_guard")
     snapshot = {
         "schema_version": 1,
         "snapshot_type": "target_weight_plan_authorization",
@@ -228,6 +229,8 @@ def build_pilot_authorization_snapshot(
         "position_quantities_before": _starting_position_quantities(plan),
         "target_quantities_after": _expected_position_quantities(plan),
     }
+    if isinstance(portfolio_drawdown_guard, dict):
+        snapshot["portfolio_drawdown_guard"] = dict(portfolio_drawdown_guard)
     if readiness_audit:
         snapshot["readiness_audit"] = {
             "generated_at": readiness_audit.get("generated_at"),
@@ -364,6 +367,12 @@ def validate_pilot_authorization_snapshot(
             expected["target_quantities_after"],
         ),
     ]
+    if "portfolio_drawdown_guard" in expected or "portfolio_drawdown_guard" in snapshot:
+        checks.append((
+            "portfolio_drawdown_guard",
+            snapshot.get("portfolio_drawdown_guard"),
+            expected.get("portfolio_drawdown_guard"),
+        ))
     mismatches = [
         {"field": field, "expected": expected_value, "actual": actual_value}
         for field, actual_value, expected_value in checks
@@ -593,6 +602,97 @@ def recommend_pilot_caps(
     }
 
 
+def _portfolio_drawdown_guard_enabled(params: dict[str, Any]) -> bool:
+    return max(
+        0.0,
+        float(params.get("portfolio_drawdown_guard_trigger_pct", 0.0) or 0.0),
+    ) > 0
+
+
+def _record_total_value(record: dict[str, Any]) -> float | None:
+    for key in ("total_value", "portfolio_value"):
+        value = record.get(key)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0:
+            return numeric
+    return None
+
+
+def _record_portfolio_drawdown_guard(record: dict[str, Any]) -> dict[str, Any]:
+    caps = record.get("pilot_caps_snapshot") or {}
+    plan = caps.get("target_weight_plan") or {}
+    guard = plan.get("portfolio_drawdown_guard") or {}
+    return guard if isinstance(guard, dict) else {}
+
+
+def load_portfolio_drawdown_guard_state(
+    candidate_id: str,
+    *,
+    as_of_date: str | None = None,
+) -> dict[str, Any]:
+    """Build explicit state for the stateful target-weight portfolio drawdown guard."""
+    from core.paper_evidence import get_canonical_records
+
+    cutoff = None
+    if as_of_date:
+        cutoff = datetime.strptime(str(as_of_date), "%Y-%m-%d").date()
+
+    values: list[float] = []
+    latest_record_date: str | None = None
+    cooldown_remaining = 0
+    records = sorted(get_canonical_records(candidate_id), key=lambda rec: str(rec.get("date") or ""))
+    for record in records:
+        record_date_raw = record.get("date")
+        if not record_date_raw:
+            continue
+        try:
+            record_date = datetime.strptime(str(record_date_raw), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if cutoff is not None and record_date >= cutoff:
+            continue
+
+        total_value = _record_total_value(record)
+        if total_value is not None:
+            values.append(total_value)
+            latest_record_date = record_date.strftime("%Y-%m-%d")
+
+        guard = _record_portfolio_drawdown_guard(record)
+        if guard:
+            try:
+                cooldown_remaining = max(
+                    0,
+                    int(guard.get("cooldown_after_plan", cooldown_remaining) or 0),
+                )
+            except (TypeError, ValueError):
+                cooldown_remaining = 0
+
+    if not values:
+        return {
+            "source": "cold_start",
+            "record_count": 0,
+            "latest_record_date": None,
+            "peak_value": None,
+            "last_evidence_value": None,
+            "cooldown_remaining": 0,
+        }
+
+    return {
+        "source": "paper_evidence",
+        "record_count": len(values),
+        "latest_record_date": latest_record_date,
+        "peak_value": max(values),
+        "last_equity_value": values[-1],
+        "last_evidence_value": values[-1],
+        "cooldown_remaining": cooldown_remaining,
+    }
+
+
 def build_plan(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -609,6 +709,11 @@ def build_plan(
     symbols = _load_symbols(config, raw_symbols)
     positions = _load_positions(candidate_id)
     plan_cash = _portfolio_cash(config, candidate_id, cash)
+    portfolio_drawdown_guard_state = (
+        load_portfolio_drawdown_guard_state(candidate_id, as_of_date=as_of_date)
+        if _portfolio_drawdown_guard_enabled(spec.params)
+        else None
+    )
     return build_target_weight_plan(
         candidate_id=candidate_id,
         symbols=symbols,
@@ -617,6 +722,7 @@ def build_plan(
         positions=positions,
         as_of_date=as_of_date,
         collector=collector,
+        portfolio_drawdown_guard_state=portfolio_drawdown_guard_state,
     )
 
 
@@ -1905,6 +2011,9 @@ def build_pilot_evidence_caps_snapshot(
         "position_quantities_before": _starting_position_quantities(plan),
         "target_quantities_after": _expected_position_quantities(plan),
     }
+    portfolio_drawdown_guard = plan.diagnostics.get("portfolio_drawdown_guard")
+    if isinstance(portfolio_drawdown_guard, dict):
+        caps["target_weight_plan"]["portfolio_drawdown_guard"] = dict(portfolio_drawdown_guard)
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
         execution,
