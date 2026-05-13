@@ -28,6 +28,7 @@
 > - rotation: **provisional_paper_candidate** (risk-adjusted 기준 통과, live alpha는 미확인)
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
 > - target-weight capped pilot readiness: audit 시작 시 paper preflight를 먼저 갱신하고, Discord webhook 누락 또는 notifier 비정상 상태는 주문 전 `BLOCKED`로 확정
+> - live 보류 주문 복구는 KIS 미체결 목록에서 사라진 주문도 체결 상세가 확인될 때만 `RECONCILED`로 닫고, 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
@@ -148,7 +149,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - 포지션 수 / 자금 비중 제한
 - 미체결 / 중복 주문 방지 (live 미체결 조회 실패 시 주문 보류)
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
-- live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문 상태 대조 완료 처리
+- live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
 - auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
 - live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
