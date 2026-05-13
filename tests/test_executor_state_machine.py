@@ -68,6 +68,7 @@ class TestExecutorUsesStateMachine:
         from config.config_loader import Config
         config = Config.get()
         executor = OrderExecutor(config, account_key="test_sm")
+        executor.config.risk_params.setdefault("liquidity_filter", {})["enabled"] = False
         return executor
 
     def test_buy_creates_order_record(self):

@@ -94,6 +94,7 @@ def test_execute_buy_quantity_records_exact_paper_quantity(fresh_db, monkeypatch
         available_cash=10_000_000,
         reason="exact quantity test",
         strategy="target_weight_rotation_test",
+        avg_daily_volume=1_000_000,
         execution_session_id="session-exact-qty",
     )
 
@@ -183,6 +184,7 @@ def test_paper_buy_uses_estimated_fill_price_for_sizing_and_targets(fresh_db, mo
         signal_score=2.0,
         reason="fill basis sizing test",
         strategy="scoring",
+        avg_daily_volume=1_000_000,
     )
 
     assert result["success"] is True
@@ -197,6 +199,82 @@ def test_paper_buy_uses_estimated_fill_price_for_sizing_and_targets(fresh_db, mo
     assert position.stop_loss_price == 58_258
     assert position.take_profit_price == 64_865
     assert position.trailing_stop_price == 57_057
+
+
+def test_execute_buy_blocks_when_entry_liquidity_volume_missing(fresh_db, monkeypatch):
+    """진입 전 유동성 필터가 켜져 있으면 평균 거래량 누락 시 일반 BUY를 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="missing_liquidity_buy_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    executor.config.risk_params["liquidity_filter"]["enabled"] = True
+    executor.config.risk_params["liquidity_filter"]["check_on_entry"] = True
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(executor, "_get_sector_map_cached", lambda: {})
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_diversification",
+        lambda *args, **kwargs: {"can_buy": True, "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_recent_performance",
+        lambda *args, **kwargs: {"allowed": True, "reason": ""},
+    )
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="missing liquidity guard test",
+        strategy="scoring",
+        avg_daily_volume=None,
+    )
+
+    assert result["success"] is False
+    assert "20일 평균 거래량 데이터 없음" in result["reason"]
+    assert get_position("005930", account_key="missing_liquidity_buy_test") is None
+
+
+def test_execute_buy_quantity_blocks_when_entry_liquidity_volume_missing(fresh_db, monkeypatch):
+    """진입 전 유동성 필터가 켜져 있으면 평균 거래량 누락 시 고정수량 BUY를 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="missing_liquidity_quantity_test")
+    executor.config.risk_params["liquidity_filter"]["enabled"] = True
+    executor.config.risk_params["liquidity_filter"]["check_on_entry"] = True
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy_quantity(
+        symbol="005930",
+        price=60_000,
+        quantity=3,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="missing liquidity quantity guard test",
+        strategy="scoring",
+        avg_daily_volume=None,
+    )
+
+    assert result["success"] is False
+    assert "20일 평균 거래량 데이터 없음" in result["reason"]
+    assert get_position("005930", account_key="missing_liquidity_quantity_test") is None
 
 
 def test_paper_buy_quantity_fails_closed_when_runtime_unavailable(fresh_db, monkeypatch):
@@ -323,6 +401,7 @@ def test_paper_buy_quantity_allows_pilot_override(fresh_db, monkeypatch):
         available_cash=10_000_000,
         reason="pilot override test",
         strategy="target_weight_rotation_test",
+        avg_daily_volume=1_000_000,
     )
 
     assert result["success"] is True
@@ -469,6 +548,7 @@ def test_monthly_buy_cap_is_scoped_by_account_mode_and_symbol(fresh_db, monkeypa
         available_cash=10_000_000,
         reason="monthly cap scoped test",
         strategy="scoring",
+        avg_daily_volume=1_000_000,
     )
 
     assert result["success"] is True
