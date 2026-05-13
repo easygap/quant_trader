@@ -959,7 +959,22 @@ class Scheduler:
                 candidate["atr"] = signal_info.get("atr", candidate.get("atr"))
                 candidate["score"] = signal_info.get("score", candidate.get("score", 0))
             except Exception as e:
-                logger.warning("종목 {} 시그널 재검증 실패 — 후보 유지: {}", symbol, e)
+                logger.warning("종목 {} 시그널 재검증 실패 — 이번 루프 진입 보류: {}", symbol, e)
+                _log_op(
+                    "ENTRY_REVALIDATION_BLOCK",
+                    f"entry candidate skipped: signal revalidation failed for {symbol}",
+                    severity="warning",
+                    symbol=symbol,
+                    strategy=self.strategy_name,
+                    mode=self._mode,
+                    detail={
+                        "symbol": symbol,
+                        "error": str(e),
+                        "candidate_reason": candidate.get("reason", "auto-entry"),
+                    },
+                )
+                remaining.append(candidate)
+                continue
 
             summary = self.portfolio.get_portfolio_summary()
             scale = candidate.get("market_regime_scale", regime_scale)
