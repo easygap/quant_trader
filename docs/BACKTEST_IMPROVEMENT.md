@@ -189,7 +189,7 @@
 | Live 체결 확인 guard | 높음 | 완료 — KIS 주문 ACK 후 체결가·체결수량 조회가 실패하거나 부분체결만 확인되면 예상가 기준 `FILLED` 처리 대신 `ACKED`/`PARTIAL_FILLED` pending으로 남기고 `requires_reconcile=True`로 운영 대조를 요구 |
 | Live 체결보류 신규진입 중단 | 높음 | 완료 — 장중 신규 진입 루프에서 live 주문이 접수됐지만 체결 확인이 보류되면 브로커 잔고 동기화 전까지 같은 루프의 남은 신규 BUY 실행을 중단해 미확정 체결분을 무시한 추가 매수를 차단 |
 | Live 미완료 주문 상태 영속화 | 높음 | 완료 — live 주문 `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태를 `order_records`에 저장하고, 재시작 또는 OrderGuard TTL 만료 후에도 DB에 미완료 주문이 남아 있으면 같은 종목 신규 주문을 fail-closed 차단 |
-| Live 보류 주문 복구 대조 | 높음 | 완료 — 재시작 복구에서 KIS 미체결 조회가 성공했고 DB `ACKED`/`PARTIAL_FILLED` 주문번호가 브로커 미체결 목록에서 사라졌으면 체결 조회 결과를 보강해 `order_records`를 `RECONCILED`로 닫고 종목별 OrderGuard를 해제. 잔고/포지션 정합성은 이어지는 KIS↔DB 동기화가 처리 |
+| Live 보류 주문 복구 대조 | 높음 | 완료 — 재시작 복구에서 KIS 미체결 조회가 성공했고 DB `ACKED`/`PARTIAL_FILLED` 주문번호가 브로커 미체결 목록에서 사라져도 체결 상세 조회가 확인될 때만 `order_records`를 `RECONCILED`로 닫고 종목별 OrderGuard를 해제. 체결 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지해 실제 체결 여부가 모호한 상태에서 신규 주문이 열리지 않게 한다 |
 | Live 미체결 조회 fail-closed | 높음 | 완료 — KIS 미체결 조회 실패, `rt_cd != 0`, 응답 형식 이상을 주문 가능 상태로 보지 않고 live BUY/SELL을 제출 전 차단 |
 | Auto-entry 시그널 재검증 fail-closed | 높음 | 완료 — 장중 `_execute_entry_candidates()`가 장전/이전 루프 후보를 주문하기 전에 최신 데이터와 전략 신호로 BUY를 재확인한다. 데이터 재조회, API, 전략 계산 오류가 나면 stale 후보로 주문하지 않고 `ENTRY_REVALIDATION_BLOCK` 이벤트를 남긴 뒤 후보를 다음 루프로 보류 |
 | KIS 잔고 오류 응답 fail-closed | 높음 | 완료 — 잔고 조회 응답도 `rt_cd == 0`일 때만 정상 잔고로 해석한다. 오류 body는 빈 포지션/0원 잔고가 아니라 조회 실패로 반환해 연결 검증·포지션 동기화가 fail-closed 처리된다 |
