@@ -145,6 +145,7 @@ def test_build_candidate_specs_supports_all_families():
     assert "target_weight_rotation_top5_60_120_floor0_hold3_rankrisk60" in ids
     assert "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_maxnew2" in ids
     assert "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd10_floor35_cd1" in ids
+    assert "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget60_cap35" in ids
     assert strategies == {
         "relative_strength_rotation",
         "momentum_factor",
@@ -490,6 +491,26 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert any(spec.params.get("position_loss_reduce_trigger_pct") == 8.0 for spec in direct)
     assert any(spec.params.get("position_loss_reduce_trigger_pct") == 10.0 for spec in direct)
     assert any(spec.params.get("position_loss_reduce_target_fraction") == 0.50 for spec in direct)
+
+
+def test_build_candidate_specs_supports_target_weight_volatility_budget_family():
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    direct = build_candidate_specs("target_weight_volatility_budget")
+    alias = build_candidate_specs("vol_budget")
+
+    assert [spec.candidate_id for spec in direct] == [
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget60_cap35",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget90_cap35",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1_volbudget60_cap35",
+    ]
+    assert [spec.candidate_id for spec in alias] == [spec.candidate_id for spec in direct]
+    assert {spec.strategy for spec in direct} == {"target_weight_rotation"}
+    assert all(spec.params["target_allocation_mode"] == "inverse_volatility" for spec in direct)
+    assert {spec.params["allocation_vol_lookback_days"] for spec in direct} == {60, 90}
+    assert {spec.params["allocation_max_sleeve_weight_pct"] for spec in direct} == {35.0}
+    assert any(spec.params.get("max_targets_per_sector") == 2 for spec in direct)
+    assert all(spec.params["portfolio_drawdown_guard_trigger_pct"] == 10.0 for spec in direct)
 
 
 def test_select_target_weight_targets_limits_new_entries_per_rebalance():

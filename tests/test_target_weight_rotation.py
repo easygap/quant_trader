@@ -815,6 +815,57 @@ def test_target_weight_rotation_position_loss_reduction_uses_prior_close_and_byp
     assert metrics["min_realized_exposure_pct"] == 50.0
 
 
+def test_target_weight_rotation_inverse_volatility_budget_weights_lower_volatility_name_more():
+    from tools.research_candidate_sweep import run_target_weight_rotation_backtest
+
+    dates = pd.bdate_range("2025-01-15", "2025-02-03")
+    aaa = np.linspace(100.0, 101.0, len(dates))
+    bbb = np.array(
+        [100.0, 108.0, 92.0, 111.0, 89.0, 112.0, 88.0, 113.0, 87.0, 114.0, 86.0, 115.0, 85.0, 116.0],
+        dtype=float,
+    )
+    frames = {
+        "AAA": _ohlcv(dates, aaa),
+        "BBB": _ohlcv(dates, bbb),
+    }
+
+    result = run_target_weight_rotation_backtest(
+        symbols=["AAA", "BBB"],
+        start="2025-02-03",
+        end="2025-02-03",
+        capital=100_000.0,
+        params={
+            "target_top_n": 2,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "score_mode": "absolute",
+            "target_allocation_mode": "inverse_volatility",
+            "allocation_vol_lookback_days": 10,
+            "allocation_vol_min_periods": 5,
+            "allocation_max_sleeve_weight_pct": 80.0,
+        },
+        collector=FakeCollector(frames),
+        risk_manager=NoCostRiskManager(),
+    )
+
+    buys = {trade["symbol"]: trade for trade in result["trades"] if trade["action"] == "BUY"}
+    aaa_notional = buys["AAA"]["price"] * buys["AAA"]["quantity"]
+    bbb_notional = buys["BBB"]["price"] * buys["BBB"]["quantity"]
+    metrics = result["target_weight_metrics"]
+
+    assert aaa_notional > bbb_notional
+    assert metrics["target_allocation_mode"] == "inverse_volatility"
+    assert metrics["target_allocation_weighted_rebalance_count"] == 1
+    assert metrics["target_allocation_missing_vol_count"] == 0
+    assert metrics["target_allocation_max_observed_sleeve_weight_pct"] > 50.0
+    assert metrics["target_allocation_min_observed_sleeve_weight_pct"] < 50.0
+    assert metrics["target_allocation_vol_lookback_days"] == 10
+    assert metrics["target_allocation_vol_min_periods"] == 5
+
+
 def test_target_weight_rotation_benchmark_risk_overlay_reduces_exposure():
     from tools.research_candidate_sweep import run_target_weight_rotation_backtest
 
