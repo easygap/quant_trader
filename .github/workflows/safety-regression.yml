@@ -49,7 +49,7 @@ jobs:
             tests/test_executor_state_machine.py \
             tests/test_paper_runtime.py \
             tests/test_paper_preflight.py \
-            tests/test_paper_pilot.py::TestPilotSchedulerIntegration \
+            tests/test_paper_pilot.py \
             tests/test_audit_safety.py \
             tests/test_critical_fixes.py \
             tests/test_target_weight_rotation.py \
