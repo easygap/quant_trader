@@ -162,15 +162,159 @@ def test_target_weight_plan_rejects_research_only_params_before_fetch():
                 "target_top_n": 2,
                 "short_lookback": 20,
                 "long_lookback": 60,
-                "rank_penalty_mode": "downside_risk",
-                "max_targets_per_sector": 2,
-                "position_loss_reduce_trigger_pct": 8.0,
+                "portfolio_drawdown_guard_trigger_pct": 10.0,
+                "portfolio_drawdown_guard_exposure": 0.40,
+                "portfolio_drawdown_guard_cooldown_rebalances": 1,
             },
             cash=1_000_000.0,
             positions={},
             as_of_date="2025-01-31",
             collector=FailingCollector(),
         )
+
+
+def test_target_weight_plan_applies_downside_rank_penalty_to_targets():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    dates = pd.bdate_range("2025-01-27", "2025-02-03")
+    frames = {
+        "AAA": _ohlcv(dates, [100, 80, 120, 80, 150, 150]),
+        "BBB": _ohlcv(dates, [100, 101, 102, 103, 108, 108]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+    base_params = {
+        "target_top_n": 1,
+        "target_exposure": 1.0,
+        "target_tolerance_pct": 0.0,
+        "short_lookback": 1,
+        "long_lookback": 1,
+        "short_weight": 1.0,
+        "score_mode": "absolute",
+    }
+
+    base = build_target_weight_plan(
+        symbols=["AAA", "BBB"],
+        params=base_params,
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-02-03",
+        collector=FakeCollector(frames),
+    )
+    penalized = build_target_weight_plan(
+        symbols=["AAA", "BBB"],
+        params={
+            **base_params,
+            "rank_penalty_mode": "downside_risk",
+            "rank_penalty_lookback": 3,
+            "rank_penalty_min_periods": 2,
+            "downside_vol_penalty_weight": 2.0,
+            "drawdown_penalty_weight": 2.0,
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-02-03",
+        collector=FakeCollector(frames),
+    )
+
+    assert base.targets == ["AAA"]
+    assert penalized.targets == ["BBB"]
+    assert penalized.diagnostics["rank_penalty_mode"] == "downside_risk"
+
+
+def test_target_weight_plan_applies_sector_cap_to_targets():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class SectorCollector(FakeCollector):
+        def get_sector_map(self):
+            return {
+                "AAA": "tech",
+                "BBB": "tech",
+                "CCC": "finance",
+            }
+
+    dates = pd.bdate_range("2025-01-27", "2025-02-03")
+    frames = {
+        "AAA": _ohlcv(dates, [100, 101, 102, 103, 104, 110]),
+        "BBB": _ohlcv(dates, [100, 101, 102, 103, 104, 108]),
+        "CCC": _ohlcv(dates, [100, 101, 102, 103, 104, 106]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+
+    plan = build_target_weight_plan(
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "score_mode": "absolute",
+            "max_targets_per_sector": 1,
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-02-03",
+        collector=SectorCollector(frames),
+    )
+
+    assert plan.targets == ["AAA", "CCC"]
+    assert plan.diagnostics["max_targets_per_sector"] == 1
+    assert plan.diagnostics["selected_sector_counts"] == {"tech": 1, "finance": 1}
+
+
+def test_target_weight_plan_position_loss_reduction_bypasses_tolerance():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    dates = pd.to_datetime(
+        [
+            "2025-01-30",
+            "2025-01-31",
+            "2025-02-03",
+            "2025-02-04",
+            "2025-03-03",
+        ]
+    )
+    frames = {
+        "AAA": _ohlcv(dates, [100, 110, 100, 90, 110]),
+        "BBB": _ohlcv(dates, [100, 105, 100, 90, 110]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+
+    plan = build_target_weight_plan(
+        symbols=["AAA", "BBB"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 40.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "position_loss_reduce_trigger_pct": 8.0,
+            "position_loss_reduce_target_fraction": 0.50,
+        },
+        cash=0.0,
+        positions={
+            "AAA": {"quantity": 500, "avg_price": 100.0},
+            "BBB": {"quantity": 500, "avg_price": 100.0},
+        },
+        as_of_date="2025-03-03",
+        collector=FakeCollector(frames),
+    )
+
+    sell_orders = [order for order in plan.orders if order.action == "SELL"]
+
+    assert {order.symbol for order in sell_orders} == {"AAA", "BBB"}
+    assert {order.quantity for order in sell_orders} == {250}
+    assert all(order.reason == "target_weight_position_loss_reduce_sell" for order in sell_orders)
+    assert plan.target_quantities_after == {"AAA": 250, "BBB": 250}
+    assert plan.diagnostics["position_loss_reduce_enabled"] is True
+    assert plan.diagnostics["position_loss_reduce_rebalance_count"] == 1
+    assert plan.diagnostics["position_loss_reduce_position_count"] == 2
+    assert plan.diagnostics["position_loss_reduce_worst_loss_pct"] == pytest.approx(-10.0)
+    assert plan.diagnostics["skipped_tolerance_symbols"] == []
 
 
 def test_target_weight_plan_records_liquidity_diagnostics():
