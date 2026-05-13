@@ -441,6 +441,10 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor35_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd8_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd8_floor35_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd2",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_maxnew2_pdd10_floor40_cd1",
         "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_maxnew2_pdd10_floor40_cd1",
@@ -450,7 +454,7 @@ def test_build_candidate_specs_supports_target_weight_drawdown_guard_family():
     assert all(spec.params["rank_penalty_mode"] == "downside_risk" for spec in direct)
     assert {spec.params["portfolio_drawdown_guard_trigger_pct"] for spec in direct} == {8.0, 10.0}
     assert {spec.params["portfolio_drawdown_guard_exposure"] for spec in direct} == {0.25, 0.35, 0.40}
-    assert all(spec.params["portfolio_drawdown_guard_cooldown_rebalances"] == 1 for spec in direct)
+    assert {spec.params["portfolio_drawdown_guard_cooldown_rebalances"] for spec in direct} == {1, 2}
     assert any(spec.params.get("max_new_targets_per_rebalance") == 2 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 3.0 for spec in direct)
     assert any(spec.params.get("target_tolerance_pct") == 4.0 for spec in direct)

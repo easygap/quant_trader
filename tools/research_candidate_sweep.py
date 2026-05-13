@@ -1207,6 +1207,21 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
         "portfolio_drawdown_guard_exposure": 0.40,
         "portfolio_drawdown_guard_cooldown_rebalances": 1,
     }
+    guard8_floor40_cd1 = {
+        "portfolio_drawdown_guard_trigger_pct": 8.0,
+        "portfolio_drawdown_guard_exposure": 0.40,
+        "portfolio_drawdown_guard_cooldown_rebalances": 1,
+    }
+    guard8_floor35_cd1 = {
+        "portfolio_drawdown_guard_trigger_pct": 8.0,
+        "portfolio_drawdown_guard_exposure": 0.35,
+        "portfolio_drawdown_guard_cooldown_rebalances": 1,
+    }
+    guard10_floor40_cd2 = {
+        "portfolio_drawdown_guard_trigger_pct": 10.0,
+        "portfolio_drawdown_guard_exposure": 0.40,
+        "portfolio_drawdown_guard_cooldown_rebalances": 2,
+    }
     exp75_rankrisk90 = rank_specs_by_id["target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90"]
     exp75_rankrisk90_tol3 = _target_weight_spec_with_exposure_overlay(
         exp75_rankrisk90,
@@ -1281,6 +1296,30 @@ def build_target_weight_drawdown_guard_candidate_specs() -> list[CandidateSpec]:
             suffix="pdd10_floor40_cd1",
             guard_params=guard10_floor40_cd1,
             description="75pct exposure rank-penalty rotation with 4pct tolerance and portfolio drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4,
+            suffix="pdd10_floor35_cd1",
+            guard_params=guard10_floor35_cd1,
+            description="75pct exposure rank-penalty rotation with 4pct tolerance and lower guard exposure",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4,
+            suffix="pdd8_floor40_cd1",
+            guard_params=guard8_floor40_cd1,
+            description="75pct exposure rank-penalty rotation with 4pct tolerance and earlier drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4,
+            suffix="pdd8_floor35_cd1",
+            guard_params=guard8_floor35_cd1,
+            description="75pct exposure rank-penalty rotation with 4pct tolerance and stricter drawdown guard",
+        ),
+        _target_weight_spec_with_portfolio_drawdown_guard(
+            exp75_rankrisk90_tol4,
+            suffix="pdd10_floor40_cd2",
+            guard_params=guard10_floor40_cd2,
+            description="75pct exposure rank-penalty rotation with 4pct tolerance and longer guard cooldown",
         ),
         _target_weight_spec_with_portfolio_drawdown_guard(
             exp75_rankrisk90_tol5,
