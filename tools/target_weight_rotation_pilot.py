@@ -296,10 +296,6 @@ def validate_pilot_authorization_snapshot(
     plan: TargetWeightPlan,
     pilot_check: Any,
 ) -> dict[str, Any]:
-    if not str(plan.candidate_id).startswith("target_weight_"):
-        return _authorization_snapshot_not_required(
-            "pilot authorization snapshot check not required for non target-weight strategy"
-        )
     if not getattr(pilot_check, "allowed", False):
         return _authorization_snapshot_not_required(
             "pilot authorization snapshot not checked because pilot entry is blocked"
