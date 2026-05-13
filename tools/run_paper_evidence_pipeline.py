@@ -21,6 +21,7 @@ Usage:
 Note:
     - canonical promotion bundle / live eligibility는 절대 수정하지 않습니다.
     - promotion package는 recommendation만 제공합니다.
+    - package 생성 시 reports/promotion/run_metadata.json이 있으면 target-weight 후보 식별과 params hash 검증에 사용합니다.
 """
 
 import argparse
