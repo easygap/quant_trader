@@ -127,7 +127,7 @@
 | Strategy Ablation Test (전략별 단독 성과 비교) | 높음 | **C-4/C-5 단독·sleeve 비교 완료** |
 | 비용 반영 전/후 성과 비교 리포트 자동화 | 중간 | 완료 — `backtest.cost_impact`가 수수료·세금·슬리피지 explicit cost를 표준 집계하고, 단일/포트폴리오 백테스트 metrics와 txt/html 리포트에 비용 차감 전 추정 수익률, 비용 차감 후 수익률, 비용 드래그(bp), 비용/순손익, cost impact status를 자동 노출한다. 비용 때문에 gross profit이 net loss로 뒤집히거나 비용이 순이익을 초과하면 fail/warn으로 표시해 과매매·고회전 후보 착시를 줄임 |
 | 월별 성과 분해 | 중간 | **C-5 반기별 분해 구현 완료** |
-| 유동성 필터 (일평균 거래대금 기준 종목 제외) | 높음 | **완료** — watchlist 진입 대상, 포트폴리오 백테스트 입력 universe, research candidate sweep universe에 20일 평균 거래대금 하한 필터 적용. target-weight pilot 주문 전 평균 거래대금 대비 주문 비율 preflight도 유지 |
+| 유동성 필터 (일평균 거래대금 기준 종목 제외) | 높음 | **완료** — watchlist 진입 대상, 포트폴리오 백테스트 입력 universe, research candidate sweep universe에 20일 평균 거래대금 하한 필터 적용. `OrderExecutor` 일반 BUY와 고정수량 paper BUY는 주문 직전 `avg_daily_volume`이 누락/0이거나 20일 평균 거래대금 하한 미달이면 fail-closed 차단한다. target-weight pilot 주문 전 평균 거래대금 대비 주문 비율 preflight도 유지 |
 | Target-weight 비용 반영 pre-trade risk | 높음 | 완료 — target-weight pilot 실행 전 수수료/세금/동적 슬리피지 반영 예상 체결가로 현금 부족과 분산/현금/투자비중 한도를 점검. readiness audit, execute, session artifact, evidence snapshot에 `pre_trade_risk_check` 기록 |
 | Sortino Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
 | Calmar Ratio 자동 계산 | 낮음 | 구현 완료 (리포트 미포함) |
