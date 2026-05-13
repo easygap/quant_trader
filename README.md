@@ -102,8 +102,8 @@ python tools/paper_preflight.py --strategy scoring --with-pilot-check
 python tools/paper_launch_readiness.py --strategy scoring --generate-runbook
 
 # Target-weight capped pilot preflight / readiness audit
-python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 --with-pilot-check
-python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 --readiness-audit --allow-rerun
+python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check
+python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit --allow-rerun
 
 # Paper evidence pipeline
 python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --generate-package
@@ -303,7 +303,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
 | relative_strength_rotation | **provisional_paper_candidate** | +18.09 | 1.62 | 100 | 83.3 | — |
-| target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 | **provisional_paper_candidate** (next-open canonical) | +171.20 | 4.24 | 100 | 83.3 | 전용 paper/pilot adapter 준비, 결측 진단 감시 필요 |
+| target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 | **provisional_paper_candidate** (default capped pilot) | +198.15 | 5.58 | 100 | 100 | 전용 paper/pilot adapter 기본 후보, 60영업일 verified pilot evidence 필요 |
+| target_weight_rotation_top5_60_120_floor0_hold3_risk60_35 | **provisional_paper_candidate** (previous default) | +171.20 | 4.24 | 100 | 83.3 | 이전 기본 후보, 관찰 유지 |
 | scoring | **paper_only** | +11.22 | 1.07 | 83.3 | 50.0 | risk-adjusted alpha 미달 |
 | breakout_volume | disabled (research_only) | -13.31 | 0.79 | 0 | 0 | — |
 | mean_reversion | disabled (research_only) | -8.36 | 0.85 | 33.3 | 0 | — |

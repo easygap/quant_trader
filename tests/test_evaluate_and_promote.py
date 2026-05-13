@@ -106,6 +106,25 @@ def test_build_canonical_research_candidate_specs_selects_target_weight_candidat
     assert specs[19].params["position_loss_reduce_target_fraction"] == 0.50
 
 
+def test_default_target_weight_candidate_uses_supported_latest_provisional():
+    from core.target_weight_rotation import (
+        DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        unsupported_plan_params,
+    )
+    from tools.evaluate_and_promote import build_canonical_research_candidate_specs
+
+    assert (
+        DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+        == "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+    )
+    spec = build_canonical_research_candidate_specs([DEFAULT_TARGET_WEIGHT_CANDIDATE_ID])[0]
+    assert unsupported_plan_params(spec.params) == []
+    assert spec.params["target_tolerance_pct"] == 5.0
+    assert spec.params["max_targets_per_sector"] == 2
+    assert spec.params["position_loss_reduce_trigger_pct"] == 8.0
+    assert spec.params["portfolio_drawdown_guard_trigger_pct"] == 10.0
+
+
 def test_canonical_research_candidate_metadata_hashes_params():
     from tools.evaluate_and_promote import (
         build_canonical_research_candidate_specs,
