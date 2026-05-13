@@ -134,7 +134,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 
 Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + 현재 commit/config와 일치하는 canonical promotion bundle + `ELIGIBLE` paper evidence package가 모두 필요합니다. live gate는 `promotion_result.json` 표기를 그대로 믿지 않고 같은 산출물과 evidence를 승격 엔진으로 재계산해 현재 규칙에서도 `live_candidate`인지 다시 확인합니다. live 스케줄러 시작 전 KIS 연결 검증과 KIS↔DB 잔고 동기화도 반드시 통과해야 하며, 실패하면 경고로 넘기지 않고 시작을 차단합니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 `live_candidate` + 현재 commit/config와 일치하는 canonical promotion bundle + `ELIGIBLE` paper evidence package가 모두 필요합니다. promotion engine과 live gate는 same-universe/cash-adjusted paper excess가 모두 양수인지 확인하며, live gate는 `promotion_result.json` 표기를 그대로 믿지 않고 같은 산출물과 evidence를 승격 엔진으로 재계산해 현재 규칙에서도 `live_candidate`인지 다시 확인합니다. live 스케줄러 시작 전 KIS 연결 검증과 KIS↔DB 잔고 동기화도 반드시 통과해야 하며, 실패하면 경고로 넘기지 않고 시작을 차단합니다.
 현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
 `reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json` 파일은 더 이상 live 근거가 아닙니다. `--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다.
 

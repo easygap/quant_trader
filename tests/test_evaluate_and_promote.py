@@ -374,6 +374,7 @@ def _write_paper_package(evidence_dir, strategy, **overrides):
         "promotable_evidence_days": 60,
         "paper_sharpe": 0.55,
         "avg_same_universe_excess": 0.2,
+        "avg_cash_adjusted_excess": 0.15,
         "benchmark_final_ratio": 0.9,
         "sell_count": 8,
         "win_rate": 55.0,
@@ -401,6 +402,7 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     assert promotions[strategy]["status"] == "live_candidate"
     assert "live" in promotions[strategy]["allowed_modes"]
     assert metrics[strategy]["paper_days"] == 60
+    assert metrics[strategy]["paper_cash_adjusted_excess"] == 0.15
     assert metrics[strategy]["paper_evidence_recommendation"] == "ELIGIBLE"
     assert metrics[strategy]["paper_evidence_fresh"] is True
 
