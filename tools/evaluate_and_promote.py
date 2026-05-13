@@ -41,6 +41,8 @@ CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrcap85_pdd10_floor40_cd1",
     "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_corrpen05_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_pdd10_floor40_cd1_volbudget60_cap35",
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_sectorcap2_pdd10_floor40_cd1_volbudget60_cap35",
 )
 
 
@@ -157,6 +159,7 @@ def build_canonical_research_candidate_specs(candidate_ids=None):
     from tools.research_candidate_sweep import (
         build_target_weight_drawdown_guard_candidate_specs,
         build_target_weight_rotation_candidate_specs,
+        build_target_weight_volatility_budget_candidate_specs,
     )
 
     wanted = tuple(candidate_ids or CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS)
@@ -165,6 +168,7 @@ def build_canonical_research_candidate_specs(candidate_ids=None):
         for spec in (
             *build_target_weight_rotation_candidate_specs(),
             *build_target_weight_drawdown_guard_candidate_specs(),
+            *build_target_weight_volatility_budget_candidate_specs(),
         )
     }
     missing = [candidate_id for candidate_id in wanted if candidate_id not in specs]
