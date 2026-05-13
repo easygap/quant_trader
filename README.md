@@ -294,7 +294,7 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 
 2026-05-13 position loss reduction follow-up: 신규 편입을 막아 손실 종목을 고착시키는 대신, 직전 확정 종가 기준 보유 종목 손실률이 `position_loss_reduce_trigger_pct`를 넘으면 다음 리밸런싱 목표 금액을 `position_loss_reduce_target_fraction`까지 감산하는 research-only 옵션을 추가했습니다. 감산 매도는 기존 비용/PnL/turnover 경로를 그대로 타며, 리밸런싱 tolerance 때문에 위험 감산이 생략되지 않도록 분리했습니다. `target_weight_drawdown_guard` family에는 `posloss8_frac50`, `posloss10_frac50`, `sectorcap2_posloss8_frac50` 후보를 추가했지만, 현 세션에서는 KRX/Naver/yfinance 데이터 수집 소켓이 차단되어 신뢰 가능한 top-200 sweep은 보류했습니다. 이 후보는 회귀 테스트 통과 상태일 뿐이며, 데이터 수집 가능한 환경에서 full sweep과 canonical 재검증 전에는 paper/live 승격 대상이 아닙니다.
 
-2026-05-13 research empty-universe guard: 데이터 수집 실패나 strict 유동성 필터 때문에 research universe가 0개가 되면 후보별 0% 성과를 만들지 않고 benchmark/candidate 평가를 건너뛰도록 보강했습니다. artifact와 Markdown에는 `INSUFFICIENT_BENCHMARK_DATA`, `empty_universe_reason`, `skipped_due_to_data`가 남아 데이터 문제를 전략 성과로 오해하지 않게 합니다.
+2026-05-13 research empty-universe guard: canonical universe 목록 조회 실패, 데이터 수집 실패, strict 유동성 필터 때문에 research universe가 0개가 되면 후보별 0% 성과를 만들지 않고 benchmark/candidate 평가를 건너뛰도록 보강했습니다. artifact와 Markdown에는 `INSUFFICIENT_BENCHMARK_DATA`, `empty_universe_reason`, `selection_error`, `skipped_due_to_data`가 남아 데이터 문제를 전략 성과로 오해하지 않게 합니다.
 
 | 전략 | 상태 | Ret% | PF | WF P% | WF Sh+% | Paper Status |
 |------|------|------|-----|-------|---------|--------------|
