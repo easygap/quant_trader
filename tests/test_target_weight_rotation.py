@@ -162,6 +162,30 @@ def test_target_weight_plan_rejects_research_only_params_before_fetch():
                 "target_top_n": 2,
                 "short_lookback": 20,
                 "long_lookback": 60,
+                "max_new_targets_per_rebalance": 1,
+            },
+            cash=1_000_000.0,
+            positions={},
+            as_of_date="2025-01-31",
+            collector=FailingCollector(),
+        )
+
+
+def test_target_weight_plan_rejects_portfolio_drawdown_guard_without_state_before_fetch():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class FailingCollector:
+        def fetch_korean_stock(self, *_args, **_kwargs):
+            raise AssertionError("collector should not be called")
+
+    with pytest.raises(ValueError, match="portfolio_drawdown_guard_state_required"):
+        build_target_weight_plan(
+            candidate_id="target_weight_guard_missing_state",
+            symbols=["005930", "000660"],
+            params={
+                "target_top_n": 2,
+                "short_lookback": 20,
+                "long_lookback": 60,
                 "portfolio_drawdown_guard_trigger_pct": 10.0,
                 "portfolio_drawdown_guard_exposure": 0.40,
                 "portfolio_drawdown_guard_cooldown_rebalances": 1,
@@ -171,6 +195,87 @@ def test_target_weight_plan_rejects_research_only_params_before_fetch():
             as_of_date="2025-01-31",
             collector=FailingCollector(),
         )
+
+
+def test_target_weight_plan_applies_portfolio_drawdown_guard_state_and_cooldown():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    plan = build_target_weight_plan(
+        candidate_id="target_weight_guard_state",
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "portfolio_drawdown_guard_trigger_pct": 10.0,
+            "portfolio_drawdown_guard_exposure": 0.35,
+            "portfolio_drawdown_guard_cooldown_rebalances": 1,
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-03-10",
+        collector=FakeCollector(_frames_for_rotation()),
+        portfolio_drawdown_guard_state={
+            "source": "fixture",
+            "last_equity_value": 80_000.0,
+            "peak_value": 100_000.0,
+            "cooldown_remaining": 0,
+        },
+    )
+
+    guard = plan.diagnostics["portfolio_drawdown_guard"]
+    assert plan.target_exposure == 0.35
+    assert guard["enabled"] is True
+    assert guard["active"] is True
+    assert guard["triggered"] is True
+    assert guard["drawdown_pct"] == pytest.approx(-20.0)
+    assert guard["cooldown_after_plan"] == 1
+    assert guard["state_source"] == "fixture"
+
+
+def test_target_weight_plan_continues_portfolio_drawdown_guard_cooldown():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    plan = build_target_weight_plan(
+        candidate_id="target_weight_guard_cooldown",
+        symbols=["AAA", "BBB", "CCC"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 0.80,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 2,
+            "long_lookback": 3,
+            "short_weight": 0.5,
+            "score_mode": "benchmark_excess",
+            "benchmark_symbol": "KS11",
+            "portfolio_drawdown_guard_trigger_pct": 10.0,
+            "portfolio_drawdown_guard_exposure": 0.35,
+            "portfolio_drawdown_guard_cooldown_rebalances": 1,
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-03-10",
+        collector=FakeCollector(_frames_for_rotation()),
+        portfolio_drawdown_guard_state={
+            "source": "fixture",
+            "last_equity_value": 99_000.0,
+            "peak_value": 100_000.0,
+            "cooldown_remaining": 1,
+        },
+    )
+
+    guard = plan.diagnostics["portfolio_drawdown_guard"]
+    assert plan.target_exposure == 0.35
+    assert guard["active"] is True
+    assert guard["triggered"] is False
+    assert guard["drawdown_pct"] == pytest.approx(-1.0)
+    assert guard["cooldown_before"] == 1
+    assert guard["cooldown_after_plan"] == 0
 
 
 def test_target_weight_plan_applies_downside_rank_penalty_to_targets():
