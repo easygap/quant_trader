@@ -1987,7 +1987,13 @@ def apply_research_universe_liquidity_filter(
 def _empty_research_universe_reason(
     input_universe: list[str],
     liquidity_filter: dict[str, Any],
+    universe_selection: dict[str, Any] | None = None,
 ) -> str:
+    universe_selection = universe_selection or {}
+    if universe_selection.get("selection_error"):
+        return "canonical_universe_selection_failed"
+    if not input_universe and universe_selection.get("source") == "canonical_liquidity_universe":
+        return "canonical_universe_empty"
     if not input_universe:
         return "empty_input_universe"
     if not liquidity_filter.get("enabled"):
@@ -4378,10 +4384,6 @@ def run_candidate_sweep(
 
     config = Config.get()
     if symbols is None:
-        input_universe = select_canonical_universe(
-            top_n,
-            scan_limit=universe_scan_limit,
-        )
         universe_selection = {
             "source": "canonical_liquidity_universe",
             "requested_top_n": max(1, int(top_n)),
@@ -4391,6 +4393,20 @@ def run_candidate_sweep(
                 else max(max(1, int(top_n)), int(universe_scan_limit))
             ),
         }
+        try:
+            input_universe = select_canonical_universe(
+                top_n,
+                scan_limit=universe_scan_limit,
+            )
+        except Exception as exc:
+            logger.warning("canonical universe selection failed: {}", exc)
+            input_universe = []
+            universe_selection.update(
+                {
+                    "selection_error": f"{type(exc).__name__}: {exc}",
+                    "selection_error_type": type(exc).__name__,
+                }
+            )
     else:
         input_universe = normalize_symbols(symbols)
         universe_selection = {
@@ -4415,7 +4431,11 @@ def run_candidate_sweep(
         candidate_ids,
     )
     if not symbols:
-        empty_reason = _empty_research_universe_reason(input_universe, liquidity_filter)
+        empty_reason = _empty_research_universe_reason(
+            input_universe,
+            liquidity_filter,
+            universe_selection,
+        )
         benchmark = _benchmark_result_unavailable(
             input_universe,
             [],
