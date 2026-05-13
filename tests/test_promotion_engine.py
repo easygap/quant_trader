@@ -337,6 +337,41 @@ class TestPromotionRules:
         assert r.status != "live_candidate"
         assert "does not match canonical" in r.reason
 
+    def test_metadata_target_weight_live_requires_proof_without_prefix(self):
+        m = StrategyMetrics(
+            "rotation_candidate_test",
+            total_return=24,
+            profit_factor=1.55,
+            mdd=-8,
+            wf_positive_rate=0.8,
+            wf_sharpe_positive_rate=0.8,
+            wf_windows=6,
+            wf_total_trades=120,
+            sharpe=0.75,
+            ev_per_trade=5000,
+            cost_adjusted_cagr=9.0,
+            turnover_per_year=350.0,
+            paper_days=60,
+            paper_sharpe=0.55,
+            paper_excess=0.2,
+            paper_cash_adjusted_excess=0.1,
+            paper_evidence_recommendation="ELIGIBLE",
+            paper_benchmark_final_ratio=0.9,
+            paper_sell_count=60,
+            paper_win_rate=55.0,
+            paper_frozen_days=0,
+            paper_cumulative_return=4.0,
+            target_weight_strategy_required=True,
+            target_weight_canonical_params_hash="current-hash",
+            target_weight_params_hash_matches_canonical=False,
+            **_fresh_paper_evidence_kwargs(),
+        )
+
+        r = promote(m)
+
+        assert r.status != "live_candidate"
+        assert "target-weight evidence required flag missing" in r.reason
+
     def test_target_weight_live_allows_matching_canonical_params_hash(self):
         m = StrategyMetrics(
             "target_weight_rotation_test",
