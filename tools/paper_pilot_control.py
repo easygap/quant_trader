@@ -27,6 +27,9 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+PROMOTION_METADATA_PATH = Path("reports/promotion/run_metadata.json")
+TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
+
 
 def main():
     parser = argparse.ArgumentParser(description="Paper Pilot Control")
@@ -104,8 +107,45 @@ def run_enable(args):
         sys.exit(1)
 
 
+def _load_promotion_metadata(path: str | Path | None = None) -> dict | None:
+    metadata_path = Path(path) if path is not None else PROMOTION_METADATA_PATH
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_target_weight_strategy_for_enable(
+    strategy: str,
+    canonical_metadata: dict | None = None,
+) -> bool:
+    strategy_name = str(strategy)
+    if strategy_name.startswith("target_weight_"):
+        return True
+    metadata = canonical_metadata if canonical_metadata is not None else _load_promotion_metadata()
+    specs = metadata.get("strategy_specs") if isinstance(metadata, dict) else None
+    if not isinstance(specs, list):
+        return False
+    for spec in specs:
+        if not isinstance(spec, dict) or spec.get("candidate_id") != strategy_name:
+            continue
+        base_strategy = spec.get("base_strategy") or spec.get("strategy")
+        candidate_id = spec.get("candidate_id")
+        return (
+            isinstance(base_strategy, str)
+            and base_strategy in TARGET_WEIGHT_BASE_STRATEGIES
+        ) or (
+            isinstance(candidate_id, str)
+            and candidate_id.startswith("target_weight_")
+        )
+    return False
+
+
 def _target_weight_enable_guard(args):
-    if not str(args.strategy).startswith("target_weight_"):
+    if not _is_target_weight_strategy_for_enable(args.strategy):
         return None
 
     from tools.target_weight_rotation_pilot import (
