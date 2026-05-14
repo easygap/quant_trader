@@ -794,6 +794,20 @@ class TestEndToEndReplay:
         assert pkg["trade_quality"]["missing_expected_price_ratio"] == 1.0
         assert "fill_quality_expected_price_missing=1/1" in pkg["block_reasons"]
 
+    def test_promotion_blocks_missing_trade_history_quality(self, evidence_dir, fresh_db):
+        """paper evidence에 거래가 있는데 TradeHistory가 비어 있으면 체결 품질 미검증으로 차단한다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_no_trades"
+        _append_eligible_promotion_records(evidence_dir, strategy)
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "no_trades"
+        assert "fill_quality_no_trades" in pkg["block_reasons"]
+
     def test_promotion_package_uses_chronological_canonical_records(self, evidence_dir):
         """나중에 append된 오래된 backfill이 promotion period/latest cumulative를 흔들지 않음."""
         from core.paper_evidence import _append_jsonl, generate_promotion_package
@@ -1739,7 +1753,7 @@ class TestShadowEvidenceNotPromotable:
         assert "no_execution_backed_evidence" in pkg["block_reasons"]
         assert "insufficient_days=0/60" in pkg["block_reasons"]
 
-    def test_target_weight_promotion_requires_verified_pilot_execution(self, evidence_dir):
+    def test_target_weight_promotion_requires_verified_pilot_execution(self, evidence_dir, fresh_db):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
 
         strategy = "target_weight_rotation_test"
@@ -1768,6 +1782,14 @@ class TestShadowEvidenceNotPromotable:
                 "status": "normal",
                 "anomalies": [],
             })
+        _seed_paper_trade(
+            strategy,
+            price=100.0,
+            expected_price=100.0,
+            price_gap=0.0,
+            actual_slippage_pct=0.0,
+            executed_at=start + timedelta(days=10),
+        )
 
         pkg_path, _ = generate_promotion_package(strategy)
         pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
@@ -1896,7 +1918,7 @@ class TestShadowEvidenceNotPromotable:
         assert pkg["target_weight_canonical_params_hash"] == "current-hash"
         assert "target_weight_canonical_params_hash_mismatch" in pkg["block_reasons"]
 
-    def test_target_weight_promotion_counts_verified_pilot_execution(self, evidence_dir):
+    def test_target_weight_promotion_counts_verified_pilot_execution(self, evidence_dir, fresh_db):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
 
         strategy = "target_weight_rotation_test"
@@ -1945,6 +1967,14 @@ class TestShadowEvidenceNotPromotable:
                 "status": "normal",
                 "anomalies": [],
             })
+        _seed_paper_trade(
+            strategy,
+            price=100.0,
+            expected_price=100.0,
+            price_gap=0.0,
+            actual_slippage_pct=0.0,
+            executed_at=start + timedelta(days=10),
+        )
 
         pkg_path, _ = generate_promotion_package(strategy)
         pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
