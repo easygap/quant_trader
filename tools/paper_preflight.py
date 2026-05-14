@@ -19,8 +19,9 @@ sys.path.insert(0, str(_ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description="Paper Preflight Check")
-    parser.add_argument("--strategy", help="전략 이름")
-    parser.add_argument("--all", action="store_true", help="전체 전략")
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument("--strategy", help="전략 이름")
+    target_group.add_argument("--all", action="store_true", help="전체 전략")
     parser.add_argument("--date", help="YYYY-MM-DD (default: today)")
     parser.add_argument("--with-pilot-check", action="store_true",
                         help="pilot authorization + prerequisites 상세 표시")
