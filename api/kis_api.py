@@ -440,19 +440,45 @@ class KISApi:
             params=params,
         )
 
-        if not data or "output" not in data:
+        if not data or str(data.get("rt_cd", "")) != "0":
             return None
 
-        output = data["output"]
+        output = data.get("output")
+        if not isinstance(output, dict):
+            return None
+
+        def _to_float(key: str, default: float = 0.0) -> float:
+            value = output.get(key)
+            if value is None or str(value).strip() == "":
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _to_int(key: str, default: int = 0) -> int:
+            value = output.get(key)
+            if value is None or str(value).strip() == "":
+                return default
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return default
+
+        price = _to_float("stck_prpr")
+        if price <= 0:
+            logger.warning("KIS 현재가 응답 가격 비정상: symbol={}, price={}", symbol, output.get("stck_prpr"))
+            return None
+
         return {
             "symbol": symbol,
-            "price": float(output.get("stck_prpr", 0)),       # 현재가
-            "open": float(output.get("stck_oprc", 0)),         # 시가
-            "high": float(output.get("stck_hgpr", 0)),         # 고가
-            "low": float(output.get("stck_lwpr", 0)),          # 저가
-            "volume": int(output.get("acml_vol", 0)),          # 누적 거래량
-            "change_rate": float(output.get("prdy_ctrt", 0)),  # 전일 대비 등락률
-            "prev_close": float(output.get("stck_sdpr", 0)),   # 전일 종가
+            "price": price,                            # 현재가
+            "open": _to_float("stck_oprc"),            # 시가
+            "high": _to_float("stck_hgpr"),            # 고가
+            "low": _to_float("stck_lwpr"),             # 저가
+            "volume": _to_int("acml_vol"),             # 누적 거래량
+            "change_rate": _to_float("prdy_ctrt"),     # 전일 대비 등락률
+            "prev_close": _to_float("stck_sdpr"),      # 전일 종가
         }
 
     def get_daily_prices(
