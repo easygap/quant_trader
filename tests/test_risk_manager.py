@@ -1,4 +1,6 @@
 """RiskManager 단위 테스트 — 포지션 사이징 엣지 케이스"""
+from types import SimpleNamespace
+
 import pytest
 
 from core.risk_manager import RiskManager, _get_tick_size
@@ -109,6 +111,82 @@ def test_diversification_blocks_when_total_investment_ratio_exceeds_limit(risk_m
     )
     assert result["can_buy"] is False
     assert "전체 투자 비중" in result["reason"]
+
+
+def test_diversification_blocks_when_sector_map_missing_and_strict(risk_manager):
+    """업종 cap이 켜져 있으면 섹터 맵 자체가 없을 때 신규 BUY를 막는다."""
+    risk_manager.risk_params["diversification"]["max_sector_ratio"] = 0.40
+    risk_manager.risk_params["diversification"]["sector_map_strict"] = True
+
+    result = risk_manager.check_diversification(
+        current_positions=0,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=900_000,
+        symbol="005930",
+        sector_map={},
+        positions=[],
+    )
+
+    assert result["can_buy"] is False
+    assert "섹터 맵 없음" in result["reason"]
+
+
+def test_diversification_blocks_when_target_sector_missing_and_strict(risk_manager):
+    """매수 대상 업종 매핑이 없으면 업종 상한을 검증할 수 없으므로 차단한다."""
+    risk_manager.risk_params["diversification"]["max_sector_ratio"] = 0.40
+    risk_manager.risk_params["diversification"]["sector_map_strict"] = True
+
+    result = risk_manager.check_diversification(
+        current_positions=0,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=900_000,
+        symbol="005930",
+        sector_map={"000660": "반도체"},
+        positions=[],
+    )
+
+    assert result["can_buy"] is False
+    assert "005930 업종 매핑 없음" in result["reason"]
+
+
+def test_diversification_blocks_when_held_sector_missing_and_strict(risk_manager):
+    """보유 종목 업종 매핑이 없으면 같은 업종 누적 비중을 계산할 수 없으므로 차단한다."""
+    risk_manager.risk_params["diversification"]["max_sector_ratio"] = 0.40
+    risk_manager.risk_params["diversification"]["sector_map_strict"] = True
+
+    result = risk_manager.check_diversification(
+        current_positions=1,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=900_000,
+        symbol="005930",
+        sector_map={"005930": "반도체"},
+        positions=[SimpleNamespace(symbol="000660", total_invested=100_000)],
+    )
+
+    assert result["can_buy"] is False
+    assert "보유 종목 업종 매핑 없음" in result["reason"]
+    assert "000660" in result["reason"]
+
+
+def test_diversification_can_skip_sector_map_when_strict_disabled(risk_manager):
+    """수동 설정으로 strict를 끄면 기존처럼 업종 맵 없이도 다른 분산 규칙만 본다."""
+    risk_manager.risk_params["diversification"]["max_sector_ratio"] = 0.40
+    risk_manager.risk_params["diversification"]["sector_map_strict"] = False
+
+    result = risk_manager.check_diversification(
+        current_positions=0,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=900_000,
+        symbol="005930",
+        sector_map={},
+        positions=[],
+    )
+
+    assert result["can_buy"] is True
 
 
 def test_dynamic_slippage_increases_when_order_participation_is_high(risk_manager):
