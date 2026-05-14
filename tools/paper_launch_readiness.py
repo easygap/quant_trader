@@ -18,8 +18,9 @@ sys.path.insert(0, str(_ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description="Pilot Launch Readiness Check")
-    parser.add_argument("--strategy", help="전략 이름")
-    parser.add_argument("--all", action="store_true", help="전체 paper 전략")
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument("--strategy", help="전략 이름")
+    target_group.add_argument("--all", action="store_true", help="전체 paper 전략")
     parser.add_argument("--generate-runbook", action="store_true",
                         help="runbook markdown도 생성")
     args = parser.parse_args()
