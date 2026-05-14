@@ -17,6 +17,7 @@ python tools/paper_launch_readiness.py --strategy scoring --generate-runbook
 - 신규 BUY 주문 직전 20일 평균 거래량이 전달되며, 누락/0 또는 평균 거래대금 하한 미달이면 주문이 차단되는지
 - 갭업 차단용 최근 가격 조회가 실패하거나 데이터가 부족하면 신규 BUY가 차단되는지
 - 상관관계 리스크 확인용 대상/보유 종목 가격 데이터가 부족하거나 조회 실패하면 신규 BUY가 차단되는지
+- 업종 비중 cap 확인용 섹터 맵이 비어 있거나 대상/보유 종목 업종 매핑이 누락되면 신규 BUY가 차단되는지
 - exit/finalize/evidence action이 허용되는지
 - Discord notifier 설정 여부
 - clean final days, benchmark final ratio, evidence freshness
