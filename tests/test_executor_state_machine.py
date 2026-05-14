@@ -770,3 +770,53 @@ class TestExecutorUsesStateMachine:
         finally:
             session.close()
             OrderGuard.clear("005380")
+
+    def test_live_buy_mismatched_execution_order_number_stays_pending(self):
+        """체결 조회가 다른 주문번호를 반환하면 현재 live 주문 장부 반영을 보류한다."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position
+
+        class AckWrongExecutionKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                return {"odno": "B126"}
+
+            def get_order_execution_after_order(self, symbol, order_output):
+                return {
+                    "fill_price": 60_100,
+                    "filled_qty": 3,
+                    "remaining_qty": 0,
+                    "order_no": "B999",
+                }
+
+        OrderGuard.clear("005387")
+        executor = self._prepare_live_executor(self._make_executor(), AckWrongExecutionKIS())
+
+        result = executor.execute_buy(
+            symbol="005387",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live mismatched order execution test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["execution_check"]["reason"] == "live_execution_order_mismatch"
+        assert result["execution_check"]["expected_order_no"] == "B126"
+        assert result["execution_check"]["execution_order_no"] == "B999"
+        assert result["order_status"] == OrderStatus.ACKED.value
+        assert get_position("005387", account_key="test_sm") is None
+
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005387").count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("005387")

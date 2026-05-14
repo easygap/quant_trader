@@ -1542,6 +1542,27 @@ class OrderExecutor:
             detail_getter = getattr(self.kis_api, "get_order_execution_after_order", None)
             if callable(detail_getter):
                 execution = detail_getter(symbol, order_output)
+                expected_order_no = self._normalize_broker_order_id(
+                    self._broker_order_id_from_order_output(order_output)
+                )
+                execution_order_no = self._normalize_broker_order_id(
+                    (execution or {}).get("order_no")
+                )
+                if expected_order_no and execution_order_no and execution_order_no != expected_order_no:
+                    logger.warning(
+                        "실전 체결 조회 주문번호 불일치 — DB 반영 보류: {} expected={} actual={}",
+                        symbol,
+                        expected_order_no,
+                        execution_order_no,
+                    )
+                    return {
+                        "confirmed": False,
+                        "fill_price": None,
+                        "actual_slippage_pct": None,
+                        "reason": "live_execution_order_mismatch",
+                        "expected_order_no": expected_order_no,
+                        "execution_order_no": execution_order_no,
+                    }
                 fill = (execution or {}).get("fill_price")
                 filled_qty = (execution or {}).get("filled_qty")
                 remaining_qty = (execution or {}).get("remaining_qty")
@@ -1684,6 +1705,16 @@ class OrderExecutor:
             "order_status": order.status.value,
             "execution_check": execution,
         }
+
+    @staticmethod
+    def _broker_order_id_from_order_output(order_output) -> str:
+        if not order_output or not isinstance(order_output, dict):
+            return ""
+        for key in ("ODNO", "odno", "ORD_NO", "ord_no"):
+            value = order_output.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
 
     @staticmethod
     def _normalize_broker_order_id(value) -> str:
