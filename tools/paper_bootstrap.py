@@ -105,6 +105,7 @@ def run_shadow_bootstrap(strategy: str, dates: list):
             f = finalize_daily_evidence(
                 strategy=strategy, mode="paper", account_key=strategy,
                 date=prev, watchlist_symbols=watchlist,
+                evidence_mode="shadow_bootstrap",
             )
             if f and f.record_version > 1:
                 stats["finalized"] += 1
