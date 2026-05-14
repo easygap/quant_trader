@@ -11,6 +11,7 @@ scheduler entry-point 기준:
 """
 
 import json
+import sys
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1047,3 +1048,40 @@ class TestRebuild:
         history = rebuild_runtime_history("rb_filt", from_date="2026-04-02", to_date="2026-04-02")
         assert len(history) == 1
         assert history[0]["date"] == "2026-04-02"
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (
+            ["paper_runtime_status.py", "--strategy", "scoring", "--freeze", "--unfreeze"],
+            "not allowed with argument",
+        ),
+        (
+            ["paper_runtime_status.py", "--strategy", "scoring", "--freeze", "--audit"],
+            "not allowed with argument",
+        ),
+        (
+            ["paper_runtime_status.py", "--strategy", "scoring", "--all"],
+            "not allowed with argument",
+        ),
+        (
+            ["paper_runtime_status.py", "--all", "--freeze"],
+            "--strategy",
+        ),
+        (
+            ["paper_runtime_status.py", "--audit"],
+            "--strategy",
+        ),
+    ],
+)
+def test_paper_runtime_status_rejects_conflicting_cli_options(monkeypatch, capsys, argv, expected):
+    import tools.paper_runtime_status as prs
+
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        prs.main()
+
+    assert exc.value.code == 2
+    assert expected in capsys.readouterr().err
