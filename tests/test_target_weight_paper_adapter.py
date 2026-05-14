@@ -322,17 +322,18 @@ class _StaticTradeSession:
         pass
 
 
-def _paper_trade_history_for_plan(plan, *, start_date="2026-01-05", day_count=60):
+def _paper_trade_history_for_plan(plan, *, start_date="2026-01-05", day_count=60, daily_sell_count=0):
     from database.models import TradeHistory
 
     trades = []
     start = datetime.fromisoformat(start_date)
     for day_index in range(day_count):
         for index, order in enumerate(plan.orders):
+            action = "SELL" if index >= len(plan.orders) - daily_sell_count else order.action
             trades.append(TradeHistory(
                 account_key=plan.candidate_id,
                 symbol=order.symbol,
-                action=order.action,
+                action=action,
                 price=order.price,
                 quantity=order.quantity,
                 total_amount=order.price * order.quantity,
@@ -5526,7 +5527,7 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
             "anomalies": [],
         })
 
-    trades = _paper_trade_history_for_plan(plan)
+    trades = _paper_trade_history_for_plan(plan, daily_sell_count=1)
     monkeypatch.setattr("database.models.get_session", lambda: _StaticTradeSession(trades))
 
     pkg_path, _ = pe.generate_promotion_package(plan.candidate_id)
