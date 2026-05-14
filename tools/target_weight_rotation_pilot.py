@@ -1027,14 +1027,33 @@ def check_execution_idempotency(
     from core.paper_pilot import load_pilot_session_artifact, pilot_session_artifact_path
 
     artifact_path = pilot_session_artifact_path(plan.candidate_id, plan.trade_day)
+    lock_path = artifact_path.with_suffix(".lock")
     result = {
         "checked": True,
         "allowed": True,
         "reason": "no prior target-weight pilot execution session",
         "allow_rerun": bool(allow_rerun),
         "artifact_path": str(artifact_path),
+        "lock_path": str(lock_path),
         "previous_session_found": False,
+        "execution_lock_found": False,
     }
+    if lock_path.exists():
+        lock_payload = None
+        try:
+            lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            lock_payload = {"unreadable": True}
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_execution_lock_present: "
+                f"existing in-progress pilot lock for {plan.candidate_id} {plan.trade_day}"
+            ),
+            "execution_lock_found": True,
+            "execution_lock": lock_payload,
+        }
     try:
         artifact = load_pilot_session_artifact(plan.candidate_id, plan.trade_day)
     except Exception as exc:
@@ -1055,10 +1074,19 @@ def check_execution_idempotency(
         "previous_execution_complete": pilot_session.get("execution_complete"),
         "previous_orders_planned": pilot_session.get("orders_planned"),
         "previous_orders_executed": pilot_session.get("orders_executed"),
+        "previous_order_submission_reached": pilot_session.get("order_submission_reached"),
+        "previous_failed_orders": (pilot_session.get("target_weight_execution") or {}).get("failed_orders"),
+        "previous_halted": (pilot_session.get("target_weight_execution") or {}).get("halted"),
     })
     if allow_rerun:
         previous_complete = bool(pilot_session.get("execution_complete", False))
         previous_orders_executed = int(pilot_session.get("orders_executed") or 0)
+        previous_order_submission_reached = bool(
+            pilot_session.get("order_submission_reached", False)
+        )
+        target_execution = pilot_session.get("target_weight_execution") or {}
+        previous_failed_orders = int(target_execution.get("failed_orders") or 0)
+        previous_halted = bool(target_execution.get("halted", False))
         if previous_complete and previous_orders_executed > 0:
             return {
                 **result,
@@ -1066,6 +1094,21 @@ def check_execution_idempotency(
                 "reason": (
                     "target_weight_completed_execution_rerun_blocked: "
                     f"existing completed pilot session for {plan.candidate_id} {plan.trade_day}"
+                ),
+            }
+        if (
+            previous_orders_executed > 0
+            or previous_order_submission_reached
+            or previous_failed_orders > 0
+            or previous_halted
+        ):
+            return {
+                **result,
+                "allowed": False,
+                "reason": (
+                    "target_weight_unsafe_execution_rerun_blocked: "
+                    f"existing pilot session reached or may have reached orders for "
+                    f"{plan.candidate_id} {plan.trade_day}"
                 ),
             }
         return {
@@ -1080,6 +1123,89 @@ def check_execution_idempotency(
             "target_weight_duplicate_execution_attempt: "
             f"existing pilot session artifact for {plan.candidate_id} {plan.trade_day}"
         ),
+    }
+
+
+def acquire_execution_lock(
+    plan: TargetWeightPlan,
+    *,
+    execution_session_id: str,
+) -> dict[str, Any]:
+    from core.paper_pilot import pilot_session_artifact_path
+
+    artifact_path = pilot_session_artifact_path(plan.candidate_id, plan.trade_day)
+    lock_path = artifact_path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "strategy": plan.candidate_id,
+        "date": plan.trade_day,
+        "execution_session_id": execution_session_id,
+        "params_hash": plan.params_hash,
+        "created_at": datetime.now().isoformat(),
+        "artifact_path": str(artifact_path),
+    }
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        lock_payload = None
+        try:
+            lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except Exception:
+            lock_payload = {"unreadable": True}
+        return {
+            "checked": True,
+            "allowed": False,
+            "acquired": False,
+            "reason": (
+                "target_weight_execution_lock_present: "
+                f"existing in-progress pilot lock for {plan.candidate_id} {plan.trade_day}"
+            ),
+            "path": str(lock_path),
+            "existing_lock": lock_payload,
+        }
+    except Exception as exc:
+        return {
+            "checked": True,
+            "allowed": False,
+            "acquired": False,
+            "reason": f"target_weight_execution_lock_failed: {exc}",
+            "path": str(lock_path),
+        }
+
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    return {
+        "checked": True,
+        "allowed": True,
+        "acquired": True,
+        "reason": "target_weight_execution_lock_acquired",
+        "path": str(lock_path),
+        "payload": payload,
+    }
+
+
+def release_execution_lock(lock: dict[str, Any] | None) -> dict[str, Any]:
+    if not lock or not lock.get("acquired"):
+        return {
+            "checked": False,
+            "released": False,
+            "reason": "execution lock was not acquired",
+        }
+    path = Path(str(lock.get("path") or ""))
+    try:
+        path.unlink(missing_ok=True)
+    except Exception as exc:
+        return {
+            "checked": True,
+            "released": False,
+            "reason": f"target_weight_execution_lock_release_failed: {exc}",
+            "path": str(path),
+        }
+    return {
+        "checked": True,
+        "released": True,
+        "reason": "target_weight_execution_lock_released",
+        "path": str(path),
     }
 
 
@@ -2163,6 +2289,8 @@ def write_session_artifact(
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
+    execution_lock: dict[str, Any] | None = None,
+    execution_lock_release: dict[str, Any] | None = None,
     preflight_refresh: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
     shadow_evidence: dict[str, Any] | None = None,
@@ -2197,6 +2325,8 @@ def write_session_artifact(
             )
         ),
         "execution_idempotency": execution_idempotency or {"checked": False},
+        "execution_lock": execution_lock or {"checked": False},
+        "execution_lock_release": execution_lock_release or {"checked": False},
         "preflight_refresh": preflight_refresh or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
@@ -4347,6 +4477,8 @@ def run_pilot(
         )
 
     execution_idempotency = None
+    execution_lock = None
+    execution_lock_release = None
     if (
         execute
         and validation.allowed
@@ -4359,6 +4491,19 @@ def run_pilot(
             plan,
             allow_rerun=allow_rerun,
         )
+        if execution_idempotency["allowed"]:
+            execution_session_id = make_execution_session_id(plan, now=execution_now)
+            execution_lock = acquire_execution_lock(
+                plan,
+                execution_session_id=execution_session_id,
+            )
+            if not execution_lock["allowed"]:
+                execution_idempotency = {
+                    **execution_idempotency,
+                    "allowed": False,
+                    "reason": execution_lock["reason"],
+                    "execution_lock": execution_lock,
+                }
 
     pre_execution_reconciliation = None
     if (
@@ -4395,7 +4540,9 @@ def run_pilot(
     elif execute and not pre_trade_risk_check["complete"]:
         execution = blocked_execution_for_pre_trade_risk(plan, pre_trade_risk_check)
     else:
-        execution_session_id = make_execution_session_id(plan, now=execution_now) if execute else None
+        execution_session_id = execution_session_id or (
+            make_execution_session_id(plan, now=execution_now) if execute else None
+        )
         execution = execute_plan(
             plan,
             config=config,
@@ -4516,6 +4663,7 @@ def run_pilot(
                 date=plan.trade_day,
                 pilot_session=pilot_session,
             )
+        execution_lock_release = release_execution_lock(execution_lock)
 
         if collect_evidence:
             evidence_collection = {
@@ -4597,6 +4745,8 @@ def run_pilot(
         execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
         execution_idempotency=execution_idempotency,
+        execution_lock=execution_lock,
+        execution_lock_release=execution_lock_release,
         preflight_refresh=preflight_refresh,
         fill_reconciliation=fill_reconciliation,
         shadow_evidence=shadow_evidence_summary,
@@ -4619,6 +4769,8 @@ def run_pilot(
         "execution_market_session_check": execution_market_session_check,
         "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
         "execution_idempotency": execution_idempotency,
+        "execution_lock": execution_lock,
+        "execution_lock_release": execution_lock_release,
         "fill_reconciliation": fill_reconciliation,
         "execution_evidence": execution_evidence,
         "evidence_collection": evidence_collection,
