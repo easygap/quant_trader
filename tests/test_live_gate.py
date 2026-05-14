@@ -135,6 +135,89 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
         "frozen_days": 0,
     }
     payload.update(overrides)
+    seed_records = payload.pop("_seed_records", True)
+    with_integrity = payload.pop("_with_integrity", True)
+    if seed_records:
+        latest = payload.get("latest_evidence_date") or "2026-04-29"
+        try:
+            latest_dt = datetime.strptime(str(latest)[:10], "%Y-%m-%d")
+        except ValueError:
+            latest_dt = datetime(2026, 4, 29)
+        count = int(payload.get("promotable_evidence_days") or 0)
+        if count <= 0:
+            count = 60
+        start_dt = latest_dt - timedelta(days=count - 1)
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        target_summary = payload.get("target_weight_evidence") or {}
+        use_pilot = target_summary.get("all_promotable_days_verified") is True
+        params_hash = (
+            payload.get("target_weight_params_hash")
+            or target_summary.get("params_hash")
+            or "hash"
+        )
+        rows = []
+        for idx in range(count):
+            day = start_dt + timedelta(days=idx)
+            record = {
+                "date": day.strftime("%Y-%m-%d"),
+                "day_number": idx + 1,
+                "strategy": strategy,
+                "execution_backed": True,
+                "evidence_mode": "pilot_paper" if use_pilot else "real_paper",
+                "session_mode": "pilot_paper" if use_pilot else "normal_paper",
+                "pilot_authorized": use_pilot,
+                "daily_return": 0.1,
+                "cumulative_return": payload.get("cumulative_return", 3.2),
+                "mdd": -2.0,
+                "total_trades": 2,
+                "sell_count": 1,
+                "winning_trades": 1,
+                "losing_trades": 0,
+                "same_universe_excess": payload.get("avg_same_universe_excess", 0.15),
+                "exposure_matched_excess": payload.get("avg_same_universe_excess", 0.15),
+                "cash_adjusted_excess": payload.get("avg_cash_adjusted_excess", 0.12),
+                "benchmark_status": "final",
+                "status": "normal",
+                "anomalies": [],
+            }
+            if use_pilot:
+                record["pilot_caps_snapshot"] = {
+                    "target_weight_plan": {
+                        "candidate_id": strategy,
+                        "trade_day": record["date"],
+                        "params_hash": params_hash,
+                    },
+                    "target_weight_execution": {
+                        "params_hash": params_hash,
+                        "complete": True,
+                        "execution_trade_day_allowed": True,
+                        "execution_market_session_allowed": True,
+                        "pilot_authorization_snapshot_allowed": True,
+                        "liquidity_complete": True,
+                        "pre_trade_risk_complete": True,
+                        "order_result_complete": True,
+                        "fill_complete": True,
+                        "position_reconciliation": {"complete": True},
+                    },
+                }
+            rows.append(json.dumps(record, ensure_ascii=False))
+        jsonl_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    if with_integrity:
+        from core.paper_evidence import (
+            build_promotion_source_records_summary,
+            compute_promotion_package_integrity_hash,
+        )
+
+        payload["source_records"] = build_promotion_source_records_summary(
+            strategy,
+            promotion_dir=evidence_dir.parent / "promotion",
+            evidence_dir=evidence_dir,
+        )
+        payload["package_integrity"] = {
+            "schema_version": 1,
+            "payload_hash": compute_promotion_package_integrity_hash(payload),
+        }
     _write_json(evidence_dir / f"promotion_evidence_{strategy}.json", payload)
 
 
@@ -429,6 +512,53 @@ def test_paper_evidence_must_be_eligible(tmp_path):
     assert any("recommendation=BLOCKED" in issue for issue in issues)
     assert any("60영업일 미달" in issue for issue in issues)
     assert any("same-universe excess" in issue for issue in issues)
+
+
+def test_paper_evidence_package_integrity_must_match_payload(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    evidence_path = evidence_dir / "promotion_evidence_scoring.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["avg_same_universe_excess"] = 9.99
+    _write_json(evidence_path, payload)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("package_integrity payload_hash 불일치" in issue for issue in issues)
+
+
+def test_paper_evidence_source_records_must_match_daily_jsonl(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    evidence_path = evidence_dir / "promotion_evidence_scoring.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["source_records"]["records_hash"] = "bad-hash"
+    from core.paper_evidence import compute_promotion_package_integrity_hash
+
+    payload["package_integrity"]["payload_hash"] = compute_promotion_package_integrity_hash(payload)
+    _write_json(evidence_path, payload)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("source_records 불일치" in issue for issue in issues)
 
 
 def test_paper_evidence_latest_date_must_be_fresh(tmp_path):
