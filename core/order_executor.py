@@ -576,6 +576,17 @@ class OrderExecutor:
         )
         return any(keyword in text for keyword in emergency_keywords)
 
+    @staticmethod
+    def _positive_order_price(price) -> float | None:
+        """주문·손절 판단에 쓸 수 있는 양수 가격만 통과시킨다."""
+        try:
+            order_price = float(price)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(order_price) or order_price <= 0:
+            return None
+        return order_price
+
     def execute_buy(
         self,
         symbol: str,
@@ -628,6 +639,13 @@ class OrderExecutor:
         execution_session_id: str = "",
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
+        order_price = self._positive_order_price(price)
+        if order_price is None:
+            reason_text = f"매수 가격 확인 실패: {symbol} 현재가 없음"
+            logger.warning("종목 {} 매수 스킵: {}", symbol, reason_text)
+            return {"success": False, "reason": reason_text, "price_invalid": True}
+        price = order_price
+
         if self._should_block_new_buy_volatility_window():
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.info(
@@ -983,8 +1001,14 @@ class OrderExecutor:
         quantity = int(quantity or 0)
         if quantity <= 0:
             return {"success": False, "reason": "quantity must be positive"}
-        if price <= 0:
-            return {"success": False, "reason": "price must be positive"}
+        order_price = self._positive_order_price(price)
+        if order_price is None:
+            return {
+                "success": False,
+                "reason": f"매수 가격 확인 실패: {symbol} 현재가 없음",
+                "price_invalid": True,
+            }
+        price = order_price
 
         if self._should_block_new_buy_volatility_window():
             return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
@@ -1158,6 +1182,13 @@ class OrderExecutor:
         if not position:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
             return {"success": False, "reason": "보유 포지션 없음"}
+
+        order_price = self._positive_order_price(price)
+        if order_price is None:
+            reason_text = f"매도 가격 확인 실패: {symbol} 현재가 없음"
+            logger.warning("종목 {} 매도 스킵: {}", symbol, reason_text)
+            return {"success": False, "reason": reason_text, "price_invalid": True}
+        price = order_price
 
         sell_qty = position.quantity if quantity is None else int(quantity)
         if sell_qty <= 0:
@@ -1358,6 +1389,13 @@ class OrderExecutor:
         position = get_position(symbol, account_key=self.account_key)
         if not position:
             return {"action": None}
+
+        checked_price = self._positive_order_price(current_price)
+        if checked_price is None:
+            reason_text = f"현재가 확인 실패: {symbol} 손절/익절 판단 보류"
+            logger.warning(reason_text)
+            return {"action": None, "price_invalid": True, "reason": reason_text}
+        current_price = checked_price
 
         # 트레일링 스탑 업데이트 (고점 경신 시)
         trailing_rate = self.risk_manager.risk_params.get(
