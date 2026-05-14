@@ -1536,6 +1536,42 @@ class TestShadowEvidenceNotPromotable:
         assert records[0]["session_mode"] == "backfill"
         assert records[0]["execution_backed"] is False
 
+    @patch("core.paper_evidence._compute_benchmark_excess")
+    @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
+    def test_shadow_bootstrap_finalize_without_existing_record_stays_shadow(
+        self, mock_diag, mock_bench, evidence_dir, fresh_db, monkeypatch,
+    ):
+        """shadow bootstrap finalize가 빈 이전일을 만들더라도 승격 증거로 남기지 않는다."""
+        mock_bench.return_value = {
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.03,
+            "cash_adjusted_excess": 0.02,
+            "benchmark_status": "final",
+            "benchmark_meta": {},
+        }
+        from core.paper_evidence import get_canonical_records
+        from tools import paper_bootstrap
+
+        monkeypatch.setattr(paper_bootstrap, "_get_watchlist", lambda: ["005930"])
+
+        stats = paper_bootstrap.run_shadow_bootstrap(
+            "cli_shadow_finalize",
+            [
+                datetime(2026, 4, 2, 15, 35),
+                datetime(2026, 4, 3, 15, 35),
+            ],
+        )
+
+        records = get_canonical_records("cli_shadow_finalize")
+
+        assert stats["order_submits"] == 0
+        assert {r["date"] for r in records} == {"2026-04-01", "2026-04-02", "2026-04-03"}
+        assert all(r["evidence_mode"] == "shadow_bootstrap" for r in records)
+        assert all(r["session_mode"] == "shadow_bootstrap" for r in records)
+        assert all(r["execution_backed"] is False for r in records)
+        assert all(r["order_submit_count"] == 0 for r in records)
+        assert all(r["fill_count"] == 0 for r in records)
+
     def test_append_shadow_plan_evidence_is_non_promotable(self, evidence_dir):
         from core.paper_evidence import append_shadow_plan_evidence, get_canonical_records
 
