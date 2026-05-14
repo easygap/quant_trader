@@ -683,6 +683,13 @@ class OrderExecutor:
         positions = get_all_positions(account_key=self.account_key if self.account_key else None)
         existing_symbols = [p.symbol for p in positions]
         corr_result = self.risk_manager.check_correlation_risk(symbol, existing_symbols)
+        if corr_result.get("blocked"):
+            logger.warning("종목 {} 매수 스킵: {}", symbol, corr_result["reason"])
+            return {
+                "success": False,
+                "reason": corr_result["reason"],
+                "correlation_risk_blocked": True,
+            }
         if corr_result["scale"] < 1.0:
             scaled_qty = max(1, int(quantity * corr_result["scale"]))
             logger.info(
