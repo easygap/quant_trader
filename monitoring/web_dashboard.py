@@ -4,10 +4,15 @@
 - 포트폴리오 요약·포지션·스냅샷 추이를 실시간(폴링)으로 표시
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 
-from aiohttp import web
+try:
+    from aiohttp import web
+except ModuleNotFoundError:
+    web = None
 from loguru import logger
 
 from config.config_loader import Config
@@ -16,8 +21,14 @@ from database.repositories import get_portfolio_snapshots
 
 
 # 기본 바인드 주소·포트 (settings.yaml dashboard 섹션으로 오버라이드 가능)
-DEFAULT_HOST = "0.0.0.0"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
+
+
+def _require_aiohttp_web():
+    if web is None:
+        raise RuntimeError("웹 대시보드 실행에는 aiohttp 설치가 필요합니다.")
+    return web
 
 
 def _serialize_snapshots(df):
@@ -480,7 +491,8 @@ async def handle_api_snapshots(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    web_mod = _require_aiohttp_web()
+    app = web_mod.Application()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/portfolio", handle_api_portfolio)
     app.router.add_get("/api/runtime", handle_api_runtime)
@@ -488,26 +500,40 @@ def create_app() -> web.Application:
     return app
 
 
-def run_web_dashboard(host: Optional[str] = None, port: Optional[int] = None):
-    """웹 대시보드 서버 실행 (블로킹). host/port 미지정 시 config dashboard 섹션 또는 기본값 사용."""
+def _config_settings_dict(config) -> dict:
+    settings = getattr(config, "settings", {})
+    if callable(settings):
+        settings = settings()
+    return settings if isinstance(settings, dict) else {}
+
+
+def resolve_dashboard_bind(host: Optional[str] = None, port: Optional[int] = None) -> tuple[str, int]:
+    """대시보드 바인드 주소를 해석한다. 기본은 로컬 루프백이다."""
     try:
         cfg = Config.get()
-        settings = cfg.settings() if hasattr(cfg, "settings") else {}
+        settings = _config_settings_dict(cfg)
         dash_cfg = (settings.get("dashboard") or {}) if isinstance(settings, dict) else {}
-        host = host or dash_cfg.get("host") or DEFAULT_HOST
+        host = host or str(dash_cfg.get("host") or "").strip() or DEFAULT_HOST
         port = port if port is not None else dash_cfg.get("port") or DEFAULT_PORT
     except Exception:
         host = host or DEFAULT_HOST
         port = port if port is not None else DEFAULT_PORT
+    return host, int(port)
+
+
+def run_web_dashboard(host: Optional[str] = None, port: Optional[int] = None):
+    """웹 대시보드 서버 실행 (블로킹). host/port 미지정 시 config dashboard 섹션 또는 기본값 사용."""
+    host, port = resolve_dashboard_bind(host=host, port=port)
+    web_mod = _require_aiohttp_web()
     app = create_app()
-    logger.info("웹 대시보드 서버 시작: http://{}:{}/", host if host != "0.0.0.0" else "127.0.0.1", port)
-    web.run_app(app, host=host, port=port)
+    logger.info("웹 대시보드 서버 시작: http://{}:{}/", host, port)
+    web_mod.run_app(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="퀀트 트레이더 웹 대시보드")
-    p.add_argument("--host", default=None, help="바인드 주소 (기본: config 또는 0.0.0.0)")
+    p.add_argument("--host", default=None, help="바인드 주소 (기본: config 또는 127.0.0.1)")
     p.add_argument("--port", type=int, default=None, help="포트 (기본: config 또는 8080)")
     args = p.parse_args()
     from database.models import init_database
