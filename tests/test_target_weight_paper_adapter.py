@@ -1189,6 +1189,32 @@ def test_paper_pilot_control_enable_stops_before_auth_when_target_weight_guard_f
     assert "target-weight audit blocked" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["paper_pilot_control.py", "--strategy", "scoring", "--enable", "--disable"],
+        ["paper_pilot_control.py", "--strategy", "scoring", "--enable", "--status"],
+        [
+            "paper_pilot_control.py",
+            "--strategy",
+            "scoring",
+            "--disable",
+            "--check-prerequisites",
+        ],
+    ],
+)
+def test_paper_pilot_control_rejects_conflicting_cli_actions(monkeypatch, capsys, argv):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc:
+        ppc.main()
+
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
 def test_paper_pilot_control_enable_writes_target_weight_plan_snapshot(monkeypatch, tmp_path):
     import core.paper_pilot as pp
     import tools.paper_pilot_control as ppc
