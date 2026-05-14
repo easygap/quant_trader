@@ -1043,12 +1043,16 @@ class KISApi:
         호환용 bool API. live 주문 전에는 get_unfilled_order_status()로 조회 성공 여부까지 확인한다.
 
         Returns:
-            True: 미체결 주문이 있음. False: 없음 또는 조회 실패.
+            True: 미체결 주문이 있거나 조회 실패. False: 조회 성공 + 미체결 없음.
         """
         status = self.get_unfilled_order_status(symbol)
         if not status.get("checked"):
-            logger.debug("미체결 조회 상태 불명(호환 API는 False 반환): {} — {}", symbol, status.get("reason"))
-            return False
+            logger.warning(
+                "미체결 조회 상태 불명 — 호환 API는 중복 주문 방지를 위해 미체결 있음으로 간주: {} — {}",
+                symbol,
+                status.get("reason"),
+            )
+            return True
         if status.get("has_unfilled"):
             logger.info("종목 {} 미체결 주문 존재 — 중복 주문 방지를 위해 이번 주문을 보류합니다.", symbol)
             return True

@@ -165,7 +165,7 @@ def test_unfilled_order_status_exposes_query_failure():
     assert status["checked"] is False
     assert status["has_unfilled"] is False
     assert status["reason"] == "kis_unfilled_query_failed"
-    assert api.has_unfilled_orders("005930") is False
+    assert api.has_unfilled_orders("005930") is True
 
 
 def test_unfilled_order_status_prefers_zero_remaining_over_original_order_qty():
