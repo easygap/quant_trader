@@ -47,12 +47,24 @@ def main():
         if results:
             path = _save_session_bootstrap(date, results)
             print(f"\nSession bootstrap: {path}")
+        else:
+            print("No paper strategies discovered", file=sys.stderr)
+            sys.exit(1)
+
+        if any(_is_blocking_result(r) for r in results):
+            sys.exit(1)
     elif args.strategy:
         r = run_preflight(args.strategy, date, args.send_test_notification)
         _print_result(r, with_pilot=args.with_pilot_check or True)
+        if _is_blocking_result(r):
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def _is_blocking_result(result) -> bool:
+    return result.overall == "fail" or not result.entry_allowed
 
 
 def _discover_strategies():
