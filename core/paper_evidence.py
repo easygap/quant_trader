@@ -1472,7 +1472,7 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
             "adverse_gap_bps_of_notional": None,
             "total_slippage_cost": 0.0,
             "avg_abs_actual_slippage_pct": None,
-            "issues": [],
+            "issues": ["paper TradeHistory 체결 기록 없음"],
         }
 
     missing_expected = 0
@@ -1776,6 +1776,9 @@ def generate_promotion_package(
             block_reasons.append(
                 "fill_quality_adverse_gap_bps=%.2f" % adverse_gap_bps
             )
+    elif trade_quality.get("status") == "no_trades":
+        blocked = True
+        block_reasons.append("fill_quality_no_trades")
 
     package = {
         "strategy": strategy,

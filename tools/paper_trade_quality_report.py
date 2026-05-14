@@ -306,6 +306,11 @@ def main() -> None:
         default=0.0,
         help="review 기준 expected_price 누락 비율",
     )
+    parser.add_argument(
+        "--allow-no-trades",
+        action="store_true",
+        help="체결 0건 리포트도 성공 종료로 처리",
+    )
     args = parser.parse_args()
 
     report = build_paper_trade_quality_report(
@@ -319,6 +324,8 @@ def main() -> None:
     json_path, md_path = write_paper_trade_quality_report(report, args.output_dir)
     print(f"OK: paper trade quality report 생성 성공\n  {json_path}\n  {md_path}")
     if report.get("quality_status") == "review":
+        sys.exit(2)
+    if report.get("quality_status") == "no_trades" and not args.allow_no_trades:
         sys.exit(2)
 
 

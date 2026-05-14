@@ -300,6 +300,56 @@ def _complete_fills(plan, execution_session_id=TEST_EXECUTION_SESSION_ID):
     ]
 
 
+class _StaticTradeQuery:
+    def __init__(self, trades):
+        self._trades = list(trades)
+
+    def filter(self, *args):
+        return self
+
+    def all(self):
+        return list(self._trades)
+
+
+class _StaticTradeSession:
+    def __init__(self, trades):
+        self._trades = list(trades)
+
+    def query(self, model):
+        return _StaticTradeQuery(self._trades)
+
+    def close(self):
+        pass
+
+
+def _paper_trade_history_for_plan(plan):
+    from database.models import TradeHistory
+
+    trades = []
+    for index, order in enumerate(plan.orders):
+        trades.append(TradeHistory(
+            account_key=plan.candidate_id,
+            symbol=order.symbol,
+            action=order.action,
+            price=order.price,
+            quantity=order.quantity,
+            total_amount=order.price * order.quantity,
+            commission=0.0,
+            tax=0.0,
+            slippage=0.0,
+            expected_price=order.price,
+            actual_slippage_pct=0.0,
+            execution_session_id=TEST_EXECUTION_SESSION_ID,
+            order_id=f"ORD-TW-{index + 1:03d}",
+            strategy=plan.candidate_id,
+            reason="target weight e2e fill quality fixture",
+            mode="paper",
+            executed_at=datetime(2026, 1, 10, 9, 0),
+            price_gap=0.0,
+        ))
+    return trades
+
+
 @pytest.mark.parametrize(
     ("execution", "expected"),
     [
@@ -5473,6 +5523,9 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
             "status": "normal",
             "anomalies": [],
         })
+
+    trades = _paper_trade_history_for_plan(plan)
+    monkeypatch.setattr("database.models.get_session", lambda: _StaticTradeSession(trades))
 
     pkg_path, _ = pe.generate_promotion_package(plan.candidate_id)
     pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
