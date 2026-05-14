@@ -43,8 +43,11 @@ full paper 신규 BUY는 preflight status가 없거나 손상되었거나 runtim
 ## 4. 장마감 finalize / package
 
 ```bash
-python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --generate-package
+python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --date YYYY-MM-DD
+python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-package
 ```
+
+`--finalize`는 날짜를 명시해야 실행된다. 날짜 없이 `--finalize --generate-package`를 주면 finalize가 누락된 승격 패키지를 만들 수 있으므로 CLI가 실패로 처리한다.
 
 수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다.
 
