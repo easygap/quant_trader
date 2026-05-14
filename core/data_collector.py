@@ -8,7 +8,7 @@
 - FinanceDataReader: 기본적으로 수정주가 제공. 백테스트·실전 동일 소스 권장.
 - yfinance: auto_adjust=True 로 수정주가 사용.
 - KIS API: 비수정(원시) 데이터를 반환하는 경우가 많음. FDR/yfinance와 혼용 시 지표값·신호가 달라질 수 있으므로,
-  백테스트와 실전에서 동일 소스를 쓰도록 FDR 설치·우선 사용을 권장하고, KIS fallback 시 로그로 경고.
+  백테스트와 실전에서 동일 소스를 쓰도록 FDR 설치·우선 사용을 권장한다. KIS fallback은 명시 설정 시에만 허용한다.
 """
 
 import re
@@ -170,10 +170,20 @@ class DataCollector:
             from config.config_loader import Config
             config = Config.get()
         self._config = config
+        from config.config_loader import _coerce_bool_setting
+
         ds_cfg = (config.settings or {}).get("data_source") or {}
         self._preferred_source = ds_cfg.get("preferred", "auto")
-        self._allow_kis_fallback = ds_cfg.get("allow_kis_fallback", True)
-        self._warn_on_source_mismatch = ds_cfg.get("warn_on_source_mismatch", True)
+        self._allow_kis_fallback = _coerce_bool_setting(
+            ds_cfg.get("allow_kis_fallback"),
+            default=False,
+            key="data_source.allow_kis_fallback",
+        )
+        self._warn_on_source_mismatch = _coerce_bool_setting(
+            ds_cfg.get("warn_on_source_mismatch"),
+            default=True,
+            key="data_source.warn_on_source_mismatch",
+        )
 
         self._last_source: str | None = None
         self._last_adjusted: bool | None = None
