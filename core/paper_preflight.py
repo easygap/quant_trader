@@ -115,6 +115,22 @@ def run_preflight(strategy: str, date: str | None = None,
     # ── 8. Market session ──
     _check_market_session(date, checks)
 
+    # ── Launch readiness ──
+    try:
+        from core.paper_pilot import compute_launch_readiness
+        lr = compute_launch_readiness(strategy, as_of_date=date)
+        result.launch_ready = lr["launch_ready"]
+        result.infra_ready = lr["infra_ready"]
+        result.clean_final_days = lr["clean_final_days_current"]
+        result.remaining_clean_days = lr["remaining_clean_days"]
+        result.blocking_requirements = lr["blocking_requirements"]
+    except Exception as exc:
+        result.launch_ready = False
+        result.infra_ready = False
+        detail = f"launch readiness check failed: {exc}"
+        checks.append(PreflightCheck("launch_readiness", "fail", detail))
+        operator_actions.append("launch readiness 계산 오류를 먼저 확인한 뒤 preflight를 재실행")
+
     # ── Overall 판정 ──
     result.checks = [asdict(c) for c in checks]
     result.operator_actions = operator_actions
@@ -139,18 +155,6 @@ def run_preflight(strategy: str, date: str | None = None,
         )
     # exit는 항상 허용 (exit-safe invariant)
     result.exit_allowed = "exit" in result.allowed_actions
-
-    # ── Launch readiness ──
-    try:
-        from core.paper_pilot import compute_launch_readiness
-        lr = compute_launch_readiness(strategy, as_of_date=date)
-        result.launch_ready = lr["launch_ready"]
-        result.infra_ready = lr["infra_ready"]
-        result.clean_final_days = lr["clean_final_days_current"]
-        result.remaining_clean_days = lr["remaining_clean_days"]
-        result.blocking_requirements = lr["blocking_requirements"]
-    except Exception:
-        pass
 
     # ── 저장 ──
     _save_preflight(result)

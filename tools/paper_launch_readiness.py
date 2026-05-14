@@ -23,6 +23,8 @@ def main():
     target_group.add_argument("--all", action="store_true", help="전체 paper 전략")
     parser.add_argument("--generate-runbook", action="store_true",
                         help="runbook markdown도 생성")
+    parser.add_argument("--report-only", action="store_true",
+                        help="READY가 아니어도 리포트 생성 후 0으로 종료")
     args = parser.parse_args()
 
     from database.models import init_database
@@ -37,8 +39,16 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    results = []
     for s in strategies:
-        _run_one(s, args.generate_runbook)
+        results.append(_run_one(s, args.generate_runbook))
+
+    if not results:
+        print("No paper strategies discovered", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.report_only and not all(results):
+        sys.exit(1)
 
 
 def _run_one(strategy: str, gen_runbook: bool):
@@ -95,6 +105,7 @@ def _run_one(strategy: str, gen_runbook: bool):
         print(f"    Runbook: {rb}")
 
     print()
+    return bool(lr["launch_ready"])
 
 
 def _check(label, value, ok):
