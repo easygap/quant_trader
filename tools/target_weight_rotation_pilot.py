@@ -487,6 +487,15 @@ def _portfolio_cash(config: Any, account_key: str, cash_override: float | None) 
     return float(summary.get("cash", 0.0))
 
 
+def _require_actual_paper_cash(cash_override: float | None, *, context: str) -> None:
+    if cash_override is None:
+        return
+    raise ValueError(
+        "target_weight_cash_override_blocked: "
+        f"--cash cannot be used for {context}; use actual paper account cash"
+    )
+
+
 def _pilot_check_to_dict(pilot_check: Any) -> dict[str, Any]:
     try:
         return asdict(pilot_check)
@@ -3988,6 +3997,7 @@ def run_pilot_readiness_audit(
     from config.config_loader import Config
     from core.paper_pilot import check_pilot_entry, compute_launch_readiness
 
+    _require_actual_paper_cash(cash, context="readiness audit")
     config = config or Config.get()
     plan = build_plan(
         candidate_id=candidate_id,
@@ -4096,6 +4106,7 @@ def run_daily_ops_summary(
     execution_now: datetime | None = None,
 ) -> dict[str, Any]:
     """readiness audit, manifest, evidence progress를 하루 운영 요약으로 저장한다."""
+    _require_actual_paper_cash(cash, context="daily ops summary")
     readiness = run_pilot_readiness_audit(
         candidate_id=candidate_id,
         raw_symbols=raw_symbols,
@@ -4422,6 +4433,8 @@ def run_pilot(
 
     if execute and record_shadow_evidence:
         raise ValueError("record_shadow_evidence is only valid for dry-run sessions")
+    if execute or collect_evidence:
+        _require_actual_paper_cash(cash, context="execution or pilot evidence collection")
 
     config = config or Config.get()
     plan = build_plan(
@@ -4850,6 +4863,22 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
+
+    if args.cash is not None:
+        cash_blocked_modes = []
+        if args.readiness_audit:
+            cash_blocked_modes.append("--readiness-audit")
+        if args.daily_ops_summary:
+            cash_blocked_modes.append("--daily-ops-summary")
+        if args.execute:
+            cash_blocked_modes.append("--execute")
+        if args.collect_evidence:
+            cash_blocked_modes.append("--collect-evidence")
+        if cash_blocked_modes:
+            parser.error(
+                "--cash cannot be combined with "
+                f"{', '.join(cash_blocked_modes)}; use actual paper account cash"
+            )
 
     from database.models import init_database
 
