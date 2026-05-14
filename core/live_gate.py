@@ -2,7 +2,8 @@
 Live trading readiness gate.
 
 The live gate intentionally trusts only canonical promotion artifacts that match
-the current code and resolved config, then cross-checks real paper evidence.
+the current code and resolved config, then cross-checks current go-live blockers
+and real paper evidence.
 Legacy walk-forward JSON files and hand-edited approval files are not enough to
 allow live trading.
 """
@@ -23,6 +24,10 @@ LIVE_GATE_MAX_ARTIFACT_AGE_DAYS = 7
 LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS = 14
 LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH = 64
 TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
+CURRENT_BLOCKERS_ARTIFACT_TYPE = "current_go_live_blockers"
+CURRENT_BLOCKERS_SCHEMA_VERSION = 2
+PROMOTION_BLOCKER_SUMMARY_ARTIFACT_TYPE = "promotion_blocker_summary"
+PROMOTION_BLOCKER_SUMMARY_SCHEMA_VERSION = 1
 
 REQUIRED_PROMOTION_ARTIFACTS = (
     "metrics_summary.json",
@@ -30,6 +35,42 @@ REQUIRED_PROMOTION_ARTIFACTS = (
     "benchmark_comparison.json",
     "run_metadata.json",
     "promotion_result.json",
+)
+
+PROMOTION_BLOCKER_METRIC_KEYS = (
+    "total_return",
+    "profit_factor",
+    "mdd",
+    "sharpe",
+    "benchmark_excess_return",
+    "benchmark_excess_sharpe",
+    "wf_positive_rate",
+    "wf_sharpe_positive_rate",
+    "wf_windows",
+    "wf_total_trades",
+    "paper_days",
+    "paper_cash_adjusted_excess",
+    "paper_evidence_recommendation",
+    "paper_latest_evidence_date",
+    "paper_evidence_age_days",
+    "paper_evidence_fresh",
+    "paper_trade_quality_status",
+    "paper_trade_quality_adverse_gap_bps",
+    "paper_trade_quality_missing_expected_ratio",
+    "paper_trade_quality_missing_expected_count",
+    "target_weight_strategy_required",
+    "target_weight_verified_pilot_days",
+    "target_weight_invalid_days",
+    "target_weight_params_hash_matches_canonical",
+    "canonical_data_integrity_ok",
+)
+
+PROMOTION_BLOCKER_SOURCE_METADATA_KEYS = (
+    "generated_at",
+    "data_snapshot_hash",
+    "commit_hash",
+    "config_yaml_hash",
+    "config_resolved_hash",
 )
 
 
@@ -130,6 +171,44 @@ def _stable_payload_hash(payload: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _promotion_blocker_metric_snapshots(metrics_all: dict[str, Any], strategy_names) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    if not isinstance(metrics_all, dict):
+        metrics_all = {}
+    for name in sorted(str(item) for item in strategy_names):
+        metrics = metrics_all.get(name) or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        snapshots[name] = {
+            key: metrics.get(key)
+            for key in PROMOTION_BLOCKER_METRIC_KEYS
+            if metrics.get(key) is not None
+        }
+    return snapshots
+
+
+def build_promotion_blocker_source_hash(
+    promotions: dict[str, Any],
+    metrics_all: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Return the source hash used by promotion/current blocker artifacts."""
+    if not isinstance(promotions, dict):
+        promotions = {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    metadata_snapshot = {
+        key: metadata.get(key)
+        for key in PROMOTION_BLOCKER_SOURCE_METADATA_KEYS
+        if metadata.get(key) is not None
+    }
+    payload = {
+        "promotions": {name: promotions[name] for name in sorted(promotions)},
+        "metrics": _promotion_blocker_metric_snapshots(metrics_all, promotions.keys()),
+        "metadata": metadata_snapshot,
+    }
+    return _stable_payload_hash(payload)
 
 
 def _material_fetch_error_keys(fetch_errors: dict[str, Any], universe: list[Any]) -> list[str]:
@@ -427,12 +506,111 @@ def _recalculate_promotion_result(
     return result.status, result.allowed_modes, result.reason
 
 
+def _validate_current_blockers_gate(
+    strategy_name: str,
+    promotion_base: Path,
+    artifacts: dict[str, dict[str, Any]],
+    current_blockers_path: Path,
+) -> list[str]:
+    """current_blockers.json이 현재 promotion bundle과 일치하고 live를 허용하는지 검증."""
+    issues: list[str] = []
+    summary_path = promotion_base / "promotion_blocker_summary.json"
+    if not summary_path.exists():
+        return [
+            "promotion blocker summary 없음: "
+            f"{summary_path}. python tools/evaluate_and_promote.py --canonical 또는 --blocker-summary 실행 후 재검증하세요."
+        ]
+
+    blocker_summary, summary_err = _read_json(summary_path)
+    if blocker_summary is None:
+        return [f"promotion blocker summary 파싱 오류: {summary_path} ({summary_err})"]
+
+    if blocker_summary.get("artifact_type") != PROMOTION_BLOCKER_SUMMARY_ARTIFACT_TYPE:
+        issues.append(
+            "promotion blocker summary artifact_type 불일치: "
+            f"{blocker_summary.get('artifact_type')!r} != {PROMOTION_BLOCKER_SUMMARY_ARTIFACT_TYPE!r}"
+        )
+    if blocker_summary.get("schema_version") != PROMOTION_BLOCKER_SUMMARY_SCHEMA_VERSION:
+        issues.append(
+            "promotion blocker summary schema_version 불일치: "
+            f"{blocker_summary.get('schema_version')} != {PROMOTION_BLOCKER_SUMMARY_SCHEMA_VERSION}"
+        )
+
+    expected_source_hash = build_promotion_blocker_source_hash(
+        artifacts["promotion_result.json"],
+        artifacts["metrics_summary.json"],
+        artifacts["run_metadata.json"],
+    )
+    summary_source_hash = blocker_summary.get("source_artifact_hash")
+    if summary_source_hash != expected_source_hash:
+        issues.append(
+            "promotion blocker summary source_artifact_hash 불일치: "
+            f"summary={summary_source_hash}, expected={expected_source_hash}. "
+            "python tools/evaluate_and_promote.py --blocker-summary 실행 후 재검증하세요."
+        )
+
+    if not current_blockers_path.exists():
+        issues.append(
+            "current blockers 없음: "
+            f"{current_blockers_path}. python tools/evaluate_and_promote.py --current-blockers 실행 후 재검증하세요."
+        )
+        return issues
+
+    current, current_err = _read_json(current_blockers_path)
+    if current is None:
+        issues.append(f"current blockers 파싱 오류: {current_blockers_path} ({current_err})")
+        return issues
+
+    if current.get("artifact_type") != CURRENT_BLOCKERS_ARTIFACT_TYPE:
+        issues.append(
+            "current_blockers artifact_type 불일치: "
+            f"{current.get('artifact_type')!r} != {CURRENT_BLOCKERS_ARTIFACT_TYPE!r}"
+        )
+    if current.get("schema_version") != CURRENT_BLOCKERS_SCHEMA_VERSION:
+        issues.append(
+            "current_blockers schema_version 불일치: "
+            f"{current.get('schema_version')} != {CURRENT_BLOCKERS_SCHEMA_VERSION}"
+        )
+    if current.get("source_artifact_hash") != summary_source_hash:
+        issues.append(
+            "current_blockers source_artifact_hash 불일치: "
+            f"current={current.get('source_artifact_hash')}, summary={summary_source_hash}. "
+            "python tools/evaluate_and_promote.py --current-blockers 실행 후 재검증하세요."
+        )
+    if current.get("promotion_summary") != blocker_summary.get("summary"):
+        issues.append(
+            "current_blockers promotion_summary 불일치: "
+            "python tools/evaluate_and_promote.py --current-blockers 실행 후 재검증하세요."
+        )
+
+    live_candidates = current.get("live_candidates")
+    if not isinstance(live_candidates, list):
+        issues.append("current_blockers live_candidates 형식 오류.")
+        live_candidates = []
+    if current.get("go_live") is not True:
+        issues.append(
+            "current_blockers.go_live가 true가 아님 "
+            f"(verdict={current.get('verdict')!r}). live 전환 불가."
+        )
+    if strategy_name not in live_candidates:
+        issues.append(
+            f"current_blockers live_candidates에 전략 '{strategy_name}'이 없음 "
+            f"(live_candidates={live_candidates})."
+        )
+    hard_blockers = current.get("hard_blockers")
+    if hard_blockers:
+        issues.append(f"current_blockers hard_blockers 존재: {hard_blockers}")
+
+    return issues
+
+
 def validate_live_readiness(
     config: Any,
     strategy_name: str,
     *,
     promotion_dir: str | Path = "reports/promotion",
     evidence_dir: str | Path = "reports/paper_evidence",
+    current_blockers_path: str | Path | None = None,
     now: datetime | None = None,
     current_git_hash: str | None = None,
     max_artifact_age_days: int = LIVE_GATE_MAX_ARTIFACT_AGE_DAYS,
@@ -441,6 +619,11 @@ def validate_live_readiness(
     issues: list[str] = []
     promotion_base = Path(promotion_dir)
     evidence_base = Path(evidence_dir)
+    blockers_path = (
+        Path(current_blockers_path)
+        if current_blockers_path is not None
+        else promotion_base.parent / "current_blockers.json"
+    )
     now = now or datetime.now()
     current_git_hash = current_git_hash or get_current_git_hash()
 
@@ -463,6 +646,15 @@ def validate_live_readiness(
             artifacts[name] = data
     if issues:
         return issues
+
+    issues.extend(
+        _validate_current_blockers_gate(
+            strategy_name,
+            promotion_base,
+            artifacts,
+            blockers_path,
+        )
+    )
 
     metadata = artifacts["run_metadata.json"]
     if metadata.get("schema_version") != LIVE_GATE_SCHEMA_VERSION:
