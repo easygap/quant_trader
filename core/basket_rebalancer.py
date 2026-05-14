@@ -332,7 +332,11 @@ class BasketRebalancer:
         if not dry_run:
             from core.order_executor import OrderExecutor
 
-            executor = OrderExecutor(self.config, account_key=self.account_key)
+            executor = OrderExecutor(
+                self.config,
+                account_key=self.account_key,
+                live_gate_validated=live_confirmed,
+            )
 
         for order in orders:
             if dry_run:
