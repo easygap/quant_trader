@@ -421,6 +421,8 @@ def _seed_paper_trade(account_key: str, **overrides):
         "mode": "paper",
         "executed_at": datetime(2026, 1, 10, 10, 0),
         "price_gap": 6.0,
+        "execution_session_id": "paper-evidence-session",
+        "order_id": "ORD-PAPER-EVIDENCE",
     }
     payload.update(overrides)
     session = get_session()
@@ -793,6 +795,31 @@ class TestEndToEndReplay:
         assert pkg["trade_quality"]["missing_expected_price_count"] == 1
         assert pkg["trade_quality"]["missing_expected_price_ratio"] == 1.0
         assert "fill_quality_expected_price_missing=1/1" in pkg["block_reasons"]
+
+    def test_promotion_blocks_missing_execution_link_quality(self, evidence_dir, fresh_db):
+        """주문/실행 세션 연결이 없는 paper 체결은 승격 품질 증거로 인정하지 않는다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_missing_execution_link"
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trade(
+            strategy,
+            price=100.0,
+            expected_price=100.0,
+            price_gap=0.0,
+            actual_slippage_pct=0.0,
+            execution_session_id="",
+            order_id="",
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "review"
+        assert pkg["trade_quality"]["missing_execution_link_count"] == 1
+        assert pkg["trade_quality"]["missing_execution_link_ratio"] == 1.0
+        assert "fill_quality_execution_link_missing=1/1" in pkg["block_reasons"]
 
     def test_promotion_blocks_missing_trade_history_quality(self, evidence_dir, fresh_db):
         """paper evidence에 거래가 있는데 TradeHistory가 비어 있으면 체결 품질 미검증으로 차단한다."""
