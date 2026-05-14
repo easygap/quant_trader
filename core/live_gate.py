@@ -543,6 +543,23 @@ def _validate_current_blockers_gate(
         artifacts["metrics_summary.json"],
         artifacts["run_metadata.json"],
     )
+    expected_blocker_summary = None
+    expected_current_blockers = None
+    try:
+        from tools.evaluate_and_promote import (
+            build_current_blockers_report,
+            build_promotion_blocker_summary,
+        )
+
+        expected_blocker_summary = build_promotion_blocker_summary(
+            artifacts["promotion_result.json"],
+            artifacts["metrics_summary.json"],
+            artifacts["run_metadata.json"],
+        )
+        expected_current_blockers = build_current_blockers_report(expected_blocker_summary)
+    except Exception as exc:
+        issues.append(f"promotion blocker summary 재계산 실패: {exc}")
+
     summary_source_hash = blocker_summary.get("source_artifact_hash")
     if summary_source_hash != expected_source_hash:
         issues.append(
@@ -550,6 +567,13 @@ def _validate_current_blockers_gate(
             f"summary={summary_source_hash}, expected={expected_source_hash}. "
             "python tools/evaluate_and_promote.py --blocker-summary 실행 후 재검증하세요."
         )
+    if expected_blocker_summary is not None:
+        for key in ("summary", "strategies"):
+            if blocker_summary.get(key) != expected_blocker_summary.get(key):
+                issues.append(
+                    f"promotion blocker summary {key} 내용 불일치: "
+                    "python tools/evaluate_and_promote.py --blocker-summary 실행 후 재검증하세요."
+                )
 
     if not current_blockers_path.exists():
         issues.append(
@@ -584,6 +608,26 @@ def _validate_current_blockers_gate(
             "current_blockers promotion_summary 불일치: "
             "python tools/evaluate_and_promote.py --current-blockers 실행 후 재검증하세요."
         )
+    if expected_current_blockers is not None:
+        for key in (
+            "artifact_type",
+            "schema_version",
+            "source_artifact_hash",
+            "go_live",
+            "verdict",
+            "promotion_summary",
+            "live_candidates",
+            "provisional_paper_candidates",
+            "hard_blockers",
+            "soft_blockers",
+            "next_actions",
+            "default_strategy",
+        ):
+            if current.get(key) != expected_current_blockers.get(key):
+                issues.append(
+                    f"current_blockers {key} 내용 불일치: "
+                    "python tools/evaluate_and_promote.py --current-blockers 실행 후 재검증하세요."
+                )
 
     live_candidates = current.get("live_candidates")
     if not isinstance(live_candidates, list):
