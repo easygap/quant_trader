@@ -670,6 +670,15 @@ def run_paper_trading(args):
     from strategies import is_strategy_allowed
 
     config = Config.get()
+    config_mode = str(config.trading.get("mode", "paper")).lower()
+    if config_mode == "live":
+        logger.warning(
+            "settings.trading.mode=live 이지만 --mode paper 실행이므로 이번 실행은 paper로 고정합니다."
+        )
+        config.trading["mode"] = "paper"
+        if hasattr(config, "_settings") and isinstance(config._settings, dict):
+            config._settings.setdefault("trading", {})["mode"] = "paper"
+
     strategy_name = getattr(args, "strategy", None) or config.active_strategy
     allowed, reason = is_strategy_allowed(strategy_name, "paper")
     if not allowed:
