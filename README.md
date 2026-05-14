@@ -33,6 +33,7 @@
 > - target-weight capped pilot readiness: audit 시작 시 paper preflight를 먼저 갱신하고, Discord webhook 누락 또는 notifier 비정상 상태는 주문 전 `BLOCKED`로 확정
 > - live 보류 주문 복구는 KIS 미체결 목록에서 사라진 주문도 체결 상세가 확인될 때만 `RECONCILED`로 닫고, 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지
 > - live 체결 조회는 주문번호가 현재 주문과 일치하는 체결 row만 확정 체결로 인정
+> - KIS Circuit Breaker는 장애 후 HALF_OPEN 복구 상태에서 단일 probe만 허용하고 결과 확인 전 추가 요청을 차단
 > - 신규 BUY 주문 직전 유동성 재검증은 평균 거래량 누락/0도 fail-closed로 차단해 소형주·데이터 공백 주문을 막음
 > - 시장 국면 필터가 켜져 있는데 지수 데이터 조회·MA 계산이 불명확하면 `unknown` 국면으로 신규 BUY를 차단
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
@@ -292,6 +293,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-14 follow-up: 바스켓 리밸런싱 paper BUY 실행 경로를 복구했습니다. `BasketRebalancer.execute()`가 없는 포트폴리오 메서드를 호출하던 부분을 `get_current_capital()`/`get_available_cash()` 기준으로 정리했고, 실제 주문 실행 전 자본·현금 값이 `OrderExecutor.execute_buy_quantity()`에 전달되는지 회귀 테스트로 고정했습니다.
 
 2026-05-14 follow-up: 시장 국면 필터를 fail-closed로 보강했습니다. `market_regime_filter=true` 상태에서 지수 데이터 조회 실패, 빈 데이터, MA 계산 실패가 발생하면 더 이상 bullish 기본값으로 넘기지 않고 `regime=unknown`, `allow_buys=false`, `position_scale=0.0`으로 신규 BUY를 차단합니다. 직접 `OrderExecutor.execute_buy()`를 호출하는 경로도 같은 결과를 받으면 주문 전 중단합니다.
+
+2026-05-14 follow-up: KIS Circuit Breaker의 `HALF_OPEN` 복구 상태를 단일 probe 방식으로 제한했습니다. OPEN 쿨다운 후 첫 요청 하나만 통과시키고, `on_success()` 또는 `on_failure()`가 들어오기 전까지 추가 요청은 차단해 장애 회복 직후 요청이 한꺼번에 풀리지 않게 했습니다.
 
 2026-05-14 follow-up: paper promotion evidence package에 `package_integrity.payload_hash`와 `source_records.records_hash`를 추가했습니다. live gate는 패키지 payload hash, 원본 daily evidence JSONL에서 재계산한 source record hash, record count/date 범위를 모두 비교해 패키지 요약값과 원본 evidence가 따로 변경된 상태를 live 전환 근거로 쓰지 않습니다.
 
