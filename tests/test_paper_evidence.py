@@ -16,6 +16,7 @@ Requirements covered:
 import json
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1535,6 +1536,31 @@ class TestShadowEvidenceNotPromotable:
         assert records[0]["evidence_mode"] == "backfill"
         assert records[0]["session_mode"] == "backfill"
         assert records[0]["execution_backed"] is False
+
+    def test_pipeline_finalize_requires_explicit_date(self, monkeypatch):
+        """날짜 없는 finalize는 package 생성만 조용히 진행하지 않고 CLI 오류로 종료한다."""
+        from tools import run_paper_evidence_pipeline as pipeline
+
+        calls = {"init_database": 0, "package": 0}
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "run_paper_evidence_pipeline.py",
+                "--strategy",
+                "scoring",
+                "--finalize",
+                "--generate-package",
+            ],
+        )
+        monkeypatch.setattr("database.models.init_database", lambda: calls.__setitem__("init_database", 1))
+        monkeypatch.setattr(pipeline, "run_promotion_package", lambda _strategy: calls.__setitem__("package", 1))
+
+        with pytest.raises(SystemExit) as exc:
+            pipeline.main()
+
+        assert exc.value.code == 2
+        assert calls == {"init_database": 0, "package": 0}
 
     @patch("core.paper_evidence._compute_benchmark_excess")
     @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
