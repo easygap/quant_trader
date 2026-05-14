@@ -27,6 +27,10 @@ class _MockConfig:
         return "00000000-00"
 
 
+class _LiveMockConfig(_MockConfig):
+    trading = {"mode": "live"}
+
+
 @pytest.fixture
 def fresh_db():
     from database.models import (
@@ -87,6 +91,43 @@ def test_portfolio_summary_uses_trade_cash_flow(monkeypatch):
     assert summary["current_value"] == 550000
     assert summary["realized_pnl"] == -10000
     assert summary["unrealized_pnl"] == 50000
+
+
+def test_live_portfolio_summary_marks_broker_balance_fallback(monkeypatch):
+    """live 잔고 조회 실패 시 DB fallback을 표시하고 주문 sizing용 자본 조회는 차단한다."""
+    from core.portfolio_manager import LiveBrokerBalanceUnavailable
+
+    monkeypatch.setattr(
+        api.kis_api.KISApi,
+        "get_balance",
+        lambda self: (_ for _ in ()).throw(RuntimeError("kis down")),
+    )
+    monkeypatch.setattr("core.portfolio_manager.get_all_positions", lambda account_key=None: [])
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_trade_cash_summary",
+        lambda mode=None, account_key=None: {
+            "cash_delta": 0,
+            "buy_count": 0,
+            "sell_count": 0,
+            "total_trades": 0,
+            "commission": 0,
+            "tax": 0,
+            "slippage": 0,
+        },
+    )
+
+    pm = PortfolioManager(_LiveMockConfig())
+    summary = pm.get_portfolio_summary()
+
+    assert summary["broker_balance_ok"] is False
+    assert summary["broker_balance_source"] == "db_fallback"
+    assert "kis down" in summary["broker_balance_error"]
+
+    with pytest.raises(LiveBrokerBalanceUnavailable, match="kis down"):
+        pm.get_current_capital()
+
+    with pytest.raises(LiveBrokerBalanceUnavailable, match="kis down"):
+        pm.get_available_cash()
 
 
 def test_sync_with_broker_uses_core_notifier(monkeypatch):
