@@ -101,6 +101,13 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     adverse_gap_cost = sum(cost for cost in signed_costs if cost > 0)
     favorable_gap_cost = sum(cost for cost in signed_costs if cost < 0)
     missing_expected = total - len(with_expected)
+    missing_execution_session = sum(1 for row in rows if not row.get("execution_session_id"))
+    missing_order = sum(1 for row in rows if not row.get("order_id"))
+    missing_execution_link = sum(
+        1
+        for row in rows
+        if not row.get("execution_session_id") or not row.get("order_id")
+    )
     return {
         "trade_count": total,
         "buy_count": buy_count,
@@ -108,6 +115,10 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "with_expected_price_count": len(with_expected),
         "missing_expected_price_count": missing_expected,
         "missing_expected_price_ratio": _round_or_none(missing_expected / total if total else None),
+        "missing_execution_session_id_count": missing_execution_session,
+        "missing_order_id_count": missing_order,
+        "missing_execution_link_count": missing_execution_link,
+        "missing_execution_link_ratio": _round_or_none(missing_execution_link / total if total else None),
         "total_notional": round(notional, 2),
         "signed_gap_cost": round(signed_gap_cost, 2),
         "adverse_gap_cost": round(adverse_gap_cost, 2),
@@ -137,7 +148,13 @@ def _group_summary(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, 
     return {name: _summarize_rows(items) for name, items in sorted(grouped.items())}
 
 
-def _quality_status(summary: dict[str, Any], *, max_gap_cost_bps: float, max_missing_expected_ratio: float) -> tuple[str, list[str]]:
+def _quality_status(
+    summary: dict[str, Any],
+    *,
+    max_gap_cost_bps: float,
+    max_missing_expected_ratio: float,
+    max_missing_execution_link_ratio: float,
+) -> tuple[str, list[str]]:
     issues = []
     if summary["trade_count"] == 0:
         return "no_trades", ["선택한 기간에 paper 체결 기록이 없습니다."]
@@ -146,6 +163,12 @@ def _quality_status(summary: dict[str, Any], *, max_gap_cost_bps: float, max_mis
         issues.append(
             "expected_price 누락 비율 "
             f"{missing_ratio:.1%} > {max_missing_expected_ratio:.1%}"
+        )
+    link_ratio = summary.get("missing_execution_link_ratio")
+    if link_ratio is not None and link_ratio > max_missing_execution_link_ratio:
+        issues.append(
+            "execution_session_id/order_id 누락 비율 "
+            f"{link_ratio:.1%} > {max_missing_execution_link_ratio:.1%}"
         )
     gap_bps = summary.get("adverse_gap_bps_of_notional")
     if gap_bps is not None and gap_bps > max_gap_cost_bps:
@@ -163,6 +186,7 @@ def build_paper_trade_quality_report(
     end_date: datetime | None = None,
     max_gap_cost_bps: float = 50.0,
     max_missing_expected_ratio: float = 0.0,
+    max_missing_execution_link_ratio: float = 0.0,
 ) -> dict[str, Any]:
     """TradeHistory 기반 paper 체결 품질 요약을 만든다."""
     from database.models import TradeHistory, get_session
@@ -186,6 +210,7 @@ def build_paper_trade_quality_report(
         summary,
         max_gap_cost_bps=max_gap_cost_bps,
         max_missing_expected_ratio=max_missing_expected_ratio,
+        max_missing_execution_link_ratio=max_missing_execution_link_ratio,
     )
     return {
         "artifact_type": "paper_trade_quality_report",
@@ -200,6 +225,7 @@ def build_paper_trade_quality_report(
         "thresholds": {
             "max_gap_cost_bps": max_gap_cost_bps,
             "max_missing_expected_ratio": max_missing_expected_ratio,
+            "max_missing_execution_link_ratio": max_missing_execution_link_ratio,
         },
         "quality_status": status,
         "issues": issues,
@@ -240,6 +266,7 @@ def write_paper_trade_quality_report(report: dict[str, Any], output_dir: str | P
         f"- Adverse gap cost: {summary.get('adverse_gap_cost', 0)}",
         f"- Adverse gap bps: {summary.get('adverse_gap_bps_of_notional')}",
         f"- Missing expected price: {summary.get('missing_expected_price_count', 0)}",
+        f"- Missing execution link: {summary.get('missing_execution_link_count', 0)}",
         "",
     ]
     issues = report.get("issues") or []
@@ -307,6 +334,12 @@ def main() -> None:
         help="review 기준 expected_price 누락 비율",
     )
     parser.add_argument(
+        "--max-missing-execution-link-ratio",
+        type=float,
+        default=0.0,
+        help="review 기준 execution_session_id/order_id 누락 비율",
+    )
+    parser.add_argument(
         "--allow-no-trades",
         action="store_true",
         help="체결 0건 리포트도 성공 종료로 처리",
@@ -320,6 +353,7 @@ def main() -> None:
         end_date=_parse_date(args.end_date, end_of_day=True),
         max_gap_cost_bps=args.max_gap_cost_bps,
         max_missing_expected_ratio=args.max_missing_expected_ratio,
+        max_missing_execution_link_ratio=args.max_missing_execution_link_ratio,
     )
     json_path, md_path = write_paper_trade_quality_report(report, args.output_dir)
     print(f"OK: paper trade quality report 생성 성공\n  {json_path}\n  {md_path}")
