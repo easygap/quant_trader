@@ -341,6 +341,50 @@ def test_execute_buy_blocks_when_correlation_risk_check_fails(fresh_db, monkeypa
     assert get_position("005930", account_key="correlation_block_test") is None
 
 
+def test_execute_buy_blocks_when_sector_map_missing(fresh_db, monkeypatch):
+    """업종 cap이 켜져 있으면 섹터 맵 누락 시 신규 BUY를 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="sector_map_missing_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    executor.config.risk_params["diversification"]["max_sector_ratio"] = 0.40
+    executor.config.risk_params["diversification"]["sector_map_strict"] = True
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(executor, "_get_sector_map_cached", lambda: {})
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"scale": 1.0, "high_corr_symbols": [], "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_recent_performance",
+        lambda *args, **kwargs: {"allowed": True, "reason": ""},
+    )
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="sector map missing test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert "섹터 맵 없음" in result["reason"]
+    assert get_position("005930", account_key="sector_map_missing_test") is None
+
+
 def test_execute_buy_blocks_when_gap_risk_price_lookup_fails(fresh_db, monkeypatch):
     """갭 리스크가 켜져 있으면 최근 가격 조회 실패 시 일반 BUY를 차단한다."""
     from core.order_executor import OrderExecutor
