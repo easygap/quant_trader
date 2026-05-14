@@ -655,14 +655,27 @@ def generate_rebuild_report(strategy: str, history: list[dict]) -> Path:
 def _is_strategy_registered(strategy: str) -> bool:
     """legacy approved_strategies.json 또는 config에서 전략 등록 여부 확인.
     없으면 True (paper 모드에서는 기본 허용 — research_disabled는 명시적 비활성만)."""
+    approved_path = Path("reports/approved_strategies.json")
+    if not approved_path.exists():
+        return True
+
     try:
-        approved_path = Path("reports/approved_strategies.json")
-        if approved_path.exists():
-            data = json.loads(approved_path.read_text(encoding="utf-8"))
-            strategies = data.get("strategies", [])
-            for s in strategies:
-                if s.get("name") == strategy:
-                    return s.get("status") != "disabled"
-        return True
-    except Exception:
-        return True
+        data = json.loads(approved_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("approved_strategies.json 로드 실패 — paper runtime을 fail-closed로 차단: {}", exc)
+        return False
+
+    strategies = data.get("strategies")
+    if not isinstance(strategies, list):
+        logger.error("approved_strategies.json 형식 오류 — strategies 배열이 없어 paper runtime을 차단합니다.")
+        return False
+
+    for item in strategies:
+        if not isinstance(item, dict):
+            logger.error("approved_strategies.json 형식 오류 — strategy 항목이 객체가 아닙니다.")
+            return False
+        if item.get("name") == strategy:
+            return item.get("status") != "disabled"
+
+    # legacy 파일은 명시적으로 disabled인 전략만 닫고, 미기재 전략은 기존 호환성을 유지한다.
+    return True
