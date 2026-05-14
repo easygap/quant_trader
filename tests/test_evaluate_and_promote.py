@@ -917,6 +917,18 @@ def test_current_blockers_check_detects_stale_report(tmp_path):
         metrics,
         metadata={"generated_at": "2026-05-13T14:00:00"},
     )
+    (promotion_dir / "promotion_result.json").write_text(
+        json.dumps(promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (promotion_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (promotion_dir / "run_metadata.json").write_text(
+        json.dumps({"generated_at": "2026-05-13T14:00:00"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     write_promotion_blocker_summary(summary, promotion_dir)
     output_path = tmp_path / "current_blockers.json"
     write_current_blockers_report(
@@ -940,8 +952,76 @@ def test_current_blockers_check_detects_stale_report(tmp_path):
 
     issues = validate_current_blockers_artifact(promotion_dir, output_path)
 
+    assert any("promotion blocker summary 동기화 실패" in issue for issue in issues)
     assert any("source_artifact_hash 불일치" in issue for issue in issues)
-    assert any("promotion_summary 불일치" in issue for issue in issues)
+    assert any("summary 내용 불일치" in issue for issue in issues)
+
+
+def test_current_blockers_check_fails_when_blocker_summary_strategy_actions_are_stale(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        load_current_blockers_from_artifacts,
+        validate_current_blockers_artifact,
+        write_current_blockers_report,
+        write_promotion_blocker_summary,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    promotion_dir.mkdir()
+    promotions = {
+        "target_weight_candidate": {
+            "status": "provisional_paper_candidate",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": (
+                "provisional_paper_candidate 충족; live 차단: "
+                "paper 0일 < 60일, target-weight verified pilot days 0 < 60"
+            ),
+        }
+    }
+    metrics = {
+        "target_weight_candidate": {
+            "benchmark_excess_return": 12.0,
+            "sharpe": 1.2,
+            "mdd": -12.0,
+        }
+    }
+    summary = build_promotion_blocker_summary(
+        promotions,
+        metrics,
+        metadata={"generated_at": "2026-05-13T14:00:00"},
+    )
+    (promotion_dir / "promotion_result.json").write_text(
+        json.dumps(promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (promotion_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (promotion_dir / "run_metadata.json").write_text(
+        json.dumps({"generated_at": "2026-05-13T14:00:00"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_promotion_blocker_summary(summary, promotion_dir)
+    output_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        output_path,
+    )
+
+    stale_summary = json.loads((promotion_dir / "promotion_blocker_summary.json").read_text(encoding="utf-8"))
+    stale_summary["strategies"]["target_weight_candidate"]["next_action"] = (
+        "canonical 데이터/벤치마크 coverage 재생성 후 재평가"
+    )
+    (promotion_dir / "promotion_blocker_summary.json").write_text(
+        json.dumps(stale_summary, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_current_blockers_artifact(promotion_dir, output_path)
+
+    assert any("promotion blocker summary 동기화 실패" in issue for issue in issues)
+    assert any("strategies 내용 불일치" in issue for issue in issues)
 
 
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
