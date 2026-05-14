@@ -771,6 +771,120 @@ def test_validate_promotion_blocker_summary_requires_summary_file(tmp_path):
     assert "promotion_blocker_summary.json 없음" in issues[0]
 
 
+def test_build_current_blockers_report_from_promotion_summary():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "a" * 64,
+        "summary": {
+            "total_strategies": 3,
+            "status_counts": {
+                "paper_only": 1,
+                "provisional_paper_candidate": 1,
+                "research_only": 1,
+            },
+            "live_ready_count": 0,
+            "blocked_from_live_count": 3,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+                "reason": "provisional_paper_candidate 충족; live 차단: paper 0일 < 60일",
+            },
+            "scoring": {
+                "status": "paper_only",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": -139.5},
+                "reason": "paper_only 충족; provisional 차단",
+            },
+            "breakout": {
+                "status": "research_only",
+                "allowed_modes": ["backtest"],
+                "metrics": {},
+                "reason": "paper_only 미달",
+            },
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary)
+
+    assert report["artifact_type"] == "current_go_live_blockers"
+    assert report["schema_version"] == 2
+    assert report["source_artifact_hash"] == "a" * 64
+    assert report["go_live"] is False
+    assert "NO-GO" in report["verdict"]
+    assert report["provisional_paper_candidates"] == ["target_weight_best"]
+    assert report["hard_blockers"][0]["desc"] == "live_candidate 상태의 전략이 없음"
+    assert report["next_actions"][0]["strategy"] == "target_weight_best"
+    assert "target_weight_best" in report["default_strategy"]
+
+
+def test_current_blockers_check_detects_stale_report(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        load_current_blockers_from_artifacts,
+        validate_current_blockers_artifact,
+        write_current_blockers_report,
+        write_promotion_blocker_summary,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    promotion_dir.mkdir()
+    promotions = {
+        "candidate": {
+            "status": "provisional_paper_candidate",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": "provisional_paper_candidate 충족; live 차단: paper 0일 < 60일",
+        }
+    }
+    metrics = {
+        "candidate": {
+            "benchmark_excess_return": 10.0,
+            "sharpe": 1.0,
+            "mdd": -10.0,
+        }
+    }
+    summary = build_promotion_blocker_summary(
+        promotions,
+        metrics,
+        metadata={"generated_at": "2026-05-13T14:00:00"},
+    )
+    write_promotion_blocker_summary(summary, promotion_dir)
+    output_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        output_path,
+    )
+
+    assert validate_current_blockers_artifact(promotion_dir, output_path) == []
+
+    (promotion_dir / "promotion_blocker_summary.json").write_text(
+        json.dumps({
+            **summary,
+            "source_artifact_hash": "b" * 64,
+            "summary": {
+                **summary["summary"],
+                "live_ready_count": 1,
+            },
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_current_blockers_artifact(promotion_dir, output_path)
+
+    assert any("source_artifact_hash 불일치" in issue for issue in issues)
+    assert any("promotion_summary 불일치" in issue for issue in issues)
+
+
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
