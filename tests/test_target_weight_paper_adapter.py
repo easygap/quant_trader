@@ -322,31 +322,33 @@ class _StaticTradeSession:
         pass
 
 
-def _paper_trade_history_for_plan(plan):
+def _paper_trade_history_for_plan(plan, *, start_date="2026-01-05", day_count=60):
     from database.models import TradeHistory
 
     trades = []
-    for index, order in enumerate(plan.orders):
-        trades.append(TradeHistory(
-            account_key=plan.candidate_id,
-            symbol=order.symbol,
-            action=order.action,
-            price=order.price,
-            quantity=order.quantity,
-            total_amount=order.price * order.quantity,
-            commission=0.0,
-            tax=0.0,
-            slippage=0.0,
-            expected_price=order.price,
-            actual_slippage_pct=0.0,
-            execution_session_id=TEST_EXECUTION_SESSION_ID,
-            order_id=f"ORD-TW-{index + 1:03d}",
-            strategy=plan.candidate_id,
-            reason="target weight e2e fill quality fixture",
-            mode="paper",
-            executed_at=datetime(2026, 1, 10, 9, 0),
-            price_gap=0.0,
-        ))
+    start = datetime.fromisoformat(start_date)
+    for day_index in range(day_count):
+        for index, order in enumerate(plan.orders):
+            trades.append(TradeHistory(
+                account_key=plan.candidate_id,
+                symbol=order.symbol,
+                action=order.action,
+                price=order.price,
+                quantity=order.quantity,
+                total_amount=order.price * order.quantity,
+                commission=0.0,
+                tax=0.0,
+                slippage=0.0,
+                expected_price=order.price,
+                actual_slippage_pct=0.0,
+                execution_session_id=TEST_EXECUTION_SESSION_ID,
+                order_id=f"ORD-TW-{day_index + 1:03d}-{index + 1:03d}",
+                strategy=plan.candidate_id,
+                reason="target weight e2e fill quality fixture",
+                mode="paper",
+                executed_at=start + pd.Timedelta(days=day_index, hours=9, minutes=index),
+                price_gap=0.0,
+            ))
     return trades
 
 
