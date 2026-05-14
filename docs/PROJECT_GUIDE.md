@@ -276,7 +276,7 @@ quant_trader/
 | **market_regime.py** | `check_market_regime()` → 3중 신호 단계적 국면 판별. **신호 A**: 200일선 이탈, **신호 B**: 20일 수익률 ≤ -5%, **신호 C**: MA(20)<MA(60) 데드크로스(선택적). 2개↑ 충족 → bearish(매수 중단), 1개 → caution(사이징 50%), 0 → bullish. 신호 C는 200일선 이탈보다 2~3주 빠르게 추세 전환 포착. 운영 필터가 켜진 상태에서 지수 조회 실패, 빈 데이터, MA 계산 실패가 발생하면 `unknown`/`allow_buys=false`/`position_scale=0.0`으로 fail-closed 처리한다. `resolve_market_regime_config()`가 운영과 백테스트의 `trading.market_regime_*` 기준을 동기화하고, `backtest_regime_filter`는 명시 값만 실험용 override로 사용한다. 기본값은 검증 결과에 맞춰 OFF. |
 | **fundamental_loader.py** | `get_fundamentals(symbol)`, `check_fundamental_filter()`. **pykrx(우선) → yfinance(폴백)** 순서로 PER·부채비율 조회. pykrx는 한국 종목 PER 정확도 높음. yfinance는 부채비율 등 보충. |
 | **dart_loader.py** | `DartEarningsLoader`: DART API로 corp_code 매핑·정기공시 기반 차기 실적 시점 추정. `data/dart_corpCode.zip` 캐시. |
-| **earnings_filter.py** | `is_near_earnings(symbol, skip_days, config=...)`. **1순위** yfinance `earningsDate`, **2순위** DART(`settings.dart.enabled`·API 키). 둘 다 없으면 통과. `trading.skip_earnings_days`(기본 3). |
+| **earnings_filter.py** | `is_near_earnings(symbol, skip_days, config=...)`. **1순위** yfinance `earningsDate`, **2순위** DART(`settings.dart.enabled`·API 키). 둘 다 조회 불가이면 기본 `earnings_filter_unknown_policy=block`으로 신규 BUY를 차단한다. 운영자가 명시적으로 `allow`를 설정한 경우에만 조회 불가를 통과시킨다. `trading.skip_earnings_days`(기본 3). |
 | **indicator_correlation.py** | 스코어링 지표 점수 시리즈 상관계수·고상관 쌍 권고. `--mode check_correlation` 시 사용. 다중공선성 안내: 3그룹 각 대표 1개만 권장. `suggest_disable_weights()`: 고상관 쌍에서 자동 비활성화 키 추출. 리포트 하단에 다음 단계 CLI 명령어 자동 출력. |
 | **ensemble_correlation.py** | 앙상블 전략 **신호** 시리즈 상관계수 + **BUY/SELL 동시 발생률** + 구체적 **대안 전략 권고**. `quick_independence_check()`: 런타임 경량 검사. `should_force_conservative()`: 고상관 시 conservative 전환 판단. |
 | **position_lock.py** | 포지션/주문 공유 자원용 `threading.RLock`. |
@@ -403,7 +403,7 @@ quant_trader/
 | **database** | type(sqlite), sqlite_path(data/quant_trader.db) | DB 설정. type: postgresql 전환 가능 |
 | **logging** | level(INFO), log_dir(logs), rotation(10MB), retention(30 days) | loguru 로그 설정 |
 | **data_source** | preferred(auto), allow_kis_fallback(false), warn_on_source_mismatch(true) | 데이터 소스·수정주가 일치 제어. KIS 일봉 fallback은 비수정주가 혼입 위험 때문에 명시 허용 시에만 사용 |
-| **trading** | market_open(09:00), market_close(15:30), mode(paper), auto_entry(false), skip_earnings_days(3), market_regime_filter(false), market_regime_index(KS11), blackswan_recovery_minutes(120), sync_broker_interval_minutes, position_mismatch_auto_correct, position_mismatch_allow_empty_broker_delete 등 | 매매 모드·시장 국면 필터·블랙스완·KIS↔DB 보정 |
+| **trading** | market_open(09:00), market_close(15:30), mode(paper), auto_entry(false), skip_earnings_days(3), earnings_filter_unknown_policy(block), market_regime_filter(false), market_regime_index(KS11), blackswan_recovery_minutes(120), sync_broker_interval_minutes, position_mismatch_auto_correct, position_mismatch_allow_empty_broker_delete 등 | 매매 모드·시장 국면 필터·블랙스완·실적일 조회 실패 정책·KIS↔DB 보정 |
 | **dart** | enabled, api_key(또는 `DART_API_KEY` 환경변수) | 전자공시 기반 실적 시점 추정 → `earnings_filter` 폴백 |
 | **discord** | enabled(false), webhook_url, username | 디스코드 알림. target-weight capped paper pilot에서는 `DISCORD_WEBHOOK_URL` 필수 |
 | **telegram** | enabled(false), bot_token, chat_id | 텔레그램 알림 (이중화) |
