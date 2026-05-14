@@ -33,13 +33,17 @@ sys.path.insert(0, str(_ROOT))
 
 def main():
     parser = argparse.ArgumentParser(description="Paper Runtime Status")
-    parser.add_argument("--strategy", help="전략 이름")
-    parser.add_argument("--all", action="store_true", help="전체 전략 상태")
-    parser.add_argument("--freeze", action="store_true", help="수동 freeze")
-    parser.add_argument("--unfreeze", action="store_true", help="수동 unfreeze")
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument("--strategy", help="전략 이름")
+    target_group.add_argument("--all", action="store_true", help="전체 전략 상태")
+    action_group = parser.add_mutually_exclusive_group()
+    action_group.add_argument("--freeze", action="store_true", help="수동 freeze")
+    action_group.add_argument("--unfreeze", action="store_true", help="수동 unfreeze")
     parser.add_argument("--reason", help="freeze/unfreeze 이유")
-    parser.add_argument("--audit", action="store_true", help="audit trail 출력")
+    action_group.add_argument("--audit", action="store_true", help="audit trail 출력")
     args = parser.parse_args()
+    if (args.freeze or args.unfreeze or args.audit) and not args.strategy:
+        parser.error("--freeze, --unfreeze, --audit 옵션은 --strategy와 함께 사용해야 합니다")
 
     from database.models import init_database
     init_database()
