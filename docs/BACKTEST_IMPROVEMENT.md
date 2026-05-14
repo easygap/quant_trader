@@ -154,6 +154,7 @@
 | Paper Evidence 전략 식별 검증 | 높음 | 완료 — `promotion_evidence_{strategy}.json` 내부 `strategy`가 현재 전략명과 정확히 일치하지 않으면 promotion engine, promotion result 생성, live gate가 해당 package를 승격/라이브 증거로 쓰지 않는다. 전략명 누락 또는 다른 전략 evidence 재사용을 fail-closed로 차단 |
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
+| Paper runtime registry 오류 차단 | 높음 | 완료 — legacy `reports/approved_strategies.json`가 JSON 파싱 실패 또는 스키마 오류 상태면 paper runtime을 `research_disabled`로 fail-closed 처리. 신규 entry/shadow는 막고 exit/cancel/reconcile/finalize/evidence/reporting만 허용 |
 | Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡 + fail-closed/audited entry guard** |
 | Paper Preflight Check | 높음 | **완료 — `core/paper_preflight.py` 운영 준비 상태 점검** |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
