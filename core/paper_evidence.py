@@ -1018,6 +1018,9 @@ def finalize_daily_evidence(
     account_key: str = "",
     date: datetime | None = None,
     watchlist_symbols: list[str] | None = None,
+    evidence_mode: str = "real_paper",
+    pilot_authorized: bool = False,
+    pilot_caps_snapshot: dict | None = None,
 ) -> DailyEvidence | None:
     """
     Provisional evidence를 final로 승격한다.
@@ -1050,7 +1053,16 @@ def finalize_daily_evidence(
 
     if existing is None:
         # 기존 기록 없음 → 새로 수집
-        return collect_daily_evidence(strategy, mode, account_key, date, watchlist_symbols)
+        return collect_daily_evidence(
+            strategy,
+            mode,
+            account_key,
+            date,
+            watchlist_symbols,
+            evidence_mode=evidence_mode,
+            pilot_authorized=pilot_authorized,
+            pilot_caps_snapshot=pilot_caps_snapshot,
+        )
 
     # provisional → final: benchmark만 재계산
     portfolio = _collect_portfolio_metrics(account_key, date)
