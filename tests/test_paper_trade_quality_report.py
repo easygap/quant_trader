@@ -1,5 +1,6 @@
 from datetime import datetime
 import json
+import sys
 
 import pytest
 
@@ -158,3 +159,48 @@ def test_paper_trade_quality_report_handles_no_trades(fresh_db):
     assert report["quality_status"] == "no_trades"
     assert report["summary"]["trade_count"] == 0
     assert report["issues"] == ["선택한 기간에 paper 체결 기록이 없습니다."]
+
+
+def test_paper_trade_quality_cli_fails_on_no_trades_by_default(fresh_db, tmp_path, monkeypatch):
+    import tools.paper_trade_quality_report as report_cli
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "paper_trade_quality_report.py",
+            "--account-key",
+            "empty",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        report_cli.main()
+
+    assert exc.value.code == 2
+    assert list(tmp_path.glob("paper_trade_quality_empty_*.json"))
+
+
+def test_paper_trade_quality_cli_can_allow_no_trades_for_report_only(
+    fresh_db, tmp_path, monkeypatch
+):
+    import tools.paper_trade_quality_report as report_cli
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "paper_trade_quality_report.py",
+            "--account-key",
+            "empty",
+            "--output-dir",
+            str(tmp_path),
+            "--allow-no-trades",
+        ],
+    )
+
+    report_cli.main()
+
+    assert list(tmp_path.glob("paper_trade_quality_empty_*.json"))
