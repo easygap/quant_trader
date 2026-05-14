@@ -29,6 +29,7 @@
 > - target-weight risk overlay 후보: canonical bundle 기준 **provisional_paper_candidate** + 전용 paper/pilot adapter/shadow proof, 유동성/비용 pre-trade/pilot 승인/실행일/장 시간/가격 최신성 guard 추가. 리서치 백테스트는 직전 거래일 점수 → 다음 거래일 시가 체결 → 종가 평가 기준으로 보수화했으며, 기존 target-weight research artifact는 execution price mode 확인 또는 재생성 후 사용 (live 미연결)
 > - target-weight capped pilot readiness: audit 시작 시 paper preflight를 먼저 갱신하고, Discord webhook 누락 또는 notifier 비정상 상태는 주문 전 `BLOCKED`로 확정
 > - live 보류 주문 복구는 KIS 미체결 목록에서 사라진 주문도 체결 상세가 확인될 때만 `RECONCILED`로 닫고, 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지
+> - live 체결 조회는 주문번호가 현재 주문과 일치하는 체결 row만 확정 체결로 인정
 > - 신규 BUY 주문 직전 유동성 재검증은 평균 거래량 누락/0도 fail-closed로 차단해 소형주·데이터 공백 주문을 막음
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
 > - live 바스켓 리밸런싱 주문도 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, canonical live gate 통과 없이는 실행 차단
@@ -156,6 +157,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - 신규 BUY 주문 직전 평균 거래량 누락 또는 거래대금 하한 미달 시 차단
 - 갭 리스크 확인용 최근 가격 조회 실패 또는 데이터 부족 시 신규 BUY 차단
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
+- live 체결 조회 결과의 주문번호가 현재 주문과 다르면 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
 - live 바스켓 리밸런싱 주문은 운영자 확인과 canonical live gate 통과 후에만 실행
