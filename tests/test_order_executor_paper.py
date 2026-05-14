@@ -1016,6 +1016,33 @@ def test_paper_sell_ignores_drawdown_guard(fresh_db, monkeypatch):
     assert get_position("005930", account_key="drawdown_guard_sell_test") is None
 
 
+def test_execute_buy_rejects_non_positive_price_before_sizing(fresh_db, monkeypatch):
+    """현재가가 비정상이면 포지션 사이징 전에 신규 BUY를 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="invalid_buy_price_test")
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: pytest.fail("invalid price must block before sizing"),
+    )
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=0,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="invalid price buy test",
+        strategy="scoring",
+    )
+
+    assert result["success"] is False
+    assert result["price_invalid"] is True
+    assert "매수 가격 확인 실패" in result["reason"]
+    assert get_position("005930", account_key="invalid_buy_price_test") is None
+
+
 def test_paper_sell_applies_model_slippage_to_fill_price(fresh_db):
     """Paper 매도도 매수처럼 모델 슬리피지를 체결가에 반영한다."""
     from core.order_executor import OrderExecutor
@@ -1271,3 +1298,60 @@ def test_paper_sell_rejects_non_positive_quantity(fresh_db):
     assert result["success"] is False
     assert result["reason"] == "매도 수량은 1주 이상이어야 합니다"
     assert get_position("005930", account_key="invalid_sell_qty_test").quantity == 3
+
+
+def test_paper_sell_rejects_non_positive_price(fresh_db):
+    """현재가가 비정상이면 SELL 체결/포지션 변경 전에 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="invalid_sell_price_test")
+    executor.config.risk_params["position_limits"]["min_holding_days"] = 0
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        stop_loss_price=55_000,
+        take_profit_price=70_000,
+        trailing_stop_price=58_000,
+        strategy="scoring",
+        account_key="invalid_sell_price_test",
+    )
+
+    result = executor.execute_sell(
+        symbol="005930",
+        price=0,
+        quantity=3,
+        reason="STOP_LOSS",
+        strategy="scoring",
+    )
+
+    assert result["success"] is False
+    assert result["price_invalid"] is True
+    assert "매도 가격 확인 실패" in result["reason"]
+    assert get_position("005930", account_key="invalid_sell_price_test").quantity == 3
+
+
+def test_stop_loss_take_profit_ignores_invalid_price_without_trailing_update(fresh_db):
+    """현재가가 비정상이면 손절/익절 판단과 트레일링 스탑 갱신을 모두 보류한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="invalid_exit_price_test")
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        stop_loss_price=55_000,
+        take_profit_price=70_000,
+        trailing_stop_price=58_000,
+        strategy="scoring",
+        account_key="invalid_exit_price_test",
+    )
+
+    result = executor.check_stop_loss_take_profit("005930", 0)
+
+    assert result["action"] is None
+    assert result["price_invalid"] is True
+    assert "현재가 확인 실패" in result["reason"]
+    assert get_position("005930", account_key="invalid_exit_price_test").trailing_stop_price == 58_000

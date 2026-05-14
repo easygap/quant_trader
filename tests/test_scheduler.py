@@ -387,6 +387,52 @@ def test_live_monitoring_skips_rescan_after_entry_requires_reconcile(monkeypatch
         scheduler.config.trading["mode"] = old_mode
 
 
+def test_exit_signals_skip_invalid_current_price(monkeypatch):
+    """현재가가 0/누락이면 갭다운·블랙스완·손절 판단과 매도 주문을 모두 보류한다."""
+    from core.scheduler import Scheduler
+
+    op_events = []
+    position = SimpleNamespace(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=3,
+        bought_at=None,
+    )
+
+    class FakeKIS:
+        def get_current_price(self, symbol):
+            return {"price": 0, "prev_close": 60_000}
+
+    class FakeExecutor:
+        def check_stop_loss_take_profit(self, *args, **kwargs):
+            pytest.fail("invalid price must not reach stop-loss check")
+
+        def execute_sell(self, *args, **kwargs):
+            pytest.fail("invalid price must not submit sell order")
+
+    monkeypatch.setattr("core.scheduler.get_all_positions", lambda account_key=None: [position])
+    monkeypatch.setattr(
+        "core.scheduler._log_op",
+        lambda *args, **kwargs: op_events.append((args, kwargs)),
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    scheduler._get_or_create_executor = lambda: FakeExecutor()
+    scheduler.blackswan = SimpleNamespace(
+        check_stock=lambda *args, **kwargs: pytest.fail(
+            "invalid price must not reach black-swan check"
+        )
+    )
+    scheduler.discord = MagicMock()
+
+    scheduler._check_exit_signals(kis=FakeKIS())
+
+    assert op_events
+    assert op_events[-1][0][0] == "PRICE_DATA_BLOCK"
+    scheduler.discord.send_message.assert_not_called()
+    scheduler.discord.send_trade_alert.assert_not_called()
+
+
 def test_scheduler_post_market_runs():
     """장마감: _run_post_market 호출 시 DB 저장·디스코드 시도만 하고 예외 없이 완료."""
     from core.scheduler import Scheduler
