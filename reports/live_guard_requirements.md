@@ -15,6 +15,8 @@
 | 9 | 데이터 소스 health check | FDR/yfinance 수집 성공 | live gate 통과 후 확인 |
 | 10 | 체결 조회 주문번호 일치 | KIS 일별체결조회 row의 `ODNO`/`ORD_NO` | 불일치 시 장부 반영 보류 |
 | 11 | 직접 live BUY 호출 차단 | `OrderExecutor.live_gate_validated` | gate 통과 경로가 아니면 KIS 주문 전 차단 |
+| 12 | live 주문 전 미체결 조회 성공 | `get_unfilled_order_status().checked` | 실패/불명확 시 BUY/SELL 제출 보류 |
+| 13 | live 긴급 청산 현재가 검증 | `KISApi.get_current_price().price > 0` | 실패 시 평균단가 fallback 매도 차단 |
 
 ## 코드 위치
 - `main.py:_check_live_readiness_gate()` — live gate 진입점
@@ -22,6 +24,8 @@
 - `main.py:run_live_trading()` — gate 실패 시 `sys.exit(1)`
 - `main.py:run_rebalance()` / `core.basket_rebalancer.BasketRebalancer.execute()` — live 바스켓 리밸런싱 주문도 운영자 확인과 live gate 통과 없이는 실행 차단
 - `api.kis_api.KISApi.get_order_execution_after_order()` / `core.order_executor.OrderExecutor._resolve_live_execution()` — 현재 주문번호와 일치하는 체결 row만 DB 반영 허용
+- `api.kis_api.KISApi.get_unfilled_order_status()` / `core.order_executor.OrderExecutor._live_unfilled_order_block()` — KIS 미체결 조회 실패 시 live 주문 제출 차단
+- `main.py:run_emergency_liquidate()` — live 긴급 청산 현재가 조회 실패 시 평균단가 지정가 매도 fallback 차단
 - 환경변수 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 이중 확인 유지
 
 생성: 2026-04-29
