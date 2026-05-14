@@ -199,6 +199,84 @@ class TestForceLiveRemoved:
         assert calls["execute"]["dry_run"] is False
         notifier.send_message.assert_called_once()
 
+    def test_paper_mode_forces_live_config_to_paper_before_executor(self, monkeypatch):
+        """--mode paper 실행은 settings.trading.mode=live여도 OrderExecutor를 paper로 고정한다."""
+        import pandas as pd
+        import main as main_mod
+        import database.repositories as repositories
+        import strategies
+
+        captured = {}
+        config = SimpleNamespace(
+            trading={"mode": "live"},
+            active_strategy="scoring",
+            watchlist=["005930"],
+            risk_params={"position_limits": {"max_holding_days": 0}},
+        )
+        sample = pd.DataFrame(
+            {
+                "close": [60_000] * 31,
+                "volume": [1_000_000] * 31,
+            }
+        )
+
+        class FakeCollector:
+            def fetch_stock(self, symbol):
+                return sample
+
+        class FakePortfolio:
+            def __init__(self, cfg, account_key=""):
+                captured["portfolio_mode"] = cfg.trading["mode"]
+
+            def get_portfolio_summary(self):
+                return {
+                    "total_value": 10_000_000,
+                    "total_return": 0.0,
+                    "position_count": 0,
+                    "cash": 10_000_000,
+                    "current_value": 0,
+                }
+
+        class FakeExecutor:
+            def __init__(self, cfg, account_key=""):
+                captured["executor_mode"] = cfg.trading["mode"]
+
+        class FakeStrategy:
+            def generate_signal(self, df, symbol=None):
+                return {
+                    "signal": "HOLD",
+                    "score": 0,
+                    "details": "test",
+                    "close": 60_000,
+                }
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(strategies, "is_strategy_allowed", lambda strategy, mode: (True, "ok"))
+        monkeypatch.setattr("core.data_collector.DataCollector", FakeCollector)
+        monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolio)
+        monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+        monkeypatch.setattr(
+            "core.notifier.Notifier",
+            lambda cfg: SimpleNamespace(
+                send_signal_alert=lambda *a, **kw: None,
+                send_trade_alert=lambda *a, **kw: None,
+            ),
+        )
+        monkeypatch.setattr(
+            main_mod,
+            "WatchlistManager",
+            lambda cfg: SimpleNamespace(resolve=lambda: ["005930"]),
+        )
+        monkeypatch.setattr(main_mod, "_get_strategy", lambda strategy: FakeStrategy())
+        monkeypatch.setattr(repositories, "get_all_positions", lambda account_key=None: [])
+        monkeypatch.setattr(repositories, "get_position", lambda symbol, account_key="": None)
+
+        main_mod.run_paper_trading(SimpleNamespace(strategy="scoring"))
+
+        assert config.trading["mode"] == "paper"
+        assert captured["portfolio_mode"] == "paper"
+        assert captured["executor_mode"] == "paper"
+
     def test_live_liquidate_syncs_broker_positions_before_loading_db_positions(self, monkeypatch):
         """live 긴급 청산은 KIS-only 포지션을 DB에 보정한 뒤 청산 대상을 읽는다."""
         import main as main_mod

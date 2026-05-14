@@ -514,17 +514,29 @@ def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatc
 def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
     from core.scheduler import Scheduler
 
+    monkeypatch.setattr("api.kis_api.KISApi", _FakeKIS)
     scheduler = Scheduler(strategy_name="scoring")
     scheduler.monitor_interval = 1
     scheduler.auto_entry = True
     scheduler._entry_candidates = [{"symbol": "005930", "price": 50000}]
+    scheduler.blackswan = SimpleNamespace(
+        consume_cooldown_ended_flag=lambda: False,
+        is_on_cooldown=lambda: False,
+        status_snapshot=lambda: {},
+    )
+    scheduler.discord = MagicMock()
 
     def slow_entry():
         import time
         time.sleep(1.1)
 
+    monkeypatch.setattr(scheduler, "_log_monitoring_watchlist_preflight", lambda: None)
+    monkeypatch.setattr(scheduler, "_maybe_recheck_market_regime", lambda: None)
     monkeypatch.setattr(scheduler, "_execute_entry_candidates", slow_entry)
     monkeypatch.setattr(scheduler, "_check_exit_signals", lambda: None)
+    monkeypatch.setattr(scheduler, "_update_dynamic_stop_losses", lambda: None)
+    monkeypatch.setattr(scheduler, "_rescan_for_new_entries", lambda: None)
+    monkeypatch.setattr(scheduler, "_publish_dashboard_runtime_state", lambda kis=None: None)
     scheduler._run_monitoring()
 
     assert scheduler._skip_next_monitor_cycle is True
