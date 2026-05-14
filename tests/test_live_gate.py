@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from core.live_gate import (
     LIVE_GATE_ARTIFACT_TYPE,
     LIVE_GATE_SCHEMA_VERSION,
-    build_promotion_blocker_source_hash,
     validate_canonical_metadata_integrity,
     validate_live_readiness,
 )
@@ -117,56 +116,16 @@ def _write_bundle(
     promotions = {strategy: {"status": status, "allowed_modes": allowed_modes, "reason": "test"}}
     _write_json(promotion_dir / "promotion_result.json", promotions)
 
-    source_hash = build_promotion_blocker_source_hash(promotions, metrics_by_strategy, metadata)
-    live_candidates = (
-        [strategy]
-        if status == "live_candidate" and "live" in allowed_modes
-        else []
+    from tools.evaluate_and_promote import (
+        build_current_blockers_report,
+        build_promotion_blocker_summary,
     )
-    promotion_summary = {
-        "total_strategies": 1,
-        "status_counts": {status: 1},
-        "live_ready_count": len(live_candidates),
-        "blocked_from_live_count": 0 if live_candidates else 1,
-    }
-    _write_json(
-        promotion_dir / "promotion_blocker_summary.json",
-        {
-            "artifact_type": "promotion_blocker_summary",
-            "schema_version": 1,
-            "generated_at": generated_at,
-            "source_artifact_hash": source_hash,
-            "summary": promotion_summary,
-            "strategies": {
-                strategy: {
-                    "status": status,
-                    "allowed_modes": allowed_modes,
-                    "next_action": "test",
-                    "blockers": [] if live_candidates else ["live 차단"],
-                    "metrics": metrics,
-                    "reason": "test",
-                }
-            },
-        },
-    )
+
+    blocker_summary = build_promotion_blocker_summary(promotions, metrics_by_strategy, metadata)
+    _write_json(promotion_dir / "promotion_blocker_summary.json", blocker_summary)
     _write_json(
         promotion_dir.parent / "current_blockers.json",
-        {
-            "artifact_type": "current_go_live_blockers",
-            "schema_version": 2,
-            "generated_at": generated_at,
-            "source": "reports/promotion/promotion_blocker_summary.json",
-            "source_artifact_hash": source_hash,
-            "go_live": bool(live_candidates),
-            "verdict": "GO: live_candidate 1개 사용 가능" if live_candidates else "NO-GO",
-            "promotion_summary": promotion_summary,
-            "live_candidates": live_candidates,
-            "provisional_paper_candidates": [],
-            "hard_blockers": [] if live_candidates else [{"desc": "live_candidate 상태의 전략이 없음"}],
-            "soft_blockers": [],
-            "next_actions": [],
-            "default_strategy": strategy if live_candidates else "paper pilot 후보 없음",
-        },
+        build_current_blockers_report(blocker_summary),
     )
 
 
@@ -745,6 +704,50 @@ def test_stale_promotion_blocker_summary_hash_blocks_live_gate(tmp_path):
     )
 
     assert any("promotion blocker summary source_artifact_hash 불일치" in issue for issue in issues)
+
+
+def test_stale_promotion_blocker_summary_strategy_actions_block_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    summary_path = promotion_dir / "promotion_blocker_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["strategies"]["scoring"]["next_action"] = "stale operator hint"
+    _write_json(summary_path, summary)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("promotion blocker summary strategies 내용 불일치" in issue for issue in issues)
+
+
+def test_stale_current_blockers_next_actions_block_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    current_path = promotion_dir.parent / "current_blockers.json"
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    current["next_actions"] = [{"priority": 1, "desc": "stale action"}]
+    _write_json(current_path, current)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("current_blockers next_actions 내용 불일치" in issue for issue in issues)
 
 
 def test_paper_evidence_strategy_is_required(tmp_path):
