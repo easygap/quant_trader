@@ -78,6 +78,45 @@ _BOOL_TRUE = frozenset({"true", "1", "on", "yes"})
 _BOOL_FALSE = frozenset({"false", "0", "off", "no"})
 
 
+def _coerce_bool_setting(value, *, default: bool, key: str) -> bool:
+    """YAML/ENV에서 온 boolean 설정을 명시적으로 해석한다."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _BOOL_TRUE:
+            return True
+        if normalized in _BOOL_FALSE:
+            return False
+    raise ValueError(
+        f"{key} 값이 유효하지 않습니다: {value!r}. "
+        "허용값: true/false/1/0/on/off/yes/no"
+    )
+
+
+def _resolve_data_source_defaults(settings: dict) -> dict:
+    """
+    데이터 소스 설정 기본값을 안전하게 채운다.
+
+    KIS 일봉은 비수정주가를 반환할 수 있어, 설정 누락 시 fallback을 허용하지 않는다.
+    """
+    ds = settings.setdefault("data_source", {})
+    ds["preferred"] = str(ds.get("preferred") or "auto").strip().lower()
+    ds["allow_kis_fallback"] = _coerce_bool_setting(
+        ds.get("allow_kis_fallback"),
+        default=False,
+        key="data_source.allow_kis_fallback",
+    )
+    ds["warn_on_source_mismatch"] = _coerce_bool_setting(
+        ds.get("warn_on_source_mismatch"),
+        default=True,
+        key="data_source.warn_on_source_mismatch",
+    )
+    return settings
+
+
 def _resolve_auto_entry(settings: dict) -> dict:
     """
     QUANT_AUTO_ENTRY 환경변수로 trading.auto_entry를 오버라이드.
@@ -151,9 +190,15 @@ def compute_resolved_hash(settings: dict, strategies: dict, risk_params: dict) -
         if not k.startswith("_")  # _auto_entry_source 같은 메타 필드 제외
     }
     watchlist_keys = settings.get("watchlist", {})
+    data_source_keys = settings.get("data_source", {})
     payload = json.dumps(
-        {"trading": trading_keys, "watchlist": watchlist_keys,
-         "strategies": strategies, "risk_params": risk_params},
+        {
+            "trading": trading_keys,
+            "watchlist": watchlist_keys,
+            "data_source": data_source_keys,
+            "strategies": strategies,
+            "risk_params": risk_params,
+        },
         sort_keys=True, default=str,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -174,6 +219,7 @@ def load_settings() -> dict:
             "dart": {},
         }
     settings = _override_with_env(settings)
+    settings = _resolve_data_source_defaults(settings)
     settings = _resolve_auto_entry(settings)
     return settings
 
