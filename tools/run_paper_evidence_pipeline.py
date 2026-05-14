@@ -48,6 +48,9 @@ def main():
     parser.add_argument("--quality-report", action="store_true", help="evidence 품질 report 생성")
     args = parser.parse_args()
 
+    if args.finalize and not args.date:
+        parser.error("--finalize requires --date YYYY-MM-DD")
+
     from database.models import init_database
     init_database()
 

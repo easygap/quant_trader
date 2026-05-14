@@ -118,7 +118,8 @@ python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_fl
 python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit --allow-rerun
 
 # Paper evidence pipeline
-python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --generate-package
+python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --date YYYY-MM-DD
+python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-package
 
 # 실전 매매 (현재 모든 전략이 live 차단 상태 — live_candidate 승격 전까지 실행 불가)
 # python main.py --mode live --strategy scoring --confirm-live
