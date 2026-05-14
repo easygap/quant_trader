@@ -705,6 +705,19 @@ class OrderExecutor:
         try:
             from core.market_regime import get_regime_adjusted_params
             regime_adj = get_regime_adjusted_params(self.config)
+            if not regime_adj.get("allow_buys", True):
+                reason_text = (
+                    "시장 국면 확인 실패 또는 bearish 상태로 신규 매수를 차단합니다: "
+                    f"{regime_adj.get('regime', 'unknown')}"
+                )
+                logger.warning("종목 {} 매수 스킵: {}", symbol, reason_text)
+                return {
+                    "success": False,
+                    "reason": reason_text,
+                    "market_regime_blocked": True,
+                    "market_regime": regime_adj.get("regime", "unknown"),
+                    "market_regime_details": regime_adj.get("details", {}),
+                }
             regime_sl_mult = regime_adj.get("stop_loss_multiplier", 1.0)
             regime_tp_mult = regime_adj.get("take_profit_multiplier", 1.0)
             if regime_sl_mult != 1.0 or regime_tp_mult != 1.0:
