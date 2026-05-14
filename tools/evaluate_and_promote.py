@@ -770,6 +770,11 @@ def build_current_blockers_report(blocker_summary: dict) -> dict:
 def load_current_blockers_from_artifacts(
     promotion_dir: str | Path = "reports/promotion",
 ) -> dict:
+    summary_issues = validate_promotion_blocker_summary_artifact(promotion_dir)
+    if summary_issues:
+        raise ValueError(
+            "promotion blocker summary 동기화 실패: " + "; ".join(summary_issues)
+        )
     summary_path = Path(promotion_dir) / "promotion_blocker_summary.json"
     blocker_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if not isinstance(blocker_summary, dict):
@@ -791,21 +796,30 @@ def validate_current_blockers_artifact(
     promotion_dir: str | Path = "reports/promotion",
     output_path: str | Path = "reports/current_blockers.json",
 ) -> list[str]:
+    issues = [
+        "promotion blocker summary 동기화 실패: " + issue
+        for issue in validate_promotion_blocker_summary_artifact(promotion_dir)
+    ]
     path = Path(output_path)
     if not path.exists():
-        return [f"{path} 없음: --current-blockers로 재생성 필요"]
+        issues.append(f"{path} 없음: --current-blockers로 재생성 필요")
+        return issues
     try:
         current = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return [f"{path} 로드 실패: {exc}"]
+        issues.append(f"{path} 로드 실패: {exc}")
+        return issues
     if not isinstance(current, dict):
-        return [f"{path} top-level JSON is not an object"]
+        issues.append(f"{path} top-level JSON is not an object")
+        return issues
+    if issues:
+        return issues
     try:
         expected = load_current_blockers_from_artifacts(promotion_dir)
     except Exception as exc:
-        return [f"current blocker source artifact 로드 실패: {exc}"]
+        issues.append(f"current blocker source artifact 로드 실패: {exc}")
+        return issues
 
-    issues = []
     for key in (
         "artifact_type",
         "schema_version",
