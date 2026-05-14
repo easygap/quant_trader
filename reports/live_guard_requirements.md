@@ -11,9 +11,10 @@
 | 5 | execution-backed Paper 60영업일 이상 | `promotable_evidence_days` | 미충족 |
 | 6 | benchmark final ratio 80% 이상 | `benchmark_final_ratio` | 미충족 |
 | 7 | frozen day 0, sell 5건 이상, win rate 45% 이상 | promotion evidence | 미충족 |
-| 8 | 데이터 소스 health check | FDR/yfinance 수집 성공 | live gate 통과 후 확인 |
-| 9 | 체결 조회 주문번호 일치 | KIS 일별체결조회 row의 `ODNO`/`ORD_NO` | 불일치 시 장부 반영 보류 |
-| 10 | 직접 live BUY 호출 차단 | `OrderExecutor.live_gate_validated` | gate 통과 경로가 아니면 KIS 주문 전 차단 |
+| 8 | Evidence package 원본/무결성 검증 | `package_integrity.payload_hash`, `source_records.records_hash` | 불일치 시 live gate 차단 |
+| 9 | 데이터 소스 health check | FDR/yfinance 수집 성공 | live gate 통과 후 확인 |
+| 10 | 체결 조회 주문번호 일치 | KIS 일별체결조회 row의 `ODNO`/`ORD_NO` | 불일치 시 장부 반영 보류 |
+| 11 | 직접 live BUY 호출 차단 | `OrderExecutor.live_gate_validated` | gate 통과 경로가 아니면 KIS 주문 전 차단 |
 
 ## 코드 위치
 - `main.py:_check_live_readiness_gate()` — live gate 진입점
