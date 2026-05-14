@@ -76,6 +76,8 @@ class StrategyMetrics:
     paper_trade_quality_adverse_gap_bps: Optional[float] = None
     paper_trade_quality_missing_expected_ratio: Optional[float] = None
     paper_trade_quality_missing_expected_count: Optional[int] = None
+    paper_trade_quality_missing_execution_link_ratio: Optional[float] = None
+    paper_trade_quality_missing_execution_link_count: Optional[int] = None
     target_weight_strategy_required: Optional[bool] = None
     target_weight_evidence_required: Optional[bool] = None
     target_weight_verified_pilot_days: Optional[int] = None
@@ -196,6 +198,21 @@ def _check_live_candidate(m: StrategyMetrics) -> tuple[bool, str]:
         fails.append(f"paper frozen_days {m.paper_frozen_days} > 0")
     if m.paper_cumulative_return is None or m.paper_cumulative_return <= 0:
         fails.append(f"paper cumulative_return {m.paper_cumulative_return or 0} <= 0")
+    if m.paper_trade_quality_status is None:
+        fails.append("paper trade quality status missing")
+    elif m.paper_trade_quality_status != "ok":
+        details = []
+        if m.paper_trade_quality_adverse_gap_bps is not None:
+            details.append(f"adverse_gap_bps={m.paper_trade_quality_adverse_gap_bps}")
+        if m.paper_trade_quality_missing_expected_count is not None:
+            details.append(f"missing_expected={m.paper_trade_quality_missing_expected_count}")
+        if m.paper_trade_quality_missing_execution_link_count is not None:
+            details.append(
+                "missing_execution_link="
+                f"{m.paper_trade_quality_missing_execution_link_count}"
+            )
+        suffix = " (" + ", ".join(details) + ")" if details else ""
+        fails.append(f"paper trade quality status {m.paper_trade_quality_status} != ok{suffix}")
     if m.paper_evidence_fresh is not True:
         latest = m.paper_latest_evidence_date or "missing"
         if m.paper_evidence_age_days is None:
@@ -429,6 +446,12 @@ def paper_evidence_metrics_from_package(
         "paper_trade_quality_missing_expected_count": _as_int(
             trade_quality.get("missing_expected_price_count")
         ),
+        "paper_trade_quality_missing_execution_link_ratio": _as_float(
+            trade_quality.get("missing_execution_link_ratio")
+        ),
+        "paper_trade_quality_missing_execution_link_count": _as_int(
+            trade_quality.get("missing_execution_link_count")
+        ),
         "target_weight_evidence_required": target_weight_evidence.get("required"),
         "target_weight_verified_pilot_days": _as_int(package.get("target_weight_verified_pilot_days")),
         "target_weight_invalid_days": _as_int(package.get("target_weight_invalid_days")),
@@ -463,6 +486,8 @@ def attach_paper_evidence_metrics(
         "paper_trade_quality_adverse_gap_bps",
         "paper_trade_quality_missing_expected_ratio",
         "paper_trade_quality_missing_expected_count",
+        "paper_trade_quality_missing_execution_link_ratio",
+        "paper_trade_quality_missing_execution_link_count",
         "target_weight_strategy_required",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
@@ -622,28 +647,10 @@ def load_metrics_from_artifact(
     excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
         wf = wf_raw.get(name, {})
-        paper_metrics = {
-            **paper_evidence_metrics_from_package(
-                load_paper_evidence_package(name, evidence_dir),
-                reference_date=paper_reference_date,
-            ),
-            **{
-                key: m.get(key)
-                for key in (
-                    "paper_days",
-                    "paper_sharpe",
-                    "paper_excess",
-                    "paper_cash_adjusted_excess",
-                    "paper_evidence_recommendation",
-                    "paper_benchmark_final_ratio",
-                    "paper_sell_count",
-                    "paper_win_rate",
-                    "paper_frozen_days",
-                    "paper_cumulative_return",
-                )
-                if m.get(key) is not None
-            },
-        }
+        paper_metrics = paper_evidence_metrics_from_package(
+            load_paper_evidence_package(name, evidence_dir),
+            reference_date=paper_reference_date,
+        )
         paper_metrics = attach_target_weight_canonical_hash_check(
             name,
             paper_metrics,
