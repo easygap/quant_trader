@@ -62,6 +62,8 @@ def _seed_trade(**overrides):
         "mode": "paper",
         "executed_at": datetime(2026, 5, 11, 10, 0),
         "price_gap": 1.0,
+        "execution_session_id": "paper-quality-session",
+        "order_id": "ORD-PAPER-QUALITY",
     }
     payload.update(overrides)
     session = get_session()
@@ -130,6 +132,24 @@ def test_paper_trade_quality_report_detects_missing_expected_price(fresh_db):
     assert report["summary"]["missing_expected_price_count"] == 1
     assert report["summary"]["missing_expected_price_ratio"] == 1.0
     assert any("expected_price 누락" in issue for issue in report["issues"])
+
+
+def test_paper_trade_quality_report_detects_missing_execution_link(fresh_db):
+    from tools.paper_trade_quality_report import build_paper_trade_quality_report
+
+    _seed_trade(execution_session_id="", order_id="")
+
+    report = build_paper_trade_quality_report(
+        account_key="scoring",
+        max_missing_execution_link_ratio=0.0,
+    )
+
+    assert report["quality_status"] == "review"
+    assert report["summary"]["missing_execution_session_id_count"] == 1
+    assert report["summary"]["missing_order_id_count"] == 1
+    assert report["summary"]["missing_execution_link_count"] == 1
+    assert report["summary"]["missing_execution_link_ratio"] == 1.0
+    assert any("execution_session_id/order_id 누락" in issue for issue in report["issues"])
 
 
 def test_write_paper_trade_quality_report_outputs_json_and_markdown(fresh_db, tmp_path):
