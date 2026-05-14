@@ -72,6 +72,7 @@ diversification:
     lookback_days: 60         # 상관계수 계산에 사용할 과거 일수
     high_corr_threshold: 0.7  # 이 값 이상이면 고상관 종목으로 판단
     high_corr_scale: 0.5      # 고상관 종목 포지션 축소 배수 (50%)
+    strict: true              # 데이터 부족/조회 실패 시 신규 BUY 차단 (fail-closed)
 
 # --- 보유 기간 제한 ---
 # max_holding_days: 신호가 없어도 N일 초과 보유 시 강제 정리 (물리는 상황 방지)
