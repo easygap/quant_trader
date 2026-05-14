@@ -1067,10 +1067,25 @@ class Scheduler:
         gap_enabled = gap_cfg.get("enabled", False)
         gap_down_threshold = float(gap_cfg.get("gap_down_threshold", -0.03))
 
+        def _record_price_block(symbol: str, reason: str) -> None:
+            logger.warning(reason)
+            _log_op(
+                "PRICE_DATA_BLOCK",
+                reason,
+                severity="warning",
+                symbol=symbol,
+                strategy=self.strategy_name,
+                mode=self._mode,
+            )
+
         for pos in positions:
             try:
                 price_info = kis.get_current_price(pos.symbol)
                 if not price_info:
+                    _record_price_block(
+                        pos.symbol,
+                        f"현재가 미수신: {pos.symbol} exit 판단 보류",
+                    )
                     continue
 
                 try:
@@ -1078,15 +1093,9 @@ class Scheduler:
                 except (TypeError, ValueError):
                     current_price = 0.0
                 if not math.isfinite(current_price) or current_price <= 0:
-                    reason = f"현재가 확인 실패: {pos.symbol} exit 판단 보류"
-                    logger.warning(reason)
-                    _log_op(
-                        "PRICE_DATA_BLOCK",
-                        reason,
-                        severity="warning",
-                        symbol=pos.symbol,
-                        strategy=self.strategy_name,
-                        mode=self._mode,
+                    _record_price_block(
+                        pos.symbol,
+                        f"현재가 확인 실패: {pos.symbol} exit 판단 보류",
                     )
                     continue
 
