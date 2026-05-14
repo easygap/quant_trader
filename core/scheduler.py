@@ -7,6 +7,7 @@
 """
 
 import os
+import math
 import time as time_mod
 import shutil
 from collections import deque
@@ -1072,8 +1073,27 @@ class Scheduler:
                 if not price_info:
                     continue
 
-                current_price = price_info["price"]
-                prev_close = price_info.get("prev_close", pos.avg_price)
+                try:
+                    current_price = float(price_info.get("price", 0))
+                except (TypeError, ValueError):
+                    current_price = 0.0
+                if not math.isfinite(current_price) or current_price <= 0:
+                    reason = f"현재가 확인 실패: {pos.symbol} exit 판단 보류"
+                    logger.warning(reason)
+                    _log_op(
+                        "PRICE_DATA_BLOCK",
+                        reason,
+                        severity="warning",
+                        symbol=pos.symbol,
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                    )
+                    continue
+
+                try:
+                    prev_close = float(price_info.get("prev_close", pos.avg_price) or 0)
+                except (TypeError, ValueError):
+                    prev_close = 0.0
 
                 # 갭다운 즉시 청산: 전일 종가 대비 시가가 크게 갭다운이면 손절 회피 불가
                 if gap_enabled and prev_close > 0:
