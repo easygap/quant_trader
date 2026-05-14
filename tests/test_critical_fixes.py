@@ -711,6 +711,42 @@ class TestForceLiveRemoved:
 
         assert captured == {"host": "0.0.0.0", "port": 9090}
 
+    def test_main_cli_unexpected_exception_exits_nonzero(self, monkeypatch):
+        """CLI 실행 중 예상치 못한 예외는 배치가 실패로 인식하도록 non-zero 종료한다."""
+        import main as main_mod
+
+        monkeypatch.setattr(sys, "argv", ["main.py", "--mode", "dashboard"])
+        monkeypatch.setattr(main_mod, "setup_logger", lambda: None)
+        monkeypatch.setattr(main_mod, "init_database", lambda: None)
+        monkeypatch.setattr(
+            main_mod,
+            "run_dashboard",
+            lambda _args: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+        assert exc.value.code == 1
+
+    def test_main_cli_keyboard_interrupt_exits_130(self, monkeypatch):
+        """사용자 중단은 일반 성공 종료와 구분되는 130 코드로 반환한다."""
+        import main as main_mod
+
+        monkeypatch.setattr(sys, "argv", ["main.py", "--mode", "dashboard"])
+        monkeypatch.setattr(main_mod, "setup_logger", lambda: None)
+        monkeypatch.setattr(main_mod, "init_database", lambda: None)
+        monkeypatch.setattr(
+            main_mod,
+            "run_dashboard",
+            lambda _args: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+        assert exc.value.code == 130
+
     def test_dashboard_docs_and_config_default_to_loopback(self):
         """실제/예시 설정과 운영 문서의 대시보드 기본 host는 외부 공개가 아니다."""
         from pathlib import Path

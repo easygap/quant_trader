@@ -1594,8 +1594,10 @@ def main():
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:
         logger.info("사용자에 의해 중단됨")
+        raise SystemExit(130)
     except Exception as e:
         logger.exception("시스템 오류 발생: {}", e)
+        raise SystemExit(1)
     finally:
         logger.info("퀀트 트레이더 종료")
 
