@@ -627,6 +627,17 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
                 "fill_quality_adverse_gap_bps=56.60"
             ),
         },
+        "target_weight_missing_pilot_strategy": {
+            "status": "provisional_paper_candidate",
+            "allowed_modes": ["backtest", "paper"],
+            "reason": (
+                "provisional_paper_candidate 충족; live 차단: "
+                "paper 0일 < 60일, paper benchmark_final_ratio 0 < 0.8, "
+                "target-weight evidence required flag missing, "
+                "target-weight verified pilot days 0 < 60, "
+                "target-weight params_hash missing"
+            ),
+        },
     }
     metrics = {
         "paper_ready_strategy": {
@@ -652,6 +663,15 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
             "paper_trade_quality_missing_expected_ratio": 0.0,
             "paper_trade_quality_missing_execution_link_ratio": 0.25,
         },
+        "target_weight_missing_pilot_strategy": {
+            "total_return": 198.15,
+            "benchmark_excess_return": 48.76,
+            "sharpe": 1.57,
+            "mdd": -17.18,
+            "paper_days": 0,
+            "paper_benchmark_final_ratio": 0.0,
+            "target_weight_verified_pilot_days": 0,
+        },
     }
 
     summary = build_promotion_blocker_summary(
@@ -668,13 +688,20 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
         {"generated_at": "2026-05-12T09:00:00"},
     )
     assert len(summary["source_artifact_hash"]) == 64
-    assert summary["summary"]["total_strategies"] == 4
+    assert summary["summary"]["total_strategies"] == 5
     assert summary["summary"]["live_ready_count"] == 1
-    assert summary["summary"]["blocked_from_live_count"] == 3
+    assert summary["summary"]["blocked_from_live_count"] == 4
     assert summary["strategies"]["paper_blocked_strategy"]["next_action"].startswith("canonical")
     assert summary["strategies"]["paper_stale_strategy"]["next_action"].startswith("paper evidence")
     assert summary["strategies"]["paper_fill_quality_strategy"]["next_action"].startswith("paper 체결")
+    assert summary["strategies"]["target_weight_missing_pilot_strategy"]["next_action"].startswith(
+        "target-weight capped paper pilot readiness audit"
+    )
     assert summary["strategies"]["paper_ready_strategy"]["metrics"]["paper_days"] == 60
+    assert (
+        summary["strategies"]["target_weight_missing_pilot_strategy"]["metrics"]["target_weight_verified_pilot_days"]
+        == 0
+    )
     assert (
         summary["strategies"]["paper_fill_quality_strategy"]["metrics"]["paper_trade_quality_adverse_gap_bps"]
         == 56.6
