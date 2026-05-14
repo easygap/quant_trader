@@ -14,6 +14,11 @@ Hard Gate (`main.py:_check_live_readiness_gate` → `core/live_gate.py`):
 
 레거시 `reports/approved_strategies.json`와 `reports/validation_walkforward_*.json`은 live 근거로 사용하지 않는다.
 
+주문 실행 계층:
+- `OrderExecutor` live 신규 BUY는 `live_gate_validated=True`로 생성된 인스턴스에서만 허용한다.
+- 기본값은 fail-closed이며, 수동 스크립트/콘솔에서 `OrderExecutor(...).execute_buy()`를 직접 호출해도 KIS 주문 제출 전에 차단한다.
+- SELL은 손절·긴급 청산 안전성을 위해 기존 청산 경로를 유지한다.
+
 Soft Gate (strategies/__init__.py:is_strategy_allowed):
 - backtest: 모든 전략
 - paper/schedule: paper_only 이상

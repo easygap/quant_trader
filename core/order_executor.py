@@ -49,10 +49,17 @@ class OrderExecutor:
     SLIPPAGE_WARN_PCT = 0.15
     SLIPPAGE_DISCORD_PCT = 1.0
 
-    def __init__(self, config: Config = None, account_key: str = ""):
+    def __init__(
+        self,
+        config: Config = None,
+        account_key: str = "",
+        *,
+        live_gate_validated: bool = False,
+    ):
         self.config = config or Config.get()
         self.account_key = account_key or ""
         self.mode = self.config.trading.get("mode", "paper")
+        self.live_gate_validated = bool(live_gate_validated)
         self.risk_manager = RiskManager(self.config)
         account_no = self.config.get_account_no(self.account_key) if self.account_key else None
         self.kis_api = KISApi(account_no=account_no)
@@ -76,6 +83,25 @@ class OrderExecutor:
             self.kis_api.authenticate()
 
         logger.info("OrderExecutor 초기화 완료 (모드: {})", self.mode)
+
+    def _live_buy_gate_check(self, action: str = "BUY") -> dict:
+        """live 신규 BUY는 canonical live gate 통과 경로에서만 허용한다."""
+        if self.mode != "live" or str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+        if self.live_gate_validated:
+            return {"allowed": True, "reason": ""}
+
+        reason = (
+            "live BUY는 run_live_trading/live rebalance의 readiness gate를 "
+            "통과한 OrderExecutor에서만 실행할 수 있습니다."
+        )
+        logger.error("실전 신규 매수 차단: {}", reason)
+        return {
+            "allowed": False,
+            "reason": reason,
+            "live_gate_blocked": True,
+            "mode": self.mode,
+        }
 
     def _restore_persistent_open_orders(self) -> None:
         if self.mode != "live":
@@ -654,6 +680,10 @@ class OrderExecutor:
         execution_session_id: str = "",
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
+        live_gate_check = self._live_buy_gate_check("BUY")
+        if not live_gate_check["allowed"]:
+            return {"success": False, **live_gate_check}
+
         order_price = self._positive_order_price(price)
         if order_price is None:
             reason_text = f"매수 가격 확인 실패: {symbol} 현재가 없음"
