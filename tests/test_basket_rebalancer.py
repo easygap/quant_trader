@@ -2,6 +2,7 @@
 
 import sys
 import os
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -188,6 +189,33 @@ class TestExecute:
         result = rebalancer.execute(orders, dry_run=True)
         assert result["skipped"] == 1
         assert result["executed"] == 0
+
+    def test_paper_buy_execute_uses_current_capital_api(self, rebalancer, monkeypatch):
+        """paper BUY 리밸런싱은 존재하는 포트폴리오 자본 API로 주문 수량을 넘긴다."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.portfolio_mgr = SimpleNamespace(
+            get_available_cash=MagicMock(return_value=5_000_000),
+            get_current_capital=MagicMock(return_value=100_000_000),
+        )
+        fake_executor = MagicMock()
+        fake_executor.execute_buy_quantity.return_value = {"success": True}
+        executor_cls = MagicMock(return_value=fake_executor)
+        monkeypatch.setattr("core.order_executor.OrderExecutor", executor_cls)
+
+        result = rebalancer.execute([
+            RebalanceOrder("005930", "BUY", 10, 70_000, "테스트"),
+        ])
+
+        assert result["executed"] == 1
+        assert result["failed"] == 0
+        rebalancer.portfolio_mgr.get_available_cash.assert_called_once()
+        rebalancer.portfolio_mgr.get_current_capital.assert_called_once()
+        fake_executor.execute_buy_quantity.assert_called_once()
+        kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
+        assert kwargs["capital"] == 100_000_000
+        assert kwargs["available_cash"] == 5_000_000
+        assert kwargs["strategy"] == "basket_rebalance"
 
     def test_live_execute_requires_confirmed_gate(self, rebalancer, monkeypatch):
         """live 리밸런싱은 확인 게이트 없이 주문 실행부에 도달하면 안 된다."""
