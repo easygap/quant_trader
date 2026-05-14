@@ -13,6 +13,7 @@
 | 7 | frozen day 0, sell 5건 이상, win rate 45% 이상 | promotion evidence | 미충족 |
 | 8 | 데이터 소스 health check | FDR/yfinance 수집 성공 | live gate 통과 후 확인 |
 | 9 | 체결 조회 주문번호 일치 | KIS 일별체결조회 row의 `ODNO`/`ORD_NO` | 불일치 시 장부 반영 보류 |
+| 10 | 직접 live BUY 호출 차단 | `OrderExecutor.live_gate_validated` | gate 통과 경로가 아니면 KIS 주문 전 차단 |
 
 ## 코드 위치
 - `main.py:_check_live_readiness_gate()` — live gate 진입점
@@ -23,4 +24,4 @@
 - 환경변수 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 이중 확인 유지
 
 생성: 2026-04-29
-최신화: 2026-05-13
+최신화: 2026-05-14
