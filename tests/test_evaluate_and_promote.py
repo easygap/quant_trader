@@ -380,6 +380,7 @@ def _write_paper_package(evidence_dir, strategy, **overrides):
         "win_rate": 55.0,
         "frozen_days": 0,
         "cumulative_return": 4.0,
+        "trade_quality": {"status": "ok"},
     }
     payload.update(overrides)
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -405,6 +406,32 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     assert metrics[strategy]["paper_cash_adjusted_excess"] == 0.15
     assert metrics[strategy]["paper_evidence_recommendation"] == "ELIGIBLE"
     assert metrics[strategy]["paper_evidence_fresh"] is True
+
+
+def test_build_promotion_results_ignores_metrics_summary_paper_fields_without_evidence_package(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "paper_metrics_only_strategy"
+    metrics = {strategy: {
+        **_provisional_metrics(),
+        "paper_days": 60,
+        "paper_sharpe": 0.7,
+        "paper_excess": 0.2,
+        "paper_cash_adjusted_excess": 0.15,
+        "paper_evidence_recommendation": "ELIGIBLE",
+        "paper_benchmark_final_ratio": 0.9,
+        "paper_sell_count": 8,
+        "paper_win_rate": 55.0,
+        "paper_frozen_days": 0,
+        "paper_cumulative_return": 4.0,
+        "paper_trade_quality_status": "ok",
+    }}
+
+    promotions = build_promotion_results(metrics, evidence_dir=str(tmp_path / "missing_evidence"))
+
+    assert promotions[strategy]["status"] == "provisional_paper_candidate"
+    assert "paper evidence recommendation missing != ELIGIBLE" in promotions[strategy]["reason"]
+    assert "paper_days" not in metrics[strategy]
 
 
 def test_build_promotion_results_requires_paper_evidence_strategy_identity(tmp_path):
@@ -623,6 +650,7 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
             "paper_trade_quality_status": "review",
             "paper_trade_quality_adverse_gap_bps": 56.6,
             "paper_trade_quality_missing_expected_ratio": 0.0,
+            "paper_trade_quality_missing_execution_link_ratio": 0.25,
         },
     }
 
@@ -650,6 +678,10 @@ def test_build_promotion_blocker_summary_writes_operator_artifacts(tmp_path):
     assert (
         summary["strategies"]["paper_fill_quality_strategy"]["metrics"]["paper_trade_quality_adverse_gap_bps"]
         == 56.6
+    )
+    assert (
+        summary["strategies"]["paper_fill_quality_strategy"]["metrics"]["paper_trade_quality_missing_execution_link_ratio"]
+        == 0.25
     )
     assert json.loads(json_path.read_text(encoding="utf-8"))["summary"]["live_ready_count"] == 1
     report = md_path.read_text(encoding="utf-8")

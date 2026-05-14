@@ -58,6 +58,8 @@ PROMOTION_BLOCKER_METRIC_KEYS = (
     "paper_trade_quality_adverse_gap_bps",
     "paper_trade_quality_missing_expected_ratio",
     "paper_trade_quality_missing_expected_count",
+    "paper_trade_quality_missing_execution_link_ratio",
+    "paper_trade_quality_missing_execution_link_count",
     "target_weight_strategy_required",
     "target_weight_verified_pilot_days",
     "target_weight_invalid_days",
