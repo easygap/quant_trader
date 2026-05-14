@@ -185,6 +185,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
         "sell_count": 8,
         "win_rate": 55.0,
         "frozen_days": 0,
+        "trade_quality": {"status": "ok"},
     }
     payload.update(overrides)
     seed_records = payload.pop("_seed_records", True)
