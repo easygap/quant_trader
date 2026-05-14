@@ -139,6 +139,8 @@ python main.py --mode rebalance --dry-run
 
 # 웹 대시보드
 python main.py --mode dashboard
+# 기본 바인드는 http://127.0.0.1:8080 입니다.
+# 외부 공개가 필요할 때만 인증/reverse proxy 구성 후 --dashboard-host 0.0.0.0 을 명시하세요.
 
 # 휴장일 갱신
 python main.py --update-holidays
