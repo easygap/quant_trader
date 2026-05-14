@@ -212,6 +212,7 @@ class TestExecutorUsesStateMachine:
 
     def _prepare_live_executor(self, executor, kis_api):
         executor.mode = "live"
+        executor.live_gate_validated = True
         executor.kis_api = kis_api
         executor.trading_hours = SimpleNamespace(
             can_place_order=lambda *a, **kw: {"allowed": True, "reason": ""}
@@ -249,6 +250,47 @@ class TestExecutorUsesStateMachine:
         }
         executor.risk_manager.calculate_trailing_stop = lambda price, atr=None: price * 0.97
         return executor
+
+    def test_live_buy_requires_live_gate_validation_before_api_order(self):
+        """실전 BUY 직접 호출은 live gate 통과 증명이 없으면 KIS 주문 전에 차단한다."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_position
+
+        class KISShouldNotBeCalled:
+            def __init__(self):
+                self.buy_called = False
+                self.unfilled_checked = False
+
+            def get_unfilled_order_status(self, symbol):
+                self.unfilled_checked = True
+                return {"checked": True, "has_unfilled": False, "orders": []}
+
+            def buy_order(self, symbol, quantity, price):
+                self.buy_called = True
+                return {"odno": "BYPASS"}
+
+        OrderGuard.clear("005930")
+        kis_api = KISShouldNotBeCalled()
+        executor = self._make_executor()
+        executor.mode = "live"
+        executor.kis_api = kis_api
+
+        result = executor.execute_buy(
+            symbol="005930",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="direct live bypass test",
+            strategy="scoring",
+        )
+
+        assert result["success"] is False
+        assert result["live_gate_blocked"] is True
+        assert "readiness gate" in result["reason"]
+        assert kis_api.unfilled_checked is False
+        assert kis_api.buy_called is False
+        assert get_position("005930", account_key="test_sm") is None
 
     def test_live_buy_blocks_when_unfilled_lookup_fails_before_api_order(self):
         """실전 BUY는 KIS 미체결 조회 실패 시 주문 제출 전에 fail-closed 차단한다."""
