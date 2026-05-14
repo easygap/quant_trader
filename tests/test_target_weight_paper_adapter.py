@@ -5095,6 +5095,7 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     from core.live_gate import (
         LIVE_GATE_ARTIFACT_TYPE,
         LIVE_GATE_SCHEMA_VERSION,
+        build_promotion_blocker_source_hash,
         validate_live_readiness,
     )
     from core.promotion_engine import load_metrics_from_artifact, promote
@@ -5344,14 +5345,60 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     metrics = load_metrics_from_artifact(str(promotion_dir), evidence_dir=str(evidence_dir))
     promotion = promote(metrics[plan.candidate_id])
     assert promotion.status == "live_candidate"
+    promotions = {
+        plan.candidate_id: {
+            "status": promotion.status,
+            "allowed_modes": promotion.allowed_modes,
+            "reason": promotion.reason,
+        }
+    }
+    write_json(promotion_dir / "promotion_result.json", promotions)
+    run_metadata = json.loads((promotion_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    metrics_summary = json.loads((promotion_dir / "metrics_summary.json").read_text(encoding="utf-8"))
+    source_hash = build_promotion_blocker_source_hash(promotions, metrics_summary, run_metadata)
+    promotion_summary = {
+        "total_strategies": 1,
+        "status_counts": {"live_candidate": 1},
+        "live_ready_count": 1,
+        "blocked_from_live_count": 0,
+    }
     write_json(
-        promotion_dir / "promotion_result.json",
+        promotion_dir / "promotion_blocker_summary.json",
         {
-            plan.candidate_id: {
-                "status": promotion.status,
-                "allowed_modes": promotion.allowed_modes,
-                "reason": promotion.reason,
-            }
+            "artifact_type": "promotion_blocker_summary",
+            "schema_version": 1,
+            "generated_at": run_metadata["generated_at"],
+            "source_artifact_hash": source_hash,
+            "summary": promotion_summary,
+            "strategies": {
+                plan.candidate_id: {
+                    "status": promotion.status,
+                    "allowed_modes": promotion.allowed_modes,
+                    "next_action": "live readiness gate 검증 후 제한 캡 운영 검토",
+                    "blockers": [],
+                    "metrics": metrics_summary[plan.candidate_id],
+                    "reason": promotion.reason,
+                }
+            },
+        },
+    )
+    write_json(
+        promotion_dir.parent / "current_blockers.json",
+        {
+            "artifact_type": "current_go_live_blockers",
+            "schema_version": 2,
+            "generated_at": run_metadata["generated_at"],
+            "source": "reports/promotion/promotion_blocker_summary.json",
+            "source_artifact_hash": source_hash,
+            "go_live": True,
+            "verdict": "GO: live_candidate 1개 사용 가능",
+            "promotion_summary": promotion_summary,
+            "live_candidates": [plan.candidate_id],
+            "provisional_paper_candidates": [],
+            "hard_blockers": [],
+            "soft_blockers": [],
+            "next_actions": [],
+            "default_strategy": plan.candidate_id,
         },
     )
 
