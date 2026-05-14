@@ -137,6 +137,33 @@ class TestPreflightBasic:
         assert r.overall == "fail"
         assert r.entry_allowed is False
 
+    def test_launch_readiness_error_fails_preflight(
+        self, evidence_dir, runtime_dir, fresh_db, monkeypatch
+    ):
+        """launch readiness 계산 실패는 preflight 성공으로 삼키지 않는다."""
+        _seed_v2(evidence_dir, "readiness_err_s", [
+            {"date": "2026-04-04", "benchmark_status": "final"},
+            {"date": "2026-04-05", "benchmark_status": "final"},
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        import core.paper_pilot as paper_pilot
+
+        def raise_readiness_error(*args, **kwargs):
+            raise RuntimeError("readiness unavailable")
+
+        monkeypatch.setattr(paper_pilot, "compute_launch_readiness", raise_readiness_error)
+
+        from core.paper_preflight import run_preflight
+        r = run_preflight("readiness_err_s", "2026-04-06")
+
+        assert r.overall == "fail"
+        assert r.entry_allowed is False
+        assert any(
+            check["name"] == "launch_readiness" and check["status"] == "fail"
+            for check in r.checks
+        )
+
 
 class TestNotifierHealth:
 
