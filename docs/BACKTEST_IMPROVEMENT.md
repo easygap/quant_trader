@@ -160,6 +160,7 @@
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
 | Paper 운영 도구 (tools/) | 높음 | **완료 — evidence pipeline, pilot control, bootstrap, preflight, launch readiness CLI. `tools/paper_pilot_control.py`와 `tools/paper_runtime_status.py`는 액션 옵션을 한 번에 하나만 허용하고, 상충 액션 동시 지정 시 상태 조회·파일 기록 전에 fail-closed로 종료** |
+| Basket rebalance paper BUY 실행 경로 | 중간 | 완료 — `BasketRebalancer.execute()`의 paper BUY가 존재하지 않는 포트폴리오 메서드 대신 `get_current_capital()`/`get_available_cash()`를 사용한다. 실행 전 자본·현금 값이 `OrderExecutor.execute_buy_quantity()`에 전달되는 회귀 테스트로 고정 |
 | Entry filter 탐색 (market filter, abs momentum, cooling) | 중간 | **완료 — 모두 NO_MEANINGFUL_IMPROVEMENT 또는 ADVERSE EFFECT. 현행 유지** |
 | 운영/백테스트 시장국면 설정 동기화 | 높음 | 완료 — `trading.market_regime_*`를 canonical 설정으로 두고 `resolve_market_regime_config()`로 paper/live와 백테스트가 같은 파라미터를 보게 했다. `backtest_regime_filter`는 명시 값만 실험용 override로 사용하며, 백테스트도 MA(20/60) 데드크로스 신호를 반영한다. 기본값은 검증 결과에 맞춰 OFF |
 | Research sweep exposure-matched benchmark | 중간 | **완료 — 후보별 평균 노출/현금비중과 exposure-matched B&H excess 진단 추가. promotion gate는 raw benchmark 기준 유지** |
