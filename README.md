@@ -32,6 +32,7 @@
 > - live 체결 조회는 주문번호가 현재 주문과 일치하는 체결 row만 확정 체결로 인정
 > - 신규 BUY 주문 직전 유동성 재검증은 평균 거래량 누락/0도 fail-closed로 차단해 소형주·데이터 공백 주문을 막음
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
+> - 상관관계 리스크 확인은 가격 데이터 조회 실패·부족 시 신규 BUY를 차단
 > - live 바스켓 리밸런싱 주문도 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, canonical live gate 통과 없이는 실행 차단
 > - manual paper evidence single-day/backfill/finalize는 `backfill` provenance로 기록되어 승격 증거에서 제외
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
@@ -158,6 +159,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - 미체결 / 중복 주문 방지 (live 미체결 조회 실패 시 주문 보류)
 - 신규 BUY 주문 직전 평균 거래량 누락 또는 거래대금 하한 미달 시 차단
 - 갭 리스크 확인용 최근 가격 조회 실패 또는 데이터 부족 시 신규 BUY 차단
+- 상관관계 리스크 확인용 가격 데이터 조회 실패 또는 보유 종목 데이터 부족 시 신규 BUY 차단
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - live 체결 조회 결과의 주문번호가 현재 주문과 다르면 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
