@@ -783,7 +783,11 @@ class OrderExecutor:
         skip_earnings_days = int(self.config.trading.get("skip_earnings_days", 0))
         if skip_earnings_days > 0:
             from core.earnings_filter import is_near_earnings
-            near, reason_earn = is_near_earnings(symbol, skip_days=skip_earnings_days)
+            near, reason_earn = is_near_earnings(
+                symbol,
+                skip_days=skip_earnings_days,
+                config=self.config,
+            )
             if near:
                 logger.warning("종목 {} 매수 스킵 (실적 필터): {}", symbol, reason_earn)
                 return {"success": False, "reason": reason_earn}
