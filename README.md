@@ -14,6 +14,7 @@
 > - Paper 운영 CLI는 pilot 제어/런타임 상태 액션 옵션을 한 번에 하나만 받도록 정리되어, 상충 액션 동시 지정 시 상태 변경 전에 fail-closed로 종료
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡 + fail-closed/audited entry guard)
 > - Paper 신규 진입 실행 경계 fail-closed: preflight 상태 누락/손상 또는 runtime 조회 실패 시 BUY 제출 전 차단, SELL 청산은 유지
+> - Paper 바스켓 리밸런싱 BUY 실행은 실제 존재하는 포트폴리오 자본/현금 조회 API를 사용하도록 고정되어 주문 실행 전 단계 오류를 회귀 테스트로 차단
 > - `--mode paper` 단발 실행은 설정 파일의 `trading.mode=live`가 남아 있어도 해당 실행을 paper로 고정해 실주문 경로 진입을 차단
 > - 장중 auto-entry 후보는 주문 직전 현재 데이터로 BUY 시그널을 재검증하며, 데이터/API/전략 계산 오류로 재검증에 실패하면 해당 루프 주문을 보류하고 후보를 다음 루프로 넘김
 > - `QUANT_AUTO_ENTRY` 해석 단일화: YAML hash와 resolved hash를 분리해 실험 설정 drift 감지
@@ -286,6 +287,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-14 follow-up: 호환용 `has_unfilled_orders()`도 미체결 조회 실패를 `False`로 감추지 않고 미체결 있음으로 간주합니다. live 신규 주문이 상태형 API를 우회하는 레거시 경로로 들어와도 중복 주문 위험은 fail-closed로 처리됩니다.
 
 2026-05-14 follow-up: `OrderExecutor` live BUY 직접 호출 우회를 막았습니다. `run_live_trading()` 또는 live 리밸런싱처럼 readiness gate를 통과한 경로만 `live_gate_validated=True`를 전달하며, 기본값은 fail-closed라 수동 스크립트/콘솔에서 executor를 직접 만들어도 신규 BUY는 KIS 주문 전에 차단됩니다. SELL은 긴급 청산 안전성을 위해 기존 실행 경로를 유지합니다.
+
+2026-05-14 follow-up: 바스켓 리밸런싱 paper BUY 실행 경로를 복구했습니다. `BasketRebalancer.execute()`가 없는 포트폴리오 메서드를 호출하던 부분을 `get_current_capital()`/`get_available_cash()` 기준으로 정리했고, 실제 주문 실행 전 자본·현금 값이 `OrderExecutor.execute_buy_quantity()`에 전달되는지 회귀 테스트로 고정했습니다.
 
 2026-05-14 follow-up: paper promotion evidence package에 `package_integrity.payload_hash`와 `source_records.records_hash`를 추가했습니다. live gate는 패키지 payload hash, 원본 daily evidence JSONL에서 재계산한 source record hash, record count/date 범위를 모두 비교해 패키지 요약값과 원본 evidence가 따로 변경된 상태를 live 전환 근거로 쓰지 않습니다.
 
