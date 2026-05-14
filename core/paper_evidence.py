@@ -54,6 +54,7 @@ PROMOTION_MIN_SELL_TRADES = 5
 PROMOTION_MIN_WIN_RATE = 45.0
 PROMOTION_MAX_ADVERSE_FILL_GAP_BPS = 50.0
 PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO = 0.0
+PROMOTION_MAX_MISSING_EXECUTION_LINK_RATIO = 0.0
 PROMOTION_SOURCE_RECORDS_SCHEMA_VERSION = 1
 PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION = 1
 
@@ -1466,6 +1467,10 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
             "trade_count": 0,
             "missing_expected_price_count": 0,
             "missing_expected_price_ratio": None,
+            "missing_execution_session_id_count": 0,
+            "missing_order_id_count": 0,
+            "missing_execution_link_count": 0,
+            "missing_execution_link_ratio": None,
             "total_notional": 0.0,
             "signed_gap_cost": 0.0,
             "adverse_gap_cost": 0.0,
@@ -1476,6 +1481,9 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
         }
 
     missing_expected = 0
+    missing_execution_session = 0
+    missing_order = 0
+    missing_execution_link = 0
     total_notional = 0.0
     signed_gap_cost = 0.0
     adverse_gap_cost = 0.0
@@ -1485,6 +1493,14 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
         action = (getattr(trade, "action", "") or "").upper()
         price = float(getattr(trade, "price", 0) or 0)
         quantity = int(getattr(trade, "quantity", 0) or 0)
+        execution_session_id = str(getattr(trade, "execution_session_id", "") or "")
+        order_id = str(getattr(trade, "order_id", "") or "")
+        if not execution_session_id:
+            missing_execution_session += 1
+        if not order_id:
+            missing_order += 1
+        if not execution_session_id or not order_id:
+            missing_execution_link += 1
         total_notional += abs(price * quantity)
         total_slippage_cost += float(getattr(trade, "slippage", 0) or 0)
         actual_slippage_pct = getattr(trade, "actual_slippage_pct", None)
@@ -1520,6 +1536,7 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
             adverse_gap_cost += cost
 
     missing_ratio = missing_expected / trade_count if trade_count else None
+    missing_link_ratio = missing_execution_link / trade_count if trade_count else None
     adverse_gap_bps = (adverse_gap_cost / total_notional * 10000) if total_notional > 0 else None
     avg_abs_slippage_pct = (
         sum(abs(value) for value in slippage_pcts) / len(slippage_pcts)
@@ -1529,6 +1546,10 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
     if missing_ratio is not None and missing_ratio > PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO:
         issues.append(
             "expected_price_missing=%d/%d" % (missing_expected, trade_count)
+        )
+    if missing_link_ratio is not None and missing_link_ratio > PROMOTION_MAX_MISSING_EXECUTION_LINK_RATIO:
+        issues.append(
+            "execution_link_missing=%d/%d" % (missing_execution_link, trade_count)
         )
     if adverse_gap_bps is not None and adverse_gap_bps > PROMOTION_MAX_ADVERSE_FILL_GAP_BPS:
         issues.append(
@@ -1540,6 +1561,10 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
         "trade_count": trade_count,
         "missing_expected_price_count": missing_expected,
         "missing_expected_price_ratio": round(missing_ratio, 4) if missing_ratio is not None else None,
+        "missing_execution_session_id_count": missing_execution_session,
+        "missing_order_id_count": missing_order,
+        "missing_execution_link_count": missing_execution_link,
+        "missing_execution_link_ratio": round(missing_link_ratio, 4) if missing_link_ratio is not None else None,
         "total_notional": round(total_notional, 2),
         "signed_gap_cost": round(signed_gap_cost, 2),
         "adverse_gap_cost": round(adverse_gap_cost, 2),
@@ -1549,6 +1574,7 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
         "thresholds": {
             "max_adverse_gap_bps": PROMOTION_MAX_ADVERSE_FILL_GAP_BPS,
             "max_missing_expected_price_ratio": PROMOTION_MAX_MISSING_EXPECTED_PRICE_RATIO,
+            "max_missing_execution_link_ratio": PROMOTION_MAX_MISSING_EXECUTION_LINK_RATIO,
         },
         "issues": issues,
     }
@@ -1767,6 +1793,18 @@ def generate_promotion_package(
                     trade_quality.get("trade_count", 0),
                 )
             )
+        missing_link_ratio = trade_quality.get("missing_execution_link_ratio")
+        if (
+            missing_link_ratio is not None
+            and missing_link_ratio > PROMOTION_MAX_MISSING_EXECUTION_LINK_RATIO
+        ):
+            blocked = True
+            block_reasons.append(
+                "fill_quality_execution_link_missing=%d/%d" % (
+                    trade_quality.get("missing_execution_link_count", 0),
+                    trade_quality.get("trade_count", 0),
+                )
+            )
         adverse_gap_bps = trade_quality.get("adverse_gap_bps_of_notional")
         if (
             adverse_gap_bps is not None
@@ -1936,6 +1974,7 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("- Trade Quality Status: " + str(package.get("trade_quality_status", "N/A")))
     lines.append("- Trade Quality Adverse Gap bp: " + str(tq.get("adverse_gap_bps_of_notional", "N/A")))
     lines.append("- Trade Quality Missing Expected Price: " + str(tq.get("missing_expected_price_count", "N/A")))
+    lines.append("- Trade Quality Missing Execution Link: " + str(tq.get("missing_execution_link_count", "N/A")))
     lines.append("- Degraded Days: " + str(package["degraded_days"]))
     lines.append("- Frozen Days: " + str(package["frozen_days"]))
     lines.append("- Anomaly Summary: " + anom_json)
