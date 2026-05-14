@@ -439,10 +439,11 @@ def _seed_paper_trades_for_evidence(
     start: datetime,
     day_count: int,
     trades_per_day: int,
+    action_override: str | None = None,
 ):
     for day_index in range(day_count):
         for trade_index in range(trades_per_day):
-            action = "SELL" if trade_index % 2 else "BUY"
+            action = action_override or ("SELL" if trade_index % 2 else "BUY")
             _seed_paper_trade(
                 account_key,
                 symbol=f"{day_index:03d}{trade_index:03d}",
@@ -870,6 +871,61 @@ class TestEndToEndReplay:
         assert pkg["trade_quality"]["expected_trade_count"] == 120
         assert pkg["trade_quality"]["trade_count_match"] is False
         assert "fill_quality_trade_count_mismatch=1/120" in pkg["block_reasons"]
+
+    def test_promotion_blocks_trade_history_action_mismatch(self, evidence_dir, fresh_db):
+        """총 체결 수가 맞아도 BUY/SELL 구성이 다르면 sell gate 근거로 인정하지 않는다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_trade_action_mismatch"
+        start = datetime(2026, 1, 5)
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trades_for_evidence(
+            strategy,
+            start=start,
+            day_count=60,
+            trades_per_day=2,
+            action_override="BUY",
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "review"
+        assert pkg["trade_quality"]["trade_count"] == 120
+        assert pkg["trade_quality"]["expected_trade_count"] == 120
+        assert pkg["trade_quality"]["trade_count_match"] is True
+        assert pkg["trade_quality"]["buy_count"] == 120
+        assert pkg["trade_quality"]["expected_buy_count"] == 60
+        assert pkg["trade_quality"]["sell_count"] == 0
+        assert pkg["trade_quality"]["expected_sell_count"] == 60
+        assert pkg["trade_quality"]["trade_action_match"] is False
+        assert "fill_quality_trade_action_mismatch=buy120/60_sell0/60" in pkg["block_reasons"]
+
+    def test_promotion_blocks_unknown_trade_history_action(self, evidence_dir, fresh_db):
+        """BUY/SELL이 아닌 체결 방향은 sell 체결로 뭉개지 않고 별도 검토로 차단한다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_unknown_trade_action"
+        start = datetime(2026, 1, 5)
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trades_for_evidence(
+            strategy,
+            start=start,
+            day_count=60,
+            trades_per_day=2,
+            action_override="HOLD",
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "review"
+        assert pkg["trade_quality"]["trade_count"] == 120
+        assert pkg["trade_quality"]["unknown_action_count"] == 120
+        assert pkg["trade_quality"]["unknown_actions"] == {"HOLD": 120}
+        assert "fill_quality_unknown_trade_action=HOLD:120" in pkg["block_reasons"]
 
     def test_promotion_blocks_missing_trade_history_quality(self, evidence_dir, fresh_db):
         """paper evidence에 거래가 있는데 TradeHistory가 비어 있으면 체결 품질 미검증으로 차단한다."""
