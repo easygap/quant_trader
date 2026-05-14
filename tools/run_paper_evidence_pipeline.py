@@ -21,6 +21,7 @@ Usage:
 Note:
     - canonical promotion bundle / live eligibility는 절대 수정하지 않습니다.
     - promotion package는 recommendation만 제공합니다.
+    - 수동 single-day/backfill/finalize 수집은 backfill provenance로 기록되어 승격 증거에서 제외됩니다.
     - package 생성 시 reports/promotion/run_metadata.json이 있으면 target-weight 후보 식별과 params hash 검증에 사용합니다.
 """
 
@@ -102,6 +103,7 @@ def run_single_day(strategy: str, date_str: str):
     result = collect_daily_evidence(
         strategy=strategy, mode="paper", account_key=strategy,
         date=date, watchlist_symbols=_get_watchlist(),
+        evidence_mode="backfill",
     )
     if result is None:
         print("SKIP: %s already recorded" % date_str)
@@ -126,6 +128,7 @@ def run_finalize(strategy: str, date_str: str):
     result = finalize_daily_evidence(
         strategy=strategy, mode="paper", account_key=strategy,
         date=date, watchlist_symbols=_get_watchlist(),
+        evidence_mode="backfill",
     )
     if result is None:
         print("SKIP: %s already final or no record" % date_str)
@@ -155,6 +158,7 @@ def run_backfill(strategy: str, n_days: int):
         r = collect_daily_evidence(
             strategy=strategy, mode="paper", account_key=strategy,
             date=date, watchlist_symbols=watchlist,
+            evidence_mode="backfill",
         )
         if r:
             stats["new"] += 1
@@ -164,6 +168,7 @@ def run_backfill(strategy: str, n_days: int):
         f = finalize_daily_evidence(
             strategy=strategy, mode="paper", account_key=strategy,
             date=date, watchlist_symbols=watchlist,
+            evidence_mode="backfill",
         )
         if f and f.record_version > 1:
             stats["finalized"] += 1
