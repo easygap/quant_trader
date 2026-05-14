@@ -433,6 +433,32 @@ def _seed_paper_trade(account_key: str, **overrides):
         session.close()
 
 
+def _seed_paper_trades_for_evidence(
+    account_key: str,
+    *,
+    start: datetime,
+    day_count: int,
+    trades_per_day: int,
+):
+    for day_index in range(day_count):
+        for trade_index in range(trades_per_day):
+            action = "SELL" if trade_index % 2 else "BUY"
+            _seed_paper_trade(
+                account_key,
+                symbol=f"{day_index:03d}{trade_index:03d}",
+                action=action,
+                price=100.0,
+                quantity=10,
+                total_amount=1000.0,
+                expected_price=100.0,
+                actual_slippage_pct=0.0,
+                price_gap=0.0,
+                executed_at=start + timedelta(days=day_index, hours=10, minutes=trade_index),
+                execution_session_id=f"paper-evidence-session-{day_index}-{trade_index}",
+                order_id=f"ORD-PAPER-EVIDENCE-{day_index:03d}-{trade_index:03d}",
+            )
+
+
 class TestEndToEndReplay:
     """7영업일 synthetic replay → evidence + anomaly + weekly + package 검증."""
 
@@ -820,6 +846,30 @@ class TestEndToEndReplay:
         assert pkg["trade_quality"]["missing_execution_link_count"] == 1
         assert pkg["trade_quality"]["missing_execution_link_ratio"] == 1.0
         assert "fill_quality_execution_link_missing=1/1" in pkg["block_reasons"]
+
+    def test_promotion_blocks_trade_history_count_mismatch(self, evidence_dir, fresh_db):
+        """evidence 거래 수와 TradeHistory 체결 수가 다르면 일부 깨끗한 체결만으로 승격하지 않는다."""
+        from core.paper_evidence import generate_promotion_package
+
+        strategy = "fill_quality_trade_count_mismatch"
+        _append_eligible_promotion_records(evidence_dir, strategy)
+        _seed_paper_trade(
+            strategy,
+            price=100.0,
+            expected_price=100.0,
+            price_gap=0.0,
+            actual_slippage_pct=0.0,
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["trade_quality_status"] == "review"
+        assert pkg["trade_quality"]["trade_count"] == 1
+        assert pkg["trade_quality"]["expected_trade_count"] == 120
+        assert pkg["trade_quality"]["trade_count_match"] is False
+        assert "fill_quality_trade_count_mismatch=1/120" in pkg["block_reasons"]
 
     def test_promotion_blocks_missing_trade_history_quality(self, evidence_dir, fresh_db):
         """paper evidence에 거래가 있는데 TradeHistory가 비어 있으면 체결 품질 미검증으로 차단한다."""
@@ -1809,13 +1859,11 @@ class TestShadowEvidenceNotPromotable:
                 "status": "normal",
                 "anomalies": [],
             })
-        _seed_paper_trade(
+        _seed_paper_trades_for_evidence(
             strategy,
-            price=100.0,
-            expected_price=100.0,
-            price_gap=0.0,
-            actual_slippage_pct=0.0,
-            executed_at=start + timedelta(days=10),
+            start=start,
+            day_count=60,
+            trades_per_day=2,
         )
 
         pkg_path, _ = generate_promotion_package(strategy)
@@ -1994,13 +2042,11 @@ class TestShadowEvidenceNotPromotable:
                 "status": "normal",
                 "anomalies": [],
             })
-        _seed_paper_trade(
+        _seed_paper_trades_for_evidence(
             strategy,
-            price=100.0,
-            expected_price=100.0,
-            price_gap=0.0,
-            actual_slippage_pct=0.0,
-            executed_at=start + timedelta(days=10),
+            start=start,
+            day_count=60,
+            trades_per_day=2,
         )
 
         pkg_path, _ = generate_promotion_package(strategy)

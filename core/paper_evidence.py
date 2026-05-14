@@ -1440,7 +1440,13 @@ def _parse_evidence_date(value: object) -> datetime | None:
         return None
 
 
-def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date: object) -> dict:
+def _collect_promotion_trade_quality(
+    strategy: str,
+    start_date: object,
+    end_date: object,
+    *,
+    expected_trade_count: int | None = None,
+) -> dict:
     """promotion 기간의 paper TradeHistory 체결 품질을 요약한다."""
     from database.models import TradeHistory, get_session
 
@@ -1471,6 +1477,9 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
             "missing_order_id_count": 0,
             "missing_execution_link_count": 0,
             "missing_execution_link_ratio": None,
+            "expected_trade_count": expected_trade_count,
+            "trade_count_delta": -expected_trade_count if expected_trade_count is not None else None,
+            "trade_count_match": expected_trade_count == 0 if expected_trade_count is not None else None,
             "total_notional": 0.0,
             "signed_gap_cost": 0.0,
             "adverse_gap_cost": 0.0,
@@ -1537,6 +1546,16 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
 
     missing_ratio = missing_expected / trade_count if trade_count else None
     missing_link_ratio = missing_execution_link / trade_count if trade_count else None
+    trade_count_delta = (
+        trade_count - int(expected_trade_count)
+        if expected_trade_count is not None
+        else None
+    )
+    trade_count_match = (
+        trade_count_delta == 0
+        if trade_count_delta is not None
+        else None
+    )
     adverse_gap_bps = (adverse_gap_cost / total_notional * 10000) if total_notional > 0 else None
     avg_abs_slippage_pct = (
         sum(abs(value) for value in slippage_pcts) / len(slippage_pcts)
@@ -1550,6 +1569,10 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
     if missing_link_ratio is not None and missing_link_ratio > PROMOTION_MAX_MISSING_EXECUTION_LINK_RATIO:
         issues.append(
             "execution_link_missing=%d/%d" % (missing_execution_link, trade_count)
+        )
+    if trade_count_match is False:
+        issues.append(
+            "trade_count_mismatch=%d/%d" % (trade_count, int(expected_trade_count or 0))
         )
     if adverse_gap_bps is not None and adverse_gap_bps > PROMOTION_MAX_ADVERSE_FILL_GAP_BPS:
         issues.append(
@@ -1565,6 +1588,9 @@ def _collect_promotion_trade_quality(strategy: str, start_date: object, end_date
         "missing_order_id_count": missing_order,
         "missing_execution_link_count": missing_execution_link,
         "missing_execution_link_ratio": round(missing_link_ratio, 4) if missing_link_ratio is not None else None,
+        "expected_trade_count": expected_trade_count,
+        "trade_count_delta": trade_count_delta,
+        "trade_count_match": trade_count_match,
         "total_notional": round(total_notional, 2),
         "signed_gap_cost": round(signed_gap_cost, 2),
         "adverse_gap_cost": round(adverse_gap_cost, 2),
@@ -1779,8 +1805,17 @@ def generate_promotion_package(
         strategy,
         records[0]["date"],
         records[-1]["date"],
+        expected_trade_count=sum(r.get("total_trades", 0) for r in records),
     )
     if trade_quality.get("trade_count", 0) > 0:
+        if trade_quality.get("trade_count_match") is False:
+            blocked = True
+            block_reasons.append(
+                "fill_quality_trade_count_mismatch=%d/%d" % (
+                    trade_quality.get("trade_count", 0),
+                    trade_quality.get("expected_trade_count", 0),
+                )
+            )
         missing_ratio = trade_quality.get("missing_expected_price_ratio")
         if (
             missing_ratio is not None
@@ -1975,6 +2010,7 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("- Trade Quality Adverse Gap bp: " + str(tq.get("adverse_gap_bps_of_notional", "N/A")))
     lines.append("- Trade Quality Missing Expected Price: " + str(tq.get("missing_expected_price_count", "N/A")))
     lines.append("- Trade Quality Missing Execution Link: " + str(tq.get("missing_execution_link_count", "N/A")))
+    lines.append("- Trade Quality Trade Count Match: " + str(tq.get("trade_count_match", "N/A")))
     lines.append("- Degraded Days: " + str(package["degraded_days"]))
     lines.append("- Frozen Days: " + str(package["frozen_days"]))
     lines.append("- Anomaly Summary: " + anom_json)
