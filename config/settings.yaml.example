@@ -50,7 +50,7 @@ logging:
 # 데이터 소스 (수정주가 일치). FDR 우선 권장.
 data_source:
   preferred: "auto"             # auto | fdr | yfinance | kis
-  allow_kis_fallback: true      # false면 KIS 비수정주가 폴백 차단
+  allow_kis_fallback: false     # true로 명시한 경우에만 KIS 비수정주가 폴백 허용
   warn_on_source_mismatch: true
 
 trading:

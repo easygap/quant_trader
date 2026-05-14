@@ -1,6 +1,55 @@
 import types
 
 import pandas as pd
+import pytest
+
+
+def _price_frame():
+    return pd.DataFrame(
+        {
+            "open": [1000.0],
+            "high": [1010.0],
+            "low": [990.0],
+            "close": [1005.0],
+            "volume": [10000],
+        },
+        index=pd.to_datetime(["2026-01-02"]),
+    )
+
+
+def test_kis_fallback_is_disabled_when_data_source_setting_is_missing(monkeypatch):
+    import core.data_collector as data_collector
+
+    monkeypatch.setattr(data_collector, "HAS_FDR", False)
+    monkeypatch.setattr(data_collector, "HAS_YF", False)
+
+    collector = data_collector.DataCollector(types.SimpleNamespace(settings={}))
+    monkeypatch.setattr(
+        collector,
+        "fetch_korean_stock_via_kis",
+        lambda _symbol: pytest.fail("KIS fallback must require explicit opt-in"),
+    )
+
+    with pytest.raises(data_collector.DataCollectionError, match="KIS fallback 비활성화"):
+        collector._fetch_korean_stock_uncached("005930", "2026-01-01", "2026-01-03")
+
+
+def test_kis_fallback_runs_only_when_explicitly_enabled(monkeypatch):
+    import core.data_collector as data_collector
+
+    monkeypatch.setattr(data_collector, "HAS_FDR", False)
+    monkeypatch.setattr(data_collector, "HAS_YF", False)
+
+    collector = data_collector.DataCollector(
+        types.SimpleNamespace(settings={"data_source": {"allow_kis_fallback": True}})
+    )
+    expected = _price_frame()
+    monkeypatch.setattr(collector, "fetch_korean_stock_via_kis", lambda _symbol: expected)
+
+    result = collector._fetch_korean_stock_uncached("005930", "2026-01-01", "2026-01-03")
+
+    assert result is expected
+    assert collector.has_kis_fallback_symbols() == ["005930"]
 
 
 def test_get_sector_map_uses_fdr_sector_column(monkeypatch):
