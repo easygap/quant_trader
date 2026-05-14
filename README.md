@@ -6,13 +6,14 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-05-13)**:
+> **현재 상태 (2026-05-14)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
 > - Paper Evidence 런타임: v2 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
 > - Paper Runtime State Machine: normal/degraded/frozen/blocked_insufficient_evidence 상태 자동 전환 + allowed_actions 제어
 > - Paper Pilot Authorization: blocked 상태에서도 제한적 real paper 가능 (수동 승인 + 리스크 캡 + fail-closed/audited entry guard)
 > - Paper 신규 진입 실행 경계 fail-closed: preflight 상태 누락/손상 또는 runtime 조회 실패 시 BUY 제출 전 차단, SELL 청산은 유지
+> - `--mode paper` 단발 실행은 설정 파일의 `trading.mode=live`가 남아 있어도 해당 실행을 paper로 고정해 실주문 경로 진입을 차단
 > - 장중 auto-entry 후보는 주문 직전 현재 데이터로 BUY 시그널을 재검증하며, 데이터/API/전략 계산 오류로 재검증에 실패하면 해당 루프 주문을 보류하고 후보를 다음 루프로 넘김
 > - `QUANT_AUTO_ENTRY` 해석 단일화: YAML hash와 resolved hash를 분리해 실험 설정 drift 감지
 > - Research sweep: 기존 top-20 all-family 후보 재검증도 `NO_ALPHA_CANDIDATE`; `pullback`, benchmark-relative momentum, risk-budget, cash-switch, benchmark-aware rotation, target-weight top-N rotation/score-floor 후보군과 exposure-matched benchmark 진단을 research-only로 추가
@@ -34,6 +35,7 @@
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
 > - 상관관계 리스크 확인은 가격 데이터 조회 실패·부족 시 신규 BUY를 차단
 > - 업종 비중 cap은 섹터 맵 조회 실패·매핑 누락 시 신규 BUY를 차단
+> - 주문/exit 판단 가격이 0·NaN·누락이면 BUY/SELL 제출과 손절/익절/블랙스완 판단을 보류하고 차단 이벤트를 기록
 > - live 바스켓 리밸런싱 주문도 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, canonical live gate 통과 없이는 실행 차단
 > - manual paper evidence single-day/backfill/finalize는 `backfill` provenance로 기록되어 승격 증거에서 제외
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
@@ -142,6 +144,7 @@ python main.py --update-holidays
 ```
 
 Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json`이 존재하고, runtime state 조회가 성공하며, `entry` 허용 또는 현재 pilot authorization이 재검증될 때만 실행됩니다. preflight 누락/손상, runtime 조회 실패, critical fail은 주문 생성 전 차단되며 기존 포지션 SELL 청산은 차단하지 않습니다.
+`python main.py --mode paper`는 설정 파일에 `trading.mode: live`가 남아 있어도 해당 실행을 paper로 고정합니다. 모의투자 명령이 설정 잔재 때문에 실전 주문 실행기로 초기화되는 것을 막기 위한 안전장치입니다.
 장전/장중 auto-entry 후보는 주문 제출 직전에 최신 OHLCV와 전략 신호로 다시 확인합니다. 재조회 또는 신호 계산이 실패하면 stale 후보로 매수하지 않고 `ENTRY_REVALIDATION_BLOCK` 이벤트를 남긴 뒤 후보를 다음 루프까지 보류합니다.
 
 Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
@@ -162,6 +165,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - 갭 리스크 확인용 최근 가격 조회 실패 또는 데이터 부족 시 신규 BUY 차단
 - 상관관계 리스크 확인용 가격 데이터 조회 실패 또는 보유 종목 데이터 부족 시 신규 BUY 차단
 - 업종 비중 cap 확인용 섹터 맵 조회 실패 또는 대상/보유 종목 매핑 누락 시 신규 BUY 차단
+- 주문/손절/익절/블랙스완 판단용 현재가가 없거나 0/NaN이면 주문·청산 판단 보류 및 `PRICE_DATA_BLOCK` 기록
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - live 체결 조회 결과의 주문번호가 현재 주문과 다르면 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
