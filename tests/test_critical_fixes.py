@@ -638,6 +638,98 @@ class TestForceLiveRemoved:
 
         assert trigger._get_bind_host() == "0.0.0.0"
 
+    def test_web_dashboard_defaults_to_loopback(self, monkeypatch):
+        """웹 대시보드는 설정이 없을 때 로컬 루프백에만 바인드한다."""
+        from monitoring import web_dashboard as wd
+
+        monkeypatch.setattr(wd.Config, "get", lambda: SimpleNamespace(settings={}))
+
+        host, port = wd.resolve_dashboard_bind()
+
+        assert host == "127.0.0.1"
+        assert port == 8080
+
+    def test_web_dashboard_uses_configured_or_explicit_host(self, monkeypatch):
+        """외부 바인드는 설정 또는 CLI에서 명시한 경우에만 사용한다."""
+        from monitoring import web_dashboard as wd
+
+        monkeypatch.setattr(
+            wd.Config,
+            "get",
+            lambda: SimpleNamespace(settings={"dashboard": {"host": "0.0.0.0", "port": 9090}}),
+        )
+
+        assert wd.resolve_dashboard_bind() == ("0.0.0.0", 9090)
+        assert wd.resolve_dashboard_bind(host="127.0.0.1", port=7070) == ("127.0.0.1", 7070)
+
+    def test_main_dashboard_passes_host_and_port(self, monkeypatch):
+        """main dashboard 모드는 host/port 옵션을 web dashboard 실행부에 전달한다."""
+        import main as main_mod
+
+        captured = {}
+
+        def fake_run_web_dashboard(host=None, port=None):
+            captured["host"] = host
+            captured["port"] = port
+
+        monkeypatch.setattr("monitoring.web_dashboard.run_web_dashboard", fake_run_web_dashboard)
+
+        main_mod.run_dashboard(SimpleNamespace(dashboard_host="127.0.0.1", dashboard_port=7777))
+
+        assert captured == {"host": "127.0.0.1", "port": 7777}
+
+    def test_main_dashboard_cli_parses_host_and_port(self, monkeypatch):
+        """CLI에서 받은 dashboard host/port 옵션이 실행 args에 보존된다."""
+        import main as main_mod
+
+        captured = {}
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "main.py",
+                "--mode",
+                "dashboard",
+                "--dashboard-host",
+                "0.0.0.0",
+                "--dashboard-port",
+                "9090",
+            ],
+        )
+        monkeypatch.setattr(main_mod, "setup_logger", lambda: None)
+        monkeypatch.setattr(main_mod, "init_database", lambda: None)
+        monkeypatch.setattr(
+            main_mod,
+            "run_dashboard",
+            lambda args: captured.update(
+                {"host": args.dashboard_host, "port": args.dashboard_port}
+            ),
+        )
+
+        main_mod.main()
+
+        assert captured == {"host": "0.0.0.0", "port": 9090}
+
+    def test_dashboard_docs_and_config_default_to_loopback(self):
+        """실제/예시 설정과 운영 문서의 대시보드 기본 host는 외부 공개가 아니다."""
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+
+        settings_path = root / "config" / "settings.yaml"
+        example = (root / "config" / "settings.yaml.example").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        project_guide = (root / "docs" / "PROJECT_GUIDE.md").read_text(encoding="utf-8")
+
+        if settings_path.exists():
+            settings = settings_path.read_text(encoding="utf-8")
+            assert 'host: "127.0.0.1"' in settings
+        assert 'host: "127.0.0.1"' in example
+        assert "기본 바인드는 http://127.0.0.1:8080" in readme
+        assert "| **dashboard** | host(127.0.0.1), port(8080) |" in project_guide
+        assert "| **dashboard** | host(0.0.0.0), port(8080) |" not in project_guide
+
     def test_http_liquidate_token_validation_rejects_short_token(self, monkeypatch):
         """긴급 청산 HTTP 토큰은 기본 최소 길이를 만족해야 한다."""
         import monitoring.liquidate_trigger as trigger

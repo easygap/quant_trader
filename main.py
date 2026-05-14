@@ -1329,7 +1329,8 @@ def run_dashboard(args):
     logger.info("=" * 50)
 
     port = getattr(args, "dashboard_port", None)
-    run_web_dashboard(port=port)
+    host = getattr(args, "dashboard_host", None)
+    run_web_dashboard(host=host, port=port)
 
 
 def _get_strategy(name: str):
@@ -1485,6 +1486,10 @@ def main():
     parser.add_argument(
         "--dashboard-port", type=int, default=None,
         help="[dashboard 모드] 웹 대시보드 포트 (기본: config dashboard.port 또는 8080)",
+    )
+    parser.add_argument(
+        "--dashboard-host", default=None,
+        help="[dashboard 모드] 웹 대시보드 바인드 주소 (기본: config dashboard.host 또는 127.0.0.1)",
     )
     parser.add_argument(
         "--correlation-threshold", type=float, default=0.7,
