@@ -153,7 +153,7 @@ Full paper 신규 BUY는 `reports/paper_runtime/preflight_status_{strategy}.json
 
 Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판정하기 전에 `paper_preflight`를 먼저 갱신하고 그 결과를 `preflight_refresh` artifact에 남깁니다. `notifier: Discord webhook 미설정` 또는 notifier health 비정상 상태가 나오면 pilot authorization이나 cap이 맞아도 실행 전 `BLOCKED`로 유지되므로, `.env`의 `DISCORD_WEBHOOK_URL` 설정 후 preflight와 readiness audit을 다시 돌려야 합니다.
 
-실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 레지스트리의 `live_candidate` 허용 + 현재 commit/config와 일치하는 canonical promotion bundle + 내부 `strategy`가 현재 전략명과 정확히 일치하는 `ELIGIBLE` paper evidence package가 모두 필요합니다. 운영자가 전략 상태를 live 미허용으로 낮추면 canonical live gate가 통과해도 실전 시작은 fail-closed로 차단됩니다. promotion engine과 live gate는 same-universe/cash-adjusted paper excess가 모두 양수인지 확인하며, live gate는 `promotion_result.json` 표기를 그대로 믿지 않고 같은 산출물과 evidence를 승격 엔진으로 재계산해 현재 규칙에서도 `live_candidate`인지 다시 확인합니다. live 스케줄러 시작 전 KIS 연결 검증과 KIS↔DB 잔고 동기화도 반드시 통과해야 하며, 실패하면 경고로 넘기지 않고 시작을 차단합니다. 또한 `OrderExecutor`를 직접 생성해 live BUY를 호출해도 `live_gate_validated=True`로 생성된 실행 경로가 아니면 KIS 주문 제출 전에 차단됩니다.
+실전 매매는 `ENABLE_LIVE_TRADING=true` + `--confirm-live` + 전략 상태 레지스트리의 `live_candidate` 허용 + 현재 commit/config와 일치하는 canonical promotion bundle + 내부 `strategy`가 현재 전략명과 정확히 일치하는 `ELIGIBLE` paper evidence package가 모두 필요합니다. 운영자가 전략 상태를 live 미허용으로 낮추면 canonical live gate가 통과해도 실전 시작은 fail-closed로 차단됩니다. promotion engine과 live gate는 same-universe/cash-adjusted paper excess가 모두 양수인지 확인하며, live gate는 `promotion_result.json` 표기를 그대로 믿지 않고 같은 산출물과 evidence를 승격 엔진으로 재계산해 현재 규칙에서도 `live_candidate`인지 다시 확인합니다. paper evidence package는 package payload hash와 원본 daily evidence JSONL의 source record hash도 재검증하므로 패키지 요약값이나 원본 record가 따로 바뀌면 live gate가 차단합니다. live 스케줄러 시작 전 KIS 연결 검증과 KIS↔DB 잔고 동기화도 반드시 통과해야 하며, 실패하면 경고로 넘기지 않고 시작을 차단합니다. 또한 `OrderExecutor`를 직접 생성해 live BUY를 호출해도 `live_gate_validated=True`로 생성된 실행 경로가 아니면 KIS 주문 제출 전에 차단됩니다.
 수동 single-day/backfill/finalize evidence CLI는 운영 보정·품질 점검 용도이며 `backfill` provenance로 기록됩니다. 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` record만 승격 증거로 사용할 수 있습니다.
 Shadow bootstrap collect/finalize CLI도 주문 제출 없이 `shadow_bootstrap` provenance로 기록되며, 빈 이전일을 finalize하면서 새 record가 생성되어도 승격 증거로 계산하지 않습니다.
 현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
@@ -175,6 +175,7 @@ Shadow bootstrap collect/finalize CLI도 주문 제출 없이 `shadow_bootstrap`
 - live 체결 조회 결과의 주문번호가 현재 주문과 다르면 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
+- paper evidence package payload hash / source record hash 불일치 시 live gate 차단
 - live 신규 BUY는 gate 통과 상태가 전달된 `OrderExecutor`에서만 KIS 주문 제출 허용
 - live 바스켓 리밸런싱 주문은 운영자 확인과 canonical live gate 통과 후에만 실행
 - auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
@@ -281,6 +282,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-08 follow-up: KIS 미체결 조회 실패를 더 이상 “미체결 없음”으로 해석하지 않습니다. live BUY/SELL은 주문 전 미체결 조회가 실패하거나 응답 형식이 불명확하면 `live_unfilled_check.checked=False`로 주문을 보류하고, 재시작 복구에서도 KIS 미체결 조회 실패를 별도 critical 알림으로 드러냅니다.
 
 2026-05-14 follow-up: `OrderExecutor` live BUY 직접 호출 우회를 막았습니다. `run_live_trading()` 또는 live 리밸런싱처럼 readiness gate를 통과한 경로만 `live_gate_validated=True`를 전달하며, 기본값은 fail-closed라 수동 스크립트/콘솔에서 executor를 직접 만들어도 신규 BUY는 KIS 주문 전에 차단됩니다. SELL은 긴급 청산 안전성을 위해 기존 실행 경로를 유지합니다.
+
+2026-05-14 follow-up: paper promotion evidence package에 `package_integrity.payload_hash`와 `source_records.records_hash`를 추가했습니다. live gate는 패키지 payload hash, 원본 daily evidence JSONL에서 재계산한 source record hash, record count/date 범위를 모두 비교해 패키지 요약값과 원본 evidence가 따로 변경된 상태를 live 전환 근거로 쓰지 않습니다.
 
 2026-05-08 follow-up: target-weight 리서치 백테스트의 리밸런싱 체결 기준을 당일 종가에서 다음 거래일 시가로 보수화했습니다. 랭킹과 risk-off 판단은 직전 거래일 종가까지만 사용하고, 리밸런싱 체결은 해당 거래일 원본 `open`, 일말 평가는 `close`로 분리합니다. 신규 top-N 매수 후보의 리밸런싱일 `open`이 누락되면 `target_weight_research_execution_price_missing`으로 중단하고, 이미 보유한 종목의 `open`이 없으면 해당 리밸런싱을 거래 없이 skip 진단으로 남깁니다. 동적 슬리피지의 20일 평균 거래량도 당일 거래량을 포함하지 않도록 1거래일 지연합니다.
 
