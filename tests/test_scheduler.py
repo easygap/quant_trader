@@ -507,7 +507,7 @@ def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatc
     from core.scheduler import Scheduler
 
     class FakeExecutor:
-        def __init__(self, config=None, account_key=""):
+        def __init__(self, config=None, account_key="", *, live_gate_validated=False):
             self.last_open_order_reconcile_status = {
                 "checked": False,
                 "reason": "kis_open_orders_query_failed",
@@ -556,6 +556,30 @@ def test_scheduler_startup_recovery_reports_open_order_lookup_failure(monkeypatc
         assert detail["broker_sync_skip_reason"] == "kis_open_orders_query_failed"
     finally:
         scheduler.config.trading["mode"] = old_mode
+
+
+def test_live_scheduler_passes_gate_validation_to_order_executor(monkeypatch):
+    """live Scheduler가 생성한 OrderExecutor에 live gate 통과 상태를 전달한다."""
+    from core.scheduler import Scheduler
+
+    captured = {}
+
+    class FakeExecutor:
+        def __init__(self, config=None, account_key="", *, live_gate_validated=False):
+            captured["account_key"] = account_key
+            captured["live_gate_validated"] = live_gate_validated
+
+    monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    scheduler._mode = "live"
+    scheduler._live_gate_validated = True
+
+    assert scheduler._get_or_create_executor() is scheduler._order_executor
+    assert captured == {
+        "account_key": "scoring",
+        "live_gate_validated": True,
+    }
 
 
 def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
