@@ -1157,8 +1157,25 @@ def run_emergency_liquidate(args):
                 account_no = config.get_account_no(ak)
                 kis = KISApi(account_no=account_no)
                 price_info = kis.get_current_price(pos.symbol)
-                if price_info and price_info.get("price"):
-                    price = float(price_info["price"])
+                try:
+                    price = float((price_info or {}).get("price") or 0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                if price <= 0:
+                    reason = "실전 긴급 청산 현재가 조회 실패"
+                    summary["failed"] += 1
+                    summary["details"].append({
+                        "symbol": pos.symbol,
+                        "account_key": ak,
+                        "status": "failed",
+                        "reason": reason,
+                    })
+                    logger.error(
+                        "{}: {} — 평균단가 fallback 매도를 실행하지 않습니다.",
+                        reason,
+                        pos.symbol,
+                    )
+                    continue
             result = executor.execute_sell(
                 pos.symbol,
                 price,
