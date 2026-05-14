@@ -277,6 +277,70 @@ def test_execute_buy_quantity_blocks_when_entry_liquidity_volume_missing(fresh_d
     assert get_position("005930", account_key="missing_liquidity_quantity_test") is None
 
 
+def test_execute_buy_blocks_when_correlation_risk_check_fails(fresh_db, monkeypatch):
+    """상관관계 리스크 확인 실패는 신규 BUY 제출 전 차단한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    save_position(
+        symbol="000660",
+        avg_price=100_000,
+        quantity=2,
+        stop_loss_price=95_000,
+        take_profit_price=110_000,
+        trailing_stop_price=96_000,
+        strategy="scoring",
+        account_key="correlation_block_test",
+    )
+
+    executor = OrderExecutor(account_key="correlation_block_test")
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(executor, "_get_sector_map_cached", lambda: {})
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_position_size",
+        lambda *args, **kwargs: 3,
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {
+            "scale": 0.0,
+            "high_corr_symbols": [],
+            "reason": "상관관계 리스크 확인 실패: 보유 종목 가격 데이터 부족 (000660)",
+            "blocked": True,
+        },
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_diversification",
+        lambda *args, **kwargs: {"can_buy": True, "reason": ""},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_recent_performance",
+        lambda *args, **kwargs: {"allowed": True, "reason": ""},
+    )
+    _allow_paper_entry(monkeypatch)
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="correlation block test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert result["correlation_risk_blocked"] is True
+    assert "상관관계 리스크 확인 실패" in result["reason"]
+    assert get_position("005930", account_key="correlation_block_test") is None
+
+
 def test_execute_buy_blocks_when_gap_risk_price_lookup_fails(fresh_db, monkeypatch):
     """갭 리스크가 켜져 있으면 최근 가격 조회 실패 시 일반 BUY를 차단한다."""
     from core.order_executor import OrderExecutor

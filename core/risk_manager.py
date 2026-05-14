@@ -180,32 +180,79 @@ class RiskManager:
 
         threshold = float(corr_cfg.get("high_corr_threshold", 0.7))
         scale_factor = float(corr_cfg.get("high_corr_scale", 0.5))
+        strict = bool(corr_cfg.get("strict", True))
         lb = lookback_days or int(corr_cfg.get("lookback_days", 60))
+
+        def _blocked(reason: str, symbols: list[str] | None = None) -> dict:
+            payload = {
+                "scale": 0.0,
+                "high_corr_symbols": [],
+                "reason": reason,
+                "blocked": True,
+            }
+            if symbols:
+                payload["missing_symbols"] = symbols
+            return payload
 
         try:
             from core.data_collector import DataCollector
             collector = DataCollector()
             target_df = collector.fetch_stock(symbol)
             if target_df is None or target_df.empty or len(target_df) < lb:
-                return {"scale": 1.0, "high_corr_symbols": [], "reason": "데이터 부족"}
+                reason = f"상관관계 리스크 확인 실패: {symbol} 가격 데이터 부족"
+                logger.warning(reason)
+                return _blocked(reason, [symbol]) if strict else {
+                    "scale": 1.0, "high_corr_symbols": [], "reason": reason,
+                }
+            if "close" not in target_df.columns:
+                reason = f"상관관계 리스크 확인 실패: {symbol} close 데이터 없음"
+                logger.warning(reason)
+                return _blocked(reason, [symbol]) if strict else {
+                    "scale": 1.0, "high_corr_symbols": [], "reason": reason,
+                }
 
             target_returns = target_df["close"].pct_change().dropna().tail(lb)
+            if len(target_returns) < 30:
+                reason = f"상관관계 리스크 확인 실패: {symbol} 수익률 데이터 부족"
+                logger.warning(reason)
+                return _blocked(reason, [symbol]) if strict else {
+                    "scale": 1.0, "high_corr_symbols": [], "reason": reason,
+                }
             high_corr = []
+            missing_symbols = []
 
             for ex_sym in existing_symbols:
                 try:
                     ex_df = collector.fetch_stock(ex_sym)
-                    if ex_df is None or ex_df.empty or len(ex_df) < lb:
+                    if (
+                        ex_df is None
+                        or ex_df.empty
+                        or len(ex_df) < lb
+                        or "close" not in ex_df.columns
+                    ):
+                        missing_symbols.append(ex_sym)
                         continue
                     ex_returns = ex_df["close"].pct_change().dropna().tail(lb)
                     common = target_returns.index.intersection(ex_returns.index)
                     if len(common) < 30:
+                        missing_symbols.append(ex_sym)
                         continue
                     corr = target_returns.loc[common].corr(ex_returns.loc[common])
                     if abs(corr) >= threshold:
                         high_corr.append((ex_sym, round(corr, 3)))
-                except Exception:
+                except Exception as exc:
+                    logger.warning("상관관계 리스크 확인 실패: {} 데이터 조회 실패 ({})", ex_sym, exc)
+                    missing_symbols.append(ex_sym)
                     continue
+
+            if missing_symbols and strict:
+                unique_missing = sorted(set(missing_symbols))
+                reason = (
+                    "상관관계 리스크 확인 실패: 보유 종목 가격 데이터 부족 "
+                    f"({', '.join(unique_missing[:5])})"
+                )
+                logger.warning(reason)
+                return _blocked(reason, unique_missing)
 
             if high_corr:
                 reason = "고상관 보유종목: " + ", ".join(
@@ -218,7 +265,10 @@ class RiskManager:
                 return {"scale": scale_factor, "high_corr_symbols": high_corr, "reason": reason}
 
         except Exception as e:
-            logger.debug("상관관계 체크 실패 (정상 진행): {}", e)
+            reason = f"상관관계 리스크 확인 실패: {e}"
+            logger.warning(reason)
+            if strict:
+                return _blocked(reason)
 
         return {"scale": 1.0, "high_corr_symbols": [], "reason": ""}
 
