@@ -64,6 +64,7 @@ diversification:
   max_position_ratio: 0.20    # 단일 종목 최대 비중 (총자산 대비 20%)
   max_investment_ratio: 0.70  # 전체 주식 투자 비중 상한 (총 자산의 70% 초과 불가)
   max_sector_ratio: 0.40      # 단일 업종(KRX Sector) 최대 비중 (총자산 대비 40%). FDR 업종 매핑 사용.
+  sector_map_strict: true     # 업종 맵 조회 실패/누락 시 신규 BUY 차단 (fail-closed)
   max_positions: 10           # 최대 동시 보유 종목 수 (이 개수 초과 시 신규 매수 불가)
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
   # 상관관계 기반 리스크 관리: 기존 보유 종목과 높은 상관관계를 보이는 종목의 비중 축소
