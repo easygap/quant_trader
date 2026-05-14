@@ -583,6 +583,33 @@ def run_rebalance(args):
     notifier = Notifier(config)
     basket_name = getattr(args, "basket", None)
     dry_run = getattr(args, "dry_run", False)
+    mode = str(config.trading.get("mode", "paper")).lower()
+    live_rebalance_confirmed = False
+
+    if mode == "live" and not dry_run:
+        strategy_name = (
+            getattr(args, "strategy", None)
+            or getattr(config, "active_strategy", "scoring")
+        )
+        _require_live_operator_confirmation(
+            args,
+            action_label="실전 바스켓 리밸런싱",
+            example=(
+                "python main.py --mode rebalance "
+                f"--basket {basket_name or '<basket>'} "
+                f"--strategy {strategy_name} --confirm-live"
+            ),
+        )
+        gate_issues = _check_live_readiness_gate(config, strategy_name)
+        if gate_issues:
+            logger.error("=" * 50)
+            logger.error("🚫 실전 바스켓 리밸런싱 검증 실패 — 아래 항목 확인 후 재시도하세요:")
+            for issue in gate_issues:
+                logger.error("  - {}", issue)
+            logger.error("리밸런싱 주문도 live gate를 우회할 수 없습니다.")
+            logger.error("=" * 50)
+            sys.exit(1)
+        live_rebalance_confirmed = True
 
     if basket_name:
         basket_names = [basket_name]
@@ -613,7 +640,11 @@ def run_rebalance(args):
                 logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
                 continue
 
-            result = rebalancer.execute(orders, dry_run=dry_run)
+            result = rebalancer.execute(
+                orders,
+                dry_run=dry_run,
+                live_confirmed=live_rebalance_confirmed,
+            )
 
             summary = (
                 f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
