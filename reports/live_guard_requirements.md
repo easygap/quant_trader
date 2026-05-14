@@ -12,12 +12,14 @@
 | 6 | benchmark final ratio 80% 이상 | `benchmark_final_ratio` | 미충족 |
 | 7 | frozen day 0, sell 5건 이상, win rate 45% 이상 | promotion evidence | 미충족 |
 | 8 | 데이터 소스 health check | FDR/yfinance 수집 성공 | live gate 통과 후 확인 |
+| 9 | 체결 조회 주문번호 일치 | KIS 일별체결조회 row의 `ODNO`/`ORD_NO` | 불일치 시 장부 반영 보류 |
 
 ## 코드 위치
 - `main.py:_check_live_readiness_gate()` — live gate 진입점
 - `core/live_gate.py:validate_live_readiness()` — canonical artifact + paper evidence 검증
 - `main.py:run_live_trading()` — gate 실패 시 `sys.exit(1)`
 - `main.py:run_rebalance()` / `core.basket_rebalancer.BasketRebalancer.execute()` — live 바스켓 리밸런싱 주문도 운영자 확인과 live gate 통과 없이는 실행 차단
+- `api.kis_api.KISApi.get_order_execution_after_order()` / `core.order_executor.OrderExecutor._resolve_live_execution()` — 현재 주문번호와 일치하는 체결 row만 DB 반영 허용
 - 환경변수 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 이중 확인 유지
 
 생성: 2026-04-29

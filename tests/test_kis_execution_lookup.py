@@ -50,6 +50,81 @@ def test_get_order_execution_after_order_matches_order_number():
     assert execution["order_no"] == "000123"
 
 
+def test_get_order_execution_after_order_rejects_single_fallback_row_with_mismatched_order_number():
+    api = object.__new__(KISApi)
+    calls = []
+
+    def fake_rows(symbol, order_no, ccld_dvsn="01"):
+        calls.append(order_no)
+        if order_no == "000123":
+            return []
+        return [{
+            "ODNO": "000122",
+            "avg_prvs": "59000",
+            "tot_ccld_qty": "3",
+        }]
+
+    api._inquire_daily_ccld_rows = fake_rows
+
+    execution = api.get_order_execution_after_order(
+        "005930",
+        {"odno": "000123"},
+        max_attempts=1,
+        delay_seconds=0,
+    )
+
+    assert execution is None
+    assert calls == ["000123", ""]
+
+
+def test_get_order_execution_after_order_rejects_single_primary_row_with_mismatched_order_number():
+    api = object.__new__(KISApi)
+
+    def fake_rows(symbol, order_no, ccld_dvsn="01"):
+        if order_no == "000123":
+            return [{
+                "ODNO": "000122",
+                "avg_prvs": "59000",
+                "tot_ccld_qty": "3",
+            }]
+        return []
+
+    api._inquire_daily_ccld_rows = fake_rows
+
+    execution = api.get_order_execution_after_order(
+        "005930",
+        {"odno": "000123"},
+        max_attempts=1,
+        delay_seconds=0,
+    )
+
+    assert execution is None
+
+
+def test_get_order_execution_after_order_accepts_single_row_with_unpadded_order_number():
+    api = object.__new__(KISApi)
+
+    def fake_rows(symbol, order_no, ccld_dvsn="01"):
+        return [{
+            "ODNO": "123",
+            "avg_prvs": "60100",
+            "tot_ccld_qty": "3",
+        }]
+
+    api._inquire_daily_ccld_rows = fake_rows
+
+    execution = api.get_order_execution_after_order(
+        "005930",
+        {"odno": "000123"},
+        max_attempts=1,
+        delay_seconds=0,
+    )
+
+    assert execution["fill_price"] == 60100.0
+    assert execution["filled_qty"] == 3.0
+    assert execution["order_no"] == "123"
+
+
 def test_unfilled_order_status_detects_uppercase_symbol_and_remaining_qty():
     api = object.__new__(KISApi)
     api.use_mock = True
