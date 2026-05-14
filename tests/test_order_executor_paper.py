@@ -201,6 +201,67 @@ def test_paper_buy_uses_estimated_fill_price_for_sizing_and_targets(fresh_db, mo
     assert position.trailing_stop_price == 57_057
 
 
+def test_paper_buy_blocks_when_earnings_lookup_unknown(fresh_db, monkeypatch):
+    """실적일 필터가 켜져 있으면 조회 불가 상태를 신규 BUY 차단으로 처리한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+    import core.earnings_filter as earnings_filter
+
+    executor = OrderExecutor(account_key="earnings_unknown_block_test")
+    executor.config.trading["skip_earnings_days"] = 3
+    executor.config.trading["earnings_filter_unknown_policy"] = "block"
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        "core.market_regime.get_regime_adjusted_params",
+        lambda config: {"allow_buys": True, "regime": "disabled", "details": {}},
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_transaction_costs",
+        lambda price, quantity, action, avg_daily_volume=None: {
+            "execution_price": float(price),
+            "commission": 0.0,
+            "tax": 0.0,
+            "slippage": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "calculate_stop_loss",
+        lambda price, atr=None, regime_multiplier=1.0: float(price) * 0.97,
+    )
+    monkeypatch.setattr(executor.risk_manager, "calculate_position_size", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {"blocked": False, "scale": 1.0, "reason": ""},
+    )
+    monkeypatch.setattr(
+        earnings_filter,
+        "lookup_next_earnings_date",
+        lambda symbol, config=None: earnings_filter.EarningsLookupResult(
+            source="yfinance,dart",
+            reason="calendar missing; dart api key missing",
+        ),
+    )
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="earnings unknown test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert "실적일 조회 불가" in result["reason"]
+    assert get_position("005930", account_key="earnings_unknown_block_test") is None
+
+
 def test_execute_buy_blocks_when_entry_liquidity_volume_missing(fresh_db, monkeypatch):
     """진입 전 유동성 필터가 켜져 있으면 평균 거래량 누락 시 일반 BUY를 차단한다."""
     from core.order_executor import OrderExecutor
