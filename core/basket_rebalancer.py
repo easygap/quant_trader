@@ -349,7 +349,7 @@ class BasketRebalancer:
             try:
                 if order.action == "BUY":
                     available_cash = self.portfolio_mgr.get_available_cash()
-                    total_value = self.portfolio_mgr.get_total_value()
+                    total_value = self.portfolio_mgr.get_current_capital()
                     res = executor.execute_buy_quantity(
                         symbol=order.symbol,
                         price=order.price,
