@@ -355,6 +355,79 @@ class TestForceLiveRemoved:
         assert summary["succeeded"] == 1
         assert summary["failed"] == 0
 
+    def test_live_liquidate_does_not_fallback_to_avg_price_when_current_price_missing(self, monkeypatch):
+        """live 긴급 청산은 현재가 조회 실패 시 평균단가 지정가 매도를 내지 않는다."""
+        import main as main_mod
+        import database.repositories as repositories
+
+        calls = []
+        sells = []
+        notifications = []
+        config = SimpleNamespace(
+            trading={"mode": "live"},
+            kis_api={"accounts": {}},
+            get_account_no=lambda account_key="": "12345678-01",
+        )
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+        monkeypatch.setattr(main_mod, "_sync_live_positions_before_liquidation", lambda cfg: [])
+        monkeypatch.setattr(
+            repositories,
+            "get_all_positions",
+            lambda: [
+                SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
+            ],
+        )
+
+        class FakeKIS:
+            def __init__(self, account_no=None):
+                self.account_no = account_no
+
+            def get_current_price(self, symbol):
+                calls.append(("price", symbol, self.account_no))
+                return None
+
+        class FakeExecutor:
+            def __init__(self, cfg, account_key=""):
+                self.account_key = account_key
+
+            def execute_sell(self, symbol, price, quantity=None, reason="", strategy=""):
+                sells.append({
+                    "symbol": symbol,
+                    "price": price,
+                    "quantity": quantity,
+                    "reason": reason,
+                    "strategy": strategy,
+                })
+                raise AssertionError("현재가 실패 시 live 매도 주문을 호출하면 안 됨")
+
+        class FakeNotifier:
+            def __init__(self, cfg):
+                self.cfg = cfg
+
+            def send_message(self, text, critical=False):
+                notifications.append({"text": text, "critical": critical})
+
+        monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
+        monkeypatch.setattr("core.order_executor.OrderExecutor", FakeExecutor)
+        monkeypatch.setattr("core.notifier.Notifier", FakeNotifier)
+
+        summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
+
+        assert calls == [("price", "005930", "12345678-01")]
+        assert sells == []
+        assert summary["attempted"] == 1
+        assert summary["succeeded"] == 0
+        assert summary["failed"] == 1
+        assert summary["details"] == [{
+            "symbol": "005930",
+            "account_key": "",
+            "status": "failed",
+            "reason": "실전 긴급 청산 현재가 조회 실패",
+        }]
+        assert notifications and "실패 상세" in notifications[0]["text"]
+
     def test_live_liquidate_aborts_when_broker_sync_fails_before_position_load(self, monkeypatch):
         """live 긴급 청산 전 KIS↔DB 동기화 실패가 남으면 stale DB 포지션만으로 진행하지 않는다."""
         import main as main_mod
