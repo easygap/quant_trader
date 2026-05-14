@@ -128,6 +128,46 @@ class TestResolveAutoEntry:
         assert result["trading"]["_auto_entry_source"] == "YAML"
 
 
+class TestResolveDataSource:
+    """데이터 소스 기본값과 boolean 해석 테스트."""
+
+    def test_missing_data_source_defaults_to_kis_fallback_disabled(self):
+        from config.config_loader import _resolve_data_source_defaults
+
+        settings = _resolve_data_source_defaults({})
+
+        assert settings["data_source"]["preferred"] == "auto"
+        assert settings["data_source"]["allow_kis_fallback"] is False
+        assert settings["data_source"]["warn_on_source_mismatch"] is True
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("true", True),
+            ("1", True),
+            ("yes", True),
+            ("false", False),
+            ("0", False),
+            ("no", False),
+        ],
+    )
+    def test_string_boolean_values_are_explicitly_parsed(self, raw, expected):
+        from config.config_loader import _resolve_data_source_defaults
+
+        settings = _resolve_data_source_defaults(
+            {"data_source": {"allow_kis_fallback": raw, "warn_on_source_mismatch": raw}}
+        )
+
+        assert settings["data_source"]["allow_kis_fallback"] is expected
+        assert settings["data_source"]["warn_on_source_mismatch"] is expected
+
+    def test_invalid_boolean_value_raises(self):
+        from config.config_loader import _resolve_data_source_defaults
+
+        with pytest.raises(ValueError, match="data_source.allow_kis_fallback"):
+            _resolve_data_source_defaults({"data_source": {"allow_kis_fallback": "maybe"}})
+
+
 # ──────────────────────────────────────────────────────
 # Config 싱글톤 통합 테스트
 # ──────────────────────────────────────────────────────
@@ -178,6 +218,34 @@ class TestDualHash:
         assert yaml_hash_1 == yaml_hash_2
         # resolved hash는 auto_entry가 바뀌었으므로 다름
         assert resolved_hash_1 != resolved_hash_2
+
+    def test_resolved_hash_changes_when_data_source_policy_changes(self):
+        """데이터 소스 정책도 실행 설정 해시에 포함된다."""
+        from config.config_loader import compute_resolved_hash
+
+        base_settings = {
+            "trading": {"mode": "paper", "auto_entry": False},
+            "watchlist": {"mode": "manual", "symbols": ["005930"]},
+            "data_source": {
+                "preferred": "fdr",
+                "allow_kis_fallback": False,
+                "warn_on_source_mismatch": True,
+            },
+        }
+        strategies = {"active_strategy": "scoring"}
+        risk_params = {"position_sizing": {"initial_capital": 1000000}}
+
+        h1 = compute_resolved_hash(base_settings, strategies, risk_params)
+        changed = {
+            **base_settings,
+            "data_source": {
+                **base_settings["data_source"],
+                "allow_kis_fallback": True,
+            },
+        }
+        h2 = compute_resolved_hash(changed, strategies, risk_params)
+
+        assert h1 != h2
 
     def test_hashes_are_hex_strings(self):
         """해시가 유효한 hex 문자열."""
