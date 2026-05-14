@@ -31,6 +31,7 @@
 > - live 보류 주문 복구는 KIS 미체결 목록에서 사라진 주문도 체결 상세가 확인될 때만 `RECONCILED`로 닫고, 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지
 > - 신규 BUY 주문 직전 유동성 재검증은 평균 거래량 누락/0도 fail-closed로 차단해 소형주·데이터 공백 주문을 막음
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
+> - live 바스켓 리밸런싱 주문도 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, canonical live gate 통과 없이는 실행 차단
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
 
 ## 주요 기능
@@ -126,6 +127,8 @@ python main.py --mode optimize --strategy scoring --include-weights --auto-corre
 
 # 바스켓 리밸런싱
 python main.py --mode rebalance
+python main.py --mode rebalance --dry-run
+# config가 live일 때 실제 리밸런싱 주문은 ENABLE_LIVE_TRADING=true + --confirm-live + live gate 통과 필요
 
 # 웹 대시보드
 python main.py --mode dashboard
@@ -155,6 +158,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 - live 주문 체결 확인 전 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
+- live 바스켓 리밸런싱 주문은 운영자 확인과 canonical live gate 통과 후에만 실행
 - auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
 - live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
 - HTTP 긴급 청산 트리거 live 실행은 별도 확인 환경변수 없이는 차단
