@@ -488,7 +488,7 @@ class RiskManager:
             available_cash: 가용 현금
             current_invested: 현재 총 투자 금액
             symbol: 매수 대상 종목코드 (업종 체크용)
-            sector_map: {종목코드: 업종명} 딕셔너리 (None이면 업종 체크 스킵)
+            sector_map: {종목코드: 업종명} 딕셔너리
             positions: 현재 보유 Position 객체 리스트 (업종 비중 계산용)
 
         Returns:
@@ -499,6 +499,7 @@ class RiskManager:
         max_ratio = div_config.get("max_position_ratio", 0.20)
         max_investment_ratio = div_config.get("max_investment_ratio", 0.70)
         min_cash = div_config.get("min_cash_ratio", 0.20)
+        sector_map_strict = bool(div_config.get("sector_map_strict", True))
 
         position_value = self._value_in_krw_for_symbol(symbol, float(position_value or 0))
         current_invested = float(current_invested or 0)
@@ -533,10 +534,41 @@ class RiskManager:
             and max_sector_ratio > 0
             and total_value > 0
             and symbol
-            and sector_map
             and positions is not None
         ):
+            if not sector_map:
+                if sector_map_strict:
+                    return {
+                        "can_buy": False,
+                        "reason": "업종 비중 확인 실패: 섹터 맵 없음",
+                    }
+                return {"can_buy": True, "reason": ""}
+
             target_sector = sector_map.get(symbol, "")
+            if not target_sector:
+                if sector_map_strict:
+                    return {
+                        "can_buy": False,
+                        "reason": f"업종 비중 확인 실패: {symbol} 업종 매핑 없음",
+                    }
+                return {"can_buy": True, "reason": ""}
+
+            missing_position_symbols = sorted(
+                {
+                    getattr(p, "symbol", "")
+                    for p in positions
+                    if getattr(p, "symbol", "") and not sector_map.get(getattr(p, "symbol", ""), "")
+                }
+            )
+            if missing_position_symbols and sector_map_strict:
+                return {
+                    "can_buy": False,
+                    "reason": (
+                        "업종 비중 확인 실패: 보유 종목 업종 매핑 없음 "
+                        f"({', '.join(missing_position_symbols[:5])})"
+                    ),
+                }
+
             if target_sector:
                 sector_invested = sum(
                     self._value_in_krw_for_symbol(
