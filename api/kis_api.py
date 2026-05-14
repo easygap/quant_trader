@@ -741,8 +741,30 @@ class KISApi:
             "fill_price": float(fill_price),
             "filled_qty": filled_qty,
             "remaining_qty": remaining_qty,
-            "order_no": str(row.get("odno") or row.get("ODNO") or "").strip(),
+            "order_no": cls._order_no_from_ccld_row(row),
         }
+
+    @staticmethod
+    def _order_no_from_ccld_row(row: Dict[str, Any]) -> str:
+        if not row or not isinstance(row, dict):
+            return ""
+        return str(
+            row.get("odno")
+            or row.get("ODNO")
+            or row.get("ord_no")
+            or row.get("ORD_NO")
+            or ""
+        ).strip()
+
+    @classmethod
+    def _ccld_row_matches_order(cls, row: Dict[str, Any], order_no: str) -> bool:
+        row_order_no = cls._order_no_from_ccld_row(row)
+        wanted = str(order_no or "").strip()
+        if not row_order_no or not wanted:
+            return False
+        return row_order_no == wanted or (row_order_no.lstrip("0") or row_order_no) == (
+            wanted.lstrip("0") or wanted
+        )
 
     def _inquire_daily_ccld_rows(
         self,
@@ -804,18 +826,11 @@ class KISApi:
         if not odno:
             logger.debug("주문 응답에 ODNO 없음 — 체결가 조회 생략: {}", symbol)
             return None
-        want = odno.lstrip("0") or odno
-
         def _pick_execution(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             if not rows:
                 return None
-            if len(rows) == 1:
-                return self._execution_from_ccld_row(rows[0])
             for row in rows:
-                r_od = str(row.get("odno") or row.get("ODNO") or "").strip()
-                if not r_od:
-                    continue
-                if r_od != odno and r_od.lstrip("0") != want:
+                if not self._ccld_row_matches_order(row, odno):
                     continue
                 execution = self._execution_from_ccld_row(row)
                 if execution and execution.get("fill_price", 0) > 0:
