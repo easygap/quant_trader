@@ -11,6 +11,13 @@ class _MockConfig:
             "max_position_ratio": 0.20,
             "max_investment_ratio": 0.70,
             "min_cash_ratio": 0.20,
+            "correlation_risk": {
+                "enabled": True,
+                "lookback_days": 60,
+                "high_corr_threshold": 0.7,
+                "high_corr_scale": 0.5,
+                "strict": True,
+            },
         },
         "transaction_costs": {
             "slippage": 0.0005,
@@ -119,3 +126,48 @@ def test_dynamic_slippage_increases_when_order_participation_is_high(risk_manage
     )
     assert high["slippage"] > low["slippage"]
     assert high["slippage_multiplier"] >= 2.0
+
+
+def test_correlation_risk_blocks_when_target_price_data_lookup_fails(risk_manager, monkeypatch):
+    """상관관계 리스크가 켜져 있으면 대상 종목 가격 조회 실패 시 fail-closed."""
+
+    class FailingCollector:
+        def fetch_stock(self, symbol):
+            raise RuntimeError("price provider unavailable")
+
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: FailingCollector())
+
+    result = risk_manager.check_correlation_risk(
+        "005930",
+        ["000660"],
+        lookback_days=60,
+    )
+
+    assert result["blocked"] is True
+    assert result["scale"] == 0.0
+    assert "상관관계 리스크 확인 실패" in result["reason"]
+
+
+def test_correlation_risk_blocks_when_existing_position_data_is_insufficient(risk_manager, monkeypatch):
+    """기존 보유 종목 데이터가 부족하면 신규 BUY 리스크 확인을 차단한다."""
+    import pandas as pd
+
+    dates = pd.date_range("2026-01-01", periods=70, freq="D")
+
+    class PartialCollector:
+        def fetch_stock(self, symbol):
+            if symbol == "005930":
+                return pd.DataFrame({"close": range(1, 71)}, index=dates)
+            return pd.DataFrame({"close": [1, 2]}, index=dates[:2])
+
+    monkeypatch.setattr("core.data_collector.DataCollector", lambda: PartialCollector())
+
+    result = risk_manager.check_correlation_risk(
+        "005930",
+        ["000660"],
+        lookback_days=60,
+    )
+
+    assert result["blocked"] is True
+    assert result["scale"] == 0.0
+    assert result["missing_symbols"] == ["000660"]
