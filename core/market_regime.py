@@ -78,7 +78,7 @@ def check_market_regime(config, collector=None) -> dict:
 
     Returns:
         {
-            "regime": "bullish" | "caution" | "bearish",
+            "regime": "bullish" | "caution" | "bearish" | "unknown",
             "position_scale": float,  # 1.0 / caution_scale(기본 0.5) / 0.0
             "allow_buys": bool,       # bearish 이면 False, 나머지 True (하위 호환)
             "details": {
@@ -102,6 +102,23 @@ def check_market_regime(config, collector=None) -> dict:
         return default_result
 
     index_symbol = regime_cfg["index_symbol"]
+
+    def fail_closed(reason: str, *, error: str = "") -> dict:
+        details = {
+            "reason": reason,
+            "index_symbol": index_symbol,
+            "data_unavailable": True,
+            "fail_closed": True,
+        }
+        if error:
+            details["error"] = error
+        return {
+            "regime": "unknown",
+            "position_scale": 0.0,
+            "allow_buys": False,
+            "details": details,
+        }
+
     ma_days = regime_cfg["ma_days"]
     short_days = regime_cfg["short_momentum_days"]
     short_threshold = regime_cfg["short_momentum_threshold"]
@@ -117,8 +134,8 @@ def check_market_regime(config, collector=None) -> dict:
             from core.data_collector import DataCollector
             collector = DataCollector()
         except Exception as e:
-            logger.warning("시장 국면 필터: DataCollector 생성 실패 — 신규 매수 허용: {}", e)
-            return default_result
+            logger.warning("시장 국면 필터: DataCollector 생성 실패 — 신규 매수 차단: {}", e)
+            return fail_closed("data_collector_unavailable", error=str(e))
 
     end_d = datetime.now()
     start_d = (end_d - timedelta(days=need_days + 30)).strftime("%Y-%m-%d")
@@ -126,9 +143,9 @@ def check_market_regime(config, collector=None) -> dict:
 
     try:
         df = collector.fetch_korean_stock(index_symbol, start_date=start_d, end_date=end_str)
-        if df.empty or len(df) < ma_days:
-            logger.warning("시장 국면 필터: 지수 {} 데이터 부족 — 신규 매수 허용", index_symbol)
-            return default_result
+        if df is None or df.empty or len(df) < ma_days:
+            logger.warning("시장 국면 필터: 지수 {} 데이터 부족 — 신규 매수 차단", index_symbol)
+            return fail_closed("index_data_insufficient")
 
         close = df["close"].astype(float)
         ma = close.rolling(ma_days, min_periods=ma_days).mean()
@@ -136,7 +153,8 @@ def check_market_regime(config, collector=None) -> dict:
         last_ma = ma.iloc[-1]
 
         if last_ma is None or (hasattr(last_ma, "item") and (last_ma != last_ma)):
-            return default_result
+            logger.warning("시장 국면 필터: 지수 {} MA 계산 실패 — 신규 매수 차단", index_symbol)
+            return fail_closed("ma_unavailable")
         last_ma = float(last_ma)
 
         below_ma = last_close < last_ma
@@ -208,8 +226,8 @@ def check_market_regime(config, collector=None) -> dict:
         return {"regime": "bullish", "position_scale": 1.0, "allow_buys": True, "details": details}
 
     except Exception as e:
-        logger.warning("시장 국면 필터 조회 실패 — 신규 매수 허용: {}", e)
-        return default_result
+        logger.warning("시장 국면 필터 조회 실패 — 신규 매수 차단: {}", e)
+        return fail_closed("market_regime_query_failed", error=str(e))
 
 
 def allow_new_buys_by_market_regime(config, collector=None) -> bool:
@@ -223,7 +241,9 @@ def get_regime_adjusted_params(config, collector=None) -> dict:
 
     Returns:
         {
-            "regime": "bullish" | "caution" | "bearish",
+            "regime": "bullish" | "caution" | "bearish" | "unknown",
+            "allow_buys": bool,
+            "position_scale": float,
             "buy_threshold_offset": int,
             "stop_loss_multiplier": float,
             "take_profit_multiplier": float,
@@ -231,13 +251,19 @@ def get_regime_adjusted_params(config, collector=None) -> dict:
     """
     regime_result = check_market_regime(config, collector)
     regime = regime_result["regime"]
+    base = {
+        "regime": regime,
+        "allow_buys": bool(regime_result.get("allow_buys", True)),
+        "position_scale": float(regime_result.get("position_scale", 1.0)),
+        "details": regime_result.get("details", {}),
+    }
 
     strategies_cfg = config.strategies if hasattr(config, "strategies") else {}
     ra_cfg = strategies_cfg.get("regime_adaptive", {})
 
     if not ra_cfg.get("enabled", False):
         return {
-            "regime": regime,
+            **base,
             "buy_threshold_offset": 0,
             "stop_loss_multiplier": 1.0,
             "take_profit_multiplier": 1.0,
@@ -245,7 +271,7 @@ def get_regime_adjusted_params(config, collector=None) -> dict:
 
     regime_params = ra_cfg.get(regime, {})
     return {
-        "regime": regime,
+        **base,
         "buy_threshold_offset": int(regime_params.get("buy_threshold_offset", 0)),
         "stop_loss_multiplier": float(regime_params.get("stop_loss_multiplier", 1.0)),
         "take_profit_multiplier": float(regime_params.get("take_profit_multiplier", 1.0)),

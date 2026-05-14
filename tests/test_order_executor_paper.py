@@ -1015,6 +1015,43 @@ def test_execute_buy_paths_share_drawdown_guard(fresh_db, monkeypatch):
     assert "MDD 한도 도달" in quantity_buy["reason"]
 
 
+def test_execute_buy_blocks_when_market_regime_disallows_new_buys(fresh_db, monkeypatch):
+    """직접 OrderExecutor를 호출해도 시장국면 확인 불가 상태면 신규 BUY를 막는다."""
+    from core.order_executor import OrderExecutor
+
+    executor = OrderExecutor(account_key="market_regime_fail_closed_test")
+    executor.config.trading["market_regime_filter"] = True
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        "core.market_regime.get_regime_adjusted_params",
+        lambda config: {
+            "regime": "unknown",
+            "allow_buys": False,
+            "position_scale": 0.0,
+            "details": {"reason": "market_regime_query_failed"},
+            "stop_loss_multiplier": 1.0,
+            "take_profit_multiplier": 1.0,
+        },
+    )
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="market regime fail closed test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert result["market_regime_blocked"] is True
+    assert result["market_regime"] == "unknown"
+    assert "시장 국면" in result["reason"]
+
+
 def test_paper_sell_ignores_drawdown_guard(fresh_db, monkeypatch):
     """손실 한도에 걸려도 기존 포지션 청산 SELL은 계속 허용한다."""
     from core.order_executor import OrderExecutor
