@@ -1,28 +1,81 @@
 {
-  "timestamp": "2026-04-29T00:00:00",
+  "artifact_type": "current_go_live_blockers",
+  "schema_version": 2,
+  "generated_at": "2026-05-13T14:07:37.832443",
+  "source": "reports/promotion/promotion_blocker_summary.json",
+  "source_artifact_hash": "136e719fc9ac5e59823fdb16716327c0e5426c74b30396a8687e2358c280fd0f",
   "go_live": false,
-  "verdict": "NO-GO: no live_candidate with current canonical and paper evidence",
+  "verdict": "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음",
+  "promotion_summary": {
+    "total_strategies": 25,
+    "status_counts": {
+      "paper_only": 19,
+      "provisional_paper_candidate": 3,
+      "research_only": 3
+    },
+    "live_ready_count": 0,
+    "blocked_from_live_count": 25
+  },
+  "live_candidates": [],
+  "provisional_paper_candidates": [
+    "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+    "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1"
+  ],
   "hard_blockers": [
     {
-      "desc": "canonical promotion artifact is stale or old schema"
+      "desc": "live_candidate 상태의 전략이 없음",
+      "evidence": "live_ready_count=0"
     },
     {
-      "desc": "no strategy has live_candidate status"
-    },
-    {
-      "desc": "benchmark excess return and excess Sharpe are not proven positive"
-    },
-    {
-      "desc": "eligible 60-business-day execution-backed paper evidence package is missing"
+      "desc": "provisional 후보의 60영업일 execution-backed paper/pilot 증거 미충족",
+      "strategies": [
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
+        "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35_tol5_rankrisk60_pdd8_floor25_cd1"
+      ]
     }
   ],
   "soft_blockers": [
     {
-      "desc": "scoring downgraded to paper_only due Sharpe/PF/WF stability weakness"
+      "desc": "paper_only 후보가 provisional gate 일부를 통과하지 못함",
+      "count": 19,
+      "sample": [
+        "relative_strength_rotation",
+        "scoring",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk120_tol4_sectorcap2_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_dd75_tol4_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol3_pdd10_floor40_cd1",
+        "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol4_corrcap85_pdd10_floor40_cd1"
+      ]
     },
     {
-      "desc": "relative_strength_rotation remains the only provisional paper priority, but live alpha is unproven"
+      "desc": "research_only 후보는 재설계 또는 제외 검토 필요",
+      "count": 3,
+      "sample": [
+        "breakout_volume",
+        "mean_reversion",
+        "trend_following"
+      ]
     }
   ],
-  "default_strategy": "relative_strength_rotation for capped paper research priority; scoring observation only"
+  "next_actions": [
+    {
+      "priority": 1,
+      "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
+      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+    },
+    {
+      "priority": 2,
+      "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
+      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+    },
+    {
+      "priority": 3,
+      "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지"
+    }
+  ],
+  "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
 }
