@@ -464,14 +464,21 @@ def _next_promotion_action(status: str, blockers: list[str]) -> str:
     text = " ".join(blockers).lower()
     if status == "live_candidate":
         return "live readiness gate 검증 후 제한 캡 운영 검토"
-    if "canonical data integrity" in text or "benchmark" in text:
-        return "canonical 데이터/벤치마크 coverage 재생성 후 재평가"
     if "fill_quality" in text or "expected_price" in text or "adverse_fill_gap" in text:
         return "paper 체결 품질 리포트 확인 후 체결 왜곡/가격 기준 재검토"
+    if "target-weight" in text:
+        if (
+            "pilot" in text
+            or "paper" in text
+            or "60영업일" in text
+            or "params_hash" in text
+        ):
+            return "target-weight capped paper pilot readiness audit 실행 후 verified pilot_paper 증거 누적"
+        return "target-weight pilot proof와 params hash 일치 여부 재검증"
     if "paper evidence" in text or "paper " in text or "60영업일" in text:
         return "paper evidence 최신화/누적 후 promotion package 재생성"
-    if "target-weight" in text:
-        return "target-weight pilot proof와 params hash 일치 여부 재검증"
+    if "canonical data integrity" in text or "benchmark" in text:
+        return "canonical 데이터/벤치마크 coverage 재생성 후 재평가"
     if status == "paper_only":
         return "research 품질, MDD, turnover, WF 안정성 개선"
     if status == "research_only":
