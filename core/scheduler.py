@@ -182,7 +182,11 @@ class Scheduler:
         """당일 OrderExecutor를 재사용 — order_book 누적을 위해 인스턴스 유지."""
         if self._order_executor is None:
             from core.order_executor import OrderExecutor
-            self._order_executor = OrderExecutor(self.config, account_key=self.strategy_name)
+            self._order_executor = OrderExecutor(
+                self.config,
+                account_key=self.strategy_name,
+                live_gate_validated=self._live_gate_validated,
+            )
         return self._order_executor
 
     def _is_paper_like_mode(self) -> bool:
@@ -228,7 +232,11 @@ class Scheduler:
             if self.config.trading.get("mode") == "live":
                 from core.order_executor import OrderExecutor
 
-                executor = OrderExecutor(self.config, account_key=self.strategy_name)
+                executor = OrderExecutor(
+                    self.config,
+                    account_key=self.strategy_name,
+                    live_gate_validated=self._live_gate_validated,
+                )
                 open_orders = executor.reconcile_open_orders_after_crash()
                 open_order_status = getattr(executor, "last_open_order_reconcile_status", {}) or {}
                 if open_order_status and open_order_status.get("checked") is False:
