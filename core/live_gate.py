@@ -326,6 +326,80 @@ def _validate_target_weight_evidence_summary(
     return issues
 
 
+def _validate_paper_evidence_package_integrity(
+    strategy_name: str,
+    evidence: dict[str, Any],
+    *,
+    promotion_base: Path,
+    evidence_base: Path,
+    canonical_metadata: dict[str, Any],
+) -> list[str]:
+    """promotion evidence package와 원본 daily evidence JSONL 무결성을 확인한다."""
+    issues: list[str] = []
+
+    try:
+        from core.paper_evidence import (
+            PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+            PROMOTION_SOURCE_RECORDS_SCHEMA_VERSION,
+            build_promotion_source_records_summary,
+            compute_promotion_package_integrity_hash,
+        )
+    except Exception as exc:
+        return [f"paper evidence integrity verifier 로드 실패: {exc}"]
+
+    integrity = evidence.get("package_integrity")
+    if not isinstance(integrity, dict):
+        issues.append("paper evidence package_integrity 누락.")
+    else:
+        if integrity.get("schema_version") != PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION:
+            issues.append("paper evidence package_integrity schema_version 불일치.")
+        expected_payload_hash = compute_promotion_package_integrity_hash(evidence)
+        if integrity.get("payload_hash") != expected_payload_hash:
+            issues.append("paper evidence package_integrity payload_hash 불일치.")
+
+    actual_source = evidence.get("source_records")
+    if not isinstance(actual_source, dict):
+        issues.append("paper evidence source_records 누락.")
+        return issues
+    if actual_source.get("schema_version") != PROMOTION_SOURCE_RECORDS_SCHEMA_VERSION:
+        issues.append("paper evidence source_records schema_version 불일치.")
+
+    try:
+        expected_source = build_promotion_source_records_summary(
+            strategy_name,
+            canonical_metadata=canonical_metadata,
+            promotion_dir=promotion_base,
+            evidence_dir=evidence_base,
+        )
+    except Exception as exc:
+        issues.append(f"paper evidence source_records 재계산 실패: {exc}")
+        return issues
+
+    for field in (
+        "records_hash",
+        "record_count",
+        "first_date",
+        "last_date",
+        "canonical_record_count",
+        "promotable_record_count",
+        "target_weight_required",
+    ):
+        if actual_source.get(field) != expected_source.get(field):
+            issues.append(
+                "paper evidence source_records 불일치: "
+                f"{field} expected={expected_source.get(field)!r}, actual={actual_source.get(field)!r}."
+            )
+
+    latest_evidence = evidence.get("latest_evidence_date")
+    if expected_source.get("last_date") and latest_evidence != expected_source.get("last_date"):
+        issues.append(
+            "paper evidence latest_evidence_date와 source_records last_date 불일치: "
+            f"{latest_evidence!r} != {expected_source.get('last_date')!r}."
+        )
+
+    return issues
+
+
 def _recalculate_promotion_result(
     strategy_name: str,
     promotion_base: Path,
@@ -594,6 +668,15 @@ def validate_live_readiness(
             issues.append("paper evidence win_rate 45% 미달.")
         if frozen_days > 0:
             issues.append("paper evidence에 frozen day가 존재함.")
+        issues.extend(
+            _validate_paper_evidence_package_integrity(
+                strategy_name,
+                evidence,
+                promotion_base=promotion_base,
+                evidence_base=evidence_base,
+                canonical_metadata=metadata,
+            )
+        )
         issues.extend(
             _validate_target_weight_evidence_summary(
                 strategy_name,

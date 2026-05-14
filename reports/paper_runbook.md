@@ -51,6 +51,8 @@ python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-packag
 
 수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다.
 
+생성된 promotion evidence package는 package payload hash와 source record hash를 포함한다. live gate는 이 값을 원본 `daily_evidence_{strategy}.jsonl`에서 재계산해 비교하므로, 패키지 요약값이나 원본 JSONL을 따로 수정했다면 package를 다시 생성해야 한다.
+
 ## 5. 모니터링
 
 - `logs/`
