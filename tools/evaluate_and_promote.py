@@ -4,6 +4,7 @@ Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 실행: python tools/evaluate_and_promote.py --canonical
 요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
 요약 검증: python tools/evaluate_and_promote.py --blocker-summary-check
+현재 blocker 갱신: python tools/evaluate_and_promote.py --current-blockers
 출력: reports/promotion/
   - metrics_summary.json
   - walk_forward_summary.json
@@ -635,6 +636,182 @@ def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "repo
     return issues
 
 
+def _strategy_names_by_status(blocker_summary: dict, status: str) -> list[str]:
+    strategies = blocker_summary.get("strategies") or {}
+    return [
+        name
+        for name, item in strategies.items()
+        if isinstance(item, dict) and item.get("status") == status
+    ]
+
+
+def _ranked_provisional_candidates(blocker_summary: dict) -> list[str]:
+    """운영 우선순위 힌트용 provisional 후보 정렬."""
+    strategies = blocker_summary.get("strategies") or {}
+    candidates = _strategy_names_by_status(blocker_summary, "provisional_paper_candidate")
+
+    def score(name: str) -> tuple[float, float, float, str]:
+        metrics = (strategies.get(name) or {}).get("metrics") or {}
+        return (
+            float(metrics.get("benchmark_excess_return") or 0),
+            float(metrics.get("sharpe") or 0),
+            -abs(float(metrics.get("mdd") or 0)),
+            name,
+        )
+
+    return sorted(candidates, key=score, reverse=True)
+
+
+def build_current_blockers_report(blocker_summary: dict) -> dict:
+    """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
+    if not isinstance(blocker_summary, dict):
+        blocker_summary = {}
+    summary = blocker_summary.get("summary") or {}
+    live_candidates = _strategy_names_by_status(blocker_summary, "live_candidate")
+    provisional_candidates = _ranked_provisional_candidates(blocker_summary)
+    paper_only = _strategy_names_by_status(blocker_summary, "paper_only")
+    research_only = _strategy_names_by_status(blocker_summary, "research_only")
+    go_live = bool(live_candidates)
+
+    hard_blockers = []
+    if not live_candidates:
+        hard_blockers.append({
+            "desc": "live_candidate 상태의 전략이 없음",
+            "evidence": f"live_ready_count={summary.get('live_ready_count', 0)}",
+        })
+    if provisional_candidates:
+        hard_blockers.append({
+            "desc": "provisional 후보의 60영업일 execution-backed paper/pilot 증거 미충족",
+            "strategies": provisional_candidates,
+        })
+    if not provisional_candidates and not live_candidates:
+        hard_blockers.append({
+            "desc": "capped paper pilot로 진행할 provisional_paper_candidate 없음",
+            "evidence": f"status_counts={summary.get('status_counts', {})}",
+        })
+
+    soft_blockers = []
+    if paper_only:
+        soft_blockers.append({
+            "desc": "paper_only 후보가 provisional gate 일부를 통과하지 못함",
+            "count": len(paper_only),
+            "sample": paper_only[:8],
+        })
+    if research_only:
+        soft_blockers.append({
+            "desc": "research_only 후보는 재설계 또는 제외 검토 필요",
+            "count": len(research_only),
+            "sample": research_only[:8],
+        })
+
+    next_actions = []
+    if provisional_candidates:
+        next_actions.append({
+            "priority": 1,
+            "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
+            "strategy": provisional_candidates[0],
+        })
+        next_actions.append({
+            "priority": 2,
+            "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
+            "strategy": provisional_candidates[0],
+        })
+    else:
+        next_actions.append({
+            "priority": 1,
+            "desc": "provisional_paper_candidate 회복을 위한 research sweep 계속 진행",
+        })
+    next_actions.append({
+        "priority": len(next_actions) + 1,
+        "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지",
+    })
+
+    verdict = (
+        f"GO: live_candidate {len(live_candidates)}개 사용 가능"
+        if go_live
+        else "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음"
+    )
+    default_strategy = (
+        f"{provisional_candidates[0]} capped paper pilot 우선, scoring은 관찰만 유지"
+        if provisional_candidates
+        else "paper pilot 후보 없음, research 재설계 필요"
+    )
+    return {
+        "artifact_type": "current_go_live_blockers",
+        "schema_version": 2,
+        "generated_at": blocker_summary.get("generated_at") or datetime.now().isoformat(),
+        "source": "reports/promotion/promotion_blocker_summary.json",
+        "source_artifact_hash": blocker_summary.get("source_artifact_hash"),
+        "go_live": go_live,
+        "verdict": verdict,
+        "promotion_summary": summary,
+        "live_candidates": live_candidates,
+        "provisional_paper_candidates": provisional_candidates,
+        "hard_blockers": hard_blockers,
+        "soft_blockers": soft_blockers,
+        "next_actions": next_actions,
+        "default_strategy": default_strategy,
+    }
+
+
+def load_current_blockers_from_artifacts(
+    promotion_dir: str | Path = "reports/promotion",
+) -> dict:
+    summary_path = Path(promotion_dir) / "promotion_blocker_summary.json"
+    blocker_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(blocker_summary, dict):
+        raise ValueError(f"{summary_path} top-level JSON is not an object")
+    return build_current_blockers_report(blocker_summary)
+
+
+def write_current_blockers_report(
+    report: dict,
+    output_path: str | Path = "reports/current_blockers.json",
+) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return path
+
+
+def validate_current_blockers_artifact(
+    promotion_dir: str | Path = "reports/promotion",
+    output_path: str | Path = "reports/current_blockers.json",
+) -> list[str]:
+    path = Path(output_path)
+    if not path.exists():
+        return [f"{path} 없음: --current-blockers로 재생성 필요"]
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{path} 로드 실패: {exc}"]
+    if not isinstance(current, dict):
+        return [f"{path} top-level JSON is not an object"]
+    try:
+        expected = load_current_blockers_from_artifacts(promotion_dir)
+    except Exception as exc:
+        return [f"current blocker source artifact 로드 실패: {exc}"]
+
+    issues = []
+    for key in (
+        "artifact_type",
+        "schema_version",
+        "source_artifact_hash",
+        "go_live",
+        "verdict",
+        "promotion_summary",
+        "live_candidates",
+        "provisional_paper_candidates",
+        "hard_blockers",
+        "soft_blockers",
+        "next_actions",
+        "default_strategy",
+    ):
+        if current.get(key) != expected.get(key):
+            issues.append(f"{key} 불일치: --current-blockers로 재생성 필요")
+    return issues
+
+
 def run_canonical():
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
@@ -970,10 +1147,36 @@ def main():
         action="store_true",
         help="저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검증",
     )
+    parser.add_argument(
+        "--current-blockers",
+        action="store_true",
+        help="promotion blocker summary에서 reports/current_blockers.json 갱신",
+    )
+    parser.add_argument(
+        "--current-blockers-check",
+        action="store_true",
+        help="reports/current_blockers.json이 현재 blocker summary와 동기화됐는지 검증",
+    )
     args = parser.parse_args()
 
     if args.canonical:
         run_canonical()
+    elif args.current_blockers_check:
+        issues = validate_current_blockers_artifact("reports/promotion", "reports/current_blockers.json")
+        if issues:
+            print("FAIL: current blockers 동기화 검증 실패")
+            for issue in issues:
+                print(f"  - {issue}")
+            sys.exit(1)
+        print("OK: current blockers 동기화 검증 성공")
+    elif args.current_blockers:
+        try:
+            report = load_current_blockers_from_artifacts("reports/promotion")
+            path = write_current_blockers_report(report, "reports/current_blockers.json")
+        except Exception as exc:
+            print(f"FAIL: current blockers 생성 실패: {exc}")
+            sys.exit(1)
+        print(f"OK: current blockers 생성 성공\n  {path}")
     elif args.blocker_summary_check:
         issues = validate_promotion_blocker_summary_artifact("reports/promotion")
         if issues:
