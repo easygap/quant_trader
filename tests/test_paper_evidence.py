@@ -1048,6 +1048,35 @@ class TestFinalizeEvidence:
                                      date=dt, watchlist_symbols=[])
         assert r2 is None  # already final
 
+    @patch("core.paper_evidence._compute_benchmark_excess")
+    @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
+    def test_finalize_without_existing_record_preserves_backfill_provenance(
+        self, mock_diag, mock_bench, evidence_dir, fresh_db,
+    ):
+        """기존 record가 없어 finalize가 새로 수집해도 backfill은 승격 증거가 아니다."""
+        mock_bench.return_value = {
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.03,
+            "cash_adjusted_excess": 0.02,
+            "benchmark_status": "final",
+            "benchmark_meta": {},
+        }
+        from core.paper_evidence import finalize_daily_evidence
+
+        result = finalize_daily_evidence(
+            strategy="finalize_backfill_s",
+            mode="paper",
+            account_key="finalize_backfill_s",
+            date=datetime(2026, 4, 1, 15, 35),
+            watchlist_symbols=["005930"],
+            evidence_mode="backfill",
+        )
+
+        assert result is not None
+        assert result.evidence_mode == "backfill"
+        assert result.session_mode == "backfill"
+        assert result.execution_backed is False
+
 
 class TestDoubleRunIdempotency:
     """scheduler double-run same date."""
@@ -1454,6 +1483,58 @@ class TestCleanDayAccumulation:
 
 class TestShadowEvidenceNotPromotable:
     """shadow evidence는 promotable real paper day를 오염시키지 않아야 함."""
+
+    @patch("core.paper_evidence._compute_benchmark_excess")
+    @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
+    def test_pipeline_single_day_records_backfill_provenance(
+        self, mock_diag, mock_bench, evidence_dir, fresh_db, monkeypatch,
+    ):
+        """manual single-day CLI 수집은 real paper 승격 증거로 남기지 않는다."""
+        mock_bench.return_value = {
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.03,
+            "cash_adjusted_excess": 0.02,
+            "benchmark_status": "final",
+            "benchmark_meta": {},
+        }
+        from core.paper_evidence import get_canonical_records
+        from tools import run_paper_evidence_pipeline as pipeline
+
+        monkeypatch.setattr(pipeline, "_get_watchlist", lambda: ["005930"])
+
+        pipeline.run_single_day("cli_single_backfill", "2026-04-01")
+
+        records = get_canonical_records("cli_single_backfill")
+        assert len(records) == 1
+        assert records[0]["evidence_mode"] == "backfill"
+        assert records[0]["session_mode"] == "backfill"
+        assert records[0]["execution_backed"] is False
+
+    @patch("core.paper_evidence._compute_benchmark_excess")
+    @patch("core.strategy_diagnostics.diagnose_live_post_market", return_value=[])
+    def test_pipeline_finalize_without_existing_record_uses_backfill_provenance(
+        self, mock_diag, mock_bench, evidence_dir, fresh_db, monkeypatch,
+    ):
+        """manual finalize CLI가 새 record를 만들 때도 backfill provenance를 유지한다."""
+        mock_bench.return_value = {
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.03,
+            "cash_adjusted_excess": 0.02,
+            "benchmark_status": "final",
+            "benchmark_meta": {},
+        }
+        from core.paper_evidence import get_canonical_records
+        from tools import run_paper_evidence_pipeline as pipeline
+
+        monkeypatch.setattr(pipeline, "_get_watchlist", lambda: ["005930"])
+
+        pipeline.run_finalize("cli_finalize_backfill", "2026-04-02")
+
+        records = get_canonical_records("cli_finalize_backfill")
+        assert len(records) == 1
+        assert records[0]["evidence_mode"] == "backfill"
+        assert records[0]["session_mode"] == "backfill"
+        assert records[0]["execution_backed"] is False
 
     def test_append_shadow_plan_evidence_is_non_promotable(self, evidence_dir):
         from core.paper_evidence import append_shadow_plan_evidence, get_canonical_records

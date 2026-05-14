@@ -44,6 +44,8 @@ full paper 신규 BUY는 preflight status가 없거나 손상되었거나 runtim
 python tools/run_paper_evidence_pipeline.py --strategy scoring --finalize --generate-package
 ```
 
+수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다.
+
 ## 5. 모니터링
 
 - `logs/`
