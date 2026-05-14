@@ -390,6 +390,21 @@ class OrderExecutor:
                 self.config,
                 account_key=self.account_key,
             ).get_portfolio_summary()
+            if self.mode == "live" and summary.get("broker_balance_ok") is False:
+                reason = (
+                    "손실 한도 확인 실패: KIS 잔고 조회가 확인되지 않아 "
+                    "DB 기준 평가금액으로 신규 매수를 판단하지 않습니다."
+                )
+                logger.warning("신규 매수 차단: {}", reason)
+                return {
+                    "allowed": False,
+                    "reason": reason,
+                    "drawdown_guard_blocked": True,
+                    "drawdown_guard_type": "broker_balance_unavailable",
+                    "broker_balance_source": summary.get("broker_balance_source"),
+                    "broker_balance_error": summary.get("broker_balance_error"),
+                    "mode": self.mode,
+                }
             total_value = float(summary.get("total_value") or 0)
             if total_value <= 0:
                 reason = "손실 한도 확인 실패: 포트폴리오 평가금액 없음"

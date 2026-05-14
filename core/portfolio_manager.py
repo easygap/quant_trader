@@ -17,6 +17,10 @@ from database.repositories import (
 )
 
 
+class LiveBrokerBalanceUnavailable(RuntimeError):
+    """live 주문 판단에 필요한 KIS 잔고를 확인하지 못한 상태."""
+
+
 class PortfolioManager:
     """
     포트폴리오 관리자
@@ -120,8 +124,13 @@ class PortfolioManager:
 
         cash = None
         total_value = None
+        broker_balance_ok = None
+        broker_balance_source = "db"
+        broker_balance_error = ""
 
         if self._is_live:
+            broker_balance_ok = False
+            broker_balance_source = "db_fallback"
             try:
                 from api.kis_api import KISApi
                 account_no = self.config.get_account_no(self.account_key)
@@ -129,7 +138,13 @@ class PortfolioManager:
                 if balance and "total_value" in balance:
                     total_value = float(balance["total_value"])
                     cash = float(balance.get("cash", total_value - current_value))
+                    broker_balance_ok = True
+                    broker_balance_source = "kis"
+                else:
+                    broker_balance_error = "KIS 잔고 응답 없음"
+                    logger.warning("KIS 잔고 조회 실패 — DB 기준으로 대체: {}", broker_balance_error)
             except Exception as e:
+                broker_balance_error = str(e)
                 logger.warning("KIS 잔고 조회 실패 — DB 기준으로 대체: {}", e)
 
         if cash is None or total_value is None:
@@ -163,6 +178,9 @@ class PortfolioManager:
             "realized_pnl": round(realized_pnl, 0),
             "unrealized_pnl": round(unrealized_pnl, 0),
             "positions": position_details,
+            "broker_balance_ok": broker_balance_ok,
+            "broker_balance_source": broker_balance_source,
+            "broker_balance_error": broker_balance_error,
         }
 
     def save_daily_snapshot(self, current_prices: dict = None):
@@ -245,15 +263,23 @@ class PortfolioManager:
     def get_current_capital(self) -> float:
         """
         포지션 사이징 등에 쓸 현재 자본.
-        Live 모드: KIS 잔고 API 총 평가금액. 실패 시 DB 기준.
+        Live 모드: KIS 잔고 API 총 평가금액. 실패 시 예외로 fail-closed.
         Paper 모드: DB 기준 총 평가금액.
         """
         summary = self.get_portfolio_summary()
+        if self._is_live and summary.get("broker_balance_ok") is False:
+            raise LiveBrokerBalanceUnavailable(
+                summary.get("broker_balance_error") or "KIS 잔고 조회 실패"
+            )
         return float(summary["total_value"])
 
     def get_available_cash(self) -> float:
         """현재 사용 가능한 현금."""
         summary = self.get_portfolio_summary()
+        if self._is_live and summary.get("broker_balance_ok") is False:
+            raise LiveBrokerBalanceUnavailable(
+                summary.get("broker_balance_error") or "KIS 잔고 조회 실패"
+            )
         return float(summary["cash"])
 
     def sync_with_broker(self, auto_correct: bool = None) -> dict:
