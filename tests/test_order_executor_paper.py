@@ -844,6 +844,37 @@ def test_buy_blocks_when_mdd_limit_reached(fresh_db, monkeypatch):
     assert "MDD 한도 도달" in result["reason"]
 
 
+def test_live_buy_blocks_when_broker_balance_unavailable(fresh_db, monkeypatch):
+    """live 신규 BUY는 브로커 잔고 미확인 상태에서 DB 평가금액으로 손실 한도를 판단하지 않는다."""
+    from core.order_executor import OrderExecutor
+
+    class FakePortfolioManager:
+        def __init__(self, config=None, account_key=""):
+            pass
+
+        def get_portfolio_summary(self):
+            return {
+                "total_value": 10_000_000,
+                "mdd": 0.0,
+                "broker_balance_ok": False,
+                "broker_balance_source": "db_fallback",
+                "broker_balance_error": "KIS 잔고 조회 실패",
+            }
+
+    executor = OrderExecutor(account_key="broker_balance_guard_test")
+    executor.mode = "live"
+    executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = 0.15
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
+
+    result = executor._pre_order_check(symbol="005930", action="BUY", strategy="scoring")
+
+    assert result["allowed"] is False
+    assert result["drawdown_guard_blocked"] is True
+    assert result["drawdown_guard_type"] == "broker_balance_unavailable"
+    assert result["broker_balance_source"] == "db_fallback"
+    assert "KIS 잔고 조회" in result["reason"]
+
+
 def test_mdd_guard_uses_restored_peak_snapshot(fresh_db):
     """재시작 후에도 DB 스냅샷 peak 기준으로 MDD 차단을 유지한다."""
     from core.order_executor import OrderExecutor
