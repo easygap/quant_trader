@@ -234,3 +234,53 @@ def test_get_balance_parses_successful_empty_account():
     assert balance is not None
     assert balance["cash"] == 1_000_000
     assert balance["positions"] == []
+
+
+def test_get_current_price_rejects_kis_error_body():
+    api = object.__new__(KISApi)
+    api._request = lambda *a, **kw: {
+        "rt_cd": "1",
+        "msg1": "temporary failure",
+        "output": {"stck_prpr": "70000"},
+    }
+
+    assert api.get_current_price("005930") is None
+
+
+def test_get_current_price_rejects_non_positive_price():
+    api = object.__new__(KISApi)
+    api._request = lambda *a, **kw: {
+        "rt_cd": "0",
+        "output": {"stck_prpr": "0"},
+    }
+
+    assert api.get_current_price("005930") is None
+
+
+def test_get_current_price_parses_success_body():
+    api = object.__new__(KISApi)
+    api._request = lambda *a, **kw: {
+        "rt_cd": "0",
+        "output": {
+            "stck_prpr": "70000",
+            "stck_oprc": "69000",
+            "stck_hgpr": "71000",
+            "stck_lwpr": "68000",
+            "acml_vol": "12345",
+            "prdy_ctrt": "1.23",
+            "stck_sdpr": "69150",
+        },
+    }
+
+    price = api.get_current_price("005930")
+
+    assert price == {
+        "symbol": "005930",
+        "price": 70000.0,
+        "open": 69000.0,
+        "high": 71000.0,
+        "low": 68000.0,
+        "volume": 12345,
+        "change_rate": 1.23,
+        "prev_close": 69150.0,
+    }
