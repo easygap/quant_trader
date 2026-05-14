@@ -266,6 +266,46 @@ class TestRuntimeStateMachine:
             elif approved.exists():
                 approved.unlink()
 
+    @pytest.mark.parametrize(
+        "registry_payload",
+        [
+            "{not-valid-json",
+            json.dumps({"strategies": {"name": "corrupt_registry_s", "status": "approved"}}),
+            json.dumps({"strategies": ["not-a-dict"]}),
+        ],
+    )
+    def test_corrupt_approved_strategies_fail_closed(self, evidence_dir, registry_payload):
+        """legacy registry가 깨졌으면 paper entry/shadow를 열지 않는다."""
+        from core.paper_runtime import get_paper_runtime_state, is_paper_trade_allowed
+
+        strategy = "corrupt_registry_s"
+        _seed_evidence(evidence_dir, strategy, [
+            {"date": "2026-03-24", "status": "normal", "benchmark_status": "final"},
+        ])
+        approved = Path("reports/approved_strategies.json")
+        original = None
+        if approved.exists():
+            original = approved.read_text(encoding="utf-8")
+
+        try:
+            approved.parent.mkdir(parents=True, exist_ok=True)
+            approved.write_text(registry_payload, encoding="utf-8")
+
+            state = get_paper_runtime_state(strategy)
+
+            assert state.state == "research_disabled"
+            assert "entry" not in state.allowed_actions
+            assert "shadow_collect" not in state.allowed_actions
+            assert "exit" in state.allowed_actions
+            assert is_paper_trade_allowed(strategy, "entry") is False
+            assert is_paper_trade_allowed(strategy, "shadow_collect") is False
+            assert is_paper_trade_allowed(strategy, "exit") is True
+        finally:
+            if original is not None:
+                approved.write_text(original, encoding="utf-8")
+            elif approved.exists():
+                approved.unlink()
+
 
 # ═══════════════════════════════════════════════════════════════
 # Freeze / Unfreeze 테스트

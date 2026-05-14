@@ -157,7 +157,7 @@ Target-weight capped pilot의 `--readiness-audit`는 주문 가능 여부를 판
 수동 single-day/backfill/finalize evidence CLI는 운영 보정·품질 점검 용도이며 `backfill` provenance로 기록됩니다. 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` record만 승격 증거로 사용할 수 있습니다.
 Shadow bootstrap collect/finalize CLI도 주문 제출 없이 `shadow_bootstrap` provenance로 기록되며, 빈 이전일을 finalize하면서 새 record가 생성되어도 승격 증거로 계산하지 않습니다.
 현재 모든 전략은 `provisional_paper_candidate` 또는 `disabled` 상태이며, **live 모드는 차단**되어 있습니다.  
-`reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json` 파일은 더 이상 live 근거가 아닙니다. `--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다.
+`reports/approved_strategies.json`와 오래된 `validation_walkforward_*.json` 파일은 더 이상 live 근거가 아닙니다. `--force-live` 플래그는 제거되었으며, 어떤 조합으로도 hard gate를 우회할 수 없습니다. legacy `approved_strategies.json`가 깨져 있거나 스키마가 맞지 않으면 paper runtime도 fail-closed로 신규 entry/shadow 수집을 닫고 exit/finalize 같은 안전 작업만 허용합니다.
 
 ## 리스크 관리
 
