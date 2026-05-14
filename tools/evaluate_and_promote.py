@@ -350,6 +350,8 @@ def build_promotion_results(
         "paper_trade_quality_adverse_gap_bps",
         "paper_trade_quality_missing_expected_ratio",
         "paper_trade_quality_missing_expected_count",
+        "paper_trade_quality_missing_execution_link_ratio",
+        "paper_trade_quality_missing_execution_link_count",
         "target_weight_strategy_required",
         "target_weight_evidence_required",
         "target_weight_verified_pilot_days",
@@ -362,6 +364,8 @@ def build_promotion_results(
     )
     paper_reference_date = datetime.now()
     for name, m in metrics_all.items():
+        for key in paper_fields:
+            m.pop(key, None)
         paper_metrics = paper_evidence_metrics_from_package(
             load_paper_evidence_package(name, evidence_dir),
             reference_date=paper_reference_date,
@@ -397,7 +401,7 @@ def build_promotion_results(
             ev_per_trade=m.get("ev_per_trade"),
             cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
             turnover_per_year=m.get("turnover_per_year"),
-        ), {key: m.get(key) for key in paper_fields})
+        ), {key: paper_metrics.get(key) for key in paper_fields})
         result = promote(sm)
         promotions[name] = {
             "status": result.status,
@@ -428,6 +432,8 @@ PROMOTION_BLOCKER_METRIC_KEYS = (
     "paper_trade_quality_adverse_gap_bps",
     "paper_trade_quality_missing_expected_ratio",
     "paper_trade_quality_missing_expected_count",
+    "paper_trade_quality_missing_execution_link_ratio",
+    "paper_trade_quality_missing_execution_link_count",
     "target_weight_strategy_required",
     "target_weight_verified_pilot_days",
     "target_weight_invalid_days",

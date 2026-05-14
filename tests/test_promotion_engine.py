@@ -25,6 +25,7 @@ def _fresh_paper_evidence_kwargs():
         "paper_latest_evidence_date": date.today().isoformat(),
         "paper_evidence_age_days": 0,
         "paper_evidence_fresh": True,
+        "paper_trade_quality_status": "ok",
     }
 
 
@@ -273,6 +274,31 @@ class TestPromotionRules:
         ok, reason = _check_live_candidate(m)
         assert ok is False
         assert "paper evidence recommendation" in reason
+
+    def test_live_candidate_requires_ok_trade_quality_even_when_package_is_eligible(self):
+        m = StrategyMetrics("test", total_return=10, profit_factor=1.5, mdd=-8,
+                            wf_positive_rate=0.8, wf_sharpe_positive_rate=0.6,
+                            wf_windows=6, wf_total_trades=100, sharpe=0.5,
+                            paper_days=60, paper_sharpe=0.5, paper_excess=1.0,
+                            paper_cash_adjusted_excess=0.8,
+                            paper_evidence_recommendation="ELIGIBLE",
+                            paper_benchmark_final_ratio=0.9,
+                            paper_sell_count=6,
+                            paper_win_rate=50.0,
+                            paper_frozen_days=0,
+                            paper_cumulative_return=2.0,
+                            paper_trade_quality_status="review",
+                            paper_trade_quality_missing_execution_link_count=1,
+                            **{
+                                key: value
+                                for key, value in _fresh_paper_evidence_kwargs().items()
+                                if key != "paper_trade_quality_status"
+                            })
+        r = promote(m)
+
+        assert r.status != "live_candidate"
+        assert "paper trade quality status review != ok" in r.reason
+        assert "missing_execution_link=1" in r.reason
 
     def test_live_candidate_reason_includes_paper_package_block_reasons(self):
         m = StrategyMetrics(
@@ -734,6 +760,7 @@ class TestArtifactLoading:
                     "win_rate": 55.0,
                     "frozen_days": 0,
                     "cumulative_return": 4.0,
+                    "trade_quality": {"status": "ok"},
                 }),
                 encoding="utf-8",
             )
@@ -744,6 +771,95 @@ class TestArtifactLoading:
         assert metrics["scoring"].paper_sharpe == 0.55
         assert metrics["scoring"].paper_cash_adjusted_excess == 0.15
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
+        assert metrics["scoring"].paper_trade_quality_status == "ok"
+
+    def test_load_metrics_from_artifact_does_not_trust_metrics_summary_paper_fields(self):
+        """paper evidence package 값은 metrics_summary의 paper_* 값으로 덮어쓰지 않는다."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        from core.promotion_engine import load_metrics_from_artifact, promote
+
+        strategy = "scoring"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base = root / "promotion"
+            evidence_dir = root / "paper_evidence"
+            base.mkdir()
+            evidence_dir.mkdir()
+            inflated_metrics = {
+                "total_return": 18.0,
+                "profit_factor": 1.5,
+                "mdd": -8.0,
+                "wf_positive_rate": 0.8,
+                "wf_sharpe_positive_rate": 0.8,
+                "wf_windows": 6,
+                "wf_total_trades": 120,
+                "sharpe": 0.7,
+                "paper_days": 60,
+                "paper_sharpe": 0.7,
+                "paper_excess": 0.2,
+                "paper_cash_adjusted_excess": 0.15,
+                "paper_evidence_recommendation": "ELIGIBLE",
+                "paper_benchmark_final_ratio": 0.9,
+                "paper_sell_count": 8,
+                "paper_win_rate": 55.0,
+                "paper_frozen_days": 0,
+                "paper_cumulative_return": 4.0,
+                "paper_trade_quality_status": "ok",
+            }
+            (base / "metrics_summary.json").write_text(
+                json.dumps({strategy: inflated_metrics}),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({strategy: {"total_trades": 120}}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {strategy: 2.0},
+                    "strategy_excess_sharpe": {strategy: 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+            fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
+            (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
+                json.dumps({
+                    "strategy": strategy,
+                    "period": f"2026-01-01 ~ {fresh_latest}",
+                    "latest_evidence_date": fresh_latest,
+                    "recommendation": "BLOCKED",
+                    "block_reasons": ["insufficient_days=10/60"],
+                    "promotable_evidence_days": 10,
+                    "paper_sharpe": 0.1,
+                    "avg_same_universe_excess": 0.2,
+                    "avg_cash_adjusted_excess": 0.15,
+                    "benchmark_final_ratio": 0.9,
+                    "sell_count": 8,
+                    "win_rate": 55.0,
+                    "frozen_days": 0,
+                    "cumulative_return": 4.0,
+                    "trade_quality": {"status": "ok"},
+                }),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics_from_artifact(str(base), evidence_dir=str(evidence_dir))
+
+        assert metrics[strategy].paper_days == 10
+        assert metrics[strategy].paper_evidence_recommendation == "BLOCKED"
+        assert promote(metrics[strategy]).status != "live_candidate"
 
     def test_load_paper_evidence_package_requires_strategy_identity(self):
         """패키지 내부 전략명이 없거나 다르면 승격 입력으로 쓰지 않는다."""
@@ -822,6 +938,8 @@ class TestArtifactLoading:
                 "adverse_gap_bps_of_notional": 56.6,
                 "missing_expected_price_ratio": 0.3333,
                 "missing_expected_price_count": 1,
+                "missing_execution_link_ratio": 0.3333,
+                "missing_execution_link_count": 1,
             },
         })
 
@@ -834,6 +952,8 @@ class TestArtifactLoading:
         assert metrics["paper_trade_quality_adverse_gap_bps"] == 56.6
         assert metrics["paper_trade_quality_missing_expected_ratio"] == 0.3333
         assert metrics["paper_trade_quality_missing_expected_count"] == 1
+        assert metrics["paper_trade_quality_missing_execution_link_ratio"] == 0.3333
+        assert metrics["paper_trade_quality_missing_execution_link_count"] == 1
 
     def test_load_metrics_blocks_target_weight_hash_mismatch(self):
         """paper evidence hash가 canonical 후보 hash와 다르면 live 승격 입력에서 차단된다."""
