@@ -1446,6 +1446,8 @@ def _collect_promotion_trade_quality(
     end_date: object,
     *,
     expected_trade_count: int | None = None,
+    expected_buy_count: int | None = None,
+    expected_sell_count: int | None = None,
 ) -> dict:
     """promotion 기간의 paper TradeHistory 체결 품질을 요약한다."""
     from database.models import TradeHistory, get_session
@@ -1480,6 +1482,19 @@ def _collect_promotion_trade_quality(
             "expected_trade_count": expected_trade_count,
             "trade_count_delta": -expected_trade_count if expected_trade_count is not None else None,
             "trade_count_match": expected_trade_count == 0 if expected_trade_count is not None else None,
+            "buy_count": 0,
+            "sell_count": 0,
+            "expected_buy_count": expected_buy_count,
+            "expected_sell_count": expected_sell_count,
+            "buy_count_delta": -expected_buy_count if expected_buy_count is not None else None,
+            "sell_count_delta": -expected_sell_count if expected_sell_count is not None else None,
+            "trade_action_match": (
+                expected_buy_count == 0 and expected_sell_count == 0
+                if expected_buy_count is not None and expected_sell_count is not None
+                else None
+            ),
+            "unknown_action_count": 0,
+            "unknown_actions": {},
             "total_notional": 0.0,
             "signed_gap_cost": 0.0,
             "adverse_gap_cost": 0.0,
@@ -1493,6 +1508,10 @@ def _collect_promotion_trade_quality(
     missing_execution_session = 0
     missing_order = 0
     missing_execution_link = 0
+    buy_count = 0
+    sell_count = 0
+    unknown_action_count = 0
+    unknown_actions: dict[str, int] = {}
     total_notional = 0.0
     signed_gap_cost = 0.0
     adverse_gap_cost = 0.0
@@ -1502,6 +1521,14 @@ def _collect_promotion_trade_quality(
         action = (getattr(trade, "action", "") or "").upper()
         price = float(getattr(trade, "price", 0) or 0)
         quantity = int(getattr(trade, "quantity", 0) or 0)
+        if action == "BUY":
+            buy_count += 1
+        elif action == "SELL":
+            sell_count += 1
+        else:
+            action_key = action or "<EMPTY>"
+            unknown_action_count += 1
+            unknown_actions[action_key] = unknown_actions.get(action_key, 0) + 1
         execution_session_id = str(getattr(trade, "execution_session_id", "") or "")
         order_id = str(getattr(trade, "order_id", "") or "")
         if not execution_session_id:
@@ -1518,6 +1545,8 @@ def _collect_promotion_trade_quality(
                 slippage_pcts.append(float(actual_slippage_pct))
             except (TypeError, ValueError):
                 pass
+        if action not in {"BUY", "SELL"}:
+            continue
 
         expected = getattr(trade, "expected_price", None)
         if expected is None:
@@ -1556,6 +1585,21 @@ def _collect_promotion_trade_quality(
         if trade_count_delta is not None
         else None
     )
+    buy_count_delta = (
+        buy_count - int(expected_buy_count)
+        if expected_buy_count is not None
+        else None
+    )
+    sell_count_delta = (
+        sell_count - int(expected_sell_count)
+        if expected_sell_count is not None
+        else None
+    )
+    trade_action_match = (
+        buy_count_delta == 0 and sell_count_delta == 0
+        if buy_count_delta is not None and sell_count_delta is not None
+        else None
+    )
     adverse_gap_bps = (adverse_gap_cost / total_notional * 10000) if total_notional > 0 else None
     avg_abs_slippage_pct = (
         sum(abs(value) for value in slippage_pcts) / len(slippage_pcts)
@@ -1574,6 +1618,20 @@ def _collect_promotion_trade_quality(
         issues.append(
             "trade_count_mismatch=%d/%d" % (trade_count, int(expected_trade_count or 0))
         )
+    if unknown_action_count > 0:
+        unknown_action_summary = ",".join(
+            "%s:%d" % (action, count) for action, count in sorted(unknown_actions.items())
+        )
+        issues.append("unknown_trade_action=%s" % unknown_action_summary)
+    if trade_action_match is False:
+        issues.append(
+            "trade_action_mismatch=buy%d/%d_sell%d/%d" % (
+                buy_count,
+                int(expected_buy_count or 0),
+                sell_count,
+                int(expected_sell_count or 0),
+            )
+        )
     if adverse_gap_bps is not None and adverse_gap_bps > PROMOTION_MAX_ADVERSE_FILL_GAP_BPS:
         issues.append(
             "adverse_fill_gap_bps=%.2f" % adverse_gap_bps
@@ -1591,6 +1649,15 @@ def _collect_promotion_trade_quality(
         "expected_trade_count": expected_trade_count,
         "trade_count_delta": trade_count_delta,
         "trade_count_match": trade_count_match,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "expected_buy_count": expected_buy_count,
+        "expected_sell_count": expected_sell_count,
+        "buy_count_delta": buy_count_delta,
+        "sell_count_delta": sell_count_delta,
+        "trade_action_match": trade_action_match,
+        "unknown_action_count": unknown_action_count,
+        "unknown_actions": unknown_actions,
         "total_notional": round(total_notional, 2),
         "signed_gap_cost": round(signed_gap_cost, 2),
         "adverse_gap_cost": round(adverse_gap_cost, 2),
@@ -1604,6 +1671,41 @@ def _collect_promotion_trade_quality(
         },
         "issues": issues,
     }
+
+
+def _as_int_or_none(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sum_expected_trade_actions(records: list[dict]) -> tuple[int | None, int | None]:
+    expected_buy_count = 0
+    expected_sell_count = 0
+    for record in records:
+        total = _as_int_or_none(record.get("total_trades"))
+        buy_present = "buy_count" in record and record.get("buy_count") is not None
+        sell_present = "sell_count" in record and record.get("sell_count") is not None
+        buy = _as_int_or_none(record.get("buy_count")) if buy_present else None
+        sell = _as_int_or_none(record.get("sell_count")) if sell_present else None
+
+        if buy is not None and sell is not None:
+            expected_buy_count += buy
+            expected_sell_count += sell
+            continue
+        if total is not None and sell is not None:
+            expected_buy_count += max(total - sell, 0)
+            expected_sell_count += sell
+            continue
+        if total is not None and buy is not None:
+            expected_buy_count += buy
+            expected_sell_count += max(total - buy, 0)
+            continue
+        if total == 0:
+            continue
+        return None, None
+    return expected_buy_count, expected_sell_count
 
 
 def generate_promotion_package(
@@ -1801,11 +1903,14 @@ def generate_promotion_package(
             "low_win_rate=%.1f%% < %.1f%%" % (win_rate, PROMOTION_MIN_WIN_RATE)
         )
 
+    expected_buy_count, expected_sell_count = _sum_expected_trade_actions(records)
     trade_quality = _collect_promotion_trade_quality(
         strategy,
         records[0]["date"],
         records[-1]["date"],
         expected_trade_count=sum(r.get("total_trades", 0) for r in records),
+        expected_buy_count=expected_buy_count,
+        expected_sell_count=expected_sell_count,
     )
     if trade_quality.get("trade_count", 0) > 0:
         if trade_quality.get("trade_count_match") is False:
@@ -1814,6 +1919,25 @@ def generate_promotion_package(
                 "fill_quality_trade_count_mismatch=%d/%d" % (
                     trade_quality.get("trade_count", 0),
                     trade_quality.get("expected_trade_count", 0),
+                )
+            )
+        if trade_quality.get("unknown_action_count", 0) > 0:
+            blocked = True
+            unknown_action_summary = ",".join(
+                "%s:%d" % (action, count)
+                for action, count in sorted((trade_quality.get("unknown_actions") or {}).items())
+            )
+            block_reasons.append(
+                "fill_quality_unknown_trade_action=%s" % unknown_action_summary
+            )
+        if trade_quality.get("trade_action_match") is False:
+            blocked = True
+            block_reasons.append(
+                "fill_quality_trade_action_mismatch=buy%d/%d_sell%d/%d" % (
+                    trade_quality.get("buy_count", 0),
+                    trade_quality.get("expected_buy_count", 0),
+                    trade_quality.get("sell_count", 0),
+                    trade_quality.get("expected_sell_count", 0),
                 )
             )
         missing_ratio = trade_quality.get("missing_expected_price_ratio")
@@ -2011,6 +2135,8 @@ def _generate_approval_checklist(strategy: str, package: dict) -> Path:
     lines.append("- Trade Quality Missing Expected Price: " + str(tq.get("missing_expected_price_count", "N/A")))
     lines.append("- Trade Quality Missing Execution Link: " + str(tq.get("missing_execution_link_count", "N/A")))
     lines.append("- Trade Quality Trade Count Match: " + str(tq.get("trade_count_match", "N/A")))
+    lines.append("- Trade Quality Trade Action Match: " + str(tq.get("trade_action_match", "N/A")))
+    lines.append("- Trade Quality Unknown Action Count: " + str(tq.get("unknown_action_count", "N/A")))
     lines.append("- Degraded Days: " + str(package["degraded_days"]))
     lines.append("- Frozen Days: " + str(package["frozen_days"]))
     lines.append("- Anomaly Summary: " + anom_json)
