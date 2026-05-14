@@ -1118,6 +1118,11 @@ def run_canonical():
         print(f"  → {path}")
     _, blocker_md_path = write_promotion_blocker_summary(blocker_summary, out_dir)
     print(f"  → {blocker_md_path}")
+    current_blockers_path = write_current_blockers_report(
+        build_current_blockers_report(blocker_summary),
+        "reports/current_blockers.json",
+    )
+    print(f"  → {current_blockers_path}")
 
     # ── 상태 요약 출력 ──
     print("\n" + "=" * 80)
