@@ -4815,6 +4815,81 @@ def test_run_pilot_blocks_duplicate_execute_session(monkeypatch, tmp_path):
     assert payload["execution_idempotency"]["allowed"] is False
 
 
+def test_run_pilot_blocks_in_progress_execution_lock(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    lock_path = pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "execution_session_id": "already-running",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        pp,
+        "check_pilot_entry",
+        lambda *args, **kwargs: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            remaining_orders=10,
+            remaining_exposure=10_000_000,
+            caps_snapshot={
+                "max_orders_per_day": 10,
+                "max_concurrent_positions": 10,
+                "max_notional_per_trade": 2_000_000,
+                "max_gross_exposure": 10_000_000,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail("locked execution must not write a session"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail("locked execution must not submit orders"),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail("locked execution must block before position reads"),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail("locked execution must not collect pilot evidence"),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    assert result["execution_idempotency"]["allowed"] is False
+    assert result["execution_idempotency"]["execution_lock_found"] is True
+    assert "target_weight_execution_lock_present" in result["execution_idempotency"]["reason"]
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["halted"] is True
+    assert result["execution_lock"] is None
+    assert lock_path.exists()
+    assert payload["execution_idempotency"]["execution_lock_found"] is True
+
+
 def test_check_execution_idempotency_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
     import core.paper_pilot as pp
     from tools.target_weight_rotation_pilot import check_execution_idempotency
@@ -4843,6 +4918,42 @@ def test_check_execution_idempotency_blocks_completed_rerun_even_when_allowed(mo
     assert idempotency["allowed"] is False
     assert idempotency["allow_rerun"] is True
     assert "target_weight_completed_execution_rerun_blocked" in idempotency["reason"]
+
+
+def test_check_execution_idempotency_blocks_rerun_after_order_submission(monkeypatch, tmp_path):
+    import core.paper_pilot as pp
+    from tools.target_weight_rotation_pilot import check_execution_idempotency
+
+    plan = _adapter_plan()
+    runtime_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", runtime_dir)
+    runtime_dir.mkdir(parents=True)
+    pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).write_text(
+        json.dumps({
+            "strategy": plan.candidate_id,
+            "date": plan.trade_day,
+            "generated_at": "2026-04-10T09:00:00",
+            "pilot_session": {
+                "session_mode": "pilot_paper",
+                "execution_complete": False,
+                "orders_planned": len(plan.orders),
+                "orders_executed": 0,
+                "order_submission_reached": True,
+                "target_weight_execution": {
+                    "failed_orders": 1,
+                    "halted": True,
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    idempotency = check_execution_idempotency(plan, allow_rerun=True)
+
+    assert idempotency["allowed"] is False
+    assert idempotency["allow_rerun"] is True
+    assert idempotency["previous_order_submission_reached"] is True
+    assert "target_weight_unsafe_execution_rerun_blocked" in idempotency["reason"]
 
 
 def test_run_pilot_blocks_completed_rerun_even_when_allowed(monkeypatch, tmp_path):
@@ -5002,6 +5113,9 @@ def test_run_pilot_allows_duplicate_session_with_explicit_rerun(monkeypatch, tmp
     assert result["execution_idempotency"]["previous_session_found"] is True
     assert result["execution_evidence"]["complete"] is True
     assert result["evidence_collection"]["status"] == "recorded"
+    assert result["execution_lock"]["acquired"] is True
+    assert result["execution_lock_release"]["released"] is True
+    assert not pp.pilot_session_artifact_path(plan.candidate_id, plan.trade_day).with_suffix(".lock").exists()
     assert len(collected) == 1
     assert saved_sessions[0]["target_weight_execution"]["idempotency_allowed"] is True
 
