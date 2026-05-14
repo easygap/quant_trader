@@ -31,6 +31,8 @@ class CircuitBreaker:
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.last_failure_time = 0.0
+        self._half_open_probe_in_flight = False
+        self._half_open_probe_started_at = 0.0
         
         # 스레드 안전성 보장
         self._lock = threading.Lock()
@@ -46,13 +48,23 @@ class CircuitBreaker:
                 # 쿨다운 타임아웃 지났으면 HALF_OPEN 전환
                 if now - self.last_failure_time >= self.recovery_timeout:
                     self.state = CircuitState.HALF_OPEN
+                    self._half_open_probe_in_flight = True
+                    self._half_open_probe_started_at = now
                     logger.info("Circuit Breaker 상태 전환: OPEN -> HALF_OPEN (복구 테스트 진행)")
                     return True
                 return False
 
             if self.state == CircuitState.HALF_OPEN:
-                # 이미 HALF_OPEN 상태에서 테스트 요청이 진행 중이면 추가 요청 차단
-                # (테스트 요청에 대한 응답이 올 때까지 대기)
+                now = time.monotonic()
+                if self._half_open_probe_in_flight:
+                    if now - self._half_open_probe_started_at >= self.recovery_timeout:
+                        logger.warning(
+                            "Circuit Breaker HALF_OPEN probe 응답 타임아웃 — 새 probe 허용"
+                        )
+                    else:
+                        return False
+                self._half_open_probe_started_at = now
+                self._half_open_probe_in_flight = True
                 return True
 
         return False
@@ -65,12 +77,16 @@ class CircuitBreaker:
             
             self.state = CircuitState.CLOSED
             self.failure_count = 0
+            self._half_open_probe_in_flight = False
+            self._half_open_probe_started_at = 0.0
 
     def on_failure(self):
         """요청 실패(50x, 타임아웃 등) 시 호출"""
         with self._lock:
             self.last_failure_time = time.monotonic()
-            
+            self._half_open_probe_in_flight = False
+            self._half_open_probe_started_at = 0.0
+
             if self.state == CircuitState.HALF_OPEN:
                 # HALF_OPEN 상태에서 또 실패하면 다시 OPEN으로 회귀
                 self.state = CircuitState.OPEN
