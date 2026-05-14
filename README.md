@@ -34,6 +34,7 @@
 > - live 보류 주문 복구는 KIS 미체결 목록에서 사라진 주문도 체결 상세가 확인될 때만 `RECONCILED`로 닫고, 조회 실패/불명확 상태는 열린 주문과 중복 차단을 유지
 > - live 체결 조회는 주문번호가 현재 주문과 일치하는 체결 row만 확정 체결로 인정
 > - 신규 BUY 주문 직전 유동성 재검증은 평균 거래량 누락/0도 fail-closed로 차단해 소형주·데이터 공백 주문을 막음
+> - 시장 국면 필터가 켜져 있는데 지수 데이터 조회·MA 계산이 불명확하면 `unknown` 국면으로 신규 BUY를 차단
 > - 갭업 추격매수 방지 가드는 최근 가격 조회 실패·데이터 부족도 신규 BUY 차단으로 처리
 > - 상관관계 리스크 확인은 가격 데이터 조회 실패·부족 시 신규 BUY를 차단
 > - 업종 비중 cap은 섹터 맵 조회 실패·매핑 누락 시 신규 BUY를 차단
@@ -289,6 +290,8 @@ Paper Evidence 체계 — `core/paper_evidence.py` v2 일별 22개 지표 자동
 2026-05-14 follow-up: `OrderExecutor` live BUY 직접 호출 우회를 막았습니다. `run_live_trading()` 또는 live 리밸런싱처럼 readiness gate를 통과한 경로만 `live_gate_validated=True`를 전달하며, 기본값은 fail-closed라 수동 스크립트/콘솔에서 executor를 직접 만들어도 신규 BUY는 KIS 주문 전에 차단됩니다. SELL은 긴급 청산 안전성을 위해 기존 실행 경로를 유지합니다.
 
 2026-05-14 follow-up: 바스켓 리밸런싱 paper BUY 실행 경로를 복구했습니다. `BasketRebalancer.execute()`가 없는 포트폴리오 메서드를 호출하던 부분을 `get_current_capital()`/`get_available_cash()` 기준으로 정리했고, 실제 주문 실행 전 자본·현금 값이 `OrderExecutor.execute_buy_quantity()`에 전달되는지 회귀 테스트로 고정했습니다.
+
+2026-05-14 follow-up: 시장 국면 필터를 fail-closed로 보강했습니다. `market_regime_filter=true` 상태에서 지수 데이터 조회 실패, 빈 데이터, MA 계산 실패가 발생하면 더 이상 bullish 기본값으로 넘기지 않고 `regime=unknown`, `allow_buys=false`, `position_scale=0.0`으로 신규 BUY를 차단합니다. 직접 `OrderExecutor.execute_buy()`를 호출하는 경로도 같은 결과를 받으면 주문 전 중단합니다.
 
 2026-05-14 follow-up: paper promotion evidence package에 `package_integrity.payload_hash`와 `source_records.records_hash`를 추가했습니다. live gate는 패키지 payload hash, 원본 daily evidence JSONL에서 재계산한 source record hash, record count/date 범위를 모두 비교해 패키지 요약값과 원본 evidence가 따로 변경된 상태를 live 전환 근거로 쓰지 않습니다.
 

@@ -217,6 +217,65 @@ def test_backtest_regime_config_mirrors_trading_when_enabled_not_overridden():
     assert cfg["ma_mid"] == 40
 
 
+class _RuntimeRegimeConfig:
+    strategies = {}
+    risk_params = {}
+
+    def __init__(self, *, enabled: bool = True, ma_days: int = 60):
+        self.trading = {
+            "market_regime_filter": enabled,
+            "market_regime_index": "KS11",
+            "market_regime_ma_days": ma_days,
+            "market_regime_short_momentum_days": 20,
+            "market_regime_short_momentum_threshold": -5.0,
+            "market_regime_caution_scale": 0.5,
+            "market_regime_ma_cross_enabled": False,
+        }
+
+
+def test_market_regime_query_failure_fails_closed_when_enabled():
+    """운영 시장국면 필터가 켜져 있으면 지수 조회 실패를 정상장으로 보지 않는다."""
+    from core.market_regime import check_market_regime
+
+    class FailingCollector:
+        def fetch_korean_stock(self, *args, **kwargs):
+            raise RuntimeError("index feed down")
+
+    result = check_market_regime(_RuntimeRegimeConfig(), FailingCollector())
+
+    assert result["regime"] == "unknown"
+    assert result["allow_buys"] is False
+    assert result["position_scale"] == 0.0
+    assert result["details"]["fail_closed"] is True
+    assert result["details"]["reason"] == "market_regime_query_failed"
+
+
+def test_market_regime_empty_index_data_fails_closed_when_enabled():
+    """시장지수 데이터가 비어 있으면 신규 BUY를 차단한다."""
+    from core.market_regime import check_market_regime
+
+    class EmptyCollector:
+        def fetch_korean_stock(self, *args, **kwargs):
+            return pd.DataFrame()
+
+    result = check_market_regime(_RuntimeRegimeConfig(ma_days=20), EmptyCollector())
+
+    assert result["regime"] == "unknown"
+    assert result["allow_buys"] is False
+    assert result["details"]["reason"] == "index_data_insufficient"
+
+
+def test_market_regime_disabled_keeps_legacy_bullish_default():
+    """필터가 꺼져 있으면 외부 지수 조회 없이 기존 기본값을 유지한다."""
+    from core.market_regime import check_market_regime
+
+    result = check_market_regime(_RuntimeRegimeConfig(enabled=False), collector=None)
+
+    assert result["regime"] == "bullish"
+    assert result["allow_buys"] is True
+    assert result["position_scale"] == 1.0
+
+
 def _ma_cross_only_index_df() -> pd.DataFrame:
     """마지막 전일 기준 MA 데드크로스만 켜지는 지수 시계열."""
     dates = pd.bdate_range("2024-01-01", periods=61)
