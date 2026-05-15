@@ -467,6 +467,7 @@ def _target_weight_execution_proof(params_hash: str) -> dict:
         "execution_trade_day_allowed": True,
         "execution_market_session_allowed": True,
         "pilot_authorization_snapshot_allowed": True,
+        "preflight_refresh_complete": True,
         "pre_execution_complete": True,
         "liquidity_complete": True,
         "pre_trade_risk_complete": True,
@@ -2057,6 +2058,11 @@ class TestShadowEvidenceNotPromotable:
         from core.paper_evidence import _target_weight_record_proof_status
 
         cases = [
+            (
+                "preflight_refresh_complete",
+                lambda execution: execution.pop("preflight_refresh_complete"),
+                "target_weight_preflight_refresh_complete_false",
+            ),
             (
                 "pre_execution_complete",
                 lambda execution: execution.pop("pre_execution_complete"),

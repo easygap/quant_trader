@@ -212,6 +212,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
                         "execution_trade_day_allowed": True,
                         "execution_market_session_allowed": True,
                         "pilot_authorization_snapshot_allowed": True,
+                        "preflight_refresh_complete": True,
                         "pre_execution_complete": True,
                         "liquidity_complete": True,
                         "pre_trade_risk_complete": True,
