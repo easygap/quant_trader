@@ -52,9 +52,11 @@ class BasketRebalancer:
         basket_name: str,
         config: Config = None,
         account_key: str = "",
+        execution_strategy: str = "basket_rebalance",
     ):
         self.config = config or Config.get()
         self.account_key = account_key
+        self.execution_strategy = execution_strategy or "basket_rebalance"
         self.basket_name = basket_name
 
         baskets_cfg = self._load_baskets_config()
@@ -327,6 +329,21 @@ class BasketRebalancer:
                 for order in orders
             ]
             return results
+        if mode == "live" and not dry_run and orders:
+            if not self.account_key or self.account_key != self.execution_strategy:
+                reason = (
+                    "live 리밸런싱 승인 단위 불일치: "
+                    f"account_key={self.account_key!r}, strategy={self.execution_strategy!r}"
+                )
+                logger.error(reason)
+                results["failed"] = len(orders)
+                results["blocked"] = True
+                results["reason"] = reason
+                results["details"] = [
+                    {"order": repr(order), "status": "blocked", "reason": reason}
+                    for order in orders
+                ]
+                return results
 
         executor = None
         if not dry_run:
@@ -357,12 +374,12 @@ class BasketRebalancer:
                         capital=total_value,
                         available_cash=available_cash,
                         reason=f"리밸런싱: {order.reason}",
-                        strategy="basket_rebalance",
+                        strategy=self.execution_strategy,
                     )
                 else:
                     res = executor.execute_sell(
                         symbol=order.symbol, price=order.price, quantity=order.quantity,
-                        reason=f"리밸런싱: {order.reason}", strategy="basket_rebalance",
+                        reason=f"리밸런싱: {order.reason}", strategy=self.execution_strategy,
                     )
 
                 if res.get("success"):
