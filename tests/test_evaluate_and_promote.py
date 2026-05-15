@@ -364,6 +364,11 @@ def _provisional_metrics():
 
 
 def _write_paper_package(evidence_dir, strategy, **overrides):
+    from core.paper_evidence import (
+        PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        compute_promotion_package_integrity_hash,
+    )
+
     latest_evidence_date = date.today().isoformat()
     payload = {
         "strategy": strategy,
@@ -383,6 +388,11 @@ def _write_paper_package(evidence_dir, strategy, **overrides):
         "trade_quality": {"status": "ok"},
     }
     payload.update(overrides)
+    payload.pop("package_integrity", None)
+    payload["package_integrity"] = {
+        "schema_version": PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        "payload_hash": compute_promotion_package_integrity_hash(payload),
+    }
     evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
         json.dumps(payload, ensure_ascii=False),
