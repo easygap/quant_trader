@@ -456,6 +456,8 @@ PROMOTION_BLOCKER_SOURCE_METADATA_KEYS = (
     "config_resolved_hash",
 )
 
+CURRENT_BLOCKERS_SCHEMA_VERSION = 3
+
 
 def _promotion_reason_items(reason: str) -> list[str]:
     if not isinstance(reason, str) or not reason.strip():
@@ -890,6 +892,106 @@ def _ranked_provisional_candidates(blocker_summary: dict) -> list[str]:
     return sorted(candidates, key=score, reverse=True)
 
 
+def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
+    base = f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy}"
+    return {
+        "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
+        "daily_ops_summary": f"{base} --daily-ops-summary",
+        "readiness_audit": f"{base} --readiness-audit",
+        "collect_shadow_days": f"{base} --shadow-days 3 --shadow-end-date YYYY-MM-DD",
+        "pilot_status": f"python tools/paper_pilot_control.py --strategy {strategy} --status",
+        "execute_capped_paper_after_ready": f"{base} --execute --collect-evidence",
+        "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers",
+    }
+
+
+def _research_operator_commands() -> dict[str, str]:
+    return {
+        "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
+        "run_canonical_research": "python tools/evaluate_and_promote.py --canonical",
+        "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers",
+    }
+
+
+def _build_current_blockers_operator_runbook(
+    *,
+    provisional_candidates: list[str],
+    live_candidates: list[str],
+) -> dict:
+    primary_strategy = provisional_candidates[0] if provisional_candidates else None
+    if primary_strategy:
+        commands = _target_weight_operator_commands(primary_strategy)
+        sequence = [
+            {
+                "step": 1,
+                "desc": "promotion/current blockers 동기화 점검",
+                "command": commands["check_promotion_artifacts"],
+                "order_safety": "no_order",
+            },
+            {
+                "step": 2,
+                "desc": "daily ops summary로 readiness와 pilot evidence 진행률 확인",
+                "command": commands["daily_ops_summary"],
+                "order_safety": "no_order",
+            },
+            {
+                "step": 3,
+                "desc": "readiness audit 실행 후 artifact의 추천 cap만 승인",
+                "command": commands["readiness_audit"],
+                "order_safety": "no_order",
+            },
+            {
+                "step": 4,
+                "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
+                "command": commands["execute_capped_paper_after_ready"],
+                "order_safety": "paper_order_only",
+                "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
+            },
+        ]
+        return {
+            "primary_strategy": primary_strategy,
+            "mode": "target_weight_capped_paper_pilot",
+            "commands": commands,
+            "sequence": sequence,
+            "safety_notes": [
+                "current_blockers.go_live=true가 되기 전까지 live 모드는 유지 차단",
+                "daily ops summary와 readiness audit은 주문과 pilot evidence를 쓰지 않는 no-order 점검",
+                "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용",
+            ],
+        }
+
+    commands = _research_operator_commands()
+    return {
+        "primary_strategy": live_candidates[0] if live_candidates else None,
+        "mode": "research_recovery" if not live_candidates else "live_gate_review",
+        "commands": commands,
+        "sequence": [
+            {
+                "step": 1,
+                "desc": "promotion/current blockers 동기화 점검",
+                "command": commands["check_promotion_artifacts"],
+                "order_safety": "no_order",
+            },
+            {
+                "step": 2,
+                "desc": "canonical research/promotion artifact 재생성",
+                "command": commands["run_canonical_research"],
+                "order_safety": "no_order",
+            },
+            {
+                "step": 3,
+                "desc": "current blockers 재생성 후 live 후보 여부 재확인",
+                "command": commands["regenerate_current_blockers"],
+                "order_safety": "no_order",
+            },
+        ],
+        "safety_notes": [
+            "provisional_paper_candidate가 없으면 research 재설계가 우선",
+            "live 후보가 생겨도 live gate와 current_blockers.go_live=true 전까지 실전 전환 금지",
+        ],
+    }
+
+
 def build_current_blockers_report(blocker_summary: dict) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
     if not isinstance(blocker_summary, dict):
@@ -933,25 +1035,39 @@ def build_current_blockers_report(blocker_summary: dict) -> dict:
         })
 
     next_actions = []
+    operator_runbook = _build_current_blockers_operator_runbook(
+        provisional_candidates=provisional_candidates,
+        live_candidates=live_candidates,
+    )
+    runbook_commands = operator_runbook.get("commands") or {}
     if provisional_candidates:
         next_actions.append({
             "priority": 1,
             "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
             "strategy": provisional_candidates[0],
+            "command": runbook_commands.get("readiness_audit"),
+            "order_safety": "no_order",
         })
         next_actions.append({
             "priority": 2,
             "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
             "strategy": provisional_candidates[0],
+            "command": runbook_commands.get("execute_capped_paper_after_ready"),
+            "order_safety": "paper_order_only",
+            "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
         })
     else:
         next_actions.append({
             "priority": 1,
             "desc": "provisional_paper_candidate 회복을 위한 research sweep 계속 진행",
+            "command": runbook_commands.get("run_canonical_research"),
+            "order_safety": "no_order",
         })
     next_actions.append({
         "priority": len(next_actions) + 1,
         "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지",
+        "command": runbook_commands.get("check_promotion_artifacts"),
+        "order_safety": "no_order",
     })
 
     verdict = (
@@ -966,7 +1082,7 @@ def build_current_blockers_report(blocker_summary: dict) -> dict:
     )
     return {
         "artifact_type": "current_go_live_blockers",
-        "schema_version": 2,
+        "schema_version": CURRENT_BLOCKERS_SCHEMA_VERSION,
         "generated_at": blocker_summary.get("generated_at") or datetime.now().isoformat(),
         "source": "reports/promotion/promotion_blocker_summary.json",
         "source_artifact_hash": blocker_summary.get("source_artifact_hash"),
@@ -978,6 +1094,7 @@ def build_current_blockers_report(blocker_summary: dict) -> dict:
         "hard_blockers": hard_blockers,
         "soft_blockers": soft_blockers,
         "next_actions": next_actions,
+        "operator_runbook": operator_runbook,
         "default_strategy": default_strategy,
     }
 
@@ -1047,6 +1164,7 @@ def validate_current_blockers_artifact(
         "hard_blockers",
         "soft_blockers",
         "next_actions",
+        "operator_runbook",
         "default_strategy",
     ):
         if current.get(key) != expected.get(key):
