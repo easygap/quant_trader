@@ -7,6 +7,7 @@ Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
 요약 검증: python tools/evaluate_and_promote.py --blocker-summary-check
 현재 blocker 갱신: python tools/evaluate_and_promote.py --current-blockers
+invalid paper evidence 격리: python tools/evaluate_and_promote.py --paper-evidence-quarantine-invalid
 출력: reports/promotion/
   - metrics_summary.json
   - walk_forward_summary.json
@@ -1116,6 +1117,27 @@ def validate_paper_evidence_operator_artifacts(
     evidence_dir: str | Path | None = None,
 ) -> list[str]:
     """운영 점검에서 paper evidence package 파일 문제를 구조화된 WARN으로 노출한다."""
+    warnings: list[str] = []
+    for item in find_invalid_paper_evidence_operator_packages(
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+    ):
+        strategy_name = item["strategy"]
+        if not strategy_name:
+            warnings.extend(item["issues"])
+            continue
+        for issue in item["issues"]:
+            warnings.append(
+                f"{strategy_name}: {issue}; package 재생성 또는 격리 필요"
+            )
+    return warnings
+
+
+def find_invalid_paper_evidence_operator_packages(
+    promotion_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> list[dict]:
+    """metrics_summary에 포함된 전략의 invalid paper evidence package 목록."""
     from core.promotion_engine import validate_paper_evidence_package_file
 
     base = Path(promotion_dir)
@@ -1123,25 +1145,102 @@ def validate_paper_evidence_operator_artifacts(
     try:
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return [f"{metrics_path} 로드 실패: {exc}"]
+        return [{
+            "strategy": "",
+            "path": str(metrics_path),
+            "issues": [f"{metrics_path} 로드 실패: {exc}"],
+            "package": False,
+        }]
     if not isinstance(metrics, dict):
-        return [f"{metrics_path} top-level JSON is not an object"]
+        return [{
+            "strategy": "",
+            "path": str(metrics_path),
+            "issues": [f"{metrics_path} top-level JSON is not an object"],
+            "package": False,
+        }]
 
     evidence_base = (
         Path(evidence_dir)
         if evidence_dir is not None
         else base.parent / "paper_evidence"
     )
-    warnings: list[str] = []
+    invalid: list[dict] = []
     for strategy_name in sorted(str(name) for name in metrics):
-        for issue in validate_paper_evidence_package_file(
+        issues = validate_paper_evidence_package_file(
             strategy_name,
             evidence_dir=str(evidence_base),
-        ):
-            warnings.append(
-                f"{strategy_name}: {issue}; package 재생성 또는 격리 필요"
-            )
-    return warnings
+        )
+        if issues:
+            invalid.append({
+                "strategy": strategy_name,
+                "path": str(evidence_base / f"promotion_evidence_{strategy_name}.json"),
+                "issues": issues,
+                "package": True,
+            })
+    return invalid
+
+
+def quarantine_invalid_paper_evidence_operator_packages(
+    promotion_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+    quarantine_dir: str | Path | None = None,
+    *,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> list[dict]:
+    """invalid paper evidence package를 운영 입력 경로 밖으로 이동한다."""
+    evidence_base = (
+        Path(evidence_dir)
+        if evidence_dir is not None
+        else Path(promotion_dir).parent / "paper_evidence"
+    )
+    quarantine_base = (
+        Path(quarantine_dir)
+        if quarantine_dir is not None
+        else evidence_base / "_invalid_packages"
+    )
+    stamp = (now or datetime.now()).strftime("%Y%m%d%H%M%S")
+    results: list[dict] = []
+    for item in find_invalid_paper_evidence_operator_packages(
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_base,
+    ):
+        src = Path(item["path"])
+        if not item.get("package", True):
+            results.append({
+                **item,
+                "target": "",
+                "moved": False,
+                "reason": "operator metrics artifact invalid; package quarantine skipped",
+            })
+            continue
+        if not src.exists() or not src.is_file():
+            results.append({
+                **item,
+                "target": "",
+                "moved": False,
+                "reason": "source package file not found",
+            })
+            continue
+
+        target = quarantine_base / f"{src.stem}_{stamp}{src.suffix}"
+        suffix = 1
+        while target.exists():
+            target = quarantine_base / f"{src.stem}_{stamp}_{suffix}{src.suffix}"
+            suffix += 1
+
+        moved = False
+        if not dry_run:
+            quarantine_base.mkdir(parents=True, exist_ok=True)
+            src.replace(target)
+            moved = True
+        results.append({
+            **item,
+            "target": str(target),
+            "moved": moved,
+            "dry_run": dry_run,
+        })
+    return results
 
 
 def validate_promotion_operator_artifacts(
@@ -1534,10 +1633,39 @@ def main():
         action="store_true",
         help="reports/current_blockers.json이 현재 blocker summary와 동기화됐는지 검증",
     )
+    parser.add_argument(
+        "--paper-evidence-quarantine-invalid",
+        action="store_true",
+        help="invalid paper evidence package를 reports/paper_evidence/_invalid_packages로 이동",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="paper evidence package 격리 대상만 출력하고 이동하지 않음",
+    )
     args = parser.parse_args()
 
     if args.canonical:
         run_canonical()
+    elif args.paper_evidence_quarantine_invalid:
+        results = quarantine_invalid_paper_evidence_operator_packages(
+            "reports/promotion",
+            "reports/paper_evidence",
+            dry_run=args.dry_run,
+        )
+        if not results:
+            print("OK: invalid paper evidence package 없음")
+            return
+        print(
+            "DRY-RUN: invalid paper evidence package 격리 대상"
+            if args.dry_run
+            else "OK: invalid paper evidence package 격리 완료"
+        )
+        for item in results:
+            action = "would move" if args.dry_run else "moved"
+            print(f"  - {item['strategy']}: {action} {item['path']} -> {item['target']}")
+            for issue in item["issues"]:
+                print(f"    issue: {issue}")
     elif args.promotion_artifacts_refresh:
         try:
             paths = refresh_promotion_artifacts_from_existing_inputs(
@@ -1606,6 +1734,10 @@ def main():
             print("WARN: paper evidence package 검증 경고")
             for warning in paper_warnings:
                 print(f"  - {warning}")
+            print(
+                "  정리: python tools/evaluate_and_promote.py "
+                "--paper-evidence-quarantine-invalid --dry-run"
+            )
         print("OK: artifact 로드 및 운영 artifact 동기화 검증 성공")
         for name, p in result.items():
             print(f"  {name}: {p['status']}")
