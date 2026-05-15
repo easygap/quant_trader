@@ -580,6 +580,8 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
 
     try:
         promotion = json.loads((base / "promotion_result.json").read_text(encoding="utf-8"))
+        metrics = json.loads((base / "metrics_summary.json").read_text(encoding="utf-8"))
+        walk_forward = json.loads((base / "walk_forward_summary.json").read_text(encoding="utf-8"))
         metadata = json.loads((base / "run_metadata.json").read_text(encoding="utf-8"))
         benchmark = json.loads((base / "benchmark_comparison.json").read_text(encoding="utf-8"))
         # schema 검증
@@ -595,6 +597,14 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
         metadata_issues = validate_canonical_metadata_integrity(metadata)
         if metadata_issues:
             logger.error("run_metadata.json canonical integrity 오류: {}", "; ".join(metadata_issues))
+            return None
+        source_issues = validate_metrics_source_artifact_sync(
+            metrics,
+            walk_forward,
+            benchmark,
+        )
+        if source_issues:
+            logger.error("promotion source artifact 동기화 오류: {}", "; ".join(source_issues))
             return None
         if not isinstance(benchmark.get("strategy_excess_return_pct"), dict):
             logger.error("benchmark_comparison.json strategy_excess_return_pct 누락")
