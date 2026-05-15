@@ -2,6 +2,7 @@
 Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 
 실행: python tools/evaluate_and_promote.py --canonical
+승격/요약 재생성: python tools/evaluate_and_promote.py --promotion-artifacts-refresh
 요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
 요약 검증: python tools/evaluate_and_promote.py --blocker-summary-check
 현재 blocker 갱신: python tools/evaluate_and_promote.py --current-blockers
@@ -622,6 +623,18 @@ def recalculate_promotion_results_from_artifacts(
     evidence_dir: str | Path | None = None,
 ) -> dict:
     """metrics/evidence/metadata 기준으로 promotion_result를 다시 계산한다."""
+    promotions, _metrics, _metadata = recalculate_promotion_bundle_from_artifacts(
+        artifact_dir,
+        evidence_dir=evidence_dir,
+    )
+    return promotions
+
+
+def recalculate_promotion_bundle_from_artifacts(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> tuple[dict, dict, dict]:
+    """metrics/evidence/metadata 기준 promotion_result와 갱신 metrics를 계산한다."""
     base = Path(artifact_dir)
     metrics_path = base / "metrics_summary.json"
     metadata_path = base / "run_metadata.json"
@@ -638,12 +651,53 @@ def recalculate_promotion_results_from_artifacts(
         else base.parent / "paper_evidence"
     )
     strategy_specs = metadata.get("strategy_specs")
-    return build_promotion_results(
+    promotions = build_promotion_results(
         metrics_for_recalc,
         evidence_dir=str(inferred_evidence_dir),
         strategy_specs=strategy_specs if isinstance(strategy_specs, list) else [],
         canonical_metadata=metadata,
     )
+    return promotions, metrics_for_recalc, metadata
+
+
+def refresh_promotion_artifacts_from_existing_inputs(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+    current_blockers_path: str | Path = "reports/current_blockers.json",
+) -> dict[str, Path]:
+    """기존 metrics/evidence/metadata에서 promotion과 파생 운영 파일을 재생성한다."""
+    base = Path(artifact_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    promotions, metrics, metadata = recalculate_promotion_bundle_from_artifacts(
+        base,
+        evidence_dir=evidence_dir,
+    )
+    promotion_path = base / "promotion_result.json"
+    metrics_path = base / "metrics_summary.json"
+    promotion_path.write_text(
+        json.dumps(promotions, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    metrics_path.write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    blocker_summary = build_promotion_blocker_summary(promotions, metrics, metadata)
+    blocker_json_path, blocker_md_path = write_promotion_blocker_summary(
+        blocker_summary,
+        base,
+    )
+    current_path = write_current_blockers_report(
+        build_current_blockers_report(blocker_summary),
+        current_blockers_path,
+    )
+    return {
+        "promotion_result": promotion_path,
+        "metrics_summary": metrics_path,
+        "promotion_blocker_summary": blocker_json_path,
+        "promotion_blocker_summary_md": blocker_md_path,
+        "current_blockers": current_path,
+    }
 
 
 def validate_promotion_result_recalculation(
@@ -1245,6 +1299,11 @@ def main():
         help="기존 promotion artifact에서 blocker summary JSON/MD 재생성",
     )
     parser.add_argument(
+        "--promotion-artifacts-refresh",
+        action="store_true",
+        help="기존 metrics/evidence/metadata에서 promotion_result와 파생 운영 파일 재생성",
+    )
+    parser.add_argument(
         "--blocker-summary-check",
         action="store_true",
         help="저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검증",
@@ -1263,6 +1322,18 @@ def main():
 
     if args.canonical:
         run_canonical()
+    elif args.promotion_artifacts_refresh:
+        try:
+            paths = refresh_promotion_artifacts_from_existing_inputs(
+                "reports/promotion",
+                current_blockers_path="reports/current_blockers.json",
+            )
+        except Exception as exc:
+            print(f"FAIL: promotion artifact 재생성 실패: {exc}")
+            sys.exit(1)
+        print("OK: promotion artifact 재생성 성공")
+        for label, path in paths.items():
+            print(f"  {label}: {path}")
     elif args.current_blockers_check:
         issues = validate_current_blockers_artifact("reports/promotion", "reports/current_blockers.json")
         if issues:
