@@ -23,6 +23,11 @@ from core.data_collector import DataCollector
 from database.repositories import get_all_positions
 
 
+def rebalance_live_strategy_id(basket_name: str) -> str:
+    """live rebalance의 gate/account/order tag를 묶는 승인 단위."""
+    return f"basket_rebalance:{basket_name}"
+
+
 class RebalanceOrder:
     """리밸런싱 개별 주문 정보."""
 
