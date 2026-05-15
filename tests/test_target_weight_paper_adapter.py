@@ -2063,6 +2063,24 @@ def test_verify_existing_pilot_evidence_rejects_plan_snapshot_mismatch(monkeypat
     }
 
 
+def test_verify_existing_pilot_evidence_reports_corrupt_plan_quantities(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    record["pilot_caps_snapshot"]["target_weight_plan"]["target_quantities_after"]["AAA"] = "bad-quantity"
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_plan.target_quantities_after"
+    }
+
+
 def test_verify_existing_pilot_evidence_rejects_non_pilot_record(monkeypatch):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
