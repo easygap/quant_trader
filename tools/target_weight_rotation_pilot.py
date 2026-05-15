@@ -4513,6 +4513,11 @@ def run_pilot(
         raise ValueError("record_shadow_evidence is only valid for dry-run sessions")
     if execute or collect_evidence:
         _require_actual_paper_cash(cash, context="execution or pilot evidence collection")
+    if collect_evidence and not execute:
+        raise ValueError(
+            "target_weight_collect_evidence_requires_execute: "
+            "pilot_paper evidence collection requires --execute --collect-evidence"
+        )
 
     config = config or Config.get()
     plan = build_plan(
@@ -4957,6 +4962,8 @@ def main() -> None:
                 "--cash cannot be combined with "
                 f"{', '.join(cash_blocked_modes)}; use actual paper account cash"
             )
+    if args.collect_evidence and not args.execute:
+        parser.error("--collect-evidence requires --execute; evidence must be tied to a completed paper execution")
 
     from database.models import init_database
 
