@@ -3,6 +3,7 @@ Canonical 평가 → Artifact 생성 → 승격 판정 → Status Report
 
 실행: python tools/evaluate_and_promote.py --canonical
 승격/요약 재생성: python tools/evaluate_and_promote.py --promotion-artifacts-refresh
+운영 검증: python tools/evaluate_and_promote.py --check-only
 요약 재생성: python tools/evaluate_and_promote.py --blocker-summary
 요약 검증: python tools/evaluate_and_promote.py --blocker-summary-check
 현재 blocker 갱신: python tools/evaluate_and_promote.py --current-blockers
@@ -981,6 +982,27 @@ def validate_current_blockers_artifact(
     return issues
 
 
+def validate_promotion_operator_artifacts(
+    promotion_dir: str | Path = "reports/promotion",
+    current_blockers_path: str | Path = "reports/current_blockers.json",
+) -> list[str]:
+    """운영 점검 기본 경로에서 promotion 파생 artifact 전체 동기화를 검사한다."""
+    summary_issues = validate_promotion_blocker_summary_artifact(promotion_dir)
+    if summary_issues:
+        return [
+            "blocker summary 동기화 실패: " + issue
+            for issue in summary_issues
+        ]
+
+    return [
+        "current blockers 동기화 실패: " + issue
+        for issue in validate_current_blockers_artifact(
+            promotion_dir,
+            current_blockers_path,
+        )
+    ]
+
+
 def run_canonical():
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
@@ -1310,7 +1332,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Canonical 평가 + 승격 판정")
     parser.add_argument("--canonical", action="store_true", help="전체 평가 실행")
-    parser.add_argument("--check-only", action="store_true", help="기존 artifact 검증만")
+    parser.add_argument("--check-only", action="store_true", help="promotion artifact 로드 및 운영 artifact 동기화 검증")
     parser.add_argument(
         "--blocker-summary",
         action="store_true",
@@ -1391,7 +1413,16 @@ def main():
         if result is None:
             print("FAIL: artifact 없음 또는 로드 실패")
             sys.exit(1)
-        print("OK: artifact 로드 성공")
+        issues = validate_promotion_operator_artifacts(
+            "reports/promotion",
+            "reports/current_blockers.json",
+        )
+        if issues:
+            print("FAIL: 운영 artifact 동기화 검증 실패")
+            for issue in issues:
+                print(f"  - {issue}")
+            sys.exit(1)
+        print("OK: artifact 로드 및 운영 artifact 동기화 검증 성공")
         for name, p in result.items():
             print(f"  {name}: {p['status']}")
     else:
