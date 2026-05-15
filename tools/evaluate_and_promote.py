@@ -364,7 +364,11 @@ def build_promotion_results(
         "target_weight_canonical_params_hash",
         "target_weight_params_hash_matches_canonical",
     )
-    paper_reference_date = datetime.now()
+    paper_reference_date = (
+        canonical_metadata.get("generated_at")
+        if isinstance(canonical_metadata, dict) and canonical_metadata.get("generated_at")
+        else datetime.now()
+    )
     for name, m in metrics_all.items():
         for key in paper_fields:
             m.pop(key, None)
