@@ -3398,8 +3398,12 @@ def build_target_weight_experiment_manifest(
                 "pre_execution_positions_complete": True,
                 "liquidity_complete": True,
                 "pre_trade_risk_complete": True,
+                "order_count_complete": True,
                 "order_result_complete": True,
+                "order_complete": True,
+                "order_result_reconciliation_complete": True,
                 "fill_complete": True,
+                "fill_reconciliation_complete": True,
                 "position_reconciliation_complete": True,
             },
             "blocked_evidence": [

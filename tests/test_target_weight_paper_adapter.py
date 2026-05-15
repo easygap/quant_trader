@@ -2241,6 +2241,10 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_trade_day_allowed"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_market_session_allowed"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["pilot_authorization_snapshot_allowed"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["order_count_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["order_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["order_result_reconciliation_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_reconciliation_complete"] is True
     assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
     assert manifest["current_decision"]["ready_for_cap_approval"] is True
@@ -2281,10 +2285,15 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "execution_trade_day_allowed": True,
                     "execution_market_session_allowed": True,
                     "pilot_authorization_snapshot_allowed": True,
+                    "pre_execution_complete": True,
                     "liquidity_complete": True,
                     "pre_trade_risk_complete": True,
+                    "order_count_complete": True,
                     "order_result_complete": True,
+                    "order_complete": True,
+                    "order_result_reconciliation": {"complete": True},
                     "fill_complete": True,
+                    "fill_reconciliation": {"complete": True},
                     "position_reconciliation": {"complete": True},
                 },
             },
