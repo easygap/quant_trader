@@ -601,8 +601,10 @@ def write_promotion_blocker_summary(summary: dict, output_dir: str | Path) -> tu
     return json_path, md_path
 
 
-def load_promotion_blocker_summary_from_artifacts(artifact_dir: str | Path = "reports/promotion") -> dict:
-    """기존 promotion artifact에서 blocker summary를 재구성한다."""
+def _load_promotion_blocker_summary_from_artifacts_unchecked(
+    artifact_dir: str | Path = "reports/promotion",
+) -> dict:
+    """검증 없이 기존 promotion artifact에서 blocker summary를 재구성한다."""
     base = Path(artifact_dir)
     promotion_path = base / "promotion_result.json"
     metrics_path = base / "metrics_summary.json"
@@ -617,6 +619,31 @@ def load_promotion_blocker_summary_from_artifacts(artifact_dir: str | Path = "re
     if not isinstance(metadata, dict):
         raise ValueError(f"{metadata_path} top-level JSON is not an object")
     return build_promotion_blocker_summary(promotions, metrics, metadata)
+
+
+def load_promotion_blocker_summary_from_artifacts(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+    *,
+    validate: bool = True,
+) -> dict:
+    """기존 promotion artifact에서 검증된 blocker summary를 재구성한다.
+
+    운영 파일 생성에 쓰는 public helper는 기본적으로 저장된 promotion_result가
+    현재 metrics/evidence 재계산 결과와 맞을 때만 summary를 반환한다.
+    """
+    if validate:
+        issues = validate_promotion_result_recalculation(
+            artifact_dir,
+            evidence_dir=evidence_dir,
+        )
+        if issues:
+            raise ValueError(
+                "promotion_result 재계산 검증 실패: "
+                + "; ".join(issues)
+                + "; --promotion-artifacts-refresh 먼저 실행 필요"
+            )
+    return _load_promotion_blocker_summary_from_artifacts_unchecked(artifact_dir)
 
 
 def _read_json_object(path: Path) -> tuple[dict | None, str | None]:
@@ -789,17 +816,11 @@ def load_validated_promotion_blocker_summary_from_artifacts(
     evidence_dir: str | Path | None = None,
 ) -> dict:
     """promotion_result 재계산 검증 통과 후 blocker summary를 재구성한다."""
-    issues = validate_promotion_result_recalculation(
+    return load_promotion_blocker_summary_from_artifacts(
         artifact_dir,
         evidence_dir=evidence_dir,
+        validate=True,
     )
-    if issues:
-        raise ValueError(
-            "promotion_result 재계산 검증 실패: "
-            + "; ".join(issues)
-            + "; --promotion-artifacts-refresh 먼저 실행 필요"
-        )
-    return load_promotion_blocker_summary_from_artifacts(artifact_dir)
 
 
 def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "reports/promotion") -> list[str]:
@@ -817,7 +838,10 @@ def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "repo
         return [f"{summary_path} top-level JSON is not an object"]
 
     try:
-        expected = load_promotion_blocker_summary_from_artifacts(base)
+        expected = load_promotion_blocker_summary_from_artifacts(
+            base,
+            validate=False,
+        )
     except Exception as exc:
         return [f"promotion source artifact 로드 실패: {exc}"]
 
