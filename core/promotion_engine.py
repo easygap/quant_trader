@@ -565,7 +565,10 @@ def attach_target_weight_canonical_hash_check(
     return metrics
 
 
-def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
+def load_promotion_artifact(
+    artifact_dir: str = ARTIFACT_DIR,
+    evidence_dir: Optional[str] = None,
+) -> Optional[dict]:
     """최신 canonical 평가 산출물에서 promotion 결과를 로드.
     artifact가 없거나 schema가 다르면 None 반환 (fail closed).
     """
@@ -573,6 +576,11 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
     from pathlib import Path
 
     base = Path(artifact_dir)
+    resolved_evidence_dir = (
+        str(base.parent / "paper_evidence")
+        if evidence_dir is None
+        else evidence_dir
+    )
     for fname in REQUIRED_ARTIFACTS:
         if not (base / fname).exists():
             logger.warning("Promotion artifact 없음: {}", base / fname)
@@ -616,6 +624,17 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
             if "status" not in p or "allowed_modes" not in p:
                 logger.error("promotion_result.json schema 오류: {} 키 누락", name)
                 return None
+        metrics_by_strategy = load_metrics_from_artifact(
+            str(base),
+            evidence_dir=resolved_evidence_dir,
+        )
+        promotion_issues = validate_promotion_result_artifact_sync(
+            promotion,
+            metrics_by_strategy,
+        )
+        if promotion_issues:
+            logger.error("promotion_result 재계산 동기화 오류: {}", "; ".join(promotion_issues))
+            return None
         return promotion
     except Exception as e:
         logger.error("Artifact 로드 실패: {}", e)
@@ -749,6 +768,49 @@ def validate_metrics_source_artifact_sync(
                 f"{name}.benchmark_excess_sharpe 불일치: "
                 f"metrics_summary={metrics.get('benchmark_excess_sharpe')!r}, "
                 f"benchmark_comparison={excess_sharpe.get(name)!r}"
+            )
+    return issues
+
+
+def validate_promotion_result_artifact_sync(
+    promotion_raw: dict,
+    metrics_by_strategy: dict[str, "StrategyMetrics"],
+) -> list[str]:
+    """저장된 promotion_result가 현재 metrics/evidence 재계산 결과와 일치하는지 검사."""
+    if not isinstance(promotion_raw, dict):
+        return ["promotion_result.json top-level JSON is not an object"]
+    if not metrics_by_strategy:
+        return ["promotion_result 재계산 metrics 없음"]
+
+    issues: list[str] = []
+    current_names = set(promotion_raw)
+    expected_names = set(metrics_by_strategy)
+    missing = sorted(expected_names - current_names)
+    extra = sorted(current_names - expected_names)
+    if missing:
+        issues.append(f"promotion_result 누락 전략: {missing[:8]}")
+    if extra:
+        issues.append(f"promotion_result 불필요 전략: {extra[:8]}")
+
+    for name in sorted(current_names & expected_names):
+        current = promotion_raw.get(name)
+        if not isinstance(current, dict):
+            issues.append(f"promotion_result.{name} 형식 오류")
+            continue
+        expected = promote(metrics_by_strategy[name])
+        if current.get("status") != expected.status:
+            issues.append(
+                f"promotion_result {name}.status 재계산 결과 불일치: "
+                f"stored={current.get('status')!r}, expected={expected.status!r}"
+            )
+        if current.get("allowed_modes") != expected.allowed_modes:
+            issues.append(
+                f"promotion_result {name}.allowed_modes 재계산 결과 불일치: "
+                f"stored={current.get('allowed_modes')!r}, expected={expected.allowed_modes!r}"
+            )
+        if current.get("reason") != expected.reason:
+            issues.append(
+                f"promotion_result {name}.reason 재계산 결과 불일치"
             )
     return issues
 
