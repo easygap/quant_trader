@@ -146,7 +146,7 @@ class TestForceLiveRemoved:
             ))
 
         assert exc.value.code == 1
-        gate.assert_called_once_with(config, "scoring")
+        gate.assert_called_once_with(config, "basket_rebalance:test_basket")
         basket_cls.assert_not_called()
 
     def test_live_rebalance_passes_confirmed_gate_to_executor(self, monkeypatch):
@@ -157,9 +157,14 @@ class TestForceLiveRemoved:
         config = SimpleNamespace(trading={"mode": "live"}, active_strategy="scoring")
 
         class FakeRebalancer:
-            def __init__(self, basket_name, config):
+            def __init__(self, basket_name, config, account_key="", execution_strategy=""):
                 calls["basket_name"] = basket_name
                 calls["config"] = config
+                calls["account_key"] = account_key
+                calls["execution_strategy"] = execution_strategy
+                self.portfolio_mgr = SimpleNamespace(
+                    sync_with_broker=MagicMock(return_value={"ok": True})
+                )
 
             def get_status_report(self):
                 return "status"
@@ -193,11 +198,69 @@ class TestForceLiveRemoved:
             strategy="scoring",
         ))
 
-        gate.assert_called_once_with(config, "scoring")
+        gate.assert_called_once_with(config, "basket_rebalance:test_basket")
         assert calls["basket_name"] == "test_basket"
+        assert calls["account_key"] == "basket_rebalance:test_basket"
+        assert calls["execution_strategy"] == "basket_rebalance:test_basket"
         assert calls["execute"]["live_confirmed"] is True
         assert calls["execute"]["dry_run"] is False
         notifier.send_message.assert_called_once()
+
+    def test_live_rebalance_sync_failure_blocks_before_orders(self, monkeypatch):
+        """live 리밸런싱은 승인 계좌 잔고 동기화 실패 시 주문 계획 후 실행하지 않는다."""
+        import main as main_mod
+
+        calls = {}
+        config = SimpleNamespace(trading={"mode": "live"}, active_strategy="scoring")
+
+        class FakeRebalancer:
+            def __init__(self, basket_name, config, account_key="", execution_strategy=""):
+                calls["account_key"] = account_key
+                calls["execution_strategy"] = execution_strategy
+                self.portfolio_mgr = SimpleNamespace(
+                    sync_with_broker=MagicMock(
+                        return_value={"ok": False, "message": "position mismatch"}
+                    )
+                )
+
+            def get_status_report(self):
+                calls["status_report"] = True
+                return "status"
+
+            def should_rebalance(self):
+                calls["should_rebalance"] = True
+                return True, "드리프트"
+
+            def plan_rebalance(self):
+                calls["plan_rebalance"] = True
+                return ["order"]
+
+            def execute(self, *args, **kwargs):
+                calls["execute"] = True
+                return {"executed": 1, "skipped": 0, "failed": 0}
+
+        monkeypatch.setattr(main_mod.Config, "get", lambda: config)
+        monkeypatch.setattr(main_mod, "_check_live_readiness_gate", MagicMock(return_value=[]))
+        monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
+        monkeypatch.setattr(
+            "core.notifier.Notifier",
+            lambda cfg: SimpleNamespace(send_message=MagicMock()),
+        )
+        monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.run_rebalance(SimpleNamespace(
+                basket="test_basket",
+                dry_run=False,
+                confirm_live=True,
+                strategy="scoring",
+            ))
+
+        assert exc.value.code == 1
+        assert calls["account_key"] == "basket_rebalance:test_basket"
+        assert calls["execution_strategy"] == "basket_rebalance:test_basket"
+        assert "status_report" not in calls
+        assert "execute" not in calls
 
     def test_paper_mode_forces_live_config_to_paper_before_executor(self, monkeypatch):
         """--mode paper 실행은 settings.trading.mode=live여도 OrderExecutor를 paper로 고정한다."""
