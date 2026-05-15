@@ -21,6 +21,7 @@ from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
 from core.notifier import Notifier
 from core.strategy_diagnostics import diagnose_live_post_market
+from core.live_readiness import check_live_readiness_gate
 
 try:
     from monitoring.paper_monitor import log_event as _log_op
@@ -1508,7 +1509,10 @@ class Scheduler:
     def _run_basket_rebalance_check(self):
         """장전 단계에서 enabled 바스켓의 리밸런싱 필요 여부를 체크하고 실행."""
         try:
-            from core.basket_rebalancer import BasketRebalancer
+            from core.basket_rebalancer import (
+                BasketRebalancer,
+                rebalance_live_strategy_id,
+            )
 
             enabled = BasketRebalancer.get_enabled_baskets()
             if not enabled:
@@ -1517,10 +1521,40 @@ class Scheduler:
             logger.info("🔄 바스켓 리밸런싱 체크: {}", enabled)
             for name in enabled:
                 try:
+                    is_live = self._mode == "live"
+                    live_strategy_name = rebalance_live_strategy_id(name)
+                    if is_live:
+                        gate_issues = check_live_readiness_gate(
+                            self.config,
+                            live_strategy_name,
+                        )
+                        if gate_issues:
+                            msg = (
+                                f"바스켓 '{name}' live 리밸런싱 검증 실패: "
+                                + "; ".join(gate_issues)
+                            )
+                            logger.error(msg)
+                            self.discord.send_message(msg, critical=True)
+                            continue
+
                     rebalancer = BasketRebalancer(
                         basket_name=name, config=self.config,
-                        account_key=self.strategy_name,
+                        account_key=live_strategy_name if is_live else self.strategy_name,
+                        execution_strategy=(
+                            live_strategy_name if is_live else "basket_rebalance"
+                        ),
                     )
+                    if is_live:
+                        sync_result = rebalancer.portfolio_mgr.sync_with_broker()
+                        if not sync_result.get("ok"):
+                            msg = (
+                                f"바스켓 '{name}' live 리밸런싱 전 포지션 동기화 실패: "
+                                f"{sync_result.get('message', 'sync failed')}"
+                            )
+                            logger.error(msg)
+                            self.discord.send_message(msg, critical=True)
+                            continue
+
                     should, reason = rebalancer.should_rebalance()
                     if not should:
                         logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
@@ -1533,7 +1567,7 @@ class Scheduler:
                     result = rebalancer.execute(
                         orders,
                         live_confirmed=(
-                            self._mode == "live" and self._live_gate_validated
+                            is_live and self._live_gate_validated
                         ),
                     )
                     summary = (
