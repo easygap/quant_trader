@@ -155,7 +155,7 @@
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
 | Paper runtime registry 오류 차단 | 높음 | 완료 — legacy `reports/approved_strategies.json`가 JSON 파싱 실패 또는 스키마 오류 상태면 paper runtime을 `research_disabled`로 fail-closed 처리. 신규 entry/shadow는 막고 exit/cancel/reconcile/finalize/evidence/reporting만 허용 |
-| Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡 + fail-closed/audited entry guard** |
+| Paper Pilot Authorization | 높음 | **완료 — `core/paper_pilot.py` launch readiness + pilot auth + 리스크 캡 + fail-closed/audited entry guard. pilot auth 생성 뒤 전략 상태나 artifact eligibility가 내려가도 entry 직전에 eligibility를 재검증해 기존 승인만으로 신규 pilot 진입이 열리지 않게 한다** |
 | Paper Preflight Check | 높음 | **완료 — `core/paper_preflight.py` 운영 준비 상태 점검** |
 | Strategy Universe Registry | 높음 | **완료 — `core/strategy_universe.py` paper 대상 전략 canonical 목록** |
 | Zero-return Semantics (deadlock 해소) | 높음 | **완료 — cash-only/no-position day에서 daily_return=0.0 추론, benchmark final 가능** |
