@@ -481,6 +481,40 @@ class TestPilotEligibility:
         with pytest.raises(ValueError, match="pilot requires provisional_paper_candidate"):
             enable_pilot(OBSERVATION_STRATEGY, "2026-04-01", "2026-04-30")
 
+    def test_pilot_auth_rejects_invalid_date_range_and_caps(self, evidence_dir, runtime_dir, fresh_db):
+        """pilot auth 입력은 기록 전에 날짜/기간/cap을 검증한다."""
+        from core.paper_pilot import enable_pilot
+
+        with pytest.raises(ValueError, match="valid_to"):
+            enable_pilot(PILOT_STRATEGY, "2026-04-30", "2026-04-01")
+        with pytest.raises(ValueError, match="valid_from"):
+            enable_pilot(PILOT_STRATEGY, "2026-4-01", "2026-04-30")
+        with pytest.raises(ValueError, match="max_orders"):
+            enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30", max_orders=0)
+        with pytest.raises(ValueError, match="max_notional"):
+            enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30", max_notional=-1)
+
+    def test_get_active_pilot_ignores_malformed_enabled_auth(self, evidence_dir, runtime_dir, fresh_db):
+        """기존 auth 파일에 잘못된 enabled record가 있어도 active pilot으로 보지 않는다."""
+        from core.paper_pilot import PILOT_AUTH_FILE, get_active_pilot
+
+        PILOT_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PILOT_AUTH_FILE.write_text(
+            json.dumps({
+                "strategy": PILOT_STRATEGY,
+                "enabled": True,
+                "valid_from": "bad-date",
+                "valid_to": "9999-99-99",
+                "max_orders_per_day": 2,
+                "max_concurrent_positions": 2,
+                "max_notional_per_trade": 1_000_000,
+                "max_gross_exposure": 3_000_000,
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        assert get_active_pilot(PILOT_STRATEGY, "2026-04-07") is None
+
     def test_artifact_only_target_weight_candidate_can_enable_pilot(
         self, evidence_dir, runtime_dir, fresh_db, monkeypatch
     ):
