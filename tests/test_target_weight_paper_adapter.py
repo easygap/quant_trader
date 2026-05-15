@@ -723,6 +723,7 @@ def _existing_pilot_evidence_record(plan):
                     "allowed": True,
                     "complete": True,
                 },
+                "preflight_refresh_complete": True,
                 "pre_execution_complete": True,
                 "liquidity_complete": True,
                 "pre_trade_risk_complete": True,
@@ -1086,6 +1087,13 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
     from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
     from tools.paper_pilot_control import _target_weight_enable_guard
 
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_300_000,
+        "max_gross_exposure": 3_300_000,
+    }
+
     def fake_run_pilot_readiness_audit(**kwargs):
         return {
             "audit": {
@@ -1095,6 +1103,7 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
                     "allowed": True,
                     "reason": "proposed pilot caps satisfied",
                 },
+                "cap_recommendation": {"suggested_caps": suggested_caps},
             },
             "artifact_path": tmp_path / "audit.json",
             "report_path": tmp_path / "audit.md",
@@ -1118,10 +1127,59 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
     assert result["audit"]["cap_preview"]["allowed"] is True
 
 
+def test_target_weight_pilot_control_enable_guard_requires_exact_suggested_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "looser caps still satisfy the plan",
+                },
+                "cap_recommendation": {
+                    "suggested_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_300_000,
+                        "max_gross_exposure": 3_300_000,
+                    }
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=4,
+        max_positions=4,
+        max_notional=2_000_000,
+        max_exposure=4_000_000,
+    )
+
+    with pytest.raises(ValueError, match="must exactly match readiness suggested caps"):
+        _target_weight_enable_guard(args)
+
+
 def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weight(monkeypatch, tmp_path):
     from tools.paper_pilot_control import _target_weight_enable_guard
 
     calls = {}
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 4,
+        "max_notional_per_trade": 1_500_000,
+        "max_gross_exposure": 4_000_000,
+    }
 
     def fake_run_pilot_readiness_audit(**kwargs):
         calls["audit"] = kwargs
@@ -1133,6 +1191,7 @@ def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weig
                     "allowed": True,
                     "reason": "proposed pilot caps satisfied",
                 },
+                "cap_recommendation": {"suggested_caps": suggested_caps},
             },
             "artifact_path": tmp_path / "audit.json",
             "report_path": tmp_path / "audit.md",
@@ -1189,6 +1248,12 @@ def test_target_weight_pilot_control_enable_guard_uses_canonical_metadata_for_pr
     monkeypatch.setattr(ppc, "PROMOTION_METADATA_PATH", metadata_path)
 
     calls = {}
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 4,
+        "max_notional_per_trade": 1_500_000,
+        "max_gross_exposure": 4_000_000,
+    }
 
     def fake_run_pilot_readiness_audit(**kwargs):
         calls["audit"] = kwargs
@@ -1200,6 +1265,7 @@ def test_target_weight_pilot_control_enable_guard_uses_canonical_metadata_for_pr
                     "allowed": True,
                     "reason": "proposed pilot caps satisfied",
                 },
+                "cap_recommendation": {"suggested_caps": suggested_caps},
             },
             "artifact_path": tmp_path / "audit.json",
             "report_path": tmp_path / "audit.md",
@@ -2194,6 +2260,24 @@ def test_verify_existing_pilot_evidence_rejects_missing_authorization_snapshot_c
     }
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_preflight_refresh(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    del record["pilot_caps_snapshot"]["target_weight_execution"]["preflight_refresh_complete"]
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_execution.preflight_refresh_complete"
+    }
+
+
 def test_preview_plan_against_caps_flags_default_pilot_caps():
     from tools.target_weight_rotation_pilot import build_preview_caps, preview_plan_against_caps
 
@@ -2321,6 +2405,7 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_trade_day_allowed"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["execution_market_session_allowed"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["pilot_authorization_snapshot_allowed"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["preflight_refresh_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["order_count_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["order_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["order_result_reconciliation_complete"] is True
@@ -2365,6 +2450,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "execution_trade_day_allowed": True,
                     "execution_market_session_allowed": True,
                     "pilot_authorization_snapshot_allowed": True,
+                    "preflight_refresh_complete": True,
                     "pre_execution_complete": True,
                     "liquidity_complete": True,
                     "pre_trade_risk_complete": True,

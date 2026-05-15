@@ -25,7 +25,7 @@ LIVE_GATE_MAX_PAPER_EVIDENCE_AGE_DAYS = 14
 LIVE_GATE_DATA_SNAPSHOT_HASH_LENGTH = 64
 TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
 CURRENT_BLOCKERS_ARTIFACT_TYPE = "current_go_live_blockers"
-CURRENT_BLOCKERS_SCHEMA_VERSION = 2
+CURRENT_BLOCKERS_SCHEMA_VERSION = 3
 PROMOTION_BLOCKER_SUMMARY_ARTIFACT_TYPE = "promotion_blocker_summary"
 PROMOTION_BLOCKER_SUMMARY_SCHEMA_VERSION = 1
 
@@ -700,6 +700,7 @@ def _validate_current_blockers_gate(
             "hard_blockers",
             "soft_blockers",
             "next_actions",
+            "operator_runbook",
             "default_strategy",
         ):
             if current.get(key) != expected_current_blockers.get(key):
