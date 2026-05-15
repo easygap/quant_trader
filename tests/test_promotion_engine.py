@@ -611,8 +611,32 @@ class TestArtifactLoading:
         from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
-            (base / "metrics_summary.json").write_text("{}", encoding="utf-8")
-            (base / "walk_forward_summary.json").write_text("{}", encoding="utf-8")
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    "scoring": {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 5,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                        "benchmark_excess_return": 1.0,
+                        "benchmark_excess_sharpe": 0.2,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({"scoring": {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
+                encoding="utf-8",
+            )
             (base / "benchmark_comparison.json").write_text(
                 json.dumps({
                     "strategy_excess_return_pct": {"scoring": 1.0},
@@ -637,6 +661,122 @@ class TestArtifactLoading:
             assert result is not None
             assert "scoring" in result
             assert result["scoring"]["status"] == "paper_only"
+
+    def test_load_promotion_artifact_rejects_stale_benchmark_fields(self):
+        """promotion_result 직접 로드도 stale benchmark source를 차단한다."""
+        import tempfile, json
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    "scoring": {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 5,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                        "benchmark_excess_return": 1.0,
+                        "benchmark_excess_sharpe": 0.2,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({"scoring": {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": -5.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+            (base / "promotion_result.json").write_text(
+                json.dumps({"scoring": {"status": "paper_only", "allowed_modes": ["backtest", "paper"], "reason": "test"}}),
+                encoding="utf-8",
+            )
+
+            result = load_promotion_artifact(str(base))
+
+        assert result is None
+
+    def test_load_promotion_artifact_rejects_stale_walk_forward_fields(self):
+        """promotion_result 직접 로드도 stale walk-forward source를 차단한다."""
+        import tempfile, json
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    "scoring": {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 5,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                        "benchmark_excess_return": 1.0,
+                        "benchmark_excess_sharpe": 0.2,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({"scoring": {
+                    "windows": 5,
+                    "positive": 1,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {"scoring": 1.0},
+                    "strategy_excess_sharpe": {"scoring": 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+            (base / "promotion_result.json").write_text(
+                json.dumps({"scoring": {"status": "paper_only", "allowed_modes": ["backtest", "paper"], "reason": "test"}}),
+                encoding="utf-8",
+            )
+
+            result = load_promotion_artifact(str(base))
+
+        assert result is None
 
     def test_load_corrupt_snapshot_returns_none(self):
         """입력 snapshot이 손상된 artifact는 fail closed."""
