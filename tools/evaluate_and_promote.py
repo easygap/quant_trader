@@ -617,6 +617,75 @@ def load_promotion_blocker_summary_from_artifacts(artifact_dir: str | Path = "re
     return build_promotion_blocker_summary(promotions, metrics, metadata)
 
 
+def recalculate_promotion_results_from_artifacts(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> dict:
+    """metrics/evidence/metadata 기준으로 promotion_result를 다시 계산한다."""
+    base = Path(artifact_dir)
+    metrics_path = base / "metrics_summary.json"
+    metadata_path = base / "run_metadata.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(metrics, dict):
+        raise ValueError(f"{metrics_path} top-level JSON is not an object")
+    if not isinstance(metadata, dict):
+        raise ValueError(f"{metadata_path} top-level JSON is not an object")
+    metrics_for_recalc = json.loads(json.dumps(metrics, ensure_ascii=False, default=str))
+    inferred_evidence_dir = (
+        Path(evidence_dir)
+        if evidence_dir is not None
+        else base.parent / "paper_evidence"
+    )
+    strategy_specs = metadata.get("strategy_specs")
+    return build_promotion_results(
+        metrics_for_recalc,
+        evidence_dir=str(inferred_evidence_dir),
+        strategy_specs=strategy_specs if isinstance(strategy_specs, list) else [],
+        canonical_metadata=metadata,
+    )
+
+
+def validate_promotion_result_recalculation(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> list[str]:
+    """저장된 promotion_result가 현재 metrics/evidence 재계산 결과와 같은지 검사."""
+    base = Path(artifact_dir)
+    promotion_path = base / "promotion_result.json"
+    try:
+        current = json.loads(promotion_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{promotion_path} 로드 실패: {exc}"]
+    if not isinstance(current, dict):
+        return [f"{promotion_path} top-level JSON is not an object"]
+
+    try:
+        expected = recalculate_promotion_results_from_artifacts(base, evidence_dir=evidence_dir)
+    except Exception as exc:
+        return [f"promotion_result 재계산 실패: {exc}"]
+
+    issues = []
+    current_names = set(current)
+    expected_names = set(expected)
+    missing = sorted(expected_names - current_names)
+    extra = sorted(current_names - expected_names)
+    if missing:
+        issues.append(f"promotion_result 누락 전략: {missing[:8]}")
+    if extra:
+        issues.append(f"promotion_result 불필요 전략: {extra[:8]}")
+    for name in sorted(current_names & expected_names):
+        current_item = current.get(name) or {}
+        expected_item = expected.get(name) or {}
+        for key in ("status", "allowed_modes", "reason"):
+            if current_item.get(key) != expected_item.get(key):
+                issues.append(
+                    f"promotion_result {name}.{key} 재계산 결과 불일치: "
+                    "--canonical 또는 promotion_result 재생성 필요"
+                )
+    return issues
+
+
 def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "reports/promotion") -> list[str]:
     """저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검사한다."""
     base = Path(artifact_dir)
@@ -646,6 +715,7 @@ def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "repo
     for key in ("summary", "strategies"):
         if current.get(key) != expected.get(key):
             issues.append(f"{key} 내용 불일치: --blocker-summary로 재생성 필요")
+    issues.extend(validate_promotion_result_recalculation(base))
     return issues
 
 
