@@ -844,6 +844,27 @@ def test_target_weight_cli_rejects_cash_override_for_operational_modes(
     assert mode in captured.err
 
 
+def test_target_weight_cli_requires_execute_for_collect_evidence(monkeypatch, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--collect-evidence",
+        ],
+    )
+    monkeypatch.setattr(twp, "run_pilot", lambda **kwargs: pytest.fail("run_pilot should not run"))
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert "--collect-evidence requires --execute" in captured.err
+
+
 def test_target_weight_daily_ops_cli_marks_not_checked_gates(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
@@ -3425,6 +3446,19 @@ def test_run_pilot_blocks_cash_override_for_operational_paths(monkeypatch, tmp_p
             output_dir=tmp_path,
             config=SimpleNamespace(trading={"mode": "paper"}),
             **kwargs,
+        )
+
+
+def test_run_pilot_blocks_collect_evidence_without_execute(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: pytest.fail("build_plan should not run"))
+
+    with pytest.raises(ValueError, match="target_weight_collect_evidence_requires_execute"):
+        twp.run_pilot(
+            collect_evidence=True,
+            output_dir=tmp_path,
+            config=SimpleNamespace(trading={"mode": "paper"}),
         )
 
 
