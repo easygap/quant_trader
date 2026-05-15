@@ -373,7 +373,7 @@ def build_promotion_results(
         for key in paper_fields:
             m.pop(key, None)
         paper_metrics = paper_evidence_metrics_from_package(
-            load_paper_evidence_package(name, evidence_dir),
+            load_paper_evidence_package(name, evidence_dir, log_warnings=False),
             reference_date=paper_reference_date,
         )
         paper_metrics = attach_target_weight_canonical_hash_check(
@@ -1111,6 +1111,39 @@ def validate_promotion_artifact_freshness(
     return []
 
 
+def validate_paper_evidence_operator_artifacts(
+    promotion_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> list[str]:
+    """운영 점검에서 paper evidence package 파일 문제를 구조화된 WARN으로 노출한다."""
+    from core.promotion_engine import validate_paper_evidence_package_file
+
+    base = Path(promotion_dir)
+    metrics_path = base / "metrics_summary.json"
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{metrics_path} 로드 실패: {exc}"]
+    if not isinstance(metrics, dict):
+        return [f"{metrics_path} top-level JSON is not an object"]
+
+    evidence_base = (
+        Path(evidence_dir)
+        if evidence_dir is not None
+        else base.parent / "paper_evidence"
+    )
+    warnings: list[str] = []
+    for strategy_name in sorted(str(name) for name in metrics):
+        for issue in validate_paper_evidence_package_file(
+            strategy_name,
+            evidence_dir=str(evidence_base),
+        ):
+            warnings.append(
+                f"{strategy_name}: {issue}; package 재생성 또는 격리 필요"
+            )
+    return warnings
+
+
 def validate_promotion_operator_artifacts(
     promotion_dir: str | Path = "reports/promotion",
     current_blockers_path: str | Path = "reports/current_blockers.json",
@@ -1565,6 +1598,14 @@ def main():
             for issue in issues:
                 print(f"  - {issue}")
             sys.exit(1)
+        paper_warnings = validate_paper_evidence_operator_artifacts(
+            "reports/promotion",
+            "reports/paper_evidence",
+        )
+        if paper_warnings:
+            print("WARN: paper evidence package 검증 경고")
+            for warning in paper_warnings:
+                print(f"  - {warning}")
         print("OK: artifact 로드 및 운영 artifact 동기화 검증 성공")
         for name, p in result.items():
             print(f"  {name}: {p['status']}")
