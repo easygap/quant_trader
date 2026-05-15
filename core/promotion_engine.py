@@ -356,10 +356,16 @@ def _latest_evidence_date_from_package(package: dict) -> Optional[date]:
 def load_paper_evidence_package(
     strategy_name: str,
     evidence_dir: str = PAPER_EVIDENCE_DIR,
+    *,
+    log_warnings: bool = True,
 ) -> Optional[dict]:
     """paper promotion evidence package를 로드한다. 없으면 None으로 둔다."""
     import json
     from pathlib import Path
+
+    def warn(message: str, *args) -> None:
+        if log_warnings:
+            logger.warning(message, *args)
 
     path = Path(evidence_dir) / f"promotion_evidence_{strategy_name}.json"
     if not path.exists():
@@ -367,61 +373,105 @@ def load_paper_evidence_package(
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        logger.warning("paper evidence package 로드 실패: {} ({})", path, exc)
+        warn("paper evidence package 로드 실패: {} ({})", path, exc)
         return None
     if not isinstance(payload, dict):
-        logger.warning("paper evidence package schema 오류: {}", path)
+        warn("paper evidence package schema 오류: {}", path)
         return None
     package_strategy = payload.get("strategy")
     if package_strategy != strategy_name:
         if package_strategy is None:
-            logger.warning(
+            warn(
                 "paper evidence package strategy 누락: {} (expected={})",
                 path,
                 strategy_name,
             )
             return None
-        logger.warning(
+        warn(
             "paper evidence package strategy 불일치: {} != {}",
             package_strategy,
             strategy_name,
         )
         return None
-    if not _validate_paper_evidence_package_integrity(payload, path):
+    if not _validate_paper_evidence_package_integrity(
+        payload,
+        path,
+        log_warnings=log_warnings,
+    ):
         return None
     return payload
 
 
-def _validate_paper_evidence_package_integrity(payload: dict, path: object) -> bool:
+def validate_paper_evidence_package_file(
+    strategy_name: str,
+    evidence_dir: str = PAPER_EVIDENCE_DIR,
+) -> list[str]:
+    """저장된 paper evidence package 파일 자체의 schema/identity/integrity 문제를 반환한다."""
+    import json
+    from pathlib import Path
+
+    path = Path(evidence_dir) / f"promotion_evidence_{strategy_name}.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"{path} 로드 실패: {exc}"]
+    if not isinstance(payload, dict):
+        return [f"{path} top-level JSON is not an object"]
+
+    issues: list[str] = []
+    package_strategy = payload.get("strategy")
+    if package_strategy != strategy_name:
+        if package_strategy is None:
+            issues.append(f"{path} strategy 누락: expected={strategy_name}")
+        else:
+            issues.append(
+                f"{path} strategy 불일치: expected={strategy_name}, actual={package_strategy}"
+            )
+    issues.extend(_paper_evidence_package_integrity_issues(payload, path))
+    return issues
+
+
+def _paper_evidence_package_integrity_issues(payload: dict, path: object) -> list[str]:
     from core.paper_evidence import (
         PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
         compute_promotion_package_integrity_hash,
     )
 
+    issues: list[str] = []
     integrity = payload.get("package_integrity")
     if not isinstance(integrity, dict):
-        logger.warning("paper evidence package integrity 누락: {}", path)
-        return False
+        return [f"{path} package_integrity 누락"]
     schema_version = integrity.get("schema_version")
     if schema_version != PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION:
-        logger.warning(
-            "paper evidence package integrity schema 오류: {} ({})",
-            path,
-            schema_version,
+        issues.append(
+            f"{path} package_integrity schema 오류: {schema_version!r}"
         )
-        return False
     stored_hash = integrity.get("payload_hash")
     if not isinstance(stored_hash, str) or not stored_hash.strip():
-        logger.warning("paper evidence package payload_hash 누락: {}", path)
-        return False
+        issues.append(f"{path} package_integrity payload_hash 누락")
+        return issues
     actual_hash = compute_promotion_package_integrity_hash(payload)
     if stored_hash != actual_hash:
-        logger.warning(
-            "paper evidence package payload_hash 불일치: {} stored={} actual={}",
-            path,
-            stored_hash,
-            actual_hash,
+        issues.append(
+            f"{path} package_integrity payload_hash 불일치: "
+            f"stored={stored_hash} actual={actual_hash}"
         )
+    return issues
+
+
+def _validate_paper_evidence_package_integrity(
+    payload: dict,
+    path: object,
+    *,
+    log_warnings: bool = True,
+) -> bool:
+    issues = _paper_evidence_package_integrity_issues(payload, path)
+    if issues and log_warnings:
+        for issue in issues:
+            logger.warning("paper evidence package integrity 오류: {}", issue)
+    if issues:
         return False
     return True
 
@@ -895,7 +945,7 @@ def load_metrics_from_artifact(
     for name, m in metrics_raw.items():
         wf = wf_raw.get(name, {})
         paper_metrics = paper_evidence_metrics_from_package(
-            load_paper_evidence_package(name, evidence_dir),
+            load_paper_evidence_package(name, evidence_dir, log_warnings=False),
             reference_date=paper_reference_date,
         )
         paper_metrics = attach_target_weight_canonical_hash_check(
