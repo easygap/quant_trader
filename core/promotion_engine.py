@@ -387,7 +387,43 @@ def load_paper_evidence_package(
             strategy_name,
         )
         return None
+    if not _validate_paper_evidence_package_integrity(payload, path):
+        return None
     return payload
+
+
+def _validate_paper_evidence_package_integrity(payload: dict, path: object) -> bool:
+    from core.paper_evidence import (
+        PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        compute_promotion_package_integrity_hash,
+    )
+
+    integrity = payload.get("package_integrity")
+    if not isinstance(integrity, dict):
+        logger.warning("paper evidence package integrity 누락: {}", path)
+        return False
+    schema_version = integrity.get("schema_version")
+    if schema_version != PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION:
+        logger.warning(
+            "paper evidence package integrity schema 오류: {} ({})",
+            path,
+            schema_version,
+        )
+        return False
+    stored_hash = integrity.get("payload_hash")
+    if not isinstance(stored_hash, str) or not stored_hash.strip():
+        logger.warning("paper evidence package payload_hash 누락: {}", path)
+        return False
+    actual_hash = compute_promotion_package_integrity_hash(payload)
+    if stored_hash != actual_hash:
+        logger.warning(
+            "paper evidence package payload_hash 불일치: {} stored={} actual={}",
+            path,
+            stored_hash,
+            actual_hash,
+        )
+        return False
+    return True
 
 
 def paper_evidence_metrics_from_package(

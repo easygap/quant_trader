@@ -29,6 +29,21 @@ def _fresh_paper_evidence_kwargs():
     }
 
 
+def _with_package_integrity(package: dict) -> dict:
+    from core.paper_evidence import (
+        PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        compute_promotion_package_integrity_hash,
+    )
+
+    payload = dict(package)
+    payload.pop("package_integrity", None)
+    payload["package_integrity"] = {
+        "schema_version": PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        "payload_hash": compute_promotion_package_integrity_hash(payload),
+    }
+    return payload
+
+
 def _canonical_snapshot_metadata():
     from tools.evaluate_and_promote import build_data_snapshot_manifest
 
@@ -962,7 +977,7 @@ class TestArtifactLoading:
             )
             fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
             (evidence_dir / "promotion_evidence_scoring.json").write_text(
-                json.dumps({
+                json.dumps(_with_package_integrity({
                     "strategy": "scoring",
                     "period": f"2026-01-01 ~ {fresh_latest}",
                     "latest_evidence_date": fresh_latest,
@@ -977,7 +992,7 @@ class TestArtifactLoading:
                     "frozen_days": 0,
                     "cumulative_return": 4.0,
                     "trade_quality": {"status": "ok"},
-                }),
+                })),
                 encoding="utf-8",
             )
 
@@ -1176,7 +1191,7 @@ class TestArtifactLoading:
             )
             fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
             (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
-                json.dumps({
+                json.dumps(_with_package_integrity({
                     "strategy": strategy,
                     "period": f"2026-01-01 ~ {fresh_latest}",
                     "latest_evidence_date": fresh_latest,
@@ -1192,7 +1207,7 @@ class TestArtifactLoading:
                     "frozen_days": 0,
                     "cumulative_return": 4.0,
                     "trade_quality": {"status": "ok"},
-                }),
+                })),
                 encoding="utf-8",
             )
 
@@ -1250,7 +1265,46 @@ class TestArtifactLoading:
 
             assert (
                 load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
+                is None
+            )
+
+            path.write_text(
+                json.dumps(_with_package_integrity({
+                    "strategy": "scoring",
+                    "recommendation": "ELIGIBLE",
+                    "promotable_evidence_days": 60,
+                })),
+                encoding="utf-8",
+            )
+
+            assert (
+                load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
                 is not None
+            )
+
+    def test_load_paper_evidence_package_rejects_tampered_integrity_hash(self):
+        """무결성 hash와 payload가 다르면 승격 입력으로 쓰지 않는다."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.promotion_engine import load_paper_evidence_package
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evidence_dir = Path(tmpdir)
+            path = evidence_dir / "promotion_evidence_scoring.json"
+            payload = _with_package_integrity({
+                "strategy": "scoring",
+                "recommendation": "BLOCKED",
+                "block_reasons": ["insufficient_days=10/60"],
+                "promotable_evidence_days": 10,
+            })
+            payload["recommendation"] = "ELIGIBLE"
+            payload["promotable_evidence_days"] = 60
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            assert (
+                load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
+                is None
             )
 
     def test_paper_evidence_metrics_exposes_trade_quality_blockers(self):
@@ -1361,7 +1415,7 @@ class TestArtifactLoading:
             )
             fresh_latest = _fresh_paper_evidence_kwargs()["paper_latest_evidence_date"]
             (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
-                json.dumps({
+                json.dumps(_with_package_integrity({
                     "strategy": strategy,
                     "period": f"2026-01-01 ~ {fresh_latest}",
                     "latest_evidence_date": fresh_latest,
@@ -1384,7 +1438,7 @@ class TestArtifactLoading:
                         "params_hash_consistent": True,
                         "params_hash": "old-hash",
                     },
-                }),
+                })),
                 encoding="utf-8",
             )
 
