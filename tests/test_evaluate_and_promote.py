@@ -854,7 +854,10 @@ def test_load_promotion_blocker_summary_from_existing_artifacts(tmp_path):
         encoding="utf-8",
     )
 
-    summary = load_promotion_blocker_summary_from_artifacts(artifact_dir)
+    summary = load_promotion_blocker_summary_from_artifacts(
+        artifact_dir,
+        validate=False,
+    )
     json_path, md_path = write_promotion_blocker_summary(summary, artifact_dir)
 
     assert summary["generated_at"] == "2026-05-12T10:00:00"
@@ -863,6 +866,59 @@ def test_load_promotion_blocker_summary_from_existing_artifacts(tmp_path):
     assert summary["strategies"]["paper_blocked_strategy"]["metrics"]["total_return"] == 7.5
     assert json_path.name == "promotion_blocker_summary.json"
     assert "benchmark excess return missing" in md_path.read_text(encoding="utf-8")
+
+
+def test_load_promotion_blocker_summary_requires_recalculated_promotion_by_default(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        load_promotion_blocker_summary_from_artifacts,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    strategy = "paper_ready_strategy"
+    metrics = {
+        strategy: {
+            **_provisional_metrics(),
+            "benchmark_excess_return": -1.0,
+        }
+    }
+    metadata = _promotion_metadata()
+    stale_promotions = {
+        strategy: {
+            "status": "live_candidate",
+            "allowed_modes": ["backtest", "paper", "live"],
+            "reason": "live_candidate 충족",
+        }
+    }
+    _write_paper_package(tmp_path / "paper_evidence", strategy)
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps(stale_promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_source_artifacts(artifact_dir, metrics)
+    write_promotion_blocker_summary(
+        build_promotion_blocker_summary(stale_promotions, metrics, metadata=metadata),
+        artifact_dir,
+    )
+
+    with pytest.raises(ValueError, match="promotion_result 재계산 검증 실패"):
+        load_promotion_blocker_summary_from_artifacts(artifact_dir)
+
+    summary = load_promotion_blocker_summary_from_artifacts(
+        artifact_dir,
+        validate=False,
+    )
+    assert summary["strategies"][strategy]["status"] == "live_candidate"
 
 
 def test_validate_promotion_blocker_summary_detects_stale_summary(tmp_path):
