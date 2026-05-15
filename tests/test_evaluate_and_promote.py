@@ -593,6 +593,42 @@ def test_build_promotion_results_blocks_stale_paper_evidence(tmp_path):
     assert metrics[strategy]["paper_evidence_fresh"] is False
 
 
+def test_build_promotion_results_uses_canonical_generated_at_for_paper_freshness(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.evaluate_and_promote as promote_tool
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 5, 20, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(promote_tool, "datetime", FrozenDatetime)
+
+    strategy = "paper_reference_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(
+        evidence_dir,
+        strategy,
+        generated_at="2026-04-30T15:30:00",
+        period="2026-03-01 ~ 2026-04-30",
+        latest_evidence_date="2026-04-30",
+    )
+    metadata = _promotion_metadata(generated_at="2026-05-13T09:00:00")
+
+    promotions = promote_tool.build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=metadata,
+    )
+
+    assert promotions[strategy]["status"] == "live_candidate"
+    assert metrics[strategy]["paper_evidence_age_days"] == 13
+    assert metrics[strategy]["paper_evidence_fresh"] is True
+
+
 def test_build_promotion_results_blocks_when_canonical_benchmark_coverage_invalid(tmp_path):
     from tools.evaluate_and_promote import build_data_snapshot_manifest, build_promotion_results
 
