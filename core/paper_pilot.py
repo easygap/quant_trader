@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -109,6 +109,45 @@ def _notifier_health_verdict(
     return True, "healthy", "Discord webhook test verified"
 
 
+def _parse_pilot_auth_date(value: str, field: str) -> Date:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be YYYY-MM-DD string")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"{field} must be YYYY-MM-DD") from exc
+    if parsed.strftime("%Y-%m-%d") != value:
+        raise ValueError(f"{field} must be zero-padded YYYY-MM-DD")
+    return parsed
+
+
+def _validate_positive_int(value: int, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{field} must be > 0")
+    return value
+
+
+def _validate_pilot_authorization_inputs(
+    valid_from: str,
+    valid_to: str,
+    *,
+    max_orders: int,
+    max_positions: int,
+    max_notional: int,
+    max_exposure: int,
+) -> None:
+    start = _parse_pilot_auth_date(valid_from, "valid_from")
+    end = _parse_pilot_auth_date(valid_to, "valid_to")
+    if end < start:
+        raise ValueError("valid_to must be on or after valid_from")
+    _validate_positive_int(max_orders, "max_orders")
+    _validate_positive_int(max_positions, "max_positions")
+    _validate_positive_int(max_notional, "max_notional")
+    _validate_positive_int(max_exposure, "max_exposure")
+
+
 @dataclass
 class PilotAuthorization:
     strategy: str
@@ -168,12 +207,23 @@ def _read_auths(strategy: str | None = None) -> list[dict]:
 def get_active_pilot(strategy: str, date: str | None = None) -> PilotAuthorization | None:
     """현재 유효한 pilot authorization 반환. 없으면 None."""
     date = date or datetime.now().strftime("%Y-%m-%d")
+    try:
+        check_date = _parse_pilot_auth_date(date, "date")
+    except ValueError:
+        logger.warning("Invalid pilot lookup date: {}", date)
+        return None
     auths = _read_auths(strategy)
     # 최신 것부터 역순 탐색
     for a in reversed(auths):
         if not a.get("enabled", False):
             continue
-        if a.get("valid_from", "") <= date <= a.get("valid_to", ""):
+        try:
+            start = _parse_pilot_auth_date(a.get("valid_from", ""), "valid_from")
+            end = _parse_pilot_auth_date(a.get("valid_to", ""), "valid_to")
+        except ValueError as exc:
+            logger.warning("Invalid pilot authorization skipped: {} ({})", a, exc)
+            continue
+        if start <= check_date <= end:
             return PilotAuthorization(**{k: v for k, v in a.items()
                                          if k in PilotAuthorization.__dataclass_fields__})
     return None
@@ -185,6 +235,14 @@ def enable_pilot(strategy: str, valid_from: str, valid_to: str,
                  reason: str = "", operator: str = "cli",
                  target_weight_plan_snapshot: dict | None = None) -> PilotAuthorization:
     """pilot authorization 생성."""
+    _validate_pilot_authorization_inputs(
+        valid_from,
+        valid_to,
+        max_orders=max_orders,
+        max_positions=max_positions,
+        max_notional=max_notional,
+        max_exposure=max_exposure,
+    )
     # eligibility check
     _check_pilot_eligibility(strategy)
 
