@@ -515,6 +515,43 @@ class TestPilotEligibility:
 
         assert get_active_pilot(PILOT_STRATEGY, "2026-04-07") is None
 
+    def test_get_active_pilot_skips_invalid_cap_record_and_uses_previous_valid_auth(
+        self, evidence_dir, runtime_dir, fresh_db
+    ):
+        """최신 enabled record의 cap이 잘못되면 건너뛰고 이전 정상 auth만 사용한다."""
+        from core.paper_pilot import PILOT_AUTH_FILE, get_active_pilot
+
+        valid_auth = {
+            "strategy": PILOT_STRATEGY,
+            "enabled": True,
+            "valid_from": "2026-04-01",
+            "valid_to": "2026-04-30",
+            "max_orders_per_day": 2,
+            "max_concurrent_positions": 2,
+            "max_notional_per_trade": 1_000_000,
+            "max_gross_exposure": 3_000_000,
+            "operator_reason": "정상 승인",
+        }
+        invalid_cap_auth = {
+            **valid_auth,
+            "max_gross_exposure": 0,
+            "operator_reason": "잘못된 cap",
+        }
+        PILOT_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PILOT_AUTH_FILE.write_text(
+            "\n".join([
+                json.dumps(valid_auth, ensure_ascii=False),
+                json.dumps(invalid_cap_auth, ensure_ascii=False),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        auth = get_active_pilot(PILOT_STRATEGY, "2026-04-07")
+
+        assert auth is not None
+        assert auth.operator_reason == "정상 승인"
+        assert auth.max_gross_exposure == 3_000_000
+
     def test_artifact_only_target_weight_candidate_can_enable_pilot(
         self, evidence_dir, runtime_dir, fresh_db, monkeypatch
     ):
