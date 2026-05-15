@@ -612,6 +612,137 @@ def load_promotion_artifact(artifact_dir: str = ARTIFACT_DIR) -> Optional[dict]:
         return None
 
 
+def _number_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _same_number(left, right, *, tolerance: float = 1e-9) -> bool:
+    left_number = _number_or_none(left)
+    right_number = _number_or_none(right)
+    if left_number is None or right_number is None:
+        return left == right
+    return abs(left_number - right_number) <= tolerance
+
+
+def validate_metrics_source_artifact_sync(
+    metrics_raw: dict,
+    wf_raw: dict,
+    benchmark_raw: dict,
+) -> list[str]:
+    """metrics_summary의 파생 값이 WF/benchmark 원천 artifact와 일치하는지 검사."""
+    issues: list[str] = []
+    if not isinstance(metrics_raw, dict):
+        return ["metrics_summary.json top-level JSON is not an object"]
+    if not isinstance(wf_raw, dict):
+        return ["walk_forward_summary.json top-level JSON is not an object"]
+    if not isinstance(benchmark_raw, dict):
+        return ["benchmark_comparison.json top-level JSON is not an object"]
+
+    excess_return = benchmark_raw.get("strategy_excess_return_pct")
+    excess_sharpe = benchmark_raw.get("strategy_excess_sharpe")
+    if not isinstance(excess_return, dict):
+        issues.append("benchmark_comparison.json strategy_excess_return_pct 누락")
+        excess_return = {}
+    if not isinstance(excess_sharpe, dict):
+        issues.append("benchmark_comparison.json strategy_excess_sharpe 누락")
+        excess_sharpe = {}
+
+    metric_names = set(metrics_raw)
+    wf_names = set(wf_raw)
+    return_names = set(excess_return)
+    sharpe_names = set(excess_sharpe)
+    if metric_names != wf_names:
+        issues.append(
+            "walk_forward_summary 전략 목록 불일치: "
+            f"missing={sorted(metric_names - wf_names)[:8]}, "
+            f"extra={sorted(wf_names - metric_names)[:8]}"
+        )
+    if metric_names != return_names:
+        issues.append(
+            "benchmark_comparison.strategy_excess_return_pct 전략 목록 불일치: "
+            f"missing={sorted(metric_names - return_names)[:8]}, "
+            f"extra={sorted(return_names - metric_names)[:8]}"
+        )
+    if metric_names != sharpe_names:
+        issues.append(
+            "benchmark_comparison.strategy_excess_sharpe 전략 목록 불일치: "
+            f"missing={sorted(metric_names - sharpe_names)[:8]}, "
+            f"extra={sorted(sharpe_names - metric_names)[:8]}"
+        )
+
+    for name in sorted(metric_names):
+        metrics = metrics_raw.get(name)
+        if not isinstance(metrics, dict):
+            issues.append(f"metrics_summary.{name} 형식 오류")
+            continue
+
+        wf = wf_raw.get(name)
+        if isinstance(wf, dict):
+            for metric_key, source_key in (
+                ("wf_windows", "windows"),
+                ("wf_total_trades", "total_trades"),
+            ):
+                if not _same_number(metrics.get(metric_key), wf.get(source_key)):
+                    issues.append(
+                        f"{name}.{metric_key} 불일치: "
+                        f"metrics_summary={metrics.get(metric_key)!r}, "
+                        f"walk_forward_summary.{source_key}={wf.get(source_key)!r}"
+                    )
+
+            windows = _number_or_none(wf.get("windows"))
+            positive = _number_or_none(wf.get("positive"))
+            sharpe_pos = _number_or_none(wf.get("sharpe_pos"))
+            if windows is None:
+                issues.append(f"walk_forward_summary.{name}.windows 누락 또는 숫자 아님")
+            if positive is None:
+                issues.append(f"walk_forward_summary.{name}.positive 누락 또는 숫자 아님")
+            if sharpe_pos is None:
+                issues.append(f"walk_forward_summary.{name}.sharpe_pos 누락 또는 숫자 아님")
+            if windows is not None and positive is not None:
+                expected = round(positive / max(windows, 1.0), 3)
+                if not _same_number(metrics.get("wf_positive_rate"), expected):
+                    issues.append(
+                        f"{name}.wf_positive_rate 불일치: "
+                        f"metrics_summary={metrics.get('wf_positive_rate')!r}, "
+                        f"walk_forward_summary={expected!r}"
+                    )
+            if windows is not None and sharpe_pos is not None:
+                expected = round(sharpe_pos / max(windows, 1.0), 3)
+                if not _same_number(metrics.get("wf_sharpe_positive_rate"), expected):
+                    issues.append(
+                        f"{name}.wf_sharpe_positive_rate 불일치: "
+                        f"metrics_summary={metrics.get('wf_sharpe_positive_rate')!r}, "
+                        f"walk_forward_summary={expected!r}"
+                    )
+        elif name in wf_raw:
+            issues.append(f"walk_forward_summary.{name} 형식 오류")
+
+        if name in excess_return and not _same_number(
+            metrics.get("benchmark_excess_return"),
+            excess_return.get(name),
+        ):
+            issues.append(
+                f"{name}.benchmark_excess_return 불일치: "
+                f"metrics_summary={metrics.get('benchmark_excess_return')!r}, "
+                f"benchmark_comparison={excess_return.get(name)!r}"
+            )
+        if name in excess_sharpe and not _same_number(
+            metrics.get("benchmark_excess_sharpe"),
+            excess_sharpe.get(name),
+        ):
+            issues.append(
+                f"{name}.benchmark_excess_sharpe 불일치: "
+                f"metrics_summary={metrics.get('benchmark_excess_sharpe')!r}, "
+                f"benchmark_comparison={excess_sharpe.get(name)!r}"
+            )
+    return issues
+
+
 def load_metrics_from_artifact(
     artifact_dir: str = ARTIFACT_DIR,
     evidence_dir: str = PAPER_EVIDENCE_DIR,
@@ -638,6 +769,14 @@ def load_metrics_from_artifact(
     metadata_issues = validate_canonical_metadata_integrity(metadata)
     if metadata_issues:
         logger.error("run_metadata.json canonical integrity 오류: {}", "; ".join(metadata_issues))
+        return {}
+    source_issues = validate_metrics_source_artifact_sync(
+        metrics_raw,
+        wf_raw,
+        benchmark_raw,
+    )
+    if source_issues:
+        logger.error("promotion source artifact 동기화 오류: {}", "; ".join(source_issues))
         return {}
 
     result = {}

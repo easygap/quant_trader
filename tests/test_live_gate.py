@@ -90,6 +90,8 @@ def _write_bundle(
         "wf_sharpe_positive_rate": 0.8,
         "wf_windows": 5,
         "wf_total_trades": 80,
+        "benchmark_excess_return": benchmark_excess,
+        "benchmark_excess_sharpe": benchmark_excess_sharpe,
         "ev_per_trade": 1000.0,
         "cost_adjusted_cagr": 6.0,
         "turnover_per_year": 350.0,
