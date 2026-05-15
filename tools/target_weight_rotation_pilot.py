@@ -268,13 +268,20 @@ def _snapshot_from_pilot_check(pilot_check: Any) -> tuple[dict[str, Any] | None,
     return snapshot, auth_payload is not None
 
 
-def _normalized_quantities(raw: Any) -> dict[str, int]:
+def _normalized_quantities(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
-    return {
-        normalize_symbol(symbol): int(quantity)
-        for symbol, quantity in raw.items()
-    }
+    normalized: dict[str, Any] = {}
+    for symbol, quantity in raw.items():
+        key = normalize_symbol(symbol)
+        if isinstance(quantity, bool):
+            normalized[key] = quantity
+            continue
+        try:
+            normalized[key] = int(quantity)
+        except (TypeError, ValueError):
+            normalized[key] = quantity
+    return normalized
 
 
 AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW = 10_000.0
