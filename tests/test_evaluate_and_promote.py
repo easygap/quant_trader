@@ -1193,6 +1193,77 @@ def test_current_blockers_check_fails_when_blocker_summary_strategy_actions_are_
     assert any("strategies 내용 불일치" in issue for issue in issues)
 
 
+def test_validate_promotion_operator_artifacts_detects_stale_promotion_result(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_current_blockers_from_artifacts,
+        validate_promotion_operator_artifacts,
+        write_current_blockers_report,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    strategy = "paper_ready_strategy"
+    _promotions, _metrics, _summary = _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    current_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        current_path,
+    )
+
+    (promotion_dir / "promotion_result.json").write_text(
+        json.dumps({
+            strategy: {
+                "status": "live_candidate",
+                "allowed_modes": ["backtest", "paper", "live"],
+                "reason": "live_candidate 충족",
+            }
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_promotion_operator_artifacts(promotion_dir, current_path)
+
+    assert any("blocker summary 동기화 실패" in issue for issue in issues)
+    assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in issues)
+
+
+def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_current_blockers_from_artifacts,
+        validate_promotion_operator_artifacts,
+        write_current_blockers_report,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    _promotions, _metrics, _summary = _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {"candidate": _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    current_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        current_path,
+    )
+
+    assert validate_promotion_operator_artifacts(promotion_dir, current_path) == []
+
+    stale_current = json.loads(current_path.read_text(encoding="utf-8"))
+    stale_current["go_live"] = True
+    current_path.write_text(
+        json.dumps(stale_current, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_promotion_operator_artifacts(promotion_dir, current_path)
+
+    assert any("current blockers 동기화 실패" in issue for issue in issues)
+    assert any("go_live 불일치" in issue for issue in issues)
+
+
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
