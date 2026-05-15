@@ -574,6 +574,11 @@ def _run_ensemble_independence_check_in_validate(args, config, notifier):
 # ──────────────────────────────────────────────────────────────
 # 바스켓 리밸런싱 모드
 # ──────────────────────────────────────────────────────────────
+def _rebalance_live_strategy_id(basket_name: str) -> str:
+    """live rebalance의 gate/account/order tag를 묶는 승인 단위."""
+    return f"basket_rebalance:{basket_name}"
+
+
 def run_rebalance(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from core.basket_rebalancer import BasketRebalancer
@@ -586,31 +591,6 @@ def run_rebalance(args):
     mode = str(config.trading.get("mode", "paper")).lower()
     live_rebalance_confirmed = False
 
-    if mode == "live" and not dry_run:
-        strategy_name = (
-            getattr(args, "strategy", None)
-            or getattr(config, "active_strategy", "scoring")
-        )
-        _require_live_operator_confirmation(
-            args,
-            action_label="실전 바스켓 리밸런싱",
-            example=(
-                "python main.py --mode rebalance "
-                f"--basket {basket_name or '<basket>'} "
-                f"--strategy {strategy_name} --confirm-live"
-            ),
-        )
-        gate_issues = _check_live_readiness_gate(config, strategy_name)
-        if gate_issues:
-            logger.error("=" * 50)
-            logger.error("🚫 실전 바스켓 리밸런싱 검증 실패 — 아래 항목 확인 후 재시도하세요:")
-            for issue in gate_issues:
-                logger.error("  - {}", issue)
-            logger.error("리밸런싱 주문도 live gate를 우회할 수 없습니다.")
-            logger.error("=" * 50)
-            sys.exit(1)
-        live_rebalance_confirmed = True
-
     if basket_name:
         basket_names = [basket_name]
     else:
@@ -619,13 +599,54 @@ def run_rebalance(args):
             logger.warning("enabled=true인 바스켓이 없습니다. --basket으로 지정하거나 baskets.yaml에서 enabled를 true로 설정하세요.")
             return
 
+    if mode == "live" and not dry_run:
+        _require_live_operator_confirmation(
+            args,
+            action_label="실전 바스켓 리밸런싱",
+            example=(
+                "python main.py --mode rebalance "
+                f"--basket {basket_name or '<enabled-basket>'} --confirm-live"
+            ),
+        )
+        for name in basket_names:
+            strategy_name = _rebalance_live_strategy_id(name)
+            gate_issues = _check_live_readiness_gate(config, strategy_name)
+            if gate_issues:
+                logger.error("=" * 50)
+                logger.error(
+                    "🚫 실전 바스켓 리밸런싱 검증 실패 ({}) — 아래 항목 확인 후 재시도하세요:",
+                    strategy_name,
+                )
+                for issue in gate_issues:
+                    logger.error("  - {}", issue)
+                logger.error("리밸런싱 주문도 live gate를 우회할 수 없습니다.")
+                logger.error("=" * 50)
+                sys.exit(1)
+        live_rebalance_confirmed = True
+
     logger.info("=" * 50)
     logger.info("🔄 바스켓 리밸런싱 시작 (바스켓: {}, dry_run: {})", basket_names, dry_run)
     logger.info("=" * 50)
 
     for name in basket_names:
         try:
-            rebalancer = BasketRebalancer(basket_name=name, config=config)
+            live_strategy_name = _rebalance_live_strategy_id(name)
+            rebalancer = BasketRebalancer(
+                basket_name=name,
+                config=config,
+                account_key=live_strategy_name if mode == "live" and not dry_run else "",
+                execution_strategy=live_strategy_name if mode == "live" and not dry_run else "basket_rebalance",
+            )
+
+            if mode == "live" and not dry_run:
+                sync_result = rebalancer.portfolio_mgr.sync_with_broker()
+                if not sync_result.get("ok"):
+                    logger.error(
+                        "바스켓 '{}' live 리밸런싱 전 포지션 동기화 실패: {}",
+                        name,
+                        sync_result.get("message", "sync failed"),
+                    )
+                    sys.exit(1)
 
             report = rebalancer.get_status_report()
             logger.info("\n{}", report)
