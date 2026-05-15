@@ -740,6 +740,24 @@ def validate_promotion_result_recalculation(
     return issues
 
 
+def load_validated_promotion_blocker_summary_from_artifacts(
+    artifact_dir: str | Path = "reports/promotion",
+    evidence_dir: str | Path | None = None,
+) -> dict:
+    """promotion_result 재계산 검증 통과 후 blocker summary를 재구성한다."""
+    issues = validate_promotion_result_recalculation(
+        artifact_dir,
+        evidence_dir=evidence_dir,
+    )
+    if issues:
+        raise ValueError(
+            "promotion_result 재계산 검증 실패: "
+            + "; ".join(issues)
+            + "; --promotion-artifacts-refresh 먼저 실행 필요"
+        )
+    return load_promotion_blocker_summary_from_artifacts(artifact_dir)
+
+
 def validate_promotion_blocker_summary_artifact(artifact_dir: str | Path = "reports/promotion") -> list[str]:
     """저장된 blocker summary가 현재 promotion artifact와 동기화됐는지 검사한다."""
     base = Path(artifact_dir)
@@ -1361,7 +1379,7 @@ def main():
     elif args.blocker_summary:
         out_dir = Path("reports/promotion")
         try:
-            summary = load_promotion_blocker_summary_from_artifacts(out_dir)
+            summary = load_validated_promotion_blocker_summary_from_artifacts(out_dir)
             json_path, md_path = write_promotion_blocker_summary(summary, out_dir)
         except Exception as exc:
             print(f"FAIL: blocker summary 생성 실패: {exc}")
