@@ -239,6 +239,8 @@ class TestExecute:
         from core.basket_rebalancer import RebalanceOrder
 
         rebalancer.config.trading["mode"] = "live"
+        rebalancer.account_key = "basket_rebalance:test_basket"
+        rebalancer.execution_strategy = "basket_rebalance:test_basket"
         fake_executor = MagicMock()
         fake_executor.execute_sell.return_value = {"success": True}
         executor_cls = MagicMock(return_value=fake_executor)
@@ -251,5 +253,32 @@ class TestExecute:
 
         assert result["executed"] == 1
         assert result["failed"] == 0
-        executor_cls.assert_called_once()
+        executor_cls.assert_called_once_with(
+            rebalancer.config,
+            account_key="basket_rebalance:test_basket",
+            live_gate_validated=True,
+        )
         fake_executor.execute_sell.assert_called_once()
+        assert fake_executor.execute_sell.call_args.kwargs["strategy"] == (
+            "basket_rebalance:test_basket"
+        )
+
+    def test_live_execute_blocks_scope_mismatch(self, rebalancer, monkeypatch):
+        """live 리밸런싱은 gate/account/order 전략 단위가 일치해야 한다."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.config.trading["mode"] = "live"
+        rebalancer.account_key = "basket_rebalance:test_basket"
+        rebalancer.execution_strategy = "basket_rebalance:other"
+        executor_cls = MagicMock()
+        monkeypatch.setattr("core.order_executor.OrderExecutor", executor_cls)
+
+        result = rebalancer.execute(
+            [RebalanceOrder("005930", "SELL", 3, 70000, "테스트")],
+            live_confirmed=True,
+        )
+
+        assert result["blocked"] is True
+        assert result["failed"] == 1
+        assert "승인 단위 불일치" in result["reason"]
+        executor_cls.assert_not_called()
