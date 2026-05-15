@@ -175,6 +175,48 @@ class PilotCheckResult:
     caps_snapshot: Optional[dict] = None
 
 
+_REQUIRED_PILOT_AUTH_FIELDS = (
+    "strategy",
+    "enabled",
+    "valid_from",
+    "valid_to",
+    "max_orders_per_day",
+    "max_concurrent_positions",
+    "max_notional_per_trade",
+    "max_gross_exposure",
+)
+
+
+def _pilot_authorization_from_record(record: dict) -> PilotAuthorization:
+    missing = [
+        field
+        for field in _REQUIRED_PILOT_AUTH_FIELDS
+        if field not in record
+    ]
+    if missing:
+        raise ValueError(f"missing pilot authorization fields: {', '.join(missing)}")
+    if record.get("enabled") is not True:
+        raise ValueError("enabled must be true")
+
+    _validate_pilot_authorization_inputs(
+        record["valid_from"],
+        record["valid_to"],
+        max_orders=record["max_orders_per_day"],
+        max_positions=record["max_concurrent_positions"],
+        max_notional=record["max_notional_per_trade"],
+        max_exposure=record["max_gross_exposure"],
+    )
+
+    try:
+        return PilotAuthorization(**{
+            k: v
+            for k, v in record.items()
+            if k in PilotAuthorization.__dataclass_fields__
+        })
+    except TypeError as exc:
+        raise ValueError(f"invalid pilot authorization fields: {exc}") from exc
+
+
 # ═══════════════════════════════════════════════════════════════
 # Authorization CRUD
 # ═══════════════════════════════════════════════════════════════
@@ -215,17 +257,17 @@ def get_active_pilot(strategy: str, date: str | None = None) -> PilotAuthorizati
     auths = _read_auths(strategy)
     # 최신 것부터 역순 탐색
     for a in reversed(auths):
-        if not a.get("enabled", False):
+        if a.get("enabled") is not True:
             continue
         try:
-            start = _parse_pilot_auth_date(a.get("valid_from", ""), "valid_from")
-            end = _parse_pilot_auth_date(a.get("valid_to", ""), "valid_to")
+            auth = _pilot_authorization_from_record(a)
+            start = _parse_pilot_auth_date(auth.valid_from, "valid_from")
+            end = _parse_pilot_auth_date(auth.valid_to, "valid_to")
         except ValueError as exc:
             logger.warning("Invalid pilot authorization skipped: {} ({})", a, exc)
             continue
         if start <= check_date <= end:
-            return PilotAuthorization(**{k: v for k, v in a.items()
-                                         if k in PilotAuthorization.__dataclass_fields__})
+            return auth
     return None
 
 
