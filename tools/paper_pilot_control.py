@@ -29,6 +29,12 @@ sys.path.insert(0, str(_ROOT))
 
 PROMOTION_METADATA_PATH = Path("reports/promotion/run_metadata.json")
 TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
+TARGET_WEIGHT_SUGGESTED_CAP_FIELDS = (
+    "max_orders_per_day",
+    "max_concurrent_positions",
+    "max_notional_per_trade",
+    "max_gross_exposure",
+)
 
 
 def main():
@@ -168,6 +174,7 @@ def _target_weight_enable_guard(args):
     )
     audit = result["audit"]
     cap_preview = audit["cap_preview"]
+    suggested_caps = (audit.get("cap_recommendation") or {}).get("suggested_caps") or {}
     if not audit.get("ready_for_cap_approval", False):
         reason = "; ".join(audit.get("blocking_reasons") or ["unknown blocker"])
         raise ValueError(
@@ -179,6 +186,17 @@ def _target_weight_enable_guard(args):
             "requested target-weight pilot caps do not satisfy the current plan: "
             f"{cap_preview.get('reason', 'cap preview blocked')}. "
             f"Use the suggested caps in {result['report_path']}"
+        )
+    cap_mismatches = [
+        f"{field}: requested={requested_caps.get(field)} suggested={suggested_caps.get(field)}"
+        for field in TARGET_WEIGHT_SUGGESTED_CAP_FIELDS
+        if requested_caps.get(field) != suggested_caps.get(field)
+    ]
+    if cap_mismatches:
+        raise ValueError(
+            "requested target-weight pilot caps must exactly match readiness suggested caps: "
+            + "; ".join(cap_mismatches)
+            + f". Use the suggested caps in {result['report_path']}"
         )
     plan = result.get("plan")
     if plan is not None:

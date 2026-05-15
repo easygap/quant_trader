@@ -1244,13 +1244,24 @@ def test_build_current_blockers_report_from_promotion_summary():
     report = build_current_blockers_report(blocker_summary)
 
     assert report["artifact_type"] == "current_go_live_blockers"
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["source_artifact_hash"] == "a" * 64
     assert report["go_live"] is False
     assert "NO-GO" in report["verdict"]
     assert report["provisional_paper_candidates"] == ["target_weight_best"]
     assert report["hard_blockers"][0]["desc"] == "live_candidate 상태의 전략이 없음"
     assert report["next_actions"][0]["strategy"] == "target_weight_best"
+    assert report["next_actions"][0]["command"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --readiness-audit"
+    )
+    assert report["next_actions"][1]["order_safety"] == "paper_order_only"
+    assert report["operator_runbook"]["primary_strategy"] == "target_weight_best"
+    assert report["operator_runbook"]["commands"]["daily_ops_summary"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --daily-ops-summary"
+    )
+    assert report["operator_runbook"]["sequence"][0]["order_safety"] == "no_order"
     assert "target_weight_best" in report["default_strategy"]
 
 
