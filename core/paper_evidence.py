@@ -1258,7 +1258,9 @@ def _is_target_weight_strategy(
 
 
 def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[bool, str]:
-    if record.get("evidence_mode") != "pilot_paper" and record.get("session_mode") != "pilot_paper":
+    if record.get("execution_backed") is not True:
+        return False, "not_execution_backed"
+    if record.get("evidence_mode") != "pilot_paper" or record.get("session_mode") != "pilot_paper":
         return False, "not_pilot_paper"
     if record.get("pilot_authorized") is not True:
         return False, "pilot_not_authorized"
@@ -1287,14 +1289,25 @@ def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[boo
         "execution_trade_day_allowed",
         "execution_market_session_allowed",
         "pilot_authorization_snapshot_allowed",
+        "pre_execution_complete",
         "liquidity_complete",
         "pre_trade_risk_complete",
+        "order_count_complete",
         "order_result_complete",
+        "order_complete",
         "fill_complete",
     )
     for field in required_execution_flags:
         if execution.get(field) is not True:
             return False, f"target_weight_{field}_false"
+
+    order_result_reconciliation = execution.get("order_result_reconciliation") or {}
+    if order_result_reconciliation.get("complete") is not True:
+        return False, "target_weight_order_result_reconciliation_incomplete"
+
+    fill_reconciliation = execution.get("fill_reconciliation") or {}
+    if fill_reconciliation.get("complete") is not True:
+        return False, "target_weight_fill_reconciliation_incomplete"
 
     position_reconciliation = execution.get("position_reconciliation") or {}
     if position_reconciliation.get("complete") is not True:
