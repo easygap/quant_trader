@@ -686,7 +686,24 @@ def _existing_pilot_evidence_record(plan):
             "target_weight_plan": {
                 "candidate_id": plan.candidate_id,
                 "trade_day": plan.trade_day,
+                "score_day": plan.score_day,
                 "params_hash": plan.params_hash,
+                "targets": list(plan.targets),
+                "target_exposure": plan.target_exposure,
+                "base_target_exposure": plan.base_target_exposure,
+                "risk_off": plan.risk_off,
+                "gross_exposure_after": plan.gross_exposure_after,
+                "max_order_notional": plan.max_order_notional,
+                "position_quantities_before": {
+                    order.symbol: order.current_quantity
+                    for order in plan.orders
+                    if order.current_quantity > 0
+                },
+                "target_quantities_after": {
+                    order.symbol: order.target_quantity
+                    for order in plan.orders
+                    if order.target_quantity > 0
+                },
             },
             "target_weight_execution": {
                 "complete": True,
@@ -2020,6 +2037,30 @@ def test_verify_existing_pilot_evidence_accepts_complete_record(monkeypatch):
 
     assert verification["valid"] is True
     assert verification["reason"] == "existing pilot_paper evidence verified"
+
+
+def test_verify_existing_pilot_evidence_rejects_plan_snapshot_mismatch(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    plan_snapshot = record["pilot_caps_snapshot"]["target_weight_plan"]
+    plan_snapshot["target_quantities_after"] = {
+        **plan_snapshot["target_quantities_after"],
+        "AAA": 1,
+    }
+    plan_snapshot["gross_exposure_after"] = 1_000_000.0
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} >= {
+        "target_weight_plan.target_quantities_after",
+        "target_weight_plan.gross_exposure_after",
+    }
 
 
 def test_verify_existing_pilot_evidence_rejects_non_pilot_record(monkeypatch):

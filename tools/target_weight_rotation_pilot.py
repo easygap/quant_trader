@@ -2137,23 +2137,7 @@ def build_pilot_evidence_caps_snapshot(
     position_reconciliation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     caps = dict(getattr(validation, "caps_snapshot", None) or {})
-    caps["target_weight_plan"] = {
-        "candidate_id": plan.candidate_id,
-        "trade_day": plan.trade_day,
-        "score_day": plan.score_day,
-        "params_hash": plan.params_hash,
-        "targets": list(plan.targets),
-        "target_exposure": plan.target_exposure,
-        "base_target_exposure": plan.base_target_exposure,
-        "risk_off": plan.risk_off,
-        "gross_exposure_after": plan.gross_exposure_after,
-        "max_order_notional": plan.max_order_notional,
-        "position_quantities_before": _starting_position_quantities(plan),
-        "target_quantities_after": _expected_position_quantities(plan),
-    }
-    portfolio_drawdown_guard = plan.diagnostics.get("portfolio_drawdown_guard")
-    if isinstance(portfolio_drawdown_guard, dict):
-        caps["target_weight_plan"]["portfolio_drawdown_guard"] = dict(portfolio_drawdown_guard)
+    caps["target_weight_plan"] = _target_weight_plan_evidence_snapshot(plan)
     caps["target_weight_execution"] = summarize_execution_for_evidence(
         plan,
         execution,
@@ -2169,6 +2153,27 @@ def build_pilot_evidence_caps_snapshot(
         position_reconciliation=position_reconciliation,
     )
     return caps
+
+
+def _target_weight_plan_evidence_snapshot(plan: TargetWeightPlan) -> dict[str, Any]:
+    snapshot = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "score_day": plan.score_day,
+        "params_hash": plan.params_hash,
+        "targets": list(plan.targets),
+        "target_exposure": plan.target_exposure,
+        "base_target_exposure": plan.base_target_exposure,
+        "risk_off": plan.risk_off,
+        "gross_exposure_after": plan.gross_exposure_after,
+        "max_order_notional": plan.max_order_notional,
+        "position_quantities_before": _starting_position_quantities(plan),
+        "target_quantities_after": _expected_position_quantities(plan),
+    }
+    portfolio_drawdown_guard = plan.diagnostics.get("portfolio_drawdown_guard")
+    if isinstance(portfolio_drawdown_guard, dict):
+        snapshot["portfolio_drawdown_guard"] = dict(portfolio_drawdown_guard)
+    return snapshot
 
 
 def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] | None:
@@ -2205,6 +2210,7 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
     position_reconciliation = target_execution.get("position_reconciliation") or {}
     order_result_reconciliation = target_execution.get("order_result_reconciliation") or {}
     fill_reconciliation = target_execution.get("fill_reconciliation") or {}
+    expected_target_plan = _target_weight_plan_evidence_snapshot(plan)
 
     result["record_summary"] = {
         "date": record.get("date"),
@@ -2225,7 +2231,28 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("record.pilot_authorized", record.get("pilot_authorized"), True),
         ("target_weight_plan.candidate_id", target_plan.get("candidate_id"), plan.candidate_id),
         ("target_weight_plan.trade_day", target_plan.get("trade_day"), plan.trade_day),
+        ("target_weight_plan.score_day", target_plan.get("score_day"), plan.score_day),
         ("target_weight_plan.params_hash", target_plan.get("params_hash"), plan.params_hash),
+        (
+            "target_weight_plan.targets",
+            [normalize_symbol(symbol) for symbol in target_plan.get("targets", [])],
+            [normalize_symbol(symbol) for symbol in expected_target_plan["targets"]],
+        ),
+        (
+            "target_weight_plan.risk_off",
+            target_plan.get("risk_off"),
+            expected_target_plan["risk_off"],
+        ),
+        (
+            "target_weight_plan.position_quantities_before",
+            _normalized_quantities(target_plan.get("position_quantities_before")),
+            expected_target_plan["position_quantities_before"],
+        ),
+        (
+            "target_weight_plan.target_quantities_after",
+            _normalized_quantities(target_plan.get("target_quantities_after")),
+            expected_target_plan["target_quantities_after"],
+        ),
         ("target_weight_execution.params_hash", target_execution.get("params_hash"), plan.params_hash),
         ("target_weight_execution.complete", target_execution.get("complete"), True),
         ("target_weight_execution.planned_orders", target_execution.get("planned_orders"), len(plan.orders)),
@@ -2260,12 +2287,52 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("target_weight_execution.fill_reconciliation.complete", fill_reconciliation.get("complete"), True),
         ("target_weight_execution.position_reconciliation.complete", position_reconciliation.get("complete"), True),
     ]
+    if "portfolio_drawdown_guard" in expected_target_plan or "portfolio_drawdown_guard" in target_plan:
+        checks.append((
+            "target_weight_plan.portfolio_drawdown_guard",
+            target_plan.get("portfolio_drawdown_guard"),
+            expected_target_plan.get("portfolio_drawdown_guard"),
+        ))
     for field, actual, expected in checks:
         if actual != expected:
             result["mismatches"].append({
                 "field": field,
                 "expected": expected,
                 "actual": actual,
+            })
+    numeric_checks = [
+        (
+            "target_weight_plan.target_exposure",
+            target_plan.get("target_exposure"),
+            expected_target_plan["target_exposure"],
+            None,
+        ),
+        (
+            "target_weight_plan.base_target_exposure",
+            target_plan.get("base_target_exposure"),
+            expected_target_plan["base_target_exposure"],
+            None,
+        ),
+        (
+            "target_weight_plan.gross_exposure_after",
+            target_plan.get("gross_exposure_after"),
+            expected_target_plan["gross_exposure_after"],
+            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+        ),
+        (
+            "target_weight_plan.max_order_notional",
+            target_plan.get("max_order_notional"),
+            expected_target_plan["max_order_notional"],
+            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+        ),
+    ]
+    for field, actual, expected, absolute_tolerance in numeric_checks:
+        if not _numbers_match(actual, expected, absolute_tolerance=absolute_tolerance):
+            result["mismatches"].append({
+                "field": field,
+                "expected": expected,
+                "actual": actual,
+                "tolerance": absolute_tolerance,
             })
 
     if result["mismatches"]:
