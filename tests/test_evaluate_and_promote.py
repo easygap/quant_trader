@@ -933,6 +933,52 @@ def test_validate_promotion_blocker_summary_detects_stale_promotion_result_again
     assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in current_issues)
 
 
+def test_blocker_summary_regeneration_requires_fresh_promotion_result(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        load_validated_promotion_blocker_summary_from_artifacts,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    strategy = "paper_ready_strategy"
+    metrics = {
+        strategy: {
+            **_provisional_metrics(),
+            "benchmark_excess_return": -1.0,
+        }
+    }
+    metadata = _promotion_metadata()
+    stale_promotions = {
+        strategy: {
+            "status": "live_candidate",
+            "allowed_modes": ["backtest", "paper", "live"],
+            "reason": "live_candidate 충족",
+        }
+    }
+    _write_paper_package(tmp_path / "paper_evidence", strategy)
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps(stale_promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_promotion_blocker_summary(
+        build_promotion_blocker_summary(stale_promotions, metrics, metadata=metadata),
+        artifact_dir,
+    )
+
+    with pytest.raises(ValueError, match="promotion_result 재계산 검증 실패"):
+        load_validated_promotion_blocker_summary_from_artifacts(artifact_dir)
+
+
 def test_refresh_promotion_artifacts_rebuilds_stale_promotion_and_current_blockers(tmp_path):
     from tools.evaluate_and_promote import (
         build_current_blockers_report,
