@@ -179,7 +179,7 @@ Shadow bootstrap collect/finalize CLI도 주문 제출 없이 `shadow_bootstrap`
 - live 체결 조회 결과의 주문번호가 현재 주문과 다르면 DB 거래·포지션 반영 보류
 - live 재시작 시 브로커 미체결 목록에서 사라진 보류 주문도 체결 상세 확인 전에는 열린 주문으로 유지
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
-- paper evidence package payload hash / source record hash 불일치 시 live gate 차단, `--check-only`는 invalid package를 구조화된 WARN으로 노출
+- paper evidence package payload hash / source record hash 불일치 시 live gate 차단, `--check-only`는 invalid package를 구조화된 WARN으로 노출하고 `--paper-evidence-quarantine-invalid`로 운영 입력 경로 밖에 격리 가능
 - live 신규 BUY는 gate 통과 상태가 전달된 `OrderExecutor`에서만 KIS 주문 제출 허용
 - live 바스켓 리밸런싱 주문은 CLI 운영자 확인 또는 live 스케줄러 검증 상태에서 바스켓별 canonical live gate, account_key/order strategy tag 일치, KIS↔DB 포지션 동기화 통과 후에만 실행
 - auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
