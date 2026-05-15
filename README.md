@@ -40,7 +40,7 @@
 > - 상관관계 리스크 확인은 가격 데이터 조회 실패·부족 시 신규 BUY를 차단
 > - 업종 비중 cap은 섹터 맵 조회 실패·매핑 누락 시 신규 BUY를 차단
 > - 주문/exit 판단 가격이 0·NaN·누락이면 BUY/SELL 제출과 손절/익절/블랙스완 판단을 보류하고 차단 이벤트를 기록
-> - live 바스켓 리밸런싱 주문도 `ENABLE_LIVE_TRADING=true`, `--confirm-live`, 바스켓별 `basket_rebalance:<basket>` canonical live gate/account/order tag 일치 없이는 실행 차단
+> - live 바스켓 리밸런싱 주문은 CLI와 스케줄러 자동 체크 모두 바스켓별 `basket_rebalance:<basket>` canonical live gate/account/order tag 일치 없이는 실행 차단
 > - manual paper evidence single-day/backfill/finalize는 `backfill` provenance로 기록되어 승격 증거에서 제외
 > - shadow bootstrap collect/finalize는 `shadow_bootstrap` provenance로 기록되어 주문 기반 승격 증거와 분리
 > - live candidate: 없음. `--force-live` 제거, hard gate 우회 불가
@@ -181,7 +181,7 @@ Shadow bootstrap collect/finalize CLI도 주문 제출 없이 `shadow_bootstrap`
 - live 시작 전 KIS 연결 / 잔고 동기화 실패 시 스케줄러 시작 차단
 - paper evidence package payload hash / source record hash 불일치 시 live gate 차단, `--check-only`는 invalid package를 구조화된 WARN으로 노출
 - live 신규 BUY는 gate 통과 상태가 전달된 `OrderExecutor`에서만 KIS 주문 제출 허용
-- live 바스켓 리밸런싱 주문은 운영자 확인, 바스켓별 canonical live gate, account_key/order strategy tag 일치, KIS↔DB 포지션 동기화 통과 후에만 실행
+- live 바스켓 리밸런싱 주문은 CLI 운영자 확인 또는 live 스케줄러 검증 상태에서 바스켓별 canonical live gate, account_key/order strategy tag 일치, KIS↔DB 포지션 동기화 통과 후에만 실행
 - auto-entry 후보 시그널 재검증 실패 시 신규 BUY 보류
 - live 긴급 청산 전 KIS-only 보유 포지션을 DB에 먼저 반영
 - live 긴급 청산 현재가 조회 실패 시 평균단가 지정가 fallback 매도 차단
