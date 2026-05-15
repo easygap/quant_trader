@@ -1,6 +1,6 @@
 {
   "artifact_type": "current_go_live_blockers",
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-05-13T14:07:37.832443",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -65,17 +65,69 @@
     {
       "priority": 1,
       "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
-      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
+      "order_safety": "no_order"
     },
     {
       "priority": 2,
       "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
-      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --execute --collect-evidence",
+      "order_safety": "paper_order_only",
+      "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
     },
     {
       "priority": 3,
-      "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지"
+      "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지",
+      "command": "python tools/evaluate_and_promote.py --check-only",
+      "order_safety": "no_order"
     }
   ],
+  "operator_runbook": {
+    "primary_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+    "mode": "target_weight_capped_paper_pilot",
+    "commands": {
+      "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
+      "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+      "readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
+      "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date YYYY-MM-DD",
+      "pilot_status": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
+      "execute_capped_paper_after_ready": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --execute --collect-evidence",
+      "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers"
+    },
+    "sequence": [
+      {
+        "step": 1,
+        "desc": "promotion/current blockers 동기화 점검",
+        "command": "python tools/evaluate_and_promote.py --check-only",
+        "order_safety": "no_order"
+      },
+      {
+        "step": 2,
+        "desc": "daily ops summary로 readiness와 pilot evidence 진행률 확인",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+        "order_safety": "no_order"
+      },
+      {
+        "step": 3,
+        "desc": "readiness audit 실행 후 artifact의 추천 cap만 승인",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
+        "order_safety": "no_order"
+      },
+      {
+        "step": 4,
+        "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --execute --collect-evidence",
+        "order_safety": "paper_order_only",
+        "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
+      }
+    ],
+    "safety_notes": [
+      "current_blockers.go_live=true가 되기 전까지 live 모드는 유지 차단",
+      "daily ops summary와 readiness audit은 주문과 pilot evidence를 쓰지 않는 no-order 점검",
+      "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용"
+    ]
+  },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
 }
