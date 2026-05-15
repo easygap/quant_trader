@@ -933,6 +933,80 @@ def test_validate_promotion_blocker_summary_detects_stale_promotion_result_again
     assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in current_issues)
 
 
+def test_refresh_promotion_artifacts_rebuilds_stale_promotion_and_current_blockers(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_current_blockers_report,
+        build_promotion_blocker_summary,
+        refresh_promotion_artifacts_from_existing_inputs,
+        validate_current_blockers_artifact,
+        validate_promotion_blocker_summary_artifact,
+        write_current_blockers_report,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    strategy = "paper_ready_strategy"
+    metrics = {
+        strategy: {
+            **_provisional_metrics(),
+            "benchmark_excess_return": -1.0,
+        }
+    }
+    metadata = _promotion_metadata()
+    stale_promotions = {
+        strategy: {
+            "status": "live_candidate",
+            "allowed_modes": ["backtest", "paper", "live"],
+            "reason": "live_candidate 충족",
+        }
+    }
+    _write_paper_package(tmp_path / "paper_evidence", strategy)
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps(stale_promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    stale_summary = build_promotion_blocker_summary(
+        stale_promotions,
+        metrics,
+        metadata=metadata,
+    )
+    write_promotion_blocker_summary(stale_summary, artifact_dir)
+    current_blockers_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        build_current_blockers_report(stale_summary),
+        current_blockers_path,
+    )
+
+    paths = refresh_promotion_artifacts_from_existing_inputs(
+        artifact_dir,
+        evidence_dir=tmp_path / "paper_evidence",
+        current_blockers_path=current_blockers_path,
+    )
+
+    refreshed_promotions = json.loads(
+        (artifact_dir / "promotion_result.json").read_text(encoding="utf-8")
+    )
+    refreshed_metrics = json.loads(
+        (artifact_dir / "metrics_summary.json").read_text(encoding="utf-8")
+    )
+    refreshed_current = json.loads(current_blockers_path.read_text(encoding="utf-8"))
+    assert paths["promotion_result"] == artifact_dir / "promotion_result.json"
+    assert refreshed_promotions[strategy]["status"] == "paper_only"
+    assert refreshed_metrics[strategy]["paper_days"] == 60
+    assert refreshed_current["go_live"] is False
+    assert validate_promotion_blocker_summary_artifact(artifact_dir) == []
+    assert validate_current_blockers_artifact(artifact_dir, current_blockers_path) == []
+
+
 def test_validate_promotion_blocker_summary_requires_summary_file(tmp_path):
     from tools.evaluate_and_promote import validate_promotion_blocker_summary_artifact
 
