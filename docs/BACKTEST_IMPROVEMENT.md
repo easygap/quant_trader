@@ -152,6 +152,7 @@
 | Live 전략 상태 emergency disable | 높음 | 완료 — `run_live_trading()`과 live `Scheduler`가 전략 상태 레지스트리의 live 미허용을 warning으로 넘기지 않고 fail-closed 차단한다. canonical live gate가 통과해도 운영자가 registry 상태를 낮춘 전략은 실전 시작 불가 |
 | Paper excess 승격 기준 정합성 | 높음 | 완료 — `promotion_engine` live_candidate 조건에 same-universe excess > 0과 cash-adjusted excess > 0을 모두 요구한다. live gate와 promotion_result 기준을 맞춰 현금 보정 기준으로 손실인 paper evidence가 live 후보로 표시되는 경로를 차단 |
 | Paper Evidence 전략 식별 검증 | 높음 | 완료 — `promotion_evidence_{strategy}.json` 내부 `strategy`가 현재 전략명과 정확히 일치하지 않으면 promotion engine, promotion result 생성, live gate가 해당 package를 승격/라이브 증거로 쓰지 않는다. 전략명 누락 또는 다른 전략 evidence 재사용을 fail-closed로 차단 |
+| Promotion evidence package 무결성 검증 | 높음 | 완료 — `promotion_engine`이 `package_integrity.schema_version`과 `payload_hash`를 재계산 검증한다. 수동 편집·충돌 해결·부분 재생성으로 payload와 hash가 어긋난 package는 승격 입력으로 쓰지 않아 오염된 paper evidence가 live_candidate 근거가 되는 경로를 차단 |
 | Legacy evidence E2E 정리 | 높음 | 완료 — v1 helper API 기반 `tests/test_evidence_e2e.py`를 v2 smoke/E2E로 교체하고 scheduler의 deprecated v1 collector 호출 제거 |
 | Paper Runtime State Machine | 높음 | **완료 — `core/paper_runtime.py` 5개 상태(normal/degraded/frozen/blocked/research_disabled), schema quarantine** |
 | Paper runtime registry 오류 차단 | 높음 | 완료 — legacy `reports/approved_strategies.json`가 JSON 파싱 실패 또는 스키마 오류 상태면 paper runtime을 `research_disabled`로 fail-closed 처리. 신규 entry/shadow는 막고 exit/cancel/reconcile/finalize/evidence/reporting만 허용 |
