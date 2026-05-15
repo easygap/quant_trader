@@ -39,7 +39,34 @@ def _paper_guard_patches():
             evidence_date="2026-01-01",
         ),
     ))
+    stack.enter_context(patch(
+        "core.data_collector.DataCollector.fetch_stock",
+        return_value=_gap_check_price_df(),
+    ))
+    stack.enter_context(patch(
+        "core.earnings_filter.is_near_earnings",
+        return_value=(False, ""),
+    ))
+    stack.enter_context(patch(
+        "core.order_executor.OrderExecutor._get_sector_map_cached",
+        return_value={"005930": "반도체"},
+    ))
     return stack
+
+
+def _gap_check_price_df():
+    """갭 리스크 확인이 외부 가격 조회에 닿지 않도록 쓰는 안정적인 최근가."""
+    dates = pd.bdate_range("2024-06-14", periods=2)
+    return pd.DataFrame(
+        {
+            "open": [54000, 54200],
+            "high": [54500, 54500],
+            "low": [53500, 53900],
+            "close": [54000, 54200],
+            "volume": [500000, 500000],
+        },
+        index=dates,
+    )
 
 
 def _make_price_df(n=60, base=50000):

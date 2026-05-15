@@ -582,6 +582,162 @@ def test_live_scheduler_passes_gate_validation_to_order_executor(monkeypatch):
     }
 
 
+def test_live_scheduler_basket_rebalance_uses_basket_gate_and_scope(monkeypatch):
+    """live 장전 바스켓 리밸런싱은 바스켓별 승인 단위로 gate/account/order tag를 맞춘다."""
+    from core.scheduler import Scheduler
+
+    calls = {}
+
+    class FakeRebalancer:
+        @staticmethod
+        def get_enabled_baskets():
+            return ["test_basket"]
+
+        def __init__(self, basket_name, config, account_key="", execution_strategy=""):
+            calls["basket_name"] = basket_name
+            calls["config"] = config
+            calls["account_key"] = account_key
+            calls["execution_strategy"] = execution_strategy
+            self.portfolio_mgr = SimpleNamespace(
+                sync_with_broker=MagicMock(return_value={"ok": True, "message": "일치"})
+            )
+            calls["sync_mock"] = self.portfolio_mgr.sync_with_broker
+
+        def should_rebalance(self):
+            calls["should_rebalance"] = True
+            return True, "드리프트"
+
+        def plan_rebalance(self):
+            calls["plan_rebalance"] = True
+            return ["order"]
+
+        def execute(self, orders, dry_run=False, live_confirmed=False):
+            calls["execute"] = {
+                "orders": orders,
+                "dry_run": dry_run,
+                "live_confirmed": live_confirmed,
+            }
+            return {"executed": 1, "skipped": 0, "failed": 0}
+
+    gate = MagicMock(return_value=[])
+    monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
+    monkeypatch.setattr("core.scheduler.check_live_readiness_gate", gate)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler._live_gate_validated = True
+        scheduler.discord = MagicMock()
+
+        scheduler._run_basket_rebalance_check()
+
+        gate.assert_called_once_with(scheduler.config, "basket_rebalance:test_basket")
+        assert calls["basket_name"] == "test_basket"
+        assert calls["account_key"] == "basket_rebalance:test_basket"
+        assert calls["execution_strategy"] == "basket_rebalance:test_basket"
+        calls["sync_mock"].assert_called_once_with()
+        assert calls["should_rebalance"] is True
+        assert calls["plan_rebalance"] is True
+        assert calls["execute"] == {
+            "orders": ["order"],
+            "dry_run": False,
+            "live_confirmed": True,
+        }
+        scheduler.discord.send_message.assert_called_once()
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
+def test_live_scheduler_basket_rebalance_gate_failure_blocks_before_plan(monkeypatch):
+    """live 바스켓 전용 gate가 실패하면 리밸런서 생성과 주문 계획까지 가지 않는다."""
+    from core.scheduler import Scheduler
+
+    class FakeRebalancer:
+        @staticmethod
+        def get_enabled_baskets():
+            return ["test_basket"]
+
+        def __init__(self, *args, **kwargs):
+            pytest.fail("live basket gate failure must block before rebalancer init")
+
+    gate = MagicMock(return_value=["promotion evidence 부족"])
+    monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
+    monkeypatch.setattr("core.scheduler.check_live_readiness_gate", gate)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler._live_gate_validated = True
+        scheduler.discord = MagicMock()
+
+        scheduler._run_basket_rebalance_check()
+
+        gate.assert_called_once_with(scheduler.config, "basket_rebalance:test_basket")
+        scheduler.discord.send_message.assert_called_once()
+        assert scheduler.discord.send_message.call_args.kwargs["critical"] is True
+        assert "promotion evidence 부족" in scheduler.discord.send_message.call_args.args[0]
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
+def test_live_scheduler_basket_rebalance_sync_failure_blocks_orders(monkeypatch):
+    """live 바스켓 리밸런싱 전 브로커 동기화가 실패하면 주문 판단과 실행을 생략한다."""
+    from core.scheduler import Scheduler
+
+    calls = {}
+
+    class FakeRebalancer:
+        @staticmethod
+        def get_enabled_baskets():
+            return ["test_basket"]
+
+        def __init__(self, basket_name, config, account_key="", execution_strategy=""):
+            calls["account_key"] = account_key
+            calls["execution_strategy"] = execution_strategy
+            self.portfolio_mgr = SimpleNamespace(
+                sync_with_broker=MagicMock(
+                    return_value={"ok": False, "message": "position mismatch"}
+                )
+            )
+
+        def should_rebalance(self):
+            pytest.fail("sync failure must block before should_rebalance")
+
+        def plan_rebalance(self):
+            pytest.fail("sync failure must block before plan_rebalance")
+
+        def execute(self, *args, **kwargs):
+            pytest.fail("sync failure must block before execute")
+
+    monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
+    monkeypatch.setattr(
+        "core.scheduler.check_live_readiness_gate",
+        MagicMock(return_value=[]),
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_mode = scheduler.config.trading.get("mode")
+    try:
+        scheduler.config.trading["mode"] = "live"
+        scheduler._mode = "live"
+        scheduler._live_gate_validated = True
+        scheduler.discord = MagicMock()
+
+        scheduler._run_basket_rebalance_check()
+
+        assert calls["account_key"] == "basket_rebalance:test_basket"
+        assert calls["execution_strategy"] == "basket_rebalance:test_basket"
+        scheduler.discord.send_message.assert_called_once()
+        assert scheduler.discord.send_message.call_args.kwargs["critical"] is True
+        assert "position mismatch" in scheduler.discord.send_message.call_args.args[0]
+    finally:
+        scheduler.config.trading["mode"] = old_mode
+
+
 def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
     from core.scheduler import Scheduler
 
