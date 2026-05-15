@@ -1049,11 +1049,83 @@ def validate_current_blockers_artifact(
     return issues
 
 
+def _parse_iso_datetime(value) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _datetime_age_days(generated_at: datetime, now: datetime) -> float:
+    if generated_at.tzinfo is not None and now.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=None)
+    if generated_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    return (now - generated_at).total_seconds() / 86400
+
+
+def validate_promotion_artifact_freshness(
+    promotion_dir: str | Path = "reports/promotion",
+    *,
+    now: datetime | None = None,
+    max_artifact_age_days: int | None = None,
+) -> list[str]:
+    """운영 점검에서 canonical bundle 생성 시각이 live gate 기준 안에 있는지 확인한다."""
+    from core.live_gate import LIVE_GATE_MAX_ARTIFACT_AGE_DAYS
+
+    base = Path(promotion_dir)
+    metadata_path = base / "run_metadata.json"
+    if not metadata_path.exists():
+        return ["run_metadata.json 누락."]
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"run_metadata.json 로드 실패: {exc}"]
+    if not isinstance(metadata, dict):
+        return ["run_metadata.json top-level JSON is not an object"]
+
+    generated_at = _parse_iso_datetime(metadata.get("generated_at"))
+    if generated_at is None:
+        return ["run_metadata.json generated_at 누락 또는 형식 오류."]
+
+    now = now or datetime.now()
+    max_days = (
+        LIVE_GATE_MAX_ARTIFACT_AGE_DAYS
+        if max_artifact_age_days is None
+        else max_artifact_age_days
+    )
+    age_days = _datetime_age_days(generated_at, now)
+    if age_days < 0:
+        return ["run_metadata.json generated_at이 현재 시각보다 미래입니다."]
+    if age_days > max_days:
+        return [
+            "run_metadata.json generated_at 기준 canonical artifact가 오래됨: "
+            f"{age_days:.1f}일 경과 (최대 {max_days}일). --canonical 재실행 필요."
+        ]
+    return []
+
+
 def validate_promotion_operator_artifacts(
     promotion_dir: str | Path = "reports/promotion",
     current_blockers_path: str | Path = "reports/current_blockers.json",
+    *,
+    now: datetime | None = None,
+    max_artifact_age_days: int | None = None,
 ) -> list[str]:
     """운영 점검 기본 경로에서 promotion 파생 artifact 전체 동기화를 검사한다."""
+    freshness_issues = validate_promotion_artifact_freshness(
+        promotion_dir,
+        now=now,
+        max_artifact_age_days=max_artifact_age_days,
+    )
+    if freshness_issues:
+        return [
+            "canonical artifact 최신성 실패: " + issue
+            for issue in freshness_issues
+        ]
+
     summary_issues = validate_promotion_blocker_summary_artifact(promotion_dir)
     if summary_issues:
         return [

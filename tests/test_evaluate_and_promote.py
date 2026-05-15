@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -1394,10 +1394,45 @@ def test_validate_promotion_operator_artifacts_detects_stale_promotion_result(tm
         encoding="utf-8",
     )
 
-    issues = validate_promotion_operator_artifacts(promotion_dir, current_path)
+    issues = validate_promotion_operator_artifacts(
+        promotion_dir,
+        current_path,
+        now=datetime(2026, 5, 13, 15, 0, 0),
+    )
 
     assert any("blocker summary 동기화 실패" in issue for issue in issues)
     assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in issues)
+
+
+def test_validate_promotion_operator_artifacts_detects_stale_canonical_generated_at(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_current_blockers_from_artifacts,
+        validate_promotion_operator_artifacts,
+        write_current_blockers_report,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    _promotions, _metrics, _summary = _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {"candidate": _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+        metadata=_promotion_metadata(generated_at="2026-05-01T09:00:00"),
+    )
+    current_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        current_path,
+    )
+
+    issues = validate_promotion_operator_artifacts(
+        promotion_dir,
+        current_path,
+        now=datetime(2026, 5, 13, 12, 0, 0),
+        max_artifact_age_days=7,
+    )
+
+    assert any("canonical artifact 최신성 실패" in issue for issue in issues)
+    assert any("canonical artifact가 오래됨" in issue for issue in issues)
 
 
 def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tmp_path):
@@ -1419,7 +1454,11 @@ def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tm
         current_path,
     )
 
-    assert validate_promotion_operator_artifacts(promotion_dir, current_path) == []
+    assert validate_promotion_operator_artifacts(
+        promotion_dir,
+        current_path,
+        now=datetime(2026, 5, 13, 15, 0, 0),
+    ) == []
 
     stale_current = json.loads(current_path.read_text(encoding="utf-8"))
     stale_current["go_live"] = True
@@ -1428,7 +1467,11 @@ def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tm
         encoding="utf-8",
     )
 
-    issues = validate_promotion_operator_artifacts(promotion_dir, current_path)
+    issues = validate_promotion_operator_artifacts(
+        promotion_dir,
+        current_path,
+        now=datetime(2026, 5, 13, 15, 0, 0),
+    )
 
     assert any("current blockers 동기화 실패" in issue for issue in issues)
     assert any("go_live 불일치" in issue for issue in issues)
