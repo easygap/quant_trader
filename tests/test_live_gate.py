@@ -164,6 +164,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
         if count <= 0:
             count = 60
         start_dt = latest_dt - timedelta(days=count - 1)
+        payload.setdefault("earliest_evidence_date", start_dt.strftime("%Y-%m-%d"))
         jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         target_summary = payload.get("target_weight_evidence") or {}
@@ -581,6 +582,44 @@ def test_paper_evidence_source_records_must_match_daily_jsonl(tmp_path):
     )
 
     assert any("source_records 불일치" in issue for issue in issues)
+
+
+def test_paper_evidence_headline_summary_must_match_source_records(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    evidence_path = evidence_dir / "promotion_evidence_scoring.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    source_count = payload["source_records"]["record_count"]
+    payload["promotable_evidence_days"] = source_count + 1
+    payload["real_paper_days"] = source_count + 1
+    payload["real_paper_days_total"] = source_count + 1
+    payload["earliest_evidence_date"] = "2026-01-01"
+    from core.paper_evidence import compute_promotion_package_integrity_hash
+
+    payload["package_integrity"]["payload_hash"] = compute_promotion_package_integrity_hash(
+        payload
+    )
+    _write_json(evidence_path, payload)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any(
+        "promotable_evidence_days와 source_records record_count 불일치" in issue
+        for issue in issues
+    )
+    assert any(
+        "earliest_evidence_date와 source_records first_date 불일치" in issue
+        for issue in issues
+    )
 
 
 def test_paper_evidence_latest_date_must_be_fresh(tmp_path):
