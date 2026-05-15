@@ -352,7 +352,7 @@ def _provisional_metrics():
         "mdd": -8.0,
         "wf_positive_rate": 0.8,
         "wf_sharpe_positive_rate": 0.8,
-        "wf_windows": 6,
+        "wf_windows": 5,
         "wf_total_trades": 120,
         "sharpe": 0.7,
         "benchmark_excess_return": 2.0,
@@ -422,6 +422,34 @@ def _promotion_metadata(*, generated_at="2026-05-13T14:00:00", strategy_specs=No
     }
 
 
+def _write_source_artifacts(artifact_dir, metrics):
+    walk_forward = {}
+    excess_return = {}
+    excess_sharpe = {}
+    for name, metric in metrics.items():
+        windows = int(metric.get("wf_windows") or 0)
+        walk_forward[name] = {
+            "windows": windows,
+            "positive": int(round(float(metric.get("wf_positive_rate") or 0) * windows)),
+            "sharpe_pos": int(round(float(metric.get("wf_sharpe_positive_rate") or 0) * windows)),
+            "total_trades": int(metric.get("wf_total_trades") or 0),
+            "details": [],
+        }
+        excess_return[name] = metric.get("benchmark_excess_return")
+        excess_sharpe[name] = metric.get("benchmark_excess_sharpe")
+    (artifact_dir / "walk_forward_summary.json").write_text(
+        json.dumps(walk_forward, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "benchmark_comparison.json").write_text(
+        json.dumps({
+            "strategy_excess_return_pct": excess_return,
+            "strategy_excess_sharpe": excess_sharpe,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def _write_consistent_promotion_artifacts(
     artifact_dir,
     metrics,
@@ -462,6 +490,7 @@ def _write_consistent_promotion_artifacts(
         json.dumps(metadata, ensure_ascii=False),
         encoding="utf-8",
     )
+    _write_source_artifacts(artifact_dir, metrics_for_artifact)
     write_promotion_blocker_summary(summary, artifact_dir)
     return promotions, metrics_for_artifact, summary
 
@@ -910,6 +939,7 @@ def test_validate_promotion_blocker_summary_detects_stale_promotion_result_again
         json.dumps(metadata, ensure_ascii=False),
         encoding="utf-8",
     )
+    _write_source_artifacts(artifact_dir, metrics)
     stale_summary = build_promotion_blocker_summary(
         stale_promotions,
         metrics,
@@ -970,6 +1000,7 @@ def test_blocker_summary_regeneration_requires_fresh_promotion_result(tmp_path):
         json.dumps(metadata, ensure_ascii=False),
         encoding="utf-8",
     )
+    _write_source_artifacts(artifact_dir, metrics)
     write_promotion_blocker_summary(
         build_promotion_blocker_summary(stale_promotions, metrics, metadata=metadata),
         artifact_dir,
@@ -1020,6 +1051,7 @@ def test_refresh_promotion_artifacts_rebuilds_stale_promotion_and_current_blocke
         json.dumps(metadata, ensure_ascii=False),
         encoding="utf-8",
     )
+    _write_source_artifacts(artifact_dir, metrics)
     stale_summary = build_promotion_blocker_summary(
         stale_promotions,
         metrics,
@@ -1191,6 +1223,78 @@ def test_current_blockers_check_fails_when_blocker_summary_strategy_actions_are_
 
     assert any("promotion blocker summary 동기화 실패" in issue for issue in issues)
     assert any("strategies 내용 불일치" in issue for issue in issues)
+
+
+def test_validate_metrics_summary_source_artifact_sync_detects_stale_benchmark_fields(tmp_path):
+    from tools.evaluate_and_promote import validate_metrics_summary_source_artifact_sync
+
+    promotion_dir = tmp_path / "promotion"
+    strategy = "paper_ready_strategy"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    benchmark_path = promotion_dir / "benchmark_comparison.json"
+    benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    benchmark["strategy_excess_return_pct"][strategy] = -10.0
+    benchmark_path.write_text(
+        json.dumps(benchmark, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_metrics_summary_source_artifact_sync(promotion_dir)
+
+    assert any("benchmark_excess_return 불일치" in issue for issue in issues)
+
+
+def test_validate_metrics_summary_source_artifact_sync_detects_stale_walk_forward_fields(tmp_path):
+    from tools.evaluate_and_promote import validate_metrics_summary_source_artifact_sync
+
+    promotion_dir = tmp_path / "promotion"
+    strategy = "paper_ready_strategy"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    walk_forward_path = promotion_dir / "walk_forward_summary.json"
+    walk_forward = json.loads(walk_forward_path.read_text(encoding="utf-8"))
+    walk_forward[strategy]["positive"] = 0
+    walk_forward_path.write_text(
+        json.dumps(walk_forward, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    issues = validate_metrics_summary_source_artifact_sync(promotion_dir)
+
+    assert any("wf_positive_rate 불일치" in issue for issue in issues)
+
+
+def test_promotion_artifacts_refresh_rejects_metrics_source_artifact_mismatch(tmp_path):
+    from tools.evaluate_and_promote import refresh_promotion_artifacts_from_existing_inputs
+
+    promotion_dir = tmp_path / "promotion"
+    strategy = "paper_ready_strategy"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    benchmark_path = promotion_dir / "benchmark_comparison.json"
+    benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    benchmark["strategy_excess_sharpe"][strategy] = -1.0
+    benchmark_path.write_text(
+        json.dumps(benchmark, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="metrics source artifact 동기화 실패"):
+        refresh_promotion_artifacts_from_existing_inputs(
+            promotion_dir,
+            evidence_dir=tmp_path / "paper_evidence",
+            current_blockers_path=tmp_path / "current_blockers.json",
+        )
 
 
 def test_validate_promotion_operator_artifacts_detects_stale_promotion_result(tmp_path):
