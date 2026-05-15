@@ -471,6 +471,25 @@ def _validate_paper_evidence_package_integrity(
                 f"{field} expected={expected_source.get(field)!r}, actual={actual_source.get(field)!r}."
             )
 
+    promotable_days = _as_int(evidence.get("promotable_evidence_days"))
+    expected_record_count = _as_int(expected_source.get("record_count"))
+    recommendation = str(evidence.get("recommendation") or "").upper()
+    requires_promotable_alignment = recommendation == "ELIGIBLE" or (
+        promotable_days is not None and promotable_days > 0
+    )
+    if requires_promotable_alignment and promotable_days != expected_record_count:
+        issues.append(
+            "paper evidence promotable_evidence_days와 source_records record_count 불일치: "
+            f"{promotable_days!r} != {expected_record_count!r}."
+        )
+
+    earliest_evidence = evidence.get("earliest_evidence_date")
+    if expected_source.get("first_date") and earliest_evidence != expected_source.get("first_date"):
+        issues.append(
+            "paper evidence earliest_evidence_date와 source_records first_date 불일치: "
+            f"{earliest_evidence!r} != {expected_source.get('first_date')!r}."
+        )
+
     latest_evidence = evidence.get("latest_evidence_date")
     if expected_source.get("last_date") and latest_evidence != expected_source.get("last_date"):
         issues.append(
