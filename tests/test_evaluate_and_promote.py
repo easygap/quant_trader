@@ -1,5 +1,6 @@
 import json
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -1542,6 +1543,63 @@ def test_validate_paper_evidence_operator_artifacts_warns_invalid_package(tmp_pa
     assert any(strategy in warning for warning in warnings)
     assert any("package_integrity 누락" in warning for warning in warnings)
     assert any("package 재생성 또는 격리 필요" in warning for warning in warnings)
+
+
+def test_quarantine_invalid_paper_evidence_operator_packages_moves_invalid_package(tmp_path):
+    from datetime import datetime
+
+    from tools.evaluate_and_promote import (
+        quarantine_invalid_paper_evidence_operator_packages,
+        validate_paper_evidence_operator_artifacts,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    evidence_dir = tmp_path / "paper_evidence"
+    strategy = "paper_ready_strategy"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=evidence_dir,
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    package_path = evidence_dir / f"promotion_evidence_{strategy}.json"
+    package_path.write_text(
+        json.dumps({
+            "strategy": strategy,
+            "recommendation": "ELIGIBLE",
+            "promotable_evidence_days": 60,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    dry_run = quarantine_invalid_paper_evidence_operator_packages(
+        promotion_dir,
+        evidence_dir=evidence_dir,
+        dry_run=True,
+        now=datetime(2026, 5, 15, 12, 0, 0),
+    )
+
+    assert len(dry_run) == 1
+    assert dry_run[0]["dry_run"] is True
+    assert dry_run[0]["moved"] is False
+    assert package_path.exists()
+
+    moved = quarantine_invalid_paper_evidence_operator_packages(
+        promotion_dir,
+        evidence_dir=evidence_dir,
+        dry_run=False,
+        now=datetime(2026, 5, 15, 12, 0, 0),
+    )
+
+    target_path = Path(moved[0]["target"])
+    assert moved[0]["moved"] is True
+    assert not package_path.exists()
+    assert target_path.exists()
+    assert target_path.parent == evidence_dir / "_invalid_packages"
+    assert validate_paper_evidence_operator_artifacts(
+        promotion_dir,
+        evidence_dir=evidence_dir,
+    ) == []
 
 
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
