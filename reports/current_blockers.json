@@ -3,7 +3,7 @@
   "schema_version": 2,
   "generated_at": "2026-05-13T14:07:37.832443",
   "source": "reports/promotion/promotion_blocker_summary.json",
-  "source_artifact_hash": "136e719fc9ac5e59823fdb16716327c0e5426c74b30396a8687e2358c280fd0f",
+  "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
   "go_live": false,
   "verdict": "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음",
   "promotion_summary": {
