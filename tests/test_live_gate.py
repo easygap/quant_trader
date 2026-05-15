@@ -59,6 +59,7 @@ def _write_bundle(
     walk_forward_errors=None,
     metric_overrides=None,
     strategy_specs=None,
+    reason=None,
 ):
     allowed_modes = ["backtest", "paper", "live"] if allowed_modes is None else allowed_modes
     generated_at = generated_at or datetime(2026, 4, 29, 12, 0, 0).isoformat()
@@ -115,7 +116,9 @@ def _write_bundle(
             "strategy_excess_sharpe": {strategy: benchmark_excess_sharpe},
         },
     )
-    promotions = {strategy: {"status": status, "allowed_modes": allowed_modes, "reason": "test"}}
+    if reason is None:
+        reason = "live_candidate 충족" if status == "live_candidate" else "test"
+    promotions = {strategy: {"status": status, "allowed_modes": allowed_modes, "reason": reason}}
     _write_json(promotion_dir / "promotion_result.json", promotions)
 
     from tools.evaluate_and_promote import (
@@ -755,6 +758,70 @@ def test_stale_current_blockers_next_actions_block_live_gate(tmp_path):
     )
 
     assert any("current_blockers next_actions 내용 불일치" in issue for issue in issues)
+
+
+def test_current_blockers_uses_recalculated_full_promotion_bundle(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+
+    other_strategy = "manual_live_overlay"
+    metrics_path = promotion_dir / "metrics_summary.json"
+    wf_path = promotion_dir / "walk_forward_summary.json"
+    benchmark_path = promotion_dir / "benchmark_comparison.json"
+    promotion_path = promotion_dir / "promotion_result.json"
+    metadata_path = promotion_dir / "run_metadata.json"
+
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics[other_strategy] = dict(metrics["scoring"])
+    _write_json(metrics_path, metrics)
+
+    wf = json.loads(wf_path.read_text(encoding="utf-8"))
+    wf[other_strategy] = dict(wf["scoring"])
+    _write_json(wf_path, wf)
+
+    benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    benchmark["strategy_excess_return_pct"][other_strategy] = benchmark["strategy_excess_return_pct"]["scoring"]
+    benchmark["strategy_excess_sharpe"][other_strategy] = benchmark["strategy_excess_sharpe"]["scoring"]
+    _write_json(benchmark_path, benchmark)
+
+    promotions = json.loads(promotion_path.read_text(encoding="utf-8"))
+    promotions[other_strategy] = {
+        "status": "live_candidate",
+        "allowed_modes": ["backtest", "paper", "live"],
+        "reason": "live_candidate 충족",
+    }
+    _write_json(promotion_path, promotions)
+
+    from tools.evaluate_and_promote import (
+        build_current_blockers_report,
+        build_promotion_blocker_summary,
+    )
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    stale_summary = build_promotion_blocker_summary(promotions, metrics, metadata)
+    _write_json(promotion_dir / "promotion_blocker_summary.json", stale_summary)
+    _write_json(
+        promotion_dir.parent / "current_blockers.json",
+        build_current_blockers_report(stale_summary),
+    )
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any(
+        f"promotion_result {other_strategy}.status 재계산 결과 불일치" in issue
+        for issue in issues
+    )
+    assert any("promotion blocker summary source_artifact_hash 불일치" in issue for issue in issues)
+    assert any("current_blockers live_candidates 내용 불일치" in issue for issue in issues)
 
 
 def test_paper_evidence_strategy_is_required(tmp_path):
