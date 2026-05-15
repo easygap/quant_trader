@@ -1287,7 +1287,10 @@ class TestArtifactLoading:
         import json
         import tempfile
         from pathlib import Path
-        from core.promotion_engine import load_paper_evidence_package
+        from core.promotion_engine import (
+            load_paper_evidence_package,
+            validate_paper_evidence_package_file,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             evidence_dir = Path(tmpdir)
@@ -1306,6 +1309,11 @@ class TestArtifactLoading:
                 load_paper_evidence_package("scoring", evidence_dir=str(evidence_dir))
                 is None
             )
+            issues = validate_paper_evidence_package_file(
+                "scoring",
+                evidence_dir=str(evidence_dir),
+            )
+            assert any("payload_hash 불일치" in issue for issue in issues)
 
     def test_paper_evidence_metrics_exposes_trade_quality_blockers(self):
         from core.promotion_engine import paper_evidence_metrics_from_package
