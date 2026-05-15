@@ -442,6 +442,28 @@ class TestPilotBasic:
         assert result.allowed is False
         assert "order-count guard failed" in result.reason.lower()
 
+    def test_entry_rechecks_strategy_eligibility_after_auth_created(
+        self, evidence_dir, runtime_dir, fresh_db, monkeypatch
+    ):
+        """pilot auth 생성 후 전략 상태가 내려가면 entry 직전에 다시 차단한다."""
+        _seed_v2(evidence_dir, PILOT_STRATEGY, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from core.paper_pilot import enable_pilot, check_pilot_entry
+
+        _write_notifier_health(runtime_dir)
+        enable_pilot(PILOT_STRATEGY, "2026-04-01", "2026-04-30")
+        monkeypatch.setattr(
+            "strategies.get_strategy_status",
+            lambda name: {"status": "disabled", "allowed_modes": ["backtest"]},
+        )
+
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-04-07")
+
+        assert result.allowed is False
+        assert "pilot eligibility revoked" in result.reason
+
 
 class TestPilotEligibility:
 

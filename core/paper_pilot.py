@@ -301,6 +301,17 @@ def check_pilot_entry(
     if auth.target_weight_plan_snapshot is not None:
         caps["target_weight_plan_snapshot"] = auth.target_weight_plan_snapshot
 
+    try:
+        _check_pilot_eligibility(strategy)
+    except ValueError as exc:
+        return _pilot_check_result(
+            strategy,
+            allowed=False,
+            reason=f"pilot eligibility revoked — pilot entry blocked: {exc}",
+            auth=auth,
+            caps=caps,
+        )
+
     # ── 1. Critical anomaly check ──
     try:
         from core.paper_runtime import get_paper_runtime_state
