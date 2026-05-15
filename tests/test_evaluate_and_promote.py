@@ -1513,6 +1513,37 @@ def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tm
     assert any("go_live 불일치" in issue for issue in issues)
 
 
+def test_validate_paper_evidence_operator_artifacts_warns_invalid_package(tmp_path):
+    from tools.evaluate_and_promote import validate_paper_evidence_operator_artifacts
+
+    promotion_dir = tmp_path / "promotion"
+    evidence_dir = tmp_path / "paper_evidence"
+    strategy = "paper_ready_strategy"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=evidence_dir,
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"promotion_evidence_{strategy}.json").write_text(
+        json.dumps({
+            "strategy": strategy,
+            "recommendation": "ELIGIBLE",
+            "promotable_evidence_days": 60,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    warnings = validate_paper_evidence_operator_artifacts(
+        promotion_dir,
+        evidence_dir=evidence_dir,
+    )
+
+    assert any(strategy in warning for warning in warnings)
+    assert any("package_integrity 누락" in warning for warning in warnings)
+    assert any("package 재생성 또는 격리 필요" in warning for warning in warnings)
+
+
 def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
