@@ -460,6 +460,64 @@ def _seed_paper_trades_for_evidence(
             )
 
 
+def _target_weight_execution_proof(params_hash: str) -> dict:
+    return {
+        "complete": True,
+        "params_hash": params_hash,
+        "execution_trade_day_allowed": True,
+        "execution_market_session_allowed": True,
+        "pilot_authorization_snapshot_allowed": True,
+        "pre_execution_complete": True,
+        "liquidity_complete": True,
+        "pre_trade_risk_complete": True,
+        "order_count_complete": True,
+        "order_result_complete": True,
+        "order_complete": True,
+        "order_result_reconciliation": {"complete": True},
+        "fill_complete": True,
+        "fill_reconciliation": {"complete": True},
+        "position_reconciliation": {"complete": True},
+    }
+
+
+def _target_weight_pilot_proof_record(
+    strategy: str = "target_weight_rotation_test",
+    *,
+    record_date: str = "2026-01-05",
+    params_hash: str = "hash",
+) -> dict:
+    return {
+        "date": record_date,
+        "day_number": 1,
+        "strategy": strategy,
+        "execution_backed": True,
+        "evidence_mode": "pilot_paper",
+        "session_mode": "pilot_paper",
+        "pilot_authorized": True,
+        "pilot_caps_snapshot": {
+            "target_weight_plan": {
+                "candidate_id": strategy,
+                "trade_day": record_date,
+                "params_hash": params_hash,
+            },
+            "target_weight_execution": _target_weight_execution_proof(params_hash),
+        },
+        "daily_return": 0.1,
+        "cumulative_return": 1.0,
+        "mdd": -1.0,
+        "total_trades": 2,
+        "sell_count": 1,
+        "winning_trades": 1,
+        "losing_trades": 0,
+        "same_universe_excess": 0.05,
+        "exposure_matched_excess": 0.04,
+        "cash_adjusted_excess": 0.03,
+        "benchmark_status": "final",
+        "status": "normal",
+        "anomalies": [],
+    }
+
+
 class TestEndToEndReplay:
     """7영업일 synthetic replay → evidence + anomaly + weekly + package 검증."""
 
@@ -1984,6 +2042,79 @@ class TestShadowEvidenceNotPromotable:
         assert pkg["target_weight_evidence"]["invalid_days"] == 60
         assert "target_weight_invalid_execution_evidence=60" in pkg["block_reasons"]
 
+    def test_target_weight_pilot_proof_requires_execution_backed_record(self):
+        from core.paper_evidence import _target_weight_record_proof_status
+
+        record = _target_weight_pilot_proof_record()
+        record["execution_backed"] = False
+
+        valid, reason = _target_weight_record_proof_status(record["strategy"], record)
+
+        assert valid is False
+        assert reason == "not_execution_backed"
+
+    def test_target_weight_pilot_proof_requires_execution_fidelity_details(self):
+        from core.paper_evidence import _target_weight_record_proof_status
+
+        cases = [
+            (
+                "pre_execution_complete",
+                lambda execution: execution.pop("pre_execution_complete"),
+                "target_weight_pre_execution_complete_false",
+            ),
+            (
+                "order_count_complete",
+                lambda execution: execution.pop("order_count_complete"),
+                "target_weight_order_count_complete_false",
+            ),
+            (
+                "order_complete",
+                lambda execution: execution.pop("order_complete"),
+                "target_weight_order_complete_false",
+            ),
+            (
+                "order_result_reconciliation",
+                lambda execution: execution.update({"order_result_reconciliation": {"complete": False}}),
+                "target_weight_order_result_reconciliation_incomplete",
+            ),
+            (
+                "fill_reconciliation",
+                lambda execution: execution.pop("fill_reconciliation"),
+                "target_weight_fill_reconciliation_incomplete",
+            ),
+        ]
+        for _name, mutate, expected_reason in cases:
+            record = _target_weight_pilot_proof_record()
+            mutate(record["pilot_caps_snapshot"]["target_weight_execution"])
+
+            valid, reason = _target_weight_record_proof_status(record["strategy"], record)
+
+            assert valid is False
+            assert reason == expected_reason
+
+    def test_target_weight_promotion_blocks_unbacked_pilot_paper_record(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "target_weight_rotation_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            record = _target_weight_pilot_proof_record(
+                strategy,
+                record_date=(start + timedelta(days=i)).strftime("%Y-%m-%d"),
+            )
+            record["day_number"] = i + 1
+            record["execution_backed"] = False
+            _append_jsonl(jsonl_path, record)
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 0
+        assert pkg["target_weight_evidence"]["valid_pilot_days"] == 0
+        assert "no_execution_backed_evidence" in pkg["block_reasons"]
+
     def test_metadata_target_weight_promotion_blocks_canonical_hash_mismatch(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
 
@@ -2004,18 +2135,7 @@ class TestShadowEvidenceNotPromotable:
                     "trade_day": record_date,
                     "params_hash": "old-hash",
                 },
-                "target_weight_execution": {
-                    "complete": True,
-                    "params_hash": "old-hash",
-                    "execution_trade_day_allowed": True,
-                    "execution_market_session_allowed": True,
-                    "pilot_authorization_snapshot_allowed": True,
-                    "liquidity_complete": True,
-                    "pre_trade_risk_complete": True,
-                    "order_result_complete": True,
-                    "fill_complete": True,
-                    "position_reconciliation": {"complete": True},
-                },
+                "target_weight_execution": _target_weight_execution_proof("old-hash"),
             },
             "daily_return": 0.1,
             "cumulative_return": 1.0,
@@ -2071,18 +2191,7 @@ class TestShadowEvidenceNotPromotable:
                         "trade_day": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
                         "params_hash": params_hash,
                     },
-                    "target_weight_execution": {
-                        "complete": True,
-                        "params_hash": params_hash,
-                        "execution_trade_day_allowed": True,
-                        "execution_market_session_allowed": True,
-                        "pilot_authorization_snapshot_allowed": True,
-                        "liquidity_complete": True,
-                        "pre_trade_risk_complete": True,
-                        "order_result_complete": True,
-                        "fill_complete": True,
-                        "position_reconciliation": {"complete": True},
-                    },
+                    "target_weight_execution": _target_weight_execution_proof(params_hash),
                 },
                 "daily_return": 0.15 if i % 2 == 0 else 0.05,
                 "cumulative_return": 6.0,
@@ -2144,18 +2253,7 @@ class TestShadowEvidenceNotPromotable:
                         "trade_day": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
                         "params_hash": params_hash,
                     },
-                    "target_weight_execution": {
-                        "complete": True,
-                        "params_hash": params_hash,
-                        "execution_trade_day_allowed": True,
-                        "execution_market_session_allowed": True,
-                        "pilot_authorization_snapshot_allowed": True,
-                        "liquidity_complete": True,
-                        "pre_trade_risk_complete": True,
-                        "order_result_complete": True,
-                        "fill_complete": True,
-                        "position_reconciliation": {"complete": True},
-                    },
+                    "target_weight_execution": _target_weight_execution_proof(params_hash),
                 },
                 "daily_return": 0.1,
                 "cumulative_return": 6.0,
@@ -2208,18 +2306,7 @@ class TestShadowEvidenceNotPromotable:
                         "trade_day": plan_trade_day,
                         "params_hash": params_hash,
                     },
-                    "target_weight_execution": {
-                        "complete": True,
-                        "params_hash": params_hash,
-                        "execution_trade_day_allowed": True,
-                        "execution_market_session_allowed": True,
-                        "pilot_authorization_snapshot_allowed": True,
-                        "liquidity_complete": True,
-                        "pre_trade_risk_complete": True,
-                        "order_result_complete": True,
-                        "fill_complete": True,
-                        "position_reconciliation": {"complete": True},
-                    },
+                    "target_weight_execution": _target_weight_execution_proof(params_hash),
                 },
                 "daily_return": 0.1,
                 "cumulative_return": 6.0,
