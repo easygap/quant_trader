@@ -576,7 +576,9 @@ def _run_ensemble_independence_check_in_validate(args, config, notifier):
 # ──────────────────────────────────────────────────────────────
 def _rebalance_live_strategy_id(basket_name: str) -> str:
     """live rebalance의 gate/account/order tag를 묶는 승인 단위."""
-    return f"basket_rebalance:{basket_name}"
+    from core.basket_rebalancer import rebalance_live_strategy_id
+
+    return rebalance_live_strategy_id(basket_name)
 
 
 def run_rebalance(args):
@@ -858,28 +860,9 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
 
     레거시 호환: "승인 파일 없음", "승인 파일 파싱 오류" 문자열은 기존 감사 테스트가 확인한다.
     """
-    from core.live_gate import validate_live_readiness
+    from core.live_readiness import check_live_readiness_gate
 
-    issues = validate_live_readiness(config, strategy_name)
-    if issues:
-        return issues
-
-    # ── 데이터 소스 health check ──
-    try:
-        from core.data_collector import DataCollector
-        dc = DataCollector()
-        test_df = dc.fetch_korean_stock("005930", "2026-01-01", "2026-03-26")
-        if test_df.empty:
-            issues.append("데이터 소스 health check 실패: 005930 데이터 수집 불가.")
-        source_info = dc.get_last_source_info()
-        if source_info.get("source") == "KIS":
-            issues.append(
-                "데이터 소스가 KIS(비수정주가) — FDR 또는 yfinance 사용을 권장합니다."
-            )
-    except Exception as e:
-        issues.append(f"데이터 소스 health check 오류: {e}")
-
-    return issues
+    return check_live_readiness_gate(config, strategy_name)
 
 
 def run_live_trading(args):
