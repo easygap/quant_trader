@@ -63,7 +63,7 @@
 | **dashboard** | `run_dashboard(args)` | monitoring.web_dashboard (aiohttp), PortfolioManager, get_portfolio_snapshots |
 | **check_correlation** | `run_check_indicator_correlation(args)` | DataCollector, IndicatorEngine, SignalGenerator → core.indicator_correlation (스코어 상관계수·고상관 쌍 권고) |
 | **check_ensemble_correlation** | `run_check_ensemble_correlation(args)` | DataCollector, StrategyEnsemble.analyze → core.ensemble_correlation (신호 상관 + BUY 동시 발생률 + 대안 전략 권고). **validate --strategy ensemble** 시 자동 실행 |
-| **rebalance** | `run_rebalance(args)` | BasketRebalancer (baskets.yaml 기반 목표 비중 vs 실제 비중 드리프트 체크 → 주문 생성·실행). `--basket`, `--dry-run` 옵션 지원 |
+| **rebalance** | `run_rebalance(args)` | BasketRebalancer (baskets.yaml 기반 목표 비중 vs 실제 비중 드리프트 체크 → 주문 생성·실행). `--basket`, `--dry-run` 옵션 지원. live 실행은 바스켓별 `basket_rebalance:<basket>` 승인 단위로 live gate/account/order tag가 일치해야 한다 |
 
 ---
 
@@ -267,7 +267,7 @@ quant_trader/
 | **risk_manager.py** | 포지션 사이징(1% 룰), `check_diversification`(**업종 비중 포함**: `max_sector_ratio`, FDR/KRX KIND 업종 매핑), `check_recent_performance`, 손절/익절/트레일링, MDD·일일 손실 한도 계산. `calculate_transaction_costs`. |
 | **order_executor.py** | `trading.mode`: paper면 DB만, live면 KIS API. 거래 시간·블랙스완 쿨다운·**실적 발표일 필터**(`skip_earnings_days`) 검사, 재시도(지수 백오프+지터). PositionLock, OrderGuard·KIS 미체결 조회. `max_monthly_roundtrips`로 종목·모드·계좌별 월간 신규 BUY 횟수를 운영 주문에서도 제한하고, `drawdown.max_portfolio_mdd`/`max_daily_loss`에 닿으면 신규 BUY만 fail-closed 차단한다. live 손실 한도 확인에서 KIS 잔고가 확인되지 않으면 DB fallback 평가금액으로 신규 BUY를 판단하지 않고 차단한다. 시장 국면 필터가 `allow_buys=false`를 반환하면 직접 executor BUY 호출도 주문 전 중단한다. SELL/exit는 손실 축소 경로라 월간 cap·손실 한도와 무관하게 계속 허용한다. live 주문 전 미체결 조회 실패는 `live_unfilled_check.checked=False`로 fail-closed 차단한다. live 주문 ACK 뒤 체결가·체결수량 확인이 안 되거나 부분체결이면 `ACKED`/`PARTIAL_FILLED` pending으로 `order_records`에 저장하고 DB 거래·포지션 반영을 보류한다. `SUBMITTED`/`ACKED`/`PARTIAL_FILLED` 상태가 남아 있으면 OrderGuard TTL이 지나도 같은 종목 신규 주문을 차단한다. 이때 반환값의 `success=False`는 브로커 주문 없음이 아니라 reconcile 필요 상태다. **Dead-letter 큐**: 모든 재시도 실패 시 `FailedOrder` 테이블에 영구 저장. |
 | **portfolio_manager.py** | 보유 포지션·잔고·수익률. `sync_with_broker()`로 KIS 잔고↔DB 크로스체크. live `get_portfolio_summary()`는 조회용 DB fallback 여부를 `broker_balance_ok/source/error`로 표시하고, 주문 sizing에 쓰는 `get_current_capital()`/`get_available_cash()`는 KIS 잔고 미확인 시 예외로 fail-closed 처리한다. 자동보정 시 KIS 기준 수량을 절대값으로 반영하고, 복구 포지션에는 손절·익절·트레일링 스탑을 재생성한다. |
-| **basket_rebalancer.py** | 바스켓 리밸런싱 엔진. `baskets.yaml`에서 바스켓 로드. `get_target_weights()`(신호 가중 지원), `get_current_weights()`, `calculate_drift()`, `should_rebalance()`(drift/weekly/monthly 트리거), `plan_rebalance()`(SELL→BUY 순서, max_turnover 제한), `execute()`(dry_run 지원). paper BUY 실행은 `PortfolioManager.get_current_capital()`/`get_available_cash()`로 자본과 현금을 조회한 뒤 `OrderExecutor.execute_buy_quantity()`에 넘긴다. `get_status_report()`로 현황 리포트 생성. |
+| **basket_rebalancer.py** | 바스켓 리밸런싱 엔진. `baskets.yaml`에서 바스켓 로드. `get_target_weights()`(신호 가중 지원), `get_current_weights()`, `calculate_drift()`, `should_rebalance()`(drift/weekly/monthly 트리거), `plan_rebalance()`(SELL→BUY 순서, max_turnover 제한), `execute()`(dry_run 지원). paper BUY 실행은 `PortfolioManager.get_current_capital()`/`get_available_cash()`로 자본과 현금을 조회한 뒤 `OrderExecutor.execute_buy_quantity()`에 넘긴다. live 실행은 `basket_rebalance:<basket>` 승인 단위가 account_key와 주문 strategy에 동일하게 전달되고, KIS↔DB 포지션 동기화가 성공해야 주문 실행부에 도달한다. `get_status_report()`로 현황 리포트 생성. |
 | **scheduler.py** | 실전 무한 루프. 장전/장중/장마감. **시장 국면 필터**(단계적: bearish→매수 중단, caution→사이징 축소). 장중 10분 간격. 루프 10분 초과 시 다음 사이클 스킵. 장전 단계에서 **바스켓 리밸런싱 자동 체크** (`_run_basket_rebalance_check`). live 신규 진입 중 `requires_reconcile` 또는 `order_pending` 결과가 나오면 남은 BUY 후보와 같은 루프 재스캔을 중단하고, 다음 성공적인 KIS↔DB 동기화 전까지 미확정 체결분을 무시한 추가 진입을 막는다. **전략 레지스트리** 기반 `_get_strategy()`. |
 | **runtime_lock.py** | `scheduler_lock(lock_file)` 컨텍스트: 스케줄 프로세스 중복 실행 방지. |
 | **trading_hours.py** | 한국 장·휴장일(holidays.yaml → pykrx → fallback). **미국**: `us_holidays.yaml`, 동부 09:30~16:00 (`is_us_trading_day`, `is_us_market_open` 등). 주문 가능 시간 검사. |
@@ -386,7 +386,7 @@ quant_trader/
 | **test_live_status_sync.py** | live 시작 경계: registry live 허용, canonical gate, KIS 연결, 초기 브로커 동기화, Scheduler live 검증 플래그 정합성. |
 | **test_positive_path.py** | 성공 경로 (happy path) 검증. |
 | **test_watchlist_manager.py** | watchlist 모드별 resolve. |
-| **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행, paper BUY 자본 API 전달 회귀). |
+| **test_basket_rebalancer.py** | 바스켓 리밸런서 (설정 로딩, 비중 계산, 드리프트 감지, 트리거 판단, 주문 계획, dry-run 실행, paper BUY 자본 API 전달, live 승인 단위/account/order tag 정합성 회귀). |
 | **test_us_market_support.py** | `fetch_stock` 미국 라우팅, 미국 장/휴장일 관련 `TradingHours` 동작. |
 
 실행: `pytest tests/ -q`
