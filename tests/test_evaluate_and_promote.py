@@ -390,6 +390,82 @@ def _write_paper_package(evidence_dir, strategy, **overrides):
     )
 
 
+def _promotion_metadata(*, generated_at="2026-05-13T14:00:00", strategy_specs=None):
+    from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+    from tools.evaluate_and_promote import build_data_snapshot_manifest
+
+    manifest = build_data_snapshot_manifest(
+        provider="test-provider",
+        universe_rule="test universe",
+        eval_start="2026-01-01",
+        eval_end="2026-03-31",
+        universe_lookback_start="2025-10-01",
+        universe_lookback_end="2025-12-31",
+        universe=["005930"],
+        liquidity_coverage={
+            "005930": {"rows": 62, "start": "2025-10-01", "end": "2025-12-31"}
+        },
+        benchmark_coverage={
+            "005930": {"rows": 60, "start": "2026-01-01", "end": "2026-03-31"}
+        },
+        fetch_errors={},
+    )
+    return {
+        "schema_version": LIVE_GATE_SCHEMA_VERSION,
+        "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+        "generated_at": generated_at,
+        "data_snapshot_hash": manifest["data_snapshot_hash"],
+        "data_snapshot_manifest": manifest,
+        "evaluation_errors": {},
+        "walk_forward_errors": {},
+        "strategy_specs": strategy_specs or [],
+    }
+
+
+def _write_consistent_promotion_artifacts(
+    artifact_dir,
+    metrics,
+    *,
+    evidence_dir=None,
+    metadata=None,
+):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        build_promotion_results,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = evidence_dir or artifact_dir.parent / "paper_evidence"
+    metadata = metadata or _promotion_metadata()
+    metrics_for_artifact = json.loads(json.dumps(metrics, ensure_ascii=False))
+    promotions = build_promotion_results(
+        metrics_for_artifact,
+        evidence_dir=str(evidence_dir),
+        strategy_specs=metadata.get("strategy_specs", []),
+        canonical_metadata=metadata,
+    )
+    summary = build_promotion_blocker_summary(
+        promotions,
+        metrics_for_artifact,
+        metadata=metadata,
+    )
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps(promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics_for_artifact, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_promotion_blocker_summary(summary, artifact_dir)
+    return promotions, metrics_for_artifact, summary
+
+
 def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exists(tmp_path):
     from tools.evaluate_and_promote import build_promotion_results
 
@@ -762,54 +838,26 @@ def test_load_promotion_blocker_summary_from_existing_artifacts(tmp_path):
 
 def test_validate_promotion_blocker_summary_detects_stale_summary(tmp_path):
     from tools.evaluate_and_promote import (
-        load_promotion_blocker_summary_from_artifacts,
         validate_promotion_blocker_summary_artifact,
-        write_promotion_blocker_summary,
     )
 
     artifact_dir = tmp_path / "promotion"
-    artifact_dir.mkdir()
-    promotion_path = artifact_dir / "promotion_result.json"
-    promotion_path.write_text(
-        json.dumps({
-            "paper_blocked_strategy": {
-                "status": "paper_only",
-                "allowed_modes": ["backtest", "paper"],
-                "reason": "paper_only 충족; provisional 차단: benchmark excess return missing",
-            }
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (artifact_dir / "metrics_summary.json").write_text(
-        json.dumps({
-            "paper_blocked_strategy": {
-                "total_return": 7.5,
-                "sharpe": 0.4,
-            }
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (artifact_dir / "run_metadata.json").write_text(
-        json.dumps({
-            "generated_at": "2026-05-12T10:00:00",
-            "data_snapshot_hash": "snapshot-a",
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    write_promotion_blocker_summary(
-        load_promotion_blocker_summary_from_artifacts(artifact_dir),
+    strategy = "paper_blocked_strategy"
+    _write_consistent_promotion_artifacts(
         artifact_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
     )
+    promotion_path = artifact_dir / "promotion_result.json"
 
     assert validate_promotion_blocker_summary_artifact(artifact_dir) == []
 
     promotion_path.write_text(
         json.dumps({
-            "paper_blocked_strategy": {
-                "status": "provisional_paper_candidate",
-                "allowed_modes": ["backtest", "paper"],
-                "reason": "provisional_paper_candidate 충족; live 차단: paper evidence stale",
+            strategy: {
+                "status": "live_candidate",
+                "allowed_modes": ["backtest", "paper", "live"],
+                "reason": "live_candidate 충족",
             }
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -819,6 +867,70 @@ def test_validate_promotion_blocker_summary_detects_stale_summary(tmp_path):
     assert any("source_artifact_hash 불일치" in issue for issue in issues)
     assert any("summary 내용 불일치" in issue for issue in issues)
     assert any("strategies 내용 불일치" in issue for issue in issues)
+    assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in issues)
+
+
+def test_validate_promotion_blocker_summary_detects_stale_promotion_result_against_metrics(tmp_path):
+    from tools.evaluate_and_promote import (
+        build_promotion_blocker_summary,
+        build_current_blockers_report,
+        validate_current_blockers_artifact,
+        validate_promotion_blocker_summary_artifact,
+        write_current_blockers_report,
+        write_promotion_blocker_summary,
+    )
+
+    artifact_dir = tmp_path / "promotion"
+    artifact_dir.mkdir()
+    strategy = "paper_ready_strategy"
+    metrics = {
+        strategy: {
+            **_provisional_metrics(),
+            "benchmark_excess_return": -1.0,
+        }
+    }
+    metadata = _promotion_metadata()
+    stale_promotions = {
+        strategy: {
+            "status": "live_candidate",
+            "allowed_modes": ["backtest", "paper", "live"],
+            "reason": "live_candidate 충족",
+        }
+    }
+    _write_paper_package(tmp_path / "paper_evidence", strategy)
+    (artifact_dir / "promotion_result.json").write_text(
+        json.dumps(stale_promotions, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "metrics_summary.json").write_text(
+        json.dumps(metrics, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (artifact_dir / "run_metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    stale_summary = build_promotion_blocker_summary(
+        stale_promotions,
+        metrics,
+        metadata=metadata,
+    )
+    write_promotion_blocker_summary(stale_summary, artifact_dir)
+    current_blockers_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        build_current_blockers_report(stale_summary),
+        current_blockers_path,
+    )
+
+    summary_issues = validate_promotion_blocker_summary_artifact(artifact_dir)
+    current_issues = validate_current_blockers_artifact(
+        artifact_dir,
+        current_blockers_path,
+    )
+
+    assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in summary_issues)
+    assert any("promotion blocker summary 동기화 실패" in issue for issue in current_issues)
+    assert any("promotion_result" in issue and "재계산 결과 불일치" in issue for issue in current_issues)
 
 
 def test_validate_promotion_blocker_summary_requires_summary_file(tmp_path):
@@ -889,47 +1001,17 @@ def test_build_current_blockers_report_from_promotion_summary():
 
 def test_current_blockers_check_detects_stale_report(tmp_path):
     from tools.evaluate_and_promote import (
-        build_promotion_blocker_summary,
         load_current_blockers_from_artifacts,
         validate_current_blockers_artifact,
         write_current_blockers_report,
-        write_promotion_blocker_summary,
     )
 
     promotion_dir = tmp_path / "promotion"
-    promotion_dir.mkdir()
-    promotions = {
-        "candidate": {
-            "status": "provisional_paper_candidate",
-            "allowed_modes": ["backtest", "paper"],
-            "reason": "provisional_paper_candidate 충족; live 차단: paper 0일 < 60일",
-        }
-    }
-    metrics = {
-        "candidate": {
-            "benchmark_excess_return": 10.0,
-            "sharpe": 1.0,
-            "mdd": -10.0,
-        }
-    }
-    summary = build_promotion_blocker_summary(
-        promotions,
-        metrics,
-        metadata={"generated_at": "2026-05-13T14:00:00"},
+    _promotions, _metrics, summary = _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {"candidate": _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
     )
-    (promotion_dir / "promotion_result.json").write_text(
-        json.dumps(promotions, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (promotion_dir / "metrics_summary.json").write_text(
-        json.dumps(metrics, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (promotion_dir / "run_metadata.json").write_text(
-        json.dumps({"generated_at": "2026-05-13T14:00:00"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    write_promotion_blocker_summary(summary, promotion_dir)
     output_path = tmp_path / "current_blockers.json"
     write_current_blockers_report(
         load_current_blockers_from_artifacts(promotion_dir),
@@ -959,50 +1041,17 @@ def test_current_blockers_check_detects_stale_report(tmp_path):
 
 def test_current_blockers_check_fails_when_blocker_summary_strategy_actions_are_stale(tmp_path):
     from tools.evaluate_and_promote import (
-        build_promotion_blocker_summary,
         load_current_blockers_from_artifacts,
         validate_current_blockers_artifact,
         write_current_blockers_report,
-        write_promotion_blocker_summary,
     )
 
     promotion_dir = tmp_path / "promotion"
-    promotion_dir.mkdir()
-    promotions = {
-        "target_weight_candidate": {
-            "status": "provisional_paper_candidate",
-            "allowed_modes": ["backtest", "paper"],
-            "reason": (
-                "provisional_paper_candidate 충족; live 차단: "
-                "paper 0일 < 60일, target-weight verified pilot days 0 < 60"
-            ),
-        }
-    }
-    metrics = {
-        "target_weight_candidate": {
-            "benchmark_excess_return": 12.0,
-            "sharpe": 1.2,
-            "mdd": -12.0,
-        }
-    }
-    summary = build_promotion_blocker_summary(
-        promotions,
-        metrics,
-        metadata={"generated_at": "2026-05-13T14:00:00"},
+    _promotions, _metrics, _summary = _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {"target_weight_candidate": _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
     )
-    (promotion_dir / "promotion_result.json").write_text(
-        json.dumps(promotions, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (promotion_dir / "metrics_summary.json").write_text(
-        json.dumps(metrics, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (promotion_dir / "run_metadata.json").write_text(
-        json.dumps({"generated_at": "2026-05-13T14:00:00"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    write_promotion_blocker_summary(summary, promotion_dir)
     output_path = tmp_path / "current_blockers.json"
     write_current_blockers_report(
         load_current_blockers_from_artifacts(promotion_dir),
