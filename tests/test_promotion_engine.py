@@ -717,15 +717,22 @@ class TestArtifactLoading:
                         "mdd": -8.0,
                         "wf_positive_rate": 0.8,
                         "wf_sharpe_positive_rate": 0.8,
-                        "wf_windows": 6,
+                        "wf_windows": 5,
                         "wf_total_trades": 120,
                         "sharpe": 0.7,
+                        "benchmark_excess_return": 2.0,
+                        "benchmark_excess_sharpe": 0.2,
                     }
                 }),
                 encoding="utf-8",
             )
             (base / "walk_forward_summary.json").write_text(
-                json.dumps({"scoring": {"total_trades": 120}}),
+                json.dumps({"scoring": {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
                 encoding="utf-8",
             )
             (base / "benchmark_comparison.json").write_text(
@@ -773,6 +780,124 @@ class TestArtifactLoading:
         assert metrics["scoring"].paper_evidence_recommendation == "ELIGIBLE"
         assert metrics["scoring"].paper_trade_quality_status == "ok"
 
+    def test_load_metrics_from_artifact_rejects_stale_benchmark_fields(self):
+        """metrics와 benchmark 원천 artifact가 다르면 promotion metrics 로드를 차단한다."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        from core.promotion_engine import load_metrics_from_artifact
+
+        strategy = "scoring"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir) / "promotion"
+            base.mkdir()
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    strategy: {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 5,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                        "benchmark_excess_return": 2.0,
+                        "benchmark_excess_sharpe": 0.2,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({strategy: {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {strategy: -5.0},
+                    "strategy_excess_sharpe": {strategy: 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics_from_artifact(str(base), evidence_dir=str(Path(tmpdir) / "paper_evidence"))
+
+        assert metrics == {}
+
+    def test_load_metrics_from_artifact_rejects_stale_walk_forward_fields(self):
+        """metrics와 walk-forward 원천 artifact가 다르면 promotion metrics 로드를 차단한다."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.live_gate import LIVE_GATE_ARTIFACT_TYPE, LIVE_GATE_SCHEMA_VERSION
+        from core.promotion_engine import load_metrics_from_artifact
+
+        strategy = "scoring"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir) / "promotion"
+            base.mkdir()
+            (base / "metrics_summary.json").write_text(
+                json.dumps({
+                    strategy: {
+                        "total_return": 18.0,
+                        "profit_factor": 1.5,
+                        "mdd": -8.0,
+                        "wf_positive_rate": 0.8,
+                        "wf_sharpe_positive_rate": 0.8,
+                        "wf_windows": 5,
+                        "wf_total_trades": 120,
+                        "sharpe": 0.7,
+                        "benchmark_excess_return": 2.0,
+                        "benchmark_excess_sharpe": 0.2,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            (base / "walk_forward_summary.json").write_text(
+                json.dumps({strategy: {
+                    "windows": 5,
+                    "positive": 1,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
+                encoding="utf-8",
+            )
+            (base / "benchmark_comparison.json").write_text(
+                json.dumps({
+                    "strategy_excess_return_pct": {strategy: 2.0},
+                    "strategy_excess_sharpe": {strategy: 0.2},
+                }),
+                encoding="utf-8",
+            )
+            (base / "run_metadata.json").write_text(
+                json.dumps({
+                    "schema_version": LIVE_GATE_SCHEMA_VERSION,
+                    "artifact_type": LIVE_GATE_ARTIFACT_TYPE,
+                    "commit_hash": "abc",
+                    **_canonical_snapshot_metadata(),
+                }),
+                encoding="utf-8",
+            )
+
+            metrics = load_metrics_from_artifact(str(base), evidence_dir=str(Path(tmpdir) / "paper_evidence"))
+
+        assert metrics == {}
+
     def test_load_metrics_from_artifact_does_not_trust_metrics_summary_paper_fields(self):
         """paper evidence package 값은 metrics_summary의 paper_* 값으로 덮어쓰지 않는다."""
         import json
@@ -794,9 +919,11 @@ class TestArtifactLoading:
                 "mdd": -8.0,
                 "wf_positive_rate": 0.8,
                 "wf_sharpe_positive_rate": 0.8,
-                "wf_windows": 6,
+                "wf_windows": 5,
                 "wf_total_trades": 120,
                 "sharpe": 0.7,
+                "benchmark_excess_return": 2.0,
+                "benchmark_excess_sharpe": 0.2,
                 "paper_days": 60,
                 "paper_sharpe": 0.7,
                 "paper_excess": 0.2,
@@ -814,7 +941,12 @@ class TestArtifactLoading:
                 encoding="utf-8",
             )
             (base / "walk_forward_summary.json").write_text(
-                json.dumps({strategy: {"total_trades": 120}}),
+                json.dumps({strategy: {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
                 encoding="utf-8",
             )
             (base / "benchmark_comparison.json").write_text(
@@ -977,9 +1109,11 @@ class TestArtifactLoading:
                         "mdd": -8.0,
                         "wf_positive_rate": 0.8,
                         "wf_sharpe_positive_rate": 0.8,
-                        "wf_windows": 6,
+                        "wf_windows": 5,
                         "wf_total_trades": 120,
                         "sharpe": 0.75,
+                        "benchmark_excess_return": 4.0,
+                        "benchmark_excess_sharpe": 0.25,
                         "ev_per_trade": 5000,
                         "cost_adjusted_cagr": 9.0,
                         "turnover_per_year": 350.0,
@@ -988,7 +1122,12 @@ class TestArtifactLoading:
                 encoding="utf-8",
             )
             (base / "walk_forward_summary.json").write_text(
-                json.dumps({strategy: {"total_trades": 120}}),
+                json.dumps({strategy: {
+                    "windows": 5,
+                    "positive": 4,
+                    "sharpe_pos": 4,
+                    "total_trades": 120,
+                }}),
                 encoding="utf-8",
             )
             (base / "benchmark_comparison.json").write_text(

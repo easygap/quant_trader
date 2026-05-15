@@ -5597,9 +5597,11 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
                 "mdd": -8.0,
                 "wf_positive_rate": 0.8,
                 "wf_sharpe_positive_rate": 0.8,
-                "wf_windows": 6,
+                "wf_windows": 5,
                 "wf_total_trades": 120,
                 "sharpe": 0.75,
+                "benchmark_excess_return": 4.0,
+                "benchmark_excess_sharpe": 0.25,
                 "ev_per_trade": 5000,
                 "cost_adjusted_cagr": 9.0,
                 "turnover_per_year": 350.0,
@@ -5608,7 +5610,7 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     )
     write_json(
         promotion_dir / "walk_forward_summary.json",
-        {plan.candidate_id: {"windows": 6, "positive": 5, "sharpe_pos": 5, "total_trades": 120}},
+        {plan.candidate_id: {"windows": 5, "positive": 4, "sharpe_pos": 4, "total_trades": 120}},
     )
     write_json(
         promotion_dir / "benchmark_comparison.json",
