@@ -487,10 +487,30 @@ def _recalculate_promotion_result(
     evidence_base: Path,
 ) -> tuple[str | None, list[str], str | None]:
     """JSON status를 그대로 믿지 않고 canonical artifact 기준으로 승격을 재계산한다."""
+    results, error = _recalculate_promotion_results(promotion_base, evidence_base)
+    if error is not None:
+        return None, [], error
+
+    result = results.get(strategy_name)
+    if not isinstance(result, dict):
+        return None, [], f"promotion 재계산 metrics 없음: {strategy_name}"
+
+    return (
+        result.get("status"),
+        result.get("allowed_modes") or [],
+        result.get("reason"),
+    )
+
+
+def _recalculate_promotion_results(
+    promotion_base: Path,
+    evidence_base: Path,
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """canonical artifact 전체를 현재 metrics/evidence 기준으로 다시 계산한다."""
     try:
         from core.promotion_engine import load_metrics_from_artifact, promote
     except Exception as exc:
-        return None, [], f"promotion engine 로드 실패: {exc}"
+        return {}, f"promotion engine 로드 실패: {exc}"
 
     try:
         metrics_by_strategy = load_metrics_from_artifact(
@@ -498,14 +518,52 @@ def _recalculate_promotion_result(
             evidence_dir=str(evidence_base),
         )
     except Exception as exc:
-        return None, [], f"promotion 재계산 실패: {exc}"
+        return {}, f"promotion 재계산 실패: {exc}"
 
-    metrics = metrics_by_strategy.get(strategy_name)
-    if metrics is None:
-        return None, [], f"promotion 재계산 metrics 없음: {strategy_name}"
+    results: dict[str, dict[str, Any]] = {}
+    for name, metrics in metrics_by_strategy.items():
+        result = promote(metrics)
+        results[name] = {
+            "status": result.status,
+            "allowed_modes": result.allowed_modes,
+            "reason": result.reason,
+        }
+    if not results:
+        return {}, "promotion 재계산 metrics 없음"
+    return results, None
 
-    result = promote(metrics)
-    return result.status, result.allowed_modes, result.reason
+
+def _validate_promotion_result_artifact_sync(
+    stored: dict[str, Any],
+    recalculated: dict[str, dict[str, Any]],
+) -> list[str]:
+    """저장된 promotion_result 전체가 live gate 재계산 결과와 같은지 검사."""
+    issues: list[str] = []
+    if not isinstance(stored, dict):
+        return ["promotion_result.json top-level JSON is not an object."]
+
+    stored_names = set(stored)
+    expected_names = set(recalculated)
+    missing = sorted(expected_names - stored_names)
+    extra = sorted(stored_names - expected_names)
+    if missing:
+        issues.append(f"promotion_result 누락 전략: {missing[:8]}.")
+    if extra:
+        issues.append(f"promotion_result 불필요 전략: {extra[:8]}.")
+
+    for name in sorted(stored_names & expected_names):
+        current = stored.get(name)
+        expected = recalculated.get(name) or {}
+        if not isinstance(current, dict):
+            issues.append(f"promotion_result.{name} 형식 오류.")
+            continue
+        for key in ("status", "allowed_modes", "reason"):
+            if current.get(key) != expected.get(key):
+                issues.append(
+                    f"promotion_result {name}.{key} 재계산 결과 불일치. "
+                    "python tools/evaluate_and_promote.py --promotion-artifacts-refresh 실행 후 재검증하세요."
+                )
+    return issues
 
 
 def _validate_current_blockers_gate(
@@ -513,6 +571,7 @@ def _validate_current_blockers_gate(
     promotion_base: Path,
     artifacts: dict[str, dict[str, Any]],
     current_blockers_path: Path,
+    recalculated_promotions: dict[str, dict[str, Any]] | None = None,
 ) -> list[str]:
     """current_blockers.json이 현재 promotion bundle과 일치하고 live를 허용하는지 검증."""
     issues: list[str] = []
@@ -538,8 +597,9 @@ def _validate_current_blockers_gate(
             f"{blocker_summary.get('schema_version')} != {PROMOTION_BLOCKER_SUMMARY_SCHEMA_VERSION}"
         )
 
+    promotions_for_gate = recalculated_promotions or artifacts["promotion_result.json"]
     expected_source_hash = build_promotion_blocker_source_hash(
-        artifacts["promotion_result.json"],
+        promotions_for_gate,
         artifacts["metrics_summary.json"],
         artifacts["run_metadata.json"],
     )
@@ -552,7 +612,7 @@ def _validate_current_blockers_gate(
         )
 
         expected_blocker_summary = build_promotion_blocker_summary(
-            artifacts["promotion_result.json"],
+            promotions_for_gate,
             artifacts["metrics_summary.json"],
             artifacts["run_metadata.json"],
         )
@@ -693,12 +753,27 @@ def validate_live_readiness(
     if issues:
         return issues
 
+    recalculated_promotions, recalc_error = _recalculate_promotion_results(
+        promotion_base,
+        evidence_base,
+    )
+    if recalc_error is not None:
+        issues.append(recalc_error)
+    else:
+        issues.extend(
+            _validate_promotion_result_artifact_sync(
+                artifacts["promotion_result.json"],
+                recalculated_promotions,
+            )
+        )
+
     issues.extend(
         _validate_current_blockers_gate(
             strategy_name,
             promotion_base,
             artifacts,
             blockers_path,
+            recalculated_promotions if recalc_error is None else None,
         )
     )
 
@@ -763,11 +838,17 @@ def validate_live_readiness(
                 f"(status={status}, allowed_modes={allowed_modes})."
             )
 
-    recalculated_status, recalculated_modes, recalculated_reason = _recalculate_promotion_result(
-        strategy_name,
-        promotion_base,
-        evidence_base,
-    )
+    if recalc_error is None:
+        recalculated_record = recalculated_promotions.get(strategy_name) or {}
+        recalculated_status = recalculated_record.get("status")
+        recalculated_modes = recalculated_record.get("allowed_modes") or []
+        recalculated_reason = recalculated_record.get("reason")
+    else:
+        recalculated_status, recalculated_modes, recalculated_reason = _recalculate_promotion_result(
+            strategy_name,
+            promotion_base,
+            evidence_base,
+        )
     if recalculated_status != "live_candidate" or "live" not in recalculated_modes:
         issues.append(
             f"전략 '{strategy_name}' promotion 재계산 결과 live_candidate가 아님 "
