@@ -809,7 +809,21 @@ def _existing_pilot_evidence_record(plan):
                 "order_complete": True,
                 "order_result_reconciliation": {"complete": True},
                 "fill_complete": True,
-                "fill_reconciliation": {"complete": True},
+                "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                "fill_reconciliation": {
+                    "complete": True,
+                    "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                    "fills": [
+                        {
+                            "symbol": order.symbol,
+                            "action": order.action,
+                            "quantity": int(order.quantity),
+                            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                            "order_id": f"ORD-TW-{index + 1:03d}",
+                        }
+                        for index, order in enumerate(plan.orders)
+                    ],
+                },
                 "position_reconciliation": {"complete": True},
             },
         },
@@ -3457,6 +3471,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                 "target_weight_execution": {
                     "complete": True,
                     "params_hash": params_hash,
+                    "execution_session_id": TEST_EXECUTION_SESSION_ID,
                     "execution_trade_day_allowed": True,
                     "execution_market_session_allowed": True,
                     "pilot_authorization_snapshot_allowed": True,
@@ -3469,7 +3484,19 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "order_complete": True,
                     "order_result_reconciliation": {"complete": True},
                     "fill_complete": True,
-                    "fill_reconciliation": {"complete": True},
+                    "fill_reconciliation": {
+                        "complete": True,
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                        "fills": [
+                            {
+                                "symbol": "005930",
+                                "action": "BUY",
+                                "quantity": 1,
+                                "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                                "order_id": "ORD-TW-001",
+                            }
+                        ],
+                    },
                     "position_reconciliation": {"complete": True},
                 },
             },

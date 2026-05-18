@@ -484,9 +484,11 @@ def _seed_paper_trades_for_evidence(
 
 
 def _target_weight_execution_proof(params_hash: str) -> dict:
+    execution_session_id = "target-weight-proof-session"
     return {
         "complete": True,
         "params_hash": params_hash,
+        "execution_session_id": execution_session_id,
         "execution_trade_day_allowed": True,
         "execution_market_session_allowed": True,
         "pilot_authorization_snapshot_allowed": True,
@@ -499,7 +501,19 @@ def _target_weight_execution_proof(params_hash: str) -> dict:
         "order_complete": True,
         "order_result_reconciliation": {"complete": True},
         "fill_complete": True,
-        "fill_reconciliation": {"complete": True},
+        "fill_reconciliation": {
+            "complete": True,
+            "execution_session_id": execution_session_id,
+            "fills": [
+                {
+                    "symbol": "005930",
+                    "action": "BUY",
+                    "quantity": 1,
+                    "execution_session_id": execution_session_id,
+                    "order_id": "ORD-TARGET-WEIGHT-PROOF",
+                }
+            ],
+        },
         "position_reconciliation": {"complete": True},
     }
 
@@ -2114,6 +2128,28 @@ class TestShadowEvidenceNotPromotable:
                 "fill_reconciliation",
                 lambda execution: execution.pop("fill_reconciliation"),
                 "target_weight_fill_reconciliation_incomplete",
+            ),
+            (
+                "execution_session_id",
+                lambda execution: execution.pop("execution_session_id"),
+                "target_weight_execution_session_id_missing",
+            ),
+            (
+                "fill_reconciliation_session_id",
+                lambda execution: execution["fill_reconciliation"].pop("execution_session_id"),
+                "target_weight_fill_reconciliation_session_id_missing",
+            ),
+            (
+                "fill_session_id_mismatch",
+                lambda execution: execution["fill_reconciliation"]["fills"][0].update(
+                    {"execution_session_id": "other-session"}
+                ),
+                "target_weight_fill_session_id_mismatch",
+            ),
+            (
+                "fill_order_id",
+                lambda execution: execution["fill_reconciliation"]["fills"][0].pop("order_id"),
+                "target_weight_fill_order_id_missing",
             ),
         ]
         for _name, mutate, expected_reason in cases:
