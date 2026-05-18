@@ -168,6 +168,36 @@ class TestResolveDataSource:
             _resolve_data_source_defaults({"data_source": {"allow_kis_fallback": "maybe"}})
 
 
+class TestEnvFileFallback:
+    """python-dotenv 미설치 환경의 .env fallback parser 테스트."""
+
+    def test_fallback_loads_simple_env_file_without_overriding_existing(self, tmp_path, monkeypatch):
+        from config.config_loader import _load_env_file_fallback
+
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "\n".join([
+                "# comment",
+                "DISCORD_WEBHOOK_URL=https://discord.test/webhook",
+                "export KIS_ACCOUNT_NO='12345678'",
+                'QUOTED_VALUE="hello world"',
+                "EXISTING_VALUE=from-file",
+            ]),
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("KIS_ACCOUNT_NO", raising=False)
+        monkeypatch.delenv("QUOTED_VALUE", raising=False)
+        monkeypatch.setenv("EXISTING_VALUE", "from-env")
+
+        _load_env_file_fallback(env_path)
+
+        assert os.environ["DISCORD_WEBHOOK_URL"] == "https://discord.test/webhook"
+        assert os.environ["KIS_ACCOUNT_NO"] == "12345678"
+        assert os.environ["QUOTED_VALUE"] == "hello world"
+        assert os.environ["EXISTING_VALUE"] == "from-env"
+
+
 # ──────────────────────────────────────────────────────
 # Config 싱글톤 통합 테스트
 # ──────────────────────────────────────────────────────
