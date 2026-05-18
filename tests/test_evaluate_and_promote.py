@@ -1566,8 +1566,15 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
     assert action["next_operator_trade_day"] == "2026-05-19"
     assert action["order_safety"] == "no_order"
     assert action["requires"] == "next KRX business day fresh readiness"
+    assert action["not_before_date"] == "2026-05-19"
+    assert action["premature_run_guard"] == "target_weight_future_as_of_date_blocked"
     assert action["command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
     assert action["follow_up"].endswith("--as-of-date 2026-05-19 --readiness-audit")
+    assert report["operator_runbook"]["sequence"][2]["not_before_date"] == "2026-05-19"
+    assert (
+        report["operator_runbook"]["sequence"][2]["premature_run_guard"]
+        == "target_weight_future_as_of_date_blocked"
+    )
     assert report["operator_runbook"]["sequence"][3]["command"].endswith(
         "--as-of-date 2026-05-19 --readiness-audit"
     )
