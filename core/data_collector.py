@@ -11,10 +11,12 @@
   백테스트와 실전에서 동일 소스를 쓰도록 FDR 설치·우선 사용을 권장한다. KIS fallback은 명시 설정 시에만 허용한다.
 """
 
+import json
 import re
 import time as time_module
 import warnings
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -48,6 +50,9 @@ from database.repositories import save_stock_prices, get_stock_prices
 
 # 시장별 FDR StockListing 전체 테이블(시총순) — 백테스트 중 반복 호출 방지
 _FDR_FULL_LISTING_CACHE: dict[str, pd.DataFrame] = {}
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SECTOR_MAP_CACHE_PATH = PROJECT_ROOT / "reports" / "sector_map_cache.json"
+SECTOR_MAP_CACHE_SCHEMA_VERSION = 1
 
 
 def clear_fdr_listing_cache() -> None:
@@ -750,14 +755,87 @@ class DataCollector:
         KRX 종목코드 → 업종(Sector) 매핑 딕셔너리 반환.
         우선 FDR StockListing('KRX')의 Sector 컬럼을 사용하고,
         FDR에 업종 컬럼이 없으면 KRX KIND 상장법인 목록과 pykrx 업종 분류로 보강한다.
+        모든 실시간 소스가 비어 있으면 마지막으로 검증해 저장한 로컬 캐시를 사용한다.
         """
-        mapping = DataCollector._get_sector_map_from_fdr()
-        if mapping:
+        for source, loader in (
+            ("fdr", DataCollector._get_sector_map_from_fdr),
+            ("kind", DataCollector._get_sector_map_from_kind),
+            ("pykrx", DataCollector._get_sector_map_from_pykrx),
+        ):
+            mapping = DataCollector._normalize_sector_map(loader())
+            if mapping:
+                DataCollector._write_sector_map_cache(mapping, source=source)
+                return mapping
+        return DataCollector._get_sector_map_from_cache()
+
+    @staticmethod
+    def _normalize_sector_map(mapping: dict[object, object] | None) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for raw_symbol, raw_sector in dict(mapping or {}).items():
+            symbol = str(raw_symbol).strip()
+            if not symbol or symbol.lower() == "nan":
+                continue
+            if symbol.upper().endswith(".KS") and symbol[:-3].isdigit():
+                symbol = symbol[:-3].zfill(6)
+            elif symbol.isdigit() and len(symbol) <= 6:
+                symbol = symbol.zfill(6)
+            sector = str(raw_sector).strip() if pd.notna(raw_sector) else ""
+            if symbol and sector and sector.lower() != "nan":
+                normalized[symbol] = sector
+        return dict(sorted(normalized.items()))
+
+    @staticmethod
+    def _write_sector_map_cache(
+        mapping: dict[str, str],
+        *,
+        source: str,
+        path: Path | None = None,
+    ) -> None:
+        normalized = DataCollector._normalize_sector_map(mapping)
+        if not normalized:
+            return
+        cache_path = path or SECTOR_MAP_CACHE_PATH
+        payload = {
+            "schema_version": SECTOR_MAP_CACHE_SCHEMA_VERSION,
+            "generated_at": datetime.now().isoformat(),
+            "source": source,
+            "entry_count": len(normalized),
+            "mapping": normalized,
+        }
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(cache_path)
+        except Exception as exc:
+            logger.debug("섹터맵 캐시 저장 실패 ({}): {}", cache_path, exc)
+
+    @staticmethod
+    def _get_sector_map_from_cache(path: Path | None = None) -> dict[str, str]:
+        cache_path = path or SECTOR_MAP_CACHE_PATH
+        try:
+            if not cache_path.exists():
+                return {}
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            raw_mapping = payload.get("mapping") if isinstance(payload, dict) else None
+            if raw_mapping is None and isinstance(payload, dict):
+                raw_mapping = payload
+            mapping = DataCollector._normalize_sector_map(raw_mapping)
+            if not mapping:
+                return {}
+            logger.warning(
+                "실시간 업종 매핑 조회 실패 — 로컬 섹터맵 캐시 {}개 사용 (source={}, generated_at={})",
+                len(mapping),
+                payload.get("source") if isinstance(payload, dict) else "raw",
+                payload.get("generated_at") if isinstance(payload, dict) else None,
+            )
             return mapping
-        mapping = DataCollector._get_sector_map_from_kind()
-        if mapping:
-            return mapping
-        return DataCollector._get_sector_map_from_pykrx()
+        except Exception as exc:
+            logger.warning("섹터맵 캐시 로드 실패 ({}): {}", cache_path, exc)
+            return {}
 
     @staticmethod
     def _sector_map_from_listing(stocks: pd.DataFrame) -> dict[str, str]:
