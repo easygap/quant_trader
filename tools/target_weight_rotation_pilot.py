@@ -21,6 +21,7 @@ sys.path.insert(0, str(_ROOT))
 
 from loguru import logger
 
+from core.data_collector import DataCollectionError
 from core.target_weight_rotation import (
     DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
     TargetWeightPlan,
@@ -44,6 +45,7 @@ DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 DEFAULT_MAX_ORDER_ADV_PCT = 5.0
 TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
 KST = timezone(timedelta(hours=9))
+NO_ORDER_OPERATION_ERRORS = (ValueError, DataCollectionError)
 
 
 def _stable_manifest_hash(payload: dict[str, Any]) -> str:
@@ -5138,7 +5140,7 @@ def main() -> None:
                 shadow_end_date=args.shadow_end_date,
                 shadow_days=args.shadow_days,
             )
-        except ValueError as exc:
+        except NO_ORDER_OPERATION_ERRORS as exc:
             parser.error(str(exc))
 
         batch = run_shadow_bootstrap(
@@ -5216,7 +5218,7 @@ def main() -> None:
                 max_order_adv_pct=args.max_order_adv_pct,
                 output_dir=Path(args.output_dir),
             )
-        except ValueError as exc:
+        except NO_ORDER_OPERATION_ERRORS as exc:
             failure = build_no_order_operation_failure_artifact(
                 mode="daily_ops_summary",
                 candidate_id=args.candidate_id,
@@ -5301,7 +5303,7 @@ def main() -> None:
                 max_order_adv_pct=args.max_order_adv_pct,
                 output_dir=Path(args.output_dir),
             )
-        except ValueError as exc:
+        except NO_ORDER_OPERATION_ERRORS as exc:
             failure = build_no_order_operation_failure_artifact(
                 mode="readiness_audit",
                 candidate_id=args.candidate_id,
