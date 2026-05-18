@@ -4557,6 +4557,19 @@ def test_run_pilot_readiness_audit_blocks_cash_override(monkeypatch, tmp_path):
         twp.run_pilot_readiness_audit(cash=1_000_000.0, output_dir=tmp_path)
 
 
+def test_run_pilot_readiness_audit_blocks_future_as_of_before_plan(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: pytest.fail("build_plan should not run"))
+
+    with pytest.raises(ValueError, match="target_weight_future_as_of_date_blocked"):
+        twp.run_pilot_readiness_audit(
+            as_of_date="2026-04-11",
+            output_dir=tmp_path,
+            execution_now=datetime(2026, 4, 10, 9, 0),
+        )
+
+
 def test_run_daily_ops_summary_blocks_cash_override(monkeypatch, tmp_path):
     import tools.target_weight_rotation_pilot as twp
 
@@ -4568,6 +4581,19 @@ def test_run_daily_ops_summary_blocks_cash_override(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="target_weight_cash_override_blocked"):
         twp.run_daily_ops_summary(cash=1_000_000.0, output_dir=tmp_path)
+
+
+def test_run_daily_ops_summary_blocks_future_as_of_before_audit(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: pytest.fail("build_plan should not run"))
+
+    with pytest.raises(ValueError, match="target_weight_future_as_of_date_blocked"):
+        twp.run_daily_ops_summary(
+            as_of_date="2026-04-11",
+            output_dir=tmp_path,
+            execution_now=datetime(2026, 4, 10, 9, 0),
+        )
 
 
 @pytest.mark.parametrize("kwargs", [{"execute": True}, {"collect_evidence": True}])
