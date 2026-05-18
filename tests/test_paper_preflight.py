@@ -222,6 +222,52 @@ class TestNotifierHealth:
         assert health["discord_configured"] is True
         assert health["discord_reachable"] is None
 
+    def test_target_weight_preflight_uses_test_notification_command(
+        self,
+        monkeypatch,
+        evidence_dir,
+        runtime_dir,
+        fresh_db,
+    ):
+        """target-weight webhook 확인은 실제 test send 명령을 운영 액션으로 남긴다."""
+        strategy = "target_weight_best"
+        _seed_v2(evidence_dir, strategy, [
+            {"date": "2026-04-06", "benchmark_status": "final"},
+        ])
+
+        from config.config_loader import Config
+        monkeypatch.setattr(
+            Config,
+            "get",
+            lambda: MagicMock(discord={"enabled": True, "webhook_url": "https://discord.test/webhook"}),
+        )
+
+        from core.paper_preflight import run_preflight
+        r = run_preflight(strategy, "2026-04-06")
+
+        actions = "\n".join(r.operator_actions)
+        assert r.notifier_health == "unverified"
+        assert "tools/paper_preflight.py" in actions
+        assert "--send-test-notification" in actions
+        assert f"--strategy {strategy}" in actions
+
+    def test_target_weight_preflight_no_evidence_uses_shadow_days(
+        self,
+        runtime_dir,
+        fresh_db,
+    ):
+        """target-weight evidence 부족은 generic backfill 대신 shadow-days 경로를 안내한다."""
+        strategy = "target_weight_best"
+
+        from core.paper_preflight import run_preflight
+        r = run_preflight(strategy, "2026-04-06")
+
+        actions = "\n".join(r.operator_actions)
+        assert "tools/target_weight_rotation_pilot.py" in actions
+        assert "--shadow-days 3 --shadow-end-date 2026-04-06" in actions
+        assert "--daily-ops-summary" in actions
+        assert "paper_bootstrap.py --mode shadow" not in actions
+
     def test_preflight_preserves_recent_successful_notifier_health(
         self,
         monkeypatch,
