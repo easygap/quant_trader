@@ -550,14 +550,36 @@ def _select_target_weight_targets(
     )
 
 
-def _sector_for_symbol(symbol: str, sector_map: dict[str, str]) -> str:
+def _preferred_share_base_symbol(symbol: str) -> str:
     raw = str(symbol).strip()
-    sector = str(sector_map.get(raw, "") or "").strip()
-    if sector:
-        return sector
-    if raw.isdigit():
-        return str(sector_map.get(raw.zfill(6), "") or "").strip()
+    if raw.upper().endswith(".KS") and raw[:-3].isdigit():
+        raw = raw[:-3].zfill(6)
+    if raw.isdigit() and len(raw) == 6 and raw[-1] != "0":
+        return f"{raw[:5]}0"
     return ""
+
+
+def _sector_lookup(symbol: str, sector_map: dict[str, str]) -> tuple[str, str]:
+    raw = str(symbol).strip()
+    lookup_keys = [raw]
+    if raw.isdigit():
+        lookup_keys.append(raw.zfill(6))
+    if raw.upper().endswith(".KS") and raw[:-3].isdigit():
+        lookup_keys.append(raw[:-3].zfill(6))
+    for key in dict.fromkeys(lookup_keys):
+        sector = str(sector_map.get(key, "") or "").strip()
+        if sector:
+            return sector, key
+    base_symbol = _preferred_share_base_symbol(raw)
+    if base_symbol:
+        sector = str(sector_map.get(base_symbol, "") or "").strip()
+        if sector:
+            return sector, base_symbol
+    return "", ""
+
+
+def _sector_for_symbol(symbol: str, sector_map: dict[str, str]) -> str:
+    return _sector_lookup(symbol, sector_map)[0]
 
 
 def _limit_targets_per_sector(
@@ -685,6 +707,7 @@ def build_target_weight_plan(
     )
     sector_map_for_selection: dict[str, str] | None = None
     missing_sector_symbols: list[str] = []
+    inferred_sector_symbols: list[dict[str, str]] = []
     if max_targets_per_sector is not None:
         try:
             sector_map_source = (
@@ -709,6 +732,15 @@ def build_target_weight_plan(
                 f"max_targets_per_sector={max_targets_per_sector}; "
                 "sector map is required for sector-capped target-weight planning"
             )
+        inferred_sector_symbols = []
+        for symbol in symbols:
+            sector, source_symbol = _sector_lookup(symbol, sector_map_for_selection)
+            if sector and source_symbol and source_symbol != normalize_symbol(symbol):
+                inferred_sector_symbols.append({
+                    "symbol": symbol,
+                    "source_symbol": source_symbol,
+                    "sector": sector,
+                })
         missing_sector_symbols = [
             symbol
             for symbol in symbols
@@ -1069,6 +1101,7 @@ def build_target_weight_plan(
             "max_targets_per_sector": max_targets_per_sector,
             "sector_map_size": len(sector_map_for_selection or {}),
             "sector_map_missing_symbols": missing_sector_symbols,
+            "sector_map_inferred_symbols": inferred_sector_symbols,
             "selected_sector_counts": selected_sector_counts,
             "selected_sector_missing_symbols": selected_sector_missing_symbols,
             "position_loss_reduce_enabled": position_loss_reduce_enabled,
