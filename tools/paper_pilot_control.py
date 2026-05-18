@@ -79,9 +79,43 @@ def _target_weight_cap_envelope_violations(
     return violations
 
 
+def _load_default_status_strategy(*, reports_dir: str | Path | None = None) -> str | None:
+    base = Path(reports_dir) if reports_dir is not None else Path(REPORTS_DIR)
+    path = base / "current_blockers.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    runbook = payload.get("operator_runbook")
+    if isinstance(runbook, dict):
+        primary = str(runbook.get("primary_strategy") or "").strip()
+        if primary:
+            return primary
+        priority = runbook.get("current_priority_action")
+        if isinstance(priority, dict):
+            strategy = str(priority.get("strategy") or "").strip()
+            if strategy:
+                return strategy
+
+    next_actions = payload.get("next_actions")
+    if isinstance(next_actions, list):
+        for action in next_actions:
+            if not isinstance(action, dict):
+                continue
+            strategy = str(action.get("strategy") or "").strip()
+            if strategy:
+                return strategy
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Paper Pilot Control")
-    parser.add_argument("--strategy", required=True)
+    parser.add_argument("--strategy")
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument("--enable", action="store_true")
     action_group.add_argument("--disable", action="store_true")
@@ -95,6 +129,13 @@ def main():
     parser.add_argument("--max-exposure", type=int, default=3_000_000)
     parser.add_argument("--reason", default="")
     args = parser.parse_args()
+
+    if args.status and not args.strategy:
+        args.strategy = _load_default_status_strategy()
+        if args.strategy:
+            print(f"INFO: --strategy omitted; using current blockers primary strategy: {args.strategy}")
+    if (args.enable or args.disable or args.check_prerequisites or args.status) and not args.strategy:
+        parser.error("--strategy is required unless --status can resolve current_blockers primary strategy")
 
     from database.models import init_database
     init_database()
