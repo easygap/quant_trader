@@ -1382,12 +1382,67 @@ def test_build_current_blockers_report_promotes_discord_test_after_shadow():
     report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
 
     action = report["next_actions"][0]
-    assert action["desc"] == "Discord webhook 도달성 확인 preflight 실행"
+    assert action["desc"] == "Discord webhook 설정 후 도달성 확인 preflight 실행"
+    assert action["setup_required"] is True
+    assert action["required_env"] == "DISCORD_WEBHOOK_URL"
+    assert action["config_path"] == "config/settings.yaml: discord.enabled=true"
+    assert "DISCORD_WEBHOOK_URL" in action["setup_hint"]
     assert action["command"] == (
         "python tools/paper_preflight.py --strategy target_weight_best "
         "--with-pilot-check --send-test-notification"
     )
     assert action["order_safety"] == "no_order"
+    assert report["operator_runbook"]["current_priority_action"]["setup_required"] is True
+    assert report["operator_runbook"]["sequence"][2]["setup_required"] is True
+
+
+def test_build_current_blockers_report_promotes_discord_retest_when_configured():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "b" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "status": "BLOCKED",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 3,
+        },
+        "decision": {
+            "blocking_reasons": ["notifier: webhook configured but test send not verified"],
+        },
+        "operator_commands": {},
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["desc"] == "Discord webhook 도달성 확인 preflight 실행"
+    assert action["setup_required"] is False
+    assert "required_env" not in action
+    assert action["command"].endswith("--with-pilot-check --send-test-notification")
 
 
 def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops():
