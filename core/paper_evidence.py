@@ -1313,6 +1313,36 @@ def _target_weight_record_has_repaired_performance(record: dict) -> bool:
     return record.get("performance_repair") is True
 
 
+def _target_weight_execution_linkage_status(execution: dict) -> tuple[bool, str]:
+    execution_session_id = str(execution.get("execution_session_id") or "").strip()
+    if not execution_session_id:
+        return False, "target_weight_execution_session_id_missing"
+
+    fill_reconciliation = execution.get("fill_reconciliation") or {}
+    fill_session_id = str(fill_reconciliation.get("execution_session_id") or "").strip()
+    if not fill_session_id:
+        return False, "target_weight_fill_reconciliation_session_id_missing"
+    if fill_session_id != execution_session_id:
+        return False, "target_weight_fill_reconciliation_session_id_mismatch"
+
+    fills = fill_reconciliation.get("fills")
+    if not isinstance(fills, list) or not fills:
+        return False, "target_weight_fill_rows_missing"
+
+    for fill in fills:
+        if not isinstance(fill, dict):
+            return False, "target_weight_fill_row_invalid"
+        row_session_id = str(fill.get("execution_session_id") or "").strip()
+        if not row_session_id:
+            return False, "target_weight_fill_session_id_missing"
+        if row_session_id != execution_session_id:
+            return False, "target_weight_fill_session_id_mismatch"
+        if not str(fill.get("order_id") or "").strip():
+            return False, "target_weight_fill_order_id_missing"
+
+    return True, "target_weight_execution_linkage_verified"
+
+
 def _target_weight_record_proof_status(
     strategy: str,
     record: dict,
@@ -1379,6 +1409,9 @@ def _target_weight_record_proof_status(
     fill_reconciliation = execution.get("fill_reconciliation") or {}
     if fill_reconciliation.get("complete") is not True:
         return False, "target_weight_fill_reconciliation_incomplete"
+    linkage_valid, linkage_reason = _target_weight_execution_linkage_status(execution)
+    if not linkage_valid:
+        return False, linkage_reason
 
     position_reconciliation = execution.get("position_reconciliation") or {}
     if position_reconciliation.get("complete") is not True:
