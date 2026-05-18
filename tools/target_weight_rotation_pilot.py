@@ -458,6 +458,7 @@ def validate_pilot_authorization_snapshot(
         ("trade_day", snapshot.get("trade_day"), expected["trade_day"]),
         ("score_day", snapshot.get("score_day"), expected["score_day"]),
         ("params_hash", snapshot.get("params_hash"), expected["params_hash"]),
+        ("risk_off", snapshot.get("risk_off"), expected["risk_off"]),
         (
             "targets",
             [normalize_symbol(symbol) for symbol in snapshot.get("targets", [])],
