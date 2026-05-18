@@ -912,8 +912,16 @@ def _load_latest_target_weight_daily_ops(
     """후보별 최신 daily ops summary가 있으면 current blockers에 반영한다."""
     base = Path(reports_dir)
     prefix = f"target_weight_daily_ops_summary_{strategy}_"
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
     candidates = sorted(
-        base.glob(f"{prefix}*.json"),
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob(f"{prefix}*.json")
+        },
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -928,15 +936,23 @@ def _load_latest_target_weight_daily_ops(
             continue
         if payload.get("candidate_id") != strategy:
             continue
+        status = payload.get("status")
+        decision = payload.get("decision") or {}
+        operator_commands = dict(payload.get("operator_commands") or {})
+        if status != "READY_TO_EXECUTE":
+            execute_command = str(operator_commands.get("execute_capped_paper") or "")
+            if not execute_command.lstrip().startswith("# blocked:"):
+                reason = _first_text(decision.get("blocking_reasons")) or payload.get("next_step") or status
+                operator_commands["execute_capped_paper"] = f"# blocked: {reason}"
         return {
             "source_path": str(path),
             "generated_at": payload.get("generated_at"),
             "trade_day": payload.get("trade_day"),
-            "status": payload.get("status"),
+            "status": status,
             "next_step": payload.get("next_step"),
             "evidence_progress": payload.get("evidence_progress") or {},
-            "decision": payload.get("decision") or {},
-            "operator_commands": payload.get("operator_commands") or {},
+            "decision": decision,
+            "operator_commands": operator_commands,
         }
     return None
 
@@ -951,6 +967,16 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _first_text(items) -> str | None:
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        text = str(item).strip()
+        if text:
+            return text
+    return None
 
 
 def _target_weight_ops_priority_action(
@@ -1039,6 +1065,28 @@ def _target_weight_ops_priority_action(
     }
 
 
+def _target_weight_execute_after_ready_command(
+    commands: dict[str, str],
+    latest_daily_ops: dict | None,
+) -> str:
+    if latest_daily_ops and latest_daily_ops.get("status") == "READY_TO_EXECUTE":
+        ops_commands = latest_daily_ops.get("operator_commands") or {}
+        return (
+            ops_commands.get("execute_capped_paper")
+            or commands.get("execute_capped_paper_after_ready")
+            or ""
+        )
+    if latest_daily_ops:
+        ops_commands = latest_daily_ops.get("operator_commands") or {}
+        execute_command = str(ops_commands.get("execute_capped_paper") or "").strip()
+        if execute_command.startswith("# blocked:"):
+            return execute_command
+        status = latest_daily_ops.get("status") or "UNKNOWN"
+        reason = _first_text((latest_daily_ops.get("decision") or {}).get("blocking_reasons"))
+        return f"# blocked: daily_ops_summary.status == {status}; {reason or 'READY_TO_EXECUTE 전 실행 금지'}"
+    return "# blocked: daily ops summary 생성 후 READY_TO_EXECUTE 상태의 execute_capped_paper 명령만 사용"
+
+
 def _research_operator_commands() -> dict[str, str]:
     return {
         "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
@@ -1056,6 +1104,10 @@ def _build_current_blockers_operator_runbook(
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
     if primary_strategy:
         commands = _target_weight_operator_commands(primary_strategy)
+        commands["execute_capped_paper_after_ready"] = _target_weight_execute_after_ready_command(
+            commands,
+            latest_daily_ops,
+        )
         ops_priority_action = _target_weight_ops_priority_action(
             primary_strategy,
             commands,
@@ -1211,21 +1263,33 @@ def build_current_blockers_report(
     runbook_commands = operator_runbook.get("commands") or {}
     ops_priority_action = operator_runbook.get("current_priority_action")
     if provisional_candidates:
+        next_priority = 1
         if ops_priority_action:
             next_actions.append({
-                "priority": 1,
+                "priority": next_priority,
                 **ops_priority_action,
             })
+            next_priority += 1
         else:
             next_actions.append({
-                "priority": 1,
-                "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
+                "priority": next_priority,
+                "desc": "target-weight daily ops summary로 readiness와 pilot evidence 진행률 먼저 확인",
+                "strategy": provisional_candidates[0],
+                "command": runbook_commands.get("daily_ops_summary"),
+                "order_safety": "no_order",
+                "follow_up": runbook_commands.get("readiness_audit"),
+            })
+            next_priority += 1
+            next_actions.append({
+                "priority": next_priority,
+                "desc": "daily ops 확인 후 target-weight capped paper pilot readiness audit 실행",
                 "strategy": provisional_candidates[0],
                 "command": runbook_commands.get("readiness_audit"),
                 "order_safety": "no_order",
             })
+            next_priority += 1
         next_actions.append({
-            "priority": 2,
+            "priority": next_priority,
             "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
             "strategy": provisional_candidates[0],
             "command": runbook_commands.get("execute_capped_paper_after_ready"),
