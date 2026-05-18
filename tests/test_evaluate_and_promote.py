@@ -433,6 +433,13 @@ def _promotion_metadata(*, generated_at="2026-05-13T14:00:00", strategy_specs=No
     }
 
 
+def _fresh_promotion_metadata(*, strategy_specs=None):
+    return _promotion_metadata(
+        generated_at=f"{date.today().isoformat()}T16:00:00",
+        strategy_specs=strategy_specs,
+    )
+
+
 def _write_source_artifacts(artifact_dir, metrics):
     walk_forward = {}
     excess_return = {}
@@ -514,7 +521,11 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     evidence_dir = tmp_path / "paper_evidence"
     _write_paper_package(evidence_dir, strategy)
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "live_candidate"
     assert "live" in promotions[strategy]["allowed_modes"]
@@ -522,6 +533,26 @@ def test_build_promotion_results_promotes_live_when_eligible_paper_evidence_exis
     assert metrics[strategy]["paper_cash_adjusted_excess"] == 0.15
     assert metrics[strategy]["paper_evidence_recommendation"] == "ELIGIBLE"
     assert metrics[strategy]["paper_evidence_fresh"] is True
+
+
+def test_build_promotion_results_blocks_without_canonical_metadata(tmp_path):
+    from tools.evaluate_and_promote import build_promotion_results
+
+    strategy = "metadata_missing_strategy"
+    metrics = {strategy: _provisional_metrics()}
+    evidence_dir = tmp_path / "paper_evidence"
+    _write_paper_package(evidence_dir, strategy)
+
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+    )
+
+    assert promotions[strategy]["status"] == "paper_only"
+    assert "canonical data integrity failed" in promotions[strategy]["reason"]
+    assert "canonical metadata missing or invalid" in promotions[strategy]["reason"]
+    assert "live" not in promotions[strategy]["allowed_modes"]
+    assert metrics[strategy]["canonical_data_integrity_ok"] is False
 
 
 def test_build_promotion_results_ignores_metrics_summary_paper_fields_without_evidence_package(tmp_path):
@@ -543,7 +574,11 @@ def test_build_promotion_results_ignores_metrics_summary_paper_fields_without_ev
         "paper_trade_quality_status": "ok",
     }}
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(tmp_path / "missing_evidence"))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(tmp_path / "missing_evidence"),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "paper evidence recommendation missing != ELIGIBLE" in promotions[strategy]["reason"]
@@ -565,7 +600,11 @@ def test_build_promotion_results_requires_paper_evidence_strategy_identity(tmp_p
         encoding="utf-8",
     )
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "live" not in promotions[strategy]["allowed_modes"]
@@ -587,7 +626,11 @@ def test_build_promotion_results_blocks_stale_paper_evidence(tmp_path):
         latest_evidence_date="2026-01-01",
     )
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "paper evidence stale" in promotions[strategy]["reason"]
@@ -685,7 +728,11 @@ def test_build_promotion_results_requires_positive_benchmark_excess(tmp_path):
     evidence_dir = tmp_path / "paper_evidence"
     _write_paper_package(evidence_dir, strategy)
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "paper_only"
     assert "benchmark excess return 0.0 <= 0" in promotions[strategy]["reason"]
@@ -702,7 +749,11 @@ def test_build_promotion_results_requires_benchmark_excess_fields(tmp_path):
     evidence_dir = tmp_path / "paper_evidence"
     _write_paper_package(evidence_dir, strategy)
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "paper_only"
     assert "benchmark excess return missing" in promotions[strategy]["reason"]
@@ -715,7 +766,11 @@ def test_build_promotion_results_stays_provisional_when_paper_evidence_missing(t
     strategy = "paper_missing_strategy"
     metrics = {strategy: _provisional_metrics()}
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(tmp_path / "paper_evidence"))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(tmp_path / "paper_evidence"),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "live" not in promotions[strategy]["allowed_modes"]
@@ -735,7 +790,11 @@ def test_build_promotion_results_does_not_promote_live_when_evidence_blocked(tmp
         promotable_evidence_days=60,
     )
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert metrics[strategy]["paper_evidence_recommendation"] == "BLOCKED"
@@ -2184,7 +2243,11 @@ def test_build_promotion_results_blocks_target_weight_without_verified_proof(tmp
     evidence_dir = tmp_path / "paper_evidence"
     _write_paper_package(evidence_dir, strategy)
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "live" not in promotions[strategy]["allowed_modes"]
@@ -2199,14 +2262,16 @@ def test_build_promotion_results_uses_metadata_for_target_weight_identity(tmp_pa
     evidence_dir = tmp_path / "paper_evidence"
     _write_paper_package(evidence_dir, strategy)
 
+    strategy_specs = [{
+        "candidate_id": strategy,
+        "base_strategy": "target_weight_rotation",
+        "params_hash": "hash",
+    }]
     promotions = build_promotion_results(
         metrics,
         evidence_dir=str(evidence_dir),
-        strategy_specs=[{
-            "candidate_id": strategy,
-            "base_strategy": "target_weight_rotation",
-            "params_hash": "hash",
-        }],
+        strategy_specs=strategy_specs,
+        canonical_metadata=_fresh_promotion_metadata(strategy_specs=strategy_specs),
     )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
@@ -2240,10 +2305,12 @@ def test_build_promotion_results_promotes_target_weight_with_verified_proof(tmp_
         target_weight_params_hash="hash",
     )
 
+    strategy_specs = [{"candidate_id": strategy, "params_hash": "hash"}]
     promotions = build_promotion_results(
         metrics,
         evidence_dir=str(evidence_dir),
-        strategy_specs=[{"candidate_id": strategy, "params_hash": "hash"}],
+        strategy_specs=strategy_specs,
+        canonical_metadata=_fresh_promotion_metadata(strategy_specs=strategy_specs),
     )
 
     assert promotions[strategy]["status"] == "live_candidate"
@@ -2278,10 +2345,12 @@ def test_build_promotion_results_blocks_target_weight_hash_mismatch(tmp_path):
         target_weight_params_hash="old-hash",
     )
 
+    strategy_specs = [{"candidate_id": strategy, "params_hash": "current-hash"}]
     promotions = build_promotion_results(
         metrics,
         evidence_dir=str(evidence_dir),
-        strategy_specs=[{"candidate_id": strategy, "params_hash": "current-hash"}],
+        strategy_specs=strategy_specs,
+        canonical_metadata=_fresh_promotion_metadata(strategy_specs=strategy_specs),
     )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
@@ -2314,7 +2383,11 @@ def test_build_promotion_results_blocks_target_weight_mixed_params_hash(tmp_path
         target_weight_params_hash=None,
     )
 
-    promotions = build_promotion_results(metrics, evidence_dir=str(evidence_dir))
+    promotions = build_promotion_results(
+        metrics,
+        evidence_dir=str(evidence_dir),
+        canonical_metadata=_fresh_promotion_metadata(),
+    )
 
     assert promotions[strategy]["status"] == "provisional_paper_candidate"
     assert "target-weight promotable evidence not fully verified" in promotions[strategy]["reason"]
