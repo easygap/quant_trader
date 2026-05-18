@@ -2572,7 +2572,8 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
     assert manifest["current_decision"]["ready_for_cap_approval"] is True
     assert "enable pilot" in manifest["current_decision"]["next_action"]
-    assert "--execute --collect-evidence" in manifest["operator_commands"]["execute_capped_paper"]
+    assert manifest["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert "pilot_authorization" in manifest["operator_commands"]["execute_capped_paper"]
     assert manifest["no_order_safety"]["orders_submitted"] is False
 
 
@@ -2742,10 +2743,117 @@ def test_build_target_weight_daily_ops_summary_writes_operator_view(tmp_path):
 
     assert summary["status"] == "READY_TO_ENABLE_CAPS"
     assert len(summary["summary_hash"]) == 64
+    assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert "pilot_authorization" in summary["operator_commands"]["execute_capped_paper"]
     assert payload["evidence_progress"]["remaining_pilot_days"] == 48
     assert payload["no_order_safety"]["summary_only"] is True
     assert "Verified pilot days: 12/60" in report
     assert "READY_TO_ENABLE_CAPS" in report
+    assert "# blocked: pilot_authorization" in report
+
+
+def test_build_target_weight_daily_ops_summary_allows_execute_only_when_ready(tmp_path):
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+        write_target_weight_daily_ops_summary,
+    )
+
+    plan = _adapter_plan()
+    cap_recommendation = recommend_pilot_caps(plan)
+    execute_command = "python tools/target_weight_rotation_pilot.py --execute --collect-evidence"
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    data_quality_check = {
+        **pass_check,
+        "trade_day": plan.trade_day,
+        "score_day": plan.score_day,
+        "symbols_checked": 3,
+        "required_symbols": ["AAA", "BBB", "CCC"],
+        "price_last_dates": {
+            "AAA": plan.trade_day,
+            "BBB": plan.trade_day,
+            "CCC": plan.trade_day,
+        },
+        "missing_price_last_date_symbols": [],
+        "stale_price_symbols": {},
+        "missing_symbols": [],
+        "missing_position_symbols": [],
+        "benchmark_symbol": "KS11",
+        "benchmark_last_date": plan.trade_day,
+        "benchmark_stale": False,
+        "violations": [],
+        "warnings": [],
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": True,
+        "ready_for_capped_pilot": True,
+        "next_action": "execute capped paper pilot with --execute --collect-evidence",
+        "blocking_reasons": [],
+        "warning_reasons": [],
+        "launch_readiness": {"launch_ready": True},
+        "plan_validation": {"allowed": True},
+        "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
+        "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+        "pilot_authorization_snapshot_check": pass_check,
+        "operator_commands": {
+            "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --shadow-days 3",
+            "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --readiness-audit",
+            "enable_suggested_caps": cap_recommendation["enable_command"],
+            "execute_capped_paper": execute_command,
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": data_quality_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 12,
+        "remaining_pilot_days": 48,
+        "progress_ratio": 0.2,
+        "shadow_days": 3,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 15,
+        "latest_record_date": "2026-04-10",
+        "latest_verified_pilot_date": "2026-04-10",
+        "latest_shadow_date": "2026-04-03",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+    _json_path, md_path = write_target_weight_daily_ops_summary(summary, output_dir=tmp_path)
+    report = md_path.read_text(encoding="utf-8")
+
+    assert summary["status"] == "READY_TO_EXECUTE"
+    assert summary["operator_commands"]["execute_capped_paper"] == execute_command
+    assert manifest["operator_commands"]["execute_capped_paper"] == execute_command
+    assert "# blocked:" not in report
+    assert "READY_TO_EXECUTE" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
@@ -3627,7 +3735,8 @@ def test_run_pilot_readiness_audit_writes_no_order_artifact(monkeypatch, tmp_pat
     assert audit["next_action"] == "enable pilot with suggested caps, then rerun readiness audit"
     assert "--readiness-audit" in audit["operator_commands"]["rerun_readiness_audit"]
     assert "--max-orders 3 --max-positions 3" in audit["operator_commands"]["enable_suggested_caps"]
-    assert "--execute --collect-evidence" in audit["operator_commands"]["execute_capped_paper"]
+    assert audit["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert "pilot authorization is not active" in audit["operator_commands"]["execute_capped_paper"]
     assert any("pilot_authorization" in reason for reason in audit["blocking_reasons"])
     assert any("pilot_validation" in reason for reason in audit["blocking_reasons"])
     assert audit["execution_idempotency"]["allowed"] is True
@@ -5778,7 +5887,8 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     audit = readiness["audit"]
     assert audit["ready_for_cap_approval"] is True
     assert audit["ready_for_capped_pilot"] is False
-    assert "--execute --collect-evidence" in audit["operator_commands"]["execute_capped_paper"]
+    assert audit["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert "pilot authorization is not active" in audit["operator_commands"]["execute_capped_paper"]
 
     enabled_snapshot = twp.build_pilot_authorization_snapshot(
         plan,
