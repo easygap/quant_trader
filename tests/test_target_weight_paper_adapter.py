@@ -767,6 +767,15 @@ def _existing_pilot_evidence_record(plan):
                 "position_reconciliation": {"complete": True},
             },
         },
+        "total_value": 10_000_000.0,
+        "cash": 3_000_000.0,
+        "invested": 7_000_000.0,
+        "position_count": len(plan.targets),
+        "daily_return": 0.1,
+        "same_universe_excess": 0.05,
+        "exposure_matched_excess": 0.04,
+        "cash_adjusted_excess": 0.03,
+        "benchmark_status": "final",
     }
 
 
@@ -2430,6 +2439,29 @@ def test_verify_existing_pilot_evidence_accepts_complete_record(monkeypatch):
     assert verification["reason"] == "existing pilot_paper evidence verified"
 
 
+def test_verify_existing_pilot_evidence_rejects_failed_benchmark(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = 0
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert {item["field"] for item in verification["mismatches"]} == {
+        "target_weight_evidence_quality"
+    }
+    assert verification["mismatches"][0]["actual"] == "target_weight_benchmark_status_not_final"
+
+
 def test_verify_existing_pilot_evidence_rejects_plan_snapshot_mismatch(monkeypatch):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
@@ -2794,6 +2826,12 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "position_reconciliation": {"complete": True},
                 },
             },
+            "total_value": 10_000_000.0,
+            "daily_return": 0.1,
+            "same_universe_excess": 0.05,
+            "exposure_matched_excess": 0.04,
+            "cash_adjusted_excess": 0.03,
+            "benchmark_status": "final",
         },
         {
             "date": "2026-04-10",
@@ -2824,6 +2862,31 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
     assert progress["invalid_execution_days"] == 1
     assert progress["invalid_reasons"]["missing_target_weight_execution"] == 1
     assert progress["latest_verified_pilot_date"] == "2026-04-09"
+
+
+def test_summarize_target_weight_evidence_progress_rejects_failed_benchmark(monkeypatch):
+    from tools.target_weight_rotation_pilot import summarize_target_weight_evidence_progress
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = 0
+    monkeypatch.setattr(
+        "core.paper_evidence.get_canonical_records",
+        lambda candidate_id: [record] if candidate_id == plan.candidate_id else [],
+    )
+
+    progress = summarize_target_weight_evidence_progress(plan.candidate_id)
+
+    assert progress["verified_pilot_days"] == 0
+    assert progress["remaining_pilot_days"] == 60
+    assert progress["invalid_execution_days"] == 1
+    assert progress["invalid_reasons"] == {"target_weight_benchmark_status_not_final": 1}
+    assert progress["latest_record_date"] == plan.trade_day
+    assert progress["latest_verified_pilot_date"] is None
 
 
 def test_build_target_weight_daily_ops_summary_writes_operator_view(tmp_path):
@@ -3106,6 +3169,77 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
     assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
     assert "PILOT_EVIDENCE_RECORDED" in report
+
+
+def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        render_target_weight_daily_ops_markdown,
+    )
+
+    plan = _adapter_plan()
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "next_action": "resolve duplicate execution blocker",
+        "blocking_reasons": [
+            "execution_idempotency: target_weight_duplicate_execution_attempt"
+        ],
+        "warning_reasons": [],
+        "launch_readiness": {"launch_ready": False},
+        "plan_validation": {"allowed": True},
+        "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
+        "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+        "pilot_authorization_snapshot_check": pass_check,
+        "operator_commands": {
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+        "invalid_reasons": {"target_weight_benchmark_status_not_final": 1},
+        "non_promotable_days": 0,
+        "total_canonical_records": 3,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": None,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest={"manifest_hash": "m" * 64},
+        evidence_progress=progress,
+    )
+    report = render_target_weight_daily_ops_markdown(summary)
+
+    assert summary["status"] == "PILOT_EVIDENCE_INVALID"
+    assert "evidence invalid" in summary["operator_commands"]["execute_capped_paper"]
+    assert "benchmark/portfolio evidence" in summary["next_step"]
+    assert "PILOT_EVIDENCE_INVALID" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
