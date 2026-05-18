@@ -123,6 +123,14 @@ def _pilot_valid_to(
         current += timedelta(days=1)
 
 
+def _next_kr_market_business_day(day: str) -> str:
+    current = datetime.strptime(day, "%Y-%m-%d").date() + timedelta(days=1)
+    holidays = _load_kr_market_holidays()
+    while not _is_kr_market_business_day(current, holidays):
+        current += timedelta(days=1)
+    return current.isoformat()
+
+
 def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
     current = now or datetime.now(KST)
     if current.tzinfo is not None:
@@ -4343,7 +4351,9 @@ def build_target_weight_daily_ops_summary(
     raw_blocking_reasons = list(audit.get("blocking_reasons") or [])
     post_evidence_diagnostics: list[str] = []
     decision_blocking_reasons = raw_blocking_reasons
+    next_operator_trade_day: str | None = None
     if pilot_evidence_recorded_today:
+        next_operator_trade_day = _next_kr_market_business_day(trade_day)
         post_evidence_diagnostics = [
             reason
             for reason in raw_blocking_reasons
@@ -4373,6 +4383,12 @@ def build_target_weight_daily_ops_summary(
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
         )
+        next_base = _base_no_order_command(
+            candidate_id=str(audit["candidate_id"]),
+            as_of_date=next_operator_trade_day,
+        )
+        operator_commands["next_daily_ops_summary"] = f"{next_base} --daily-ops-summary"
+        operator_commands["next_readiness_audit"] = f"{next_base} --readiness-audit"
     elif status != "READY_TO_EXECUTE":
         block_reason = _first_text(audit.get("blocking_reasons")) or f"{status}: {next_step}"
         operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
@@ -4382,6 +4398,7 @@ def build_target_weight_daily_ops_summary(
         "generated_at": datetime.now().isoformat(),
         "candidate_id": audit["candidate_id"],
         "trade_day": audit["trade_day"],
+        "next_operator_trade_day": next_operator_trade_day,
         "status": status,
         "next_step": next_step,
         "evidence_progress": evidence_progress,
@@ -4477,6 +4494,7 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         f"- Trade day: `{summary['trade_day']}`",
         f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
         f"- Execution time (KST): `{market_session.get('execution_time', 'N/A')}`",
+        f"- Next operator trade day: `{summary.get('next_operator_trade_day') or 'N/A'}`",
         f"- Status: **{summary['status']}**",
         f"- Next step: {summary['next_step']}",
         "",
@@ -4556,6 +4574,21 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         commands.get("rerun_readiness_audit", ""),
         "```",
         "",
+    ])
+    if commands.get("next_daily_ops_summary") or commands.get("next_readiness_audit"):
+        lines.extend([
+            "### Next Daily Ops Summary",
+            "```bash",
+            commands.get("next_daily_ops_summary", ""),
+            "```",
+            "",
+            "### Next Readiness Audit",
+            "```bash",
+            commands.get("next_readiness_audit", ""),
+            "```",
+            "",
+        ])
+    lines.extend([
         "### Enable Suggested Caps",
         "```bash",
         commands.get("enable_suggested_caps", ""),
