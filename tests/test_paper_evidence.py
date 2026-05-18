@@ -113,6 +113,29 @@ class TestJsonlIO:
             _append_jsonl(path, {"date": f"2026-04-{day:02d}"})
         assert _already_recorded(path, "2026-04-01") is True
 
+    def test_already_recorded_allows_shadow_upgrade(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, _already_recorded
+
+        path = evidence_dir / "daily_evidence_shadow_upgrade.jsonl"
+        _append_jsonl(path, {
+            "date": "2026-04-01",
+            "evidence_mode": "shadow_bootstrap",
+            "session_mode": "shadow_bootstrap",
+            "execution_backed": False,
+        })
+
+        assert _already_recorded(path, "2026-04-01") is True
+        assert _already_recorded(path, "2026-04-01", allow_shadow_upgrade=True) is False
+
+        _append_jsonl(path, {
+            "date": "2026-04-01",
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "execution_backed": True,
+        })
+
+        assert _already_recorded(path, "2026-04-01", allow_shadow_upgrade=True) is True
+
     def test_canonical_records_are_latest_per_date_and_chronological(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, get_canonical_records
         path = evidence_dir / "daily_evidence_ordered.jsonl"

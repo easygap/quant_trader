@@ -199,8 +199,18 @@ def _append_jsonl(path: Path, record: dict) -> None:
     tmp.unlink(missing_ok=True)
 
 
-def _already_recorded(jsonl_path: Path, date_str: str, *, allow_provisional: bool = False) -> bool:
-    """동일 날짜 기록 여부 확인. allow_provisional=True 면 provisional record는 무시(finalize 허용)."""
+def _already_recorded(
+    jsonl_path: Path,
+    date_str: str,
+    *,
+    allow_provisional: bool = False,
+    allow_shadow_upgrade: bool = False,
+) -> bool:
+    """동일 날짜 기록 여부 확인.
+
+    allow_provisional=True 면 provisional record는 무시(finalize 허용).
+    allow_shadow_upgrade=True 면 shadow_bootstrap record는 실행 기반 evidence로 교체 가능하다.
+    """
     if not jsonl_path.exists():
         return False
     try:
@@ -208,6 +218,12 @@ def _already_recorded(jsonl_path: Path, date_str: str, *, allow_provisional: boo
             if rec.get("date") == date_str:
                 if allow_provisional and rec.get("benchmark_status") == "provisional":
                     return False  # provisional이면 finalize 가능
+                if allow_shadow_upgrade and (
+                    rec.get("evidence_mode") == "shadow_bootstrap"
+                    or rec.get("session_mode") == "shadow_bootstrap"
+                    or rec.get("execution_backed") is False
+                ):
+                    return False
                 return True
     except Exception:
         pass
@@ -903,7 +919,11 @@ def collect_daily_evidence(
     today_str = date.strftime("%Y-%m-%d")
     jsonl_path = _evidence_path(strategy)
 
-    if _already_recorded(jsonl_path, today_str):
+    if _already_recorded(
+        jsonl_path,
+        today_str,
+        allow_shadow_upgrade=evidence_mode != "shadow_bootstrap",
+    ):
         logger.info("Paper evidence 이미 기록됨: {} {}", strategy, today_str)
         return None
 

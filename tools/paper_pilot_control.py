@@ -35,6 +35,45 @@ TARGET_WEIGHT_SUGGESTED_CAP_FIELDS = (
     "max_notional_per_trade",
     "max_gross_exposure",
 )
+TARGET_WEIGHT_MONEY_CAP_FIELDS = frozenset({
+    "max_notional_per_trade",
+    "max_gross_exposure",
+})
+
+
+def _target_weight_cap_envelope_violations(
+    requested_caps: dict,
+    cap_recommendation: dict,
+) -> list[str]:
+    suggested_caps = cap_recommendation.get("suggested_caps") or {}
+    minimum_caps = cap_recommendation.get("minimum_caps") or {}
+    try:
+        rounding_step = int(cap_recommendation.get("rounding_step") or 0)
+    except (TypeError, ValueError):
+        rounding_step = 0
+    if not suggested_caps:
+        return ["readiness suggested caps missing"]
+
+    violations: list[str] = []
+    for field in TARGET_WEIGHT_SUGGESTED_CAP_FIELDS:
+        requested = requested_caps.get(field)
+        minimum = minimum_caps.get(field)
+        suggested = suggested_caps.get(field)
+        if requested is None:
+            violations.append(f"{field}: requested missing")
+            continue
+        if minimum is not None and requested < minimum:
+            violations.append(
+                f"{field}: requested={requested} below_minimum={minimum}"
+            )
+        tolerance = rounding_step if field in TARGET_WEIGHT_MONEY_CAP_FIELDS else 0
+        upper_bound = suggested + tolerance if suggested is not None else None
+        if upper_bound is not None and requested > upper_bound:
+            violations.append(
+                f"{field}: requested={requested} above_suggested={suggested}"
+                f" tolerance={tolerance}"
+            )
+    return violations
 
 
 def main():
@@ -174,7 +213,6 @@ def _target_weight_enable_guard(args):
     )
     audit = result["audit"]
     cap_preview = audit["cap_preview"]
-    suggested_caps = (audit.get("cap_recommendation") or {}).get("suggested_caps") or {}
     if not audit.get("ready_for_cap_approval", False):
         reason = "; ".join(audit.get("blocking_reasons") or ["unknown blocker"])
         raise ValueError(
@@ -187,15 +225,14 @@ def _target_weight_enable_guard(args):
             f"{cap_preview.get('reason', 'cap preview blocked')}. "
             f"Use the suggested caps in {result['report_path']}"
         )
-    cap_mismatches = [
-        f"{field}: requested={requested_caps.get(field)} suggested={suggested_caps.get(field)}"
-        for field in TARGET_WEIGHT_SUGGESTED_CAP_FIELDS
-        if requested_caps.get(field) != suggested_caps.get(field)
-    ]
-    if cap_mismatches:
+    cap_violations = _target_weight_cap_envelope_violations(
+        requested_caps,
+        audit.get("cap_recommendation") or {},
+    )
+    if cap_violations:
         raise ValueError(
-            "requested target-weight pilot caps must exactly match readiness suggested caps: "
-            + "; ".join(cap_mismatches)
+            "requested target-weight pilot caps must stay within readiness cap envelope: "
+            + "; ".join(cap_violations)
             + f". Use the suggested caps in {result['report_path']}"
         )
     plan = result.get("plan")
