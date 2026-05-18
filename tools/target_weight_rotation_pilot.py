@@ -3181,13 +3181,16 @@ def _build_readiness_operator_commands(
     execution_trade_day_check: dict[str, Any] | None = None,
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
+    execute_block_reason: str | None = None,
 ) -> dict[str, str]:
     base = (
         "python tools/target_weight_rotation_pilot.py "
         f"--candidate-id {plan.candidate_id} --as-of-date {plan.as_of_date}"
     )
     execute_command = f"{base} --execute --collect-evidence"
-    if execution_trade_day_check and not execution_trade_day_check.get("allowed", True):
+    if execute_block_reason:
+        execute_command = f"# blocked: {execute_block_reason}"
+    elif execution_trade_day_check and not execution_trade_day_check.get("allowed", True):
         execute_command = (
             "# blocked: "
             f"{execution_trade_day_check.get('reason', 'execution trade day check failed')}"
@@ -3219,6 +3222,75 @@ def _build_readiness_operator_commands(
         "enable_suggested_caps": str(cap_recommendation.get("enable_command", "")).strip(),
         "execute_capped_paper": execute_command,
     }
+
+
+def _first_text(items: Any) -> str | None:
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        text = str(item).strip()
+        if text:
+            return text
+    return None
+
+
+def _readiness_execute_block_reason(
+    *,
+    ready_for_capped_pilot: bool,
+    ready_for_cap_approval: bool,
+    launch_readiness: dict[str, Any],
+    validation: Any,
+    execution_trade_day_check: dict[str, Any],
+    execution_market_session_check: dict[str, Any],
+    pilot_authorization_snapshot_check: dict[str, Any],
+    blocking_reasons: list[str],
+    next_action: str,
+) -> str | None:
+    if ready_for_capped_pilot:
+        return None
+    if (
+        execution_trade_day_check.get("checked", False)
+        and not execution_trade_day_check.get("allowed", False)
+    ):
+        return str(execution_trade_day_check.get("reason", "execution trade day check failed"))
+    if (
+        execution_market_session_check.get("checked", False)
+        and not execution_market_session_check.get("allowed", False)
+    ):
+        return str(execution_market_session_check.get("reason", "execution market session check failed"))
+    if not ready_for_cap_approval:
+        return _first_text(blocking_reasons) or "readiness audit is not ready for cap approval"
+    if not launch_readiness.get("pilot_authorization_present", False):
+        return "pilot authorization is not active; enable suggested caps, then rerun readiness audit"
+    if (
+        pilot_authorization_snapshot_check.get("checked", False)
+        and not pilot_authorization_snapshot_check.get("allowed", False)
+    ):
+        return str(pilot_authorization_snapshot_check.get("reason", "pilot authorization snapshot check failed"))
+    if not launch_readiness.get("launch_ready", False):
+        blocker = _first_text(launch_readiness.get("blocking_requirements"))
+        return f"launch readiness is not ready: {blocker or 'requirements are not met'}"
+    if not getattr(validation, "allowed", False):
+        return str(getattr(validation, "reason", "pilot plan blocked"))
+    return f"readiness audit is not READY_TO_EXECUTE; next action: {next_action}"
+
+
+def _readiness_audit_execute_block_reason(readiness_audit: dict[str, Any] | None) -> str | None:
+    if not readiness_audit or readiness_audit.get("ready_for_capped_pilot"):
+        return None
+    for key, default_reason in (
+        ("execution_trade_day_check", "execution trade day check failed"),
+        ("execution_market_session_check", "execution market session check failed"),
+        ("pilot_authorization_snapshot_check", "pilot authorization snapshot check failed"),
+    ):
+        check = readiness_audit.get(key) or {}
+        if check.get("checked", False) and not check.get("allowed", False):
+            return str(check.get("reason", default_reason))
+    blocker = _first_text(readiness_audit.get("blocking_reasons"))
+    if blocker:
+        return blocker
+    next_action = str(readiness_audit.get("next_action") or "rerun readiness audit")
+    return f"readiness audit is not READY_TO_EXECUTE; next action: {next_action}"
 
 
 def build_pilot_readiness_audit(
@@ -3378,6 +3450,18 @@ def build_pilot_readiness_audit(
     else:
         next_action = "resolve blocking requirements before enabling or executing pilot"
 
+    execute_block_reason = _readiness_execute_block_reason(
+        ready_for_capped_pilot=ready_for_capped_pilot,
+        ready_for_cap_approval=ready_for_cap_approval,
+        launch_readiness=launch_readiness,
+        validation=validation,
+        execution_trade_day_check=execution_trade_day_check,
+        execution_market_session_check=execution_market_session_check,
+        pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
+        blocking_reasons=blockers,
+        next_action=next_action,
+    )
+
     return {
         "artifact_type": "target_weight_rotation_pilot_readiness_audit",
         "schema_version": 1,
@@ -3395,6 +3479,7 @@ def build_pilot_readiness_audit(
             execution_trade_day_check=execution_trade_day_check,
             execution_market_session_check=execution_market_session_check,
             pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
+            execute_block_reason=execute_block_reason,
         ),
         "plan_summary": _plan_summary(plan),
         "pilot_check": _pilot_check_to_dict(pilot_check),
@@ -3433,7 +3518,11 @@ def build_target_weight_experiment_manifest(
     """target-weight 후보의 60영업일 paper 운용 기준 manifest를 만든다."""
     commands = dict((readiness_audit or {}).get("operator_commands") or {})
     if not commands:
-        commands = _build_readiness_operator_commands(plan, cap_recommendation)
+        commands = _build_readiness_operator_commands(
+            plan,
+            cap_recommendation,
+            execute_block_reason=_readiness_audit_execute_block_reason(readiness_audit),
+        )
     manifest = {
         "artifact_type": "target_weight_paper_experiment_manifest",
         "schema_version": 1,
@@ -3662,6 +3751,10 @@ def build_target_weight_daily_ops_summary(
     plan = audit.get("plan_summary") or {}
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
+    operator_commands = dict(audit.get("operator_commands") or {})
+    if status != "READY_TO_EXECUTE":
+        block_reason = _first_text(audit.get("blocking_reasons")) or f"{status}: {next_step}"
+        operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
     summary = {
         "artifact_type": "target_weight_daily_ops_summary",
         "schema_version": 1,
@@ -3720,7 +3813,7 @@ def build_target_weight_daily_ops_summary(
             ),
         },
         "data_quality_snapshot": data_quality_check,
-        "operator_commands": dict(audit.get("operator_commands") or {}),
+        "operator_commands": operator_commands,
         "manifest_hash": experiment_manifest.get("manifest_hash"),
         "no_order_safety": {
             "orders_submitted": False,
