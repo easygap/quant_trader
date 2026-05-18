@@ -1250,6 +1250,12 @@ def _build_current_blockers_operator_runbook(
                 if key in ops_priority_action:
                     priority_step[key] = ops_priority_action[key]
             sequence.insert(2, priority_step)
+            follow_up = str(ops_priority_action.get("follow_up") or "")
+            if "--readiness-audit" in follow_up:
+                for item in sequence:
+                    if item.get("command") == commands["readiness_audit"]:
+                        item["command"] = follow_up
+                        break
             for index, item in enumerate(sequence, start=1):
                 item["step"] = index
         runbook = {
