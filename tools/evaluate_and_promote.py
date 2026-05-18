@@ -962,6 +962,35 @@ def _reason_contains(reasons: list[str], *needles: str) -> bool:
     return any(needle.lower() in lowered for needle in needles)
 
 
+def _target_weight_discord_action(
+    strategy: str,
+    base_action: dict,
+    blockers: list[str],
+) -> dict:
+    command = (
+        "python tools/paper_preflight.py "
+        f"--strategy {strategy} --with-pilot-check --send-test-notification"
+    )
+    if _reason_contains(blockers, "미설정", "not configured", "unconfigured"):
+        return {
+            **base_action,
+            "desc": "Discord webhook 설정 후 도달성 확인 preflight 실행",
+            "setup_required": True,
+            "required_env": "DISCORD_WEBHOOK_URL",
+            "config_path": "config/settings.yaml: discord.enabled=true",
+            "setup_hint": ".env의 DISCORD_WEBHOOK_URL을 채운 뒤 preflight test send를 실행",
+            "command": command,
+            "order_safety": "no_order",
+        }
+    return {
+        **base_action,
+        "desc": "Discord webhook 도달성 확인 preflight 실행",
+        "setup_required": False,
+        "command": command,
+        "order_safety": "no_order",
+    }
+
+
 def _safe_int(value, default: int = 0) -> int:
     try:
         return int(value)
@@ -1030,15 +1059,7 @@ def _target_weight_ops_priority_action(
         }
 
     if _reason_contains(blockers, "discord", "webhook", "notifier"):
-        return {
-            **base_action,
-            "desc": "Discord webhook 도달성 확인 preflight 실행",
-            "command": (
-                "python tools/paper_preflight.py "
-                f"--strategy {strategy} --with-pilot-check --send-test-notification"
-            ),
-            "order_safety": "no_order",
-        }
+        return _target_weight_discord_action(strategy, base_action, blockers)
 
     if status == "READY_TO_ENABLE_CAPS" or _reason_contains(blockers, "pilot_authorization"):
         return {
@@ -1141,7 +1162,7 @@ def _build_current_blockers_operator_runbook(
             },
         ]
         if ops_priority_action:
-            sequence.insert(2, {
+            priority_step = {
                 "step": 3,
                 "desc": ops_priority_action["desc"],
                 "command": ops_priority_action.get("command"),
@@ -1156,7 +1177,11 @@ def _build_current_blockers_operator_runbook(
                     if ops_priority_action.get("follow_up")
                     else {}
                 ),
-            })
+            }
+            for key in ("setup_required", "required_env", "config_path", "setup_hint"):
+                if key in ops_priority_action:
+                    priority_step[key] = ops_priority_action[key]
+            sequence.insert(2, priority_step)
             for index, item in enumerate(sequence, start=1):
                 item["step"] = index
         runbook = {
