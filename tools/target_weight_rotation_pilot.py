@@ -143,6 +143,24 @@ def _execution_day(now: datetime | None = None) -> str:
     return current.date().strftime("%Y-%m-%d")
 
 
+def _require_not_future_as_of_date(
+    as_of_date: str | None,
+    *,
+    context: str,
+    now: datetime | None = None,
+) -> None:
+    if not as_of_date:
+        return
+    requested = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+    current = _coerce_kst_datetime(now).date()
+    if requested > current:
+        raise ValueError(
+            "target_weight_future_as_of_date_blocked: "
+            f"{context} as_of_date={requested.isoformat()} "
+            f"current_kst_date={current.isoformat()}; rerun on or after the requested date"
+        )
+
+
 def make_execution_session_id(plan: TargetWeightPlan, now: datetime | None = None) -> str:
     current = _coerce_kst_datetime(now)
     stamp = current.strftime("%Y%m%d%H%M%S")
@@ -4979,6 +4997,11 @@ def run_pilot_readiness_audit(
     from core.paper_pilot import check_pilot_entry, compute_launch_readiness
 
     _require_actual_paper_cash(cash, context="readiness audit")
+    _require_not_future_as_of_date(
+        as_of_date,
+        context="readiness audit",
+        now=execution_now,
+    )
     config = config or Config.get()
     plan = build_plan(
         candidate_id=candidate_id,
