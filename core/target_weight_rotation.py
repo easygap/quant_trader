@@ -684,6 +684,7 @@ def build_target_weight_plan(
         else None
     )
     sector_map_for_selection: dict[str, str] | None = None
+    missing_sector_symbols: list[str] = []
     if max_targets_per_sector is not None:
         try:
             sector_map_source = (
@@ -707,6 +708,21 @@ def build_target_weight_plan(
                 "target_weight_sector_map_missing: "
                 f"max_targets_per_sector={max_targets_per_sector}; "
                 "sector map is required for sector-capped target-weight planning"
+            )
+        missing_sector_symbols = [
+            symbol
+            for symbol in symbols
+            if not _sector_for_symbol(symbol, sector_map_for_selection)
+        ]
+        if missing_sector_symbols:
+            missing_text = ", ".join(missing_sector_symbols[:10])
+            if len(missing_sector_symbols) > 10:
+                missing_text = f"{missing_text}, +{len(missing_sector_symbols) - 10} more"
+            raise ValueError(
+                "target_weight_sector_map_incomplete: "
+                f"max_targets_per_sector={max_targets_per_sector}; "
+                f"missing_symbols={missing_text}; "
+                "sector-capped target-weight planning requires sector coverage for all planning symbols"
             )
     close_parts: list[pd.Series] = []
     valid_symbols: list[str] = []
@@ -1052,6 +1068,7 @@ def build_target_weight_plan(
             "rank_penalty_mode": str(params.get("rank_penalty_mode", "none") or "none").lower().strip(),
             "max_targets_per_sector": max_targets_per_sector,
             "sector_map_size": len(sector_map_for_selection or {}),
+            "sector_map_missing_symbols": missing_sector_symbols,
             "selected_sector_counts": selected_sector_counts,
             "selected_sector_missing_symbols": selected_sector_missing_symbols,
             "position_loss_reduce_enabled": position_loss_reduce_enabled,
