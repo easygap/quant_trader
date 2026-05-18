@@ -905,6 +905,140 @@ def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
     }
 
 
+def _load_latest_target_weight_daily_ops(
+    strategy: str,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    """후보별 최신 daily ops summary가 있으면 current blockers에 반영한다."""
+    base = Path(reports_dir)
+    prefix = f"target_weight_daily_ops_summary_{strategy}_"
+    candidates = sorted(
+        base.glob(f"{prefix}*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_daily_ops_summary":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        return {
+            "source_path": str(path),
+            "generated_at": payload.get("generated_at"),
+            "trade_day": payload.get("trade_day"),
+            "status": payload.get("status"),
+            "next_step": payload.get("next_step"),
+            "evidence_progress": payload.get("evidence_progress") or {},
+            "decision": payload.get("decision") or {},
+            "operator_commands": payload.get("operator_commands") or {},
+        }
+    return None
+
+
+def _reason_contains(reasons: list[str], *needles: str) -> bool:
+    lowered = " ".join(str(reason).lower() for reason in reasons)
+    return any(needle.lower() in lowered for needle in needles)
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _target_weight_ops_priority_action(
+    strategy: str,
+    commands: dict[str, str],
+    latest_daily_ops: dict | None,
+) -> dict | None:
+    if not latest_daily_ops:
+        return None
+
+    status = str(latest_daily_ops.get("status") or "")
+    progress = latest_daily_ops.get("evidence_progress") or {}
+    decision = latest_daily_ops.get("decision") or {}
+    blockers = [str(reason) for reason in decision.get("blocking_reasons") or []]
+    ops_commands = latest_daily_ops.get("operator_commands") or {}
+    shadow_days = _safe_int(progress.get("shadow_days"))
+    verified_days = _safe_int(progress.get("verified_pilot_days"))
+
+    base_action = {
+        "strategy": strategy,
+        "source": "latest_daily_ops_summary",
+        "source_path": latest_daily_ops.get("source_path"),
+        "daily_ops_status": status,
+        "daily_ops_trade_day": latest_daily_ops.get("trade_day"),
+        "verified_pilot_days": verified_days,
+        "shadow_days": shadow_days,
+    }
+
+    if status == "READY_TO_EXECUTE":
+        return {
+            **base_action,
+            "desc": "READY_TO_EXECUTE 당일 capped paper 실행 및 pilot_paper 증거 수집",
+            "command": ops_commands.get("execute_capped_paper")
+            or commands.get("execute_capped_paper_after_ready"),
+            "order_safety": "paper_order_only",
+            "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
+        }
+
+    if shadow_days < 3 or _reason_contains(
+        blockers,
+        "clean_final_days",
+        "no eligible",
+        "evidence_freshness",
+        "no evidence",
+    ):
+        return {
+            **base_action,
+            "desc": "target-weight shadow 3일 수집으로 launch readiness 증거 먼저 확보",
+            "command": ops_commands.get("collect_shadow_days") or commands.get("collect_shadow_days"),
+            "order_safety": "no_order",
+        }
+
+    if _reason_contains(blockers, "discord", "webhook", "notifier"):
+        return {
+            **base_action,
+            "desc": "Discord webhook 도달성 확인 preflight 실행",
+            "command": (
+                "python tools/paper_preflight.py "
+                f"--strategy {strategy} --with-pilot-check --send-test-notification"
+            ),
+            "order_safety": "no_order",
+        }
+
+    if status == "READY_TO_ENABLE_CAPS" or _reason_contains(blockers, "pilot_authorization"):
+        return {
+            **base_action,
+            "desc": "readiness artifact의 추천 cap 승인 후 readiness 재점검",
+            "command": ops_commands.get("enable_suggested_caps") or "",
+            "order_safety": "no_order",
+            "follow_up": ops_commands.get("rerun_readiness_audit") or commands.get("readiness_audit"),
+        }
+
+    if status == "WAITING_FOR_MARKET_SESSION":
+        return {
+            **base_action,
+            "desc": "KRX 정규장 시간에 readiness audit 재실행",
+            "command": ops_commands.get("rerun_readiness_audit") or commands.get("readiness_audit"),
+            "order_safety": "no_order",
+        }
+
+    return {
+        **base_action,
+        "desc": "daily ops blocker 해소 후 readiness 재점검",
+        "command": ops_commands.get("rerun_readiness_audit") or commands.get("readiness_audit"),
+        "order_safety": "no_order",
+    }
+
+
 def _research_operator_commands() -> dict[str, str]:
     return {
         "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
@@ -917,10 +1051,16 @@ def _build_current_blockers_operator_runbook(
     *,
     provisional_candidates: list[str],
     live_candidates: list[str],
+    latest_daily_ops: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
     if primary_strategy:
         commands = _target_weight_operator_commands(primary_strategy)
+        ops_priority_action = _target_weight_ops_priority_action(
+            primary_strategy,
+            commands,
+            latest_daily_ops,
+        )
         sequence = [
             {
                 "step": 1,
@@ -948,7 +1088,26 @@ def _build_current_blockers_operator_runbook(
                 "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
             },
         ]
-        return {
+        if ops_priority_action:
+            sequence.insert(2, {
+                "step": 3,
+                "desc": ops_priority_action["desc"],
+                "command": ops_priority_action.get("command"),
+                "order_safety": ops_priority_action["order_safety"],
+                **(
+                    {"requires": ops_priority_action["requires"]}
+                    if ops_priority_action.get("requires")
+                    else {}
+                ),
+                **(
+                    {"follow_up": ops_priority_action["follow_up"]}
+                    if ops_priority_action.get("follow_up")
+                    else {}
+                ),
+            })
+            for index, item in enumerate(sequence, start=1):
+                item["step"] = index
+        runbook = {
             "primary_strategy": primary_strategy,
             "mode": "target_weight_capped_paper_pilot",
             "commands": commands,
@@ -959,6 +1118,11 @@ def _build_current_blockers_operator_runbook(
                 "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용",
             ],
         }
+        if latest_daily_ops:
+            runbook["latest_daily_ops"] = latest_daily_ops
+        if ops_priority_action:
+            runbook["current_priority_action"] = ops_priority_action
+        return runbook
 
     commands = _research_operator_commands()
     return {
@@ -992,7 +1156,11 @@ def _build_current_blockers_operator_runbook(
     }
 
 
-def build_current_blockers_report(blocker_summary: dict) -> dict:
+def build_current_blockers_report(
+    blocker_summary: dict,
+    *,
+    latest_daily_ops: dict | None = None,
+) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
     if not isinstance(blocker_summary, dict):
         blocker_summary = {}
@@ -1038,16 +1206,24 @@ def build_current_blockers_report(blocker_summary: dict) -> dict:
     operator_runbook = _build_current_blockers_operator_runbook(
         provisional_candidates=provisional_candidates,
         live_candidates=live_candidates,
+        latest_daily_ops=latest_daily_ops,
     )
     runbook_commands = operator_runbook.get("commands") or {}
+    ops_priority_action = operator_runbook.get("current_priority_action")
     if provisional_candidates:
-        next_actions.append({
-            "priority": 1,
-            "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
-            "strategy": provisional_candidates[0],
-            "command": runbook_commands.get("readiness_audit"),
-            "order_safety": "no_order",
-        })
+        if ops_priority_action:
+            next_actions.append({
+                "priority": 1,
+                **ops_priority_action,
+            })
+        else:
+            next_actions.append({
+                "priority": 1,
+                "desc": "target-weight capped paper pilot readiness audit 실행 후 추천 cap만 승인",
+                "strategy": provisional_candidates[0],
+                "command": runbook_commands.get("readiness_audit"),
+                "order_safety": "no_order",
+            })
         next_actions.append({
             "priority": 2,
             "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
@@ -1111,7 +1287,13 @@ def load_current_blockers_from_artifacts(
     blocker_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if not isinstance(blocker_summary, dict):
         raise ValueError(f"{summary_path} top-level JSON is not an object")
-    return build_current_blockers_report(blocker_summary)
+    provisional_candidates = _ranked_provisional_candidates(blocker_summary)
+    latest_daily_ops = (
+        _load_latest_target_weight_daily_ops(provisional_candidates[0], Path(promotion_dir).parent)
+        if provisional_candidates
+        else None
+    )
+    return build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
 
 
 def write_current_blockers_report(
