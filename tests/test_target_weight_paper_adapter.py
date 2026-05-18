@@ -519,6 +519,24 @@ def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
     assert check["mismatches"][0]["field"] == "params_hash"
 
 
+def test_validate_pilot_authorization_snapshot_blocks_risk_off_mismatch():
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_snapshot = twp.build_pilot_authorization_snapshot(
+        replace(plan, risk_off=not plan.risk_off)
+    )
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert "target_weight_pilot_authorization_snapshot_mismatch" in check["reason"]
+    assert check["mismatches"][0]["field"] == "risk_off"
+
+
 def test_load_portfolio_drawdown_guard_state_uses_prior_evidence_peak_and_cooldown(monkeypatch):
     import core.paper_evidence as pe
     import tools.target_weight_rotation_pilot as twp
