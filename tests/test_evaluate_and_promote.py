@@ -1265,6 +1265,215 @@ def test_build_current_blockers_report_from_promotion_summary():
     assert "target_weight_best" in report["default_strategy"]
 
 
+def test_build_current_blockers_report_prioritizes_shadow_from_daily_ops():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "a" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "status": "BLOCKED",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 0,
+        },
+        "decision": {
+            "blocking_reasons": [
+                "launch_readiness: clean_final_days 0/3",
+                "evidence_freshness: no evidence",
+                "notifier: Discord webhook 미설정",
+            ],
+        },
+        "operator_commands": {
+            "collect_shadow_days": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --shadow-days 3 --shadow-end-date 2026-05-18"
+            ),
+            "rerun_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --readiness-audit"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["desc"].startswith("target-weight shadow 3일 수집")
+    assert action["command"].endswith("--shadow-days 3 --shadow-end-date 2026-05-18")
+    assert action["order_safety"] == "no_order"
+    assert action["daily_ops_status"] == "BLOCKED"
+    assert report["operator_runbook"]["current_priority_action"]["desc"] == action["desc"]
+    assert report["operator_runbook"]["sequence"][2]["command"] == action["command"]
+
+
+def test_build_current_blockers_report_promotes_discord_test_after_shadow():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "b" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "status": "BLOCKED",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 3,
+        },
+        "decision": {
+            "blocking_reasons": ["notifier: Discord webhook 미설정"],
+        },
+        "operator_commands": {},
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["desc"] == "Discord webhook 도달성 확인 preflight 실행"
+    assert action["command"] == (
+        "python tools/paper_preflight.py --strategy target_weight_best "
+        "--with-pilot-check --send-test-notification"
+    )
+    assert action["order_safety"] == "no_order"
+
+
+def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "c" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {
+            "verified_pilot_days": 12,
+            "shadow_days": 3,
+        },
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --execute --collect-evidence"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["desc"].startswith("READY_TO_EXECUTE")
+    assert action["order_safety"] == "paper_order_only"
+    assert action["requires"] == "daily_ops_summary.status == READY_TO_EXECUTE"
+    assert action["command"].endswith("--execute --collect-evidence")
+
+
+def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:00:00",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_ENABLE_CAPS",
+        "evidence_progress": {"verified_pilot_days": 0, "shadow_days": 3},
+        "decision": {"blocking_reasons": ["pilot_authorization: no active capped pilot authorization"]},
+        "operator_commands": {
+            "enable_suggested_caps": (
+                f"python tools/paper_pilot_control.py --strategy {strategy} "
+                "--enable --from 2026-05-18 --to 2026-05-31"
+            ),
+            "rerun_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {strategy} --readiness-audit"
+            ),
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action = report["next_actions"][0]
+    assert action["desc"].startswith("readiness artifact의 추천 cap 승인")
+    assert "--enable" in action["command"]
+    assert action["follow_up"].endswith("--readiness-audit")
+
+
 def test_current_blockers_check_detects_stale_report(tmp_path):
     from tools.evaluate_and_promote import (
         load_current_blockers_from_artifacts,
