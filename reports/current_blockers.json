@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-18T15:07:11.887114",
+  "generated_at": "2026-05-18T15:38:20.411514",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -84,7 +84,7 @@
       "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "command": "# blocked: pilot_paper evidence already recorded for 2026-05-18",
-      "order_safety": "paper_order_only",
+      "order_safety": "no_order",
       "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
     },
     {
@@ -137,7 +137,7 @@
         "step": 5,
         "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
         "command": "# blocked: pilot_paper evidence already recorded for 2026-05-18",
-        "order_safety": "paper_order_only",
+        "order_safety": "no_order",
         "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
       }
     ],
