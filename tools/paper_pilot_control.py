@@ -28,6 +28,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 PROMOTION_METADATA_PATH = Path("reports/promotion/run_metadata.json")
+REPORTS_DIR = Path("reports")
 TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
 TARGET_WEIGHT_SUGGESTED_CAP_FIELDS = (
     "max_orders_per_day",
@@ -271,6 +272,83 @@ def run_status(strategy):
         print(f"  Remaining orders: {check.remaining_orders}")
     if check.remaining_exposure is not None:
         print(f"  Remaining exposure: {check.remaining_exposure:,}")
+    if _is_target_weight_strategy_for_enable(strategy):
+        _print_target_weight_daily_ops_status(strategy)
+
+
+def _load_latest_target_weight_daily_ops(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> dict | None:
+    base = Path(reports_dir)
+    prefix = f"target_weight_daily_ops_summary_{strategy}_"
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
+    candidates = sorted(
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob(f"{prefix}*.json")
+        },
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_daily_ops_summary":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        payload["source_path"] = str(path)
+        return payload
+    return None
+
+
+def _print_target_weight_daily_ops_status(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> None:
+    summary = _load_latest_target_weight_daily_ops(strategy, reports_dir=reports_dir)
+    command = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --daily-ops-summary"
+    )
+    if summary is None:
+        print("\n  Target-weight Daily Ops: MISSING")
+        print(f"  Run: {command}")
+        return
+
+    progress = summary.get("evidence_progress") or {}
+    decision = summary.get("decision") or {}
+    diagnostics = decision.get("post_evidence_diagnostics") or []
+    operator_commands = summary.get("operator_commands") or {}
+    execute_command = operator_commands.get("execute_capped_paper") or ""
+    print("\n  Target-weight Daily Ops:")
+    print(f"    Status: {summary.get('status', 'unknown')}")
+    print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
+    print(
+        "    Verified pilot days: "
+        f"{progress.get('verified_pilot_days', 0)}/{progress.get('target_days', 'N/A')}"
+    )
+    print(f"    Next: {summary.get('next_step', 'N/A')}")
+    if diagnostics:
+        print(f"    Post-evidence diagnostics: {len(diagnostics)}")
+    if execute_command:
+        if str(execute_command).lstrip().startswith("# blocked:"):
+            print("    Adapter execution: BLOCKED by daily ops")
+        else:
+            print("    Adapter execution: follow daily ops READY_TO_EXECUTE command only")
+        print(f"    Execute command: {execute_command}")
+    print(f"    Source: {summary.get('source_path')}")
 
 
 def run_check_prerequisites(strategy):
