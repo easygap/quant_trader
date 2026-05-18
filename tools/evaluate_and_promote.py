@@ -326,16 +326,15 @@ def build_promotion_results(
     target_weight_params_hashes = target_weight_params_hashes_from_strategy_specs(
         strategy_specs or []
     )
-    canonical_integrity_issues = (
-        validate_canonical_metadata_integrity(canonical_metadata)
-        if isinstance(canonical_metadata, dict)
-        else []
-    )
-    canonical_integrity_ok = (
-        not canonical_integrity_issues
-        if isinstance(canonical_metadata, dict)
-        else None
-    )
+    if isinstance(canonical_metadata, dict):
+        canonical_integrity_issues = validate_canonical_metadata_integrity(
+            canonical_metadata
+        )
+    else:
+        canonical_integrity_issues = [
+            "canonical metadata missing or invalid; run_metadata.json is required"
+        ]
+    canonical_integrity_ok = not canonical_integrity_issues
     paper_fields = (
         "paper_days",
         "paper_sharpe",
@@ -388,9 +387,8 @@ def build_promotion_results(
             value = paper_metrics.get(key)
             if value is not None:
                 m[key] = value
-        if canonical_integrity_ok is not None:
-            m["canonical_data_integrity_ok"] = canonical_integrity_ok
-            m["canonical_data_integrity_issues"] = canonical_integrity_issues
+        m["canonical_data_integrity_ok"] = canonical_integrity_ok
+        m["canonical_data_integrity_issues"] = canonical_integrity_issues
 
         sm = attach_paper_evidence_metrics(StrategyMetrics(
             name=name,
