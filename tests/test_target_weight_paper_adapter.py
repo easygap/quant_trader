@@ -2250,6 +2250,53 @@ def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypat
     assert "Target-weight Daily Ops: MISSING" in output
 
 
+def test_paper_pilot_control_status_uses_current_blockers_default_strategy(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import database.models as db_models
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+    monkeypatch.setattr(ppc, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(db_models, "init_database", lambda: None)
+    monkeypatch.setattr(ppc, "run_status", lambda value: captured.setdefault("strategy", value))
+    monkeypatch.setattr(sys, "argv", ["paper_pilot_control.py", "--status"])
+
+    ppc.main()
+
+    output = capsys.readouterr().out
+    assert captured["strategy"] == strategy
+    assert "using current blockers primary strategy" in output
+    assert strategy in output
+
+
+def test_paper_pilot_control_write_actions_require_explicit_strategy(monkeypatch, capsys):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(sys, "argv", ["paper_pilot_control.py", "--enable"])
+
+    with pytest.raises(SystemExit):
+        ppc.main()
+
+    error = capsys.readouterr().err
+    assert "--strategy is required" in error
+    assert "unless --status" in error
+
+
 def test_paper_pilot_control_status_prints_daily_ops_command_when_missing(tmp_path, capsys):
     import tools.paper_pilot_control as ppc
 
