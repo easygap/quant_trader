@@ -2533,6 +2533,7 @@ def render_target_weight_pilot_evidence_repair_markdown(report: dict[str, Any]) 
         f"- Source record version: {report.get('source_record_version', 'N/A')}",
         f"- Appended record version: {report.get('appended_record_version', 'N/A')}",
         f"- Proof after repair: {report.get('proof_status_after', {}).get('reason', 'N/A')}",
+        f"- Promotion after repair: {report.get('promotion_status_after', {}).get('reason', 'N/A')}",
         "",
         "## Repaired Fields",
     ]
@@ -2716,6 +2717,8 @@ def repair_target_weight_pilot_evidence(
     updated["session_mode"] = "pilot_paper"
     updated["pilot_authorized"] = True
     updated["execution_backed"] = True
+    updated["promotion_eligible"] = False
+    updated["promotion_exclusion_reason"] = "target_weight_repaired_performance_not_promotable"
 
     warnings = list(updated.get("cross_validation_warnings") or [])
     repair_warning = "target_weight_pilot_evidence_repaired_from_execution_snapshot"
@@ -2723,12 +2726,17 @@ def repair_target_weight_pilot_evidence(
         warnings.append(repair_warning)
     updated["cross_validation_warnings"] = warnings
 
-    after_valid, after_reason = _target_weight_record_proof_status(candidate_id, updated)
+    after_valid, after_reason = _target_weight_record_proof_status(
+        candidate_id,
+        updated,
+        allow_repaired_performance=True,
+    )
     if not after_valid:
         report["reason"] = f"target_weight_pilot_evidence_repair_still_invalid: {after_reason}"
         report["repaired_fields"] = repaired_fields
         report["proof_status_after"] = {"valid": after_valid, "reason": after_reason}
         return finish(report, fail=True)
+    promotion_valid, promotion_reason = _target_weight_record_proof_status(candidate_id, updated)
 
     _append_jsonl(jsonl_path, updated)
     report.update({
@@ -2758,6 +2766,10 @@ def repair_target_weight_pilot_evidence(
         },
         "benchmark_status": benchmark_status,
         "proof_status_after": {"valid": after_valid, "reason": after_reason},
+        "promotion_status_after": {
+            "eligible": promotion_valid,
+            "reason": promotion_reason,
+        },
     })
     return finish(report)
 
