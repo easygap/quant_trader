@@ -913,6 +913,10 @@ def _adapter_plan_for_date(day: str):
     return replace(_adapter_plan(), as_of_date=day, trade_day=day, score_day=score_day)
 
 
+def _adapter_plan_for_strategy(strategy: str, day: str = "2026-04-10"):
+    return replace(_adapter_plan_for_date(day), candidate_id=strategy)
+
+
 class SimpleCostRiskManager:
     def __init__(
         self,
@@ -1419,8 +1423,10 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
 
     def fake_run_pilot_readiness_audit(**kwargs):
         return {
+            "plan": _adapter_plan_for_strategy(DEFAULT_TARGET_WEIGHT_CANDIDATE_ID),
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
@@ -1464,8 +1470,10 @@ def test_target_weight_pilot_control_enable_guard_allows_tighter_safe_caps(monke
 
     def fake_run_pilot_readiness_audit(**kwargs):
         return {
+            "plan": _adapter_plan_for_strategy(DEFAULT_TARGET_WEIGHT_CANDIDATE_ID),
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
@@ -1514,8 +1522,10 @@ def test_target_weight_pilot_control_enable_guard_allows_one_step_money_cap_drif
 
     def fake_run_pilot_readiness_audit(**kwargs):
         return {
+            "plan": _adapter_plan_for_strategy(DEFAULT_TARGET_WEIGHT_CANDIDATE_ID),
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
@@ -1567,6 +1577,7 @@ def test_target_weight_pilot_control_enable_guard_blocks_caps_above_suggested(mo
         return {
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
@@ -1608,6 +1619,190 @@ def test_target_weight_pilot_control_enable_guard_blocks_caps_above_suggested(mo
         _target_weight_enable_guard(args)
 
 
+def test_target_weight_pilot_control_enable_guard_blocks_audit_trade_day_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_300_000,
+        "max_gross_exposure": 3_300_000,
+    }
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "plan": _adapter_plan_for_strategy(DEFAULT_TARGET_WEIGHT_CANDIDATE_ID),
+            "audit": {
+                "ready_for_cap_approval": True,
+                "trade_day": "2026-04-09",
+                "blocking_reasons": [],
+                "cap_preview": {"allowed": True, "reason": "proposed pilot caps satisfied"},
+                "cap_recommendation": {"suggested_caps": suggested_caps},
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    with pytest.raises(ValueError, match="readiness audit trade day mismatch"):
+        _target_weight_enable_guard(args)
+
+
+def test_target_weight_pilot_control_enable_guard_requires_plan_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_300_000,
+        "max_gross_exposure": 3_300_000,
+    }
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
+                "blocking_reasons": [],
+                "cap_preview": {"allowed": True, "reason": "proposed pilot caps satisfied"},
+                "cap_recommendation": {"suggested_caps": suggested_caps},
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    with pytest.raises(ValueError, match="readiness plan missing"):
+        _target_weight_enable_guard(args)
+
+
+def test_target_weight_pilot_control_enable_guard_blocks_plan_candidate_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_300_000,
+        "max_gross_exposure": 3_300_000,
+    }
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "plan": _adapter_plan_for_strategy("target_weight_other_candidate"),
+            "audit": {
+                "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
+                "blocking_reasons": [],
+                "cap_preview": {"allowed": True, "reason": "proposed pilot caps satisfied"},
+                "cap_recommendation": {"suggested_caps": suggested_caps},
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    with pytest.raises(ValueError, match="readiness plan candidate mismatch"):
+        _target_weight_enable_guard(args)
+
+
+def test_target_weight_pilot_control_enable_guard_blocks_plan_trade_day_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    suggested_caps = {
+        "max_orders_per_day": 3,
+        "max_concurrent_positions": 3,
+        "max_notional_per_trade": 1_300_000,
+        "max_gross_exposure": 3_300_000,
+    }
+    stale_plan = _adapter_plan_for_strategy(DEFAULT_TARGET_WEIGHT_CANDIDATE_ID, "2026-04-09")
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "plan": stale_plan,
+            "audit": {
+                "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
+                "blocking_reasons": [],
+                "cap_preview": {"allowed": True, "reason": "proposed pilot caps satisfied"},
+                "cap_recommendation": {"suggested_caps": suggested_caps},
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.build_pilot_authorization_snapshot",
+        lambda *args, **kwargs: pytest.fail("mismatched plan must not create auth snapshot"),
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    with pytest.raises(ValueError, match="readiness plan trade day mismatch"):
+        _target_weight_enable_guard(args)
+
+
 def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weight(monkeypatch, tmp_path):
     from tools.paper_pilot_control import _target_weight_enable_guard
 
@@ -1622,8 +1817,10 @@ def test_target_weight_pilot_control_enable_guard_covers_non_default_target_weig
     def fake_run_pilot_readiness_audit(**kwargs):
         calls["audit"] = kwargs
         return {
+            "plan": _adapter_plan_for_strategy("target_weight_rotation_next_candidate"),
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
@@ -1696,8 +1893,10 @@ def test_target_weight_pilot_control_enable_guard_uses_canonical_metadata_for_pr
     def fake_run_pilot_readiness_audit(**kwargs):
         calls["audit"] = kwargs
         return {
+            "plan": _adapter_plan_for_strategy(strategy),
             "audit": {
                 "ready_for_cap_approval": True,
+                "trade_day": "2026-04-10",
                 "blocking_reasons": [],
                 "cap_preview": {
                     "allowed": True,
