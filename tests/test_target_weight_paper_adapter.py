@@ -779,6 +779,131 @@ def _existing_pilot_evidence_record(plan):
     }
 
 
+def _repairable_invalid_pilot_evidence_record(plan):
+    record = deepcopy(_existing_pilot_evidence_record(plan))
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    cash = float(plan.cash_before)
+    order_costs = []
+    total_commission = 0.0
+    for order in plan.orders:
+        commission = 100.0
+        required_cash = float(order.notional) + commission
+        item = {
+            "symbol": order.symbol,
+            "action": order.action,
+            "quantity": int(order.quantity),
+            "plan_price": float(order.price),
+            "execution_price": float(order.price),
+            "commission": commission,
+            "tax": 0.0,
+            "capital_gains_tax": 0.0,
+            "slippage": 0.0,
+            "cash_before": round(cash, 2),
+            "required_cash": round(required_cash, 2),
+            "cash_delta": round(-required_cash, 2),
+        }
+        cash -= required_cash
+        item["cash_after"] = round(cash, 2)
+        total_commission += commission
+        order_costs.append(item)
+
+    invested = sum(float(order.notional) for order in plan.orders)
+    total_value = cash + invested
+    fills = [
+        {
+            "symbol": order.symbol,
+            "action": order.action,
+            "quantity": int(order.quantity),
+            "strategy": plan.candidate_id,
+            "mode": "paper",
+            "account_key": plan.candidate_id,
+            "executed_at": f"{plan.trade_day} 09:00:00",
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "order_id": f"ORD-TW-{index + 1:03d}",
+        }
+        for index, order in enumerate(plan.orders)
+    ]
+    execution.update({
+        "executed_orders": len(plan.orders),
+        "pre_trade_risk_check": {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+            "projected_cash_after_costs": round(cash, 2),
+            "projected_gross_exposure_after_costs": round(invested, 2),
+            "projected_total_value_after_costs": round(total_value, 2),
+            "target_position_count": len(plan.targets),
+            "order_costs": order_costs,
+            "cost_summary": {
+                "commission": round(total_commission, 2),
+                "tax": 0.0,
+                "capital_gains_tax": 0.0,
+                "slippage": 0.0,
+                "total_explicit_costs": round(total_commission, 2),
+            },
+        },
+        "fill_reconciliation": {
+            "checked": True,
+            "complete": True,
+            "reason": "paper trade fills match target-weight plan",
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "expected_quantities": {
+                f"{order.symbol}:{order.action}": int(order.quantity)
+                for order in plan.orders
+            },
+            "actual_quantities": {
+                f"{order.symbol}:{order.action}": int(order.quantity)
+                for order in plan.orders
+            },
+            "mismatches": [],
+            "unexpected_fills": [],
+            "unlinked_fills": [],
+            "fill_count": len(plan.orders),
+            "fills": fills,
+        },
+        "position_reconciliation": {
+            "checked": True,
+            "complete": True,
+            "reason": "paper positions match target-weight target quantities",
+            "expected_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "actual_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "mismatches": [],
+            "unexpected_positions": [],
+        },
+    })
+    record.update({
+        "total_value": 0.0,
+        "cash": 0.0,
+        "invested": 0.0,
+        "position_count": 0,
+        "daily_return": None,
+        "cumulative_return": None,
+        "mdd": None,
+        "total_trades": 0,
+        "buy_count": 0,
+        "sell_count": 0,
+        "order_submit_count": 0,
+        "fill_count": 0,
+        "raw_fill_rate": None,
+        "effective_fill_rate": None,
+        "turnover": None,
+        "same_universe_excess": None,
+        "exposure_matched_excess": None,
+        "cash_adjusted_excess": None,
+        "benchmark_status": "failed",
+        "benchmark_meta": {"warning": "daily_return is null"},
+        "record_version": 1,
+        "day_number": 1,
+    })
+    return record
+
+
 def _adapter_plan_for_date(day: str):
     score_day = {
         "2026-04-08": "2026-04-07",
@@ -2462,6 +2587,85 @@ def test_verify_existing_pilot_evidence_rejects_failed_benchmark(monkeypatch):
     assert verification["mismatches"][0]["actual"] == "target_weight_benchmark_status_not_final"
 
 
+def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    evidence_dir = tmp_path / "paper_evidence"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", evidence_dir)
+
+    def final_benchmark(*, date, daily_return, cash_ratio, watchlist_symbols):
+        assert daily_return is not None
+        assert watchlist_symbols == list(plan.targets)
+        return {
+            "same_universe_excess": round(daily_return - 0.10, 4),
+            "exposure_matched_excess": round(daily_return - 0.05, 4),
+            "cash_adjusted_excess": round(daily_return - 0.02, 4),
+            "benchmark_status": "final",
+            "benchmark_meta": {
+                "type": "universe_equal_weight",
+                "date": date.strftime("%Y-%m-%d"),
+                "completeness": 1.0,
+                "cash_ratio": cash_ratio,
+            },
+        }
+
+    monkeypatch.setattr(pe, "_compute_benchmark_excess", final_benchmark)
+    record = _repairable_invalid_pilot_evidence_record(plan)
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    result = twp.repair_target_weight_pilot_evidence(
+        candidate_id=plan.candidate_id,
+        repair_date=plan.trade_day,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    assert result["status"] == "repaired"
+    assert result["appended_record_version"] == 2
+    assert result["proof_status_after"]["reason"] == "verified_target_weight_pilot_evidence"
+
+    records = pe._read_all_evidence(pe._evidence_path(plan.candidate_id))
+    assert len(records) == 2
+    repaired = records[-1]
+    valid, reason = pe._target_weight_record_proof_status(plan.candidate_id, repaired)
+
+    expected_total_value = (
+        record["pilot_caps_snapshot"]["target_weight_execution"]["pre_trade_risk_check"][
+            "projected_total_value_after_costs"
+        ]
+    )
+    assert valid is True
+    assert reason == "verified_target_weight_pilot_evidence"
+    assert repaired["total_value"] == expected_total_value
+    assert repaired["daily_return"] == pytest.approx((expected_total_value / plan.cash_before - 1.0) * 100)
+    assert repaired["benchmark_status"] == "final"
+    assert repaired["benchmark_meta"]["performance_repair"] is True
+    assert repaired["benchmark_meta"]["repair_source"] == "target_weight_execution.pre_trade_risk_check"
+    assert repaired["total_trades"] == len(plan.orders)
+
+
+def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    record = _repairable_invalid_pilot_evidence_record(plan)
+    record["pilot_caps_snapshot"]["target_weight_execution"]["fill_reconciliation"]["complete"] = False
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    with pytest.raises(ValueError, match="target_weight_fill_reconciliation_incomplete"):
+        twp.repair_target_weight_pilot_evidence(
+            candidate_id=plan.candidate_id,
+            repair_date=plan.trade_day,
+            output_dir=tmp_path / "paper_runtime",
+        )
+
+    records = pe._read_all_evidence(pe._evidence_path(plan.candidate_id))
+    assert len(records) == 1
+
+
 def test_verify_existing_pilot_evidence_rejects_plan_snapshot_mismatch(monkeypatch):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
@@ -3238,8 +3442,12 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
 
     assert summary["status"] == "PILOT_EVIDENCE_INVALID"
     assert "evidence invalid" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["operator_commands"]["repair_pilot_evidence"].endswith(
+        f"--repair-pilot-evidence --repair-date {plan.trade_day}"
+    )
     assert "benchmark/portfolio evidence" in summary["next_step"]
     assert "PILOT_EVIDENCE_INVALID" in report
+    assert "Repair Pilot Evidence" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):

@@ -1049,9 +1049,14 @@ def _target_weight_ops_priority_action(
             "invalid_execution_days": _safe_int(progress.get("invalid_execution_days")),
             "invalid_reasons": progress.get("invalid_reasons") or {},
             "desc": "오늘 target-weight pilot_paper 증거 품질 실패, benchmark/portfolio evidence 복구 후 daily ops 재점검",
-            "command": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
+            "command": (
+                ops_commands.get("repair_pilot_evidence")
+                or ops_commands.get("daily_ops_summary")
+                or commands.get("daily_ops_summary")
+            ),
             "order_safety": "no_order",
             "requires": "benchmark/portfolio evidence repair",
+            "follow_up": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
         }
 
     if status == "READY_TO_EXECUTE":
