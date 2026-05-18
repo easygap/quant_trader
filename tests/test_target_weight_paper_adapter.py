@@ -3353,7 +3353,9 @@ def test_build_target_weight_daily_ops_summary_allows_execute_only_when_ready(tm
     assert "READY_TO_EXECUTE" in report
 
 
-def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
+def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, monkeypatch):
+    import tools.target_weight_rotation_pilot as twp
+
     from tools.target_weight_rotation_pilot import (
         build_target_weight_daily_ops_summary,
         build_target_weight_experiment_manifest,
@@ -3361,6 +3363,7 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
         write_target_weight_daily_ops_summary,
     )
 
+    monkeypatch.setattr(twp, "_load_kr_market_holidays", lambda: {"2026-04-13"})
     plan = _adapter_plan()
     cap_recommendation = recommend_pilot_caps(plan)
     pass_check = {
@@ -3443,8 +3446,27 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
     ]
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
     assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["next_operator_trade_day"] == "2026-04-14"
+    assert (
+        summary["operator_commands"]["next_daily_ops_summary"]
+        == (
+            "python tools/target_weight_rotation_pilot.py "
+            "--candidate-id target_weight_candidate --as-of-date 2026-04-14 "
+            "--daily-ops-summary"
+        )
+    )
+    assert (
+        summary["operator_commands"]["next_readiness_audit"]
+        == (
+            "python tools/target_weight_rotation_pilot.py "
+            "--candidate-id target_weight_candidate --as-of-date 2026-04-14 "
+            "--readiness-audit"
+        )
+    )
     assert "fresh readiness" in summary["next_step"]
     assert "PILOT_EVIDENCE_RECORDED" in report
+    assert "Next Daily Ops Summary" in report
+    assert "--as-of-date 2026-04-14 --daily-ops-summary" in report
     assert "Post-evidence Diagnostics" in report
 
 
