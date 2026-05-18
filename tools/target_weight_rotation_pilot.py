@@ -2284,6 +2284,8 @@ def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] |
 
 
 def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, Any]:
+    from core.paper_evidence import _target_weight_record_proof_status
+
     record = _latest_existing_evidence_record(plan)
     result = {
         "checked": True,
@@ -2318,6 +2320,12 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         "pilot_authorized": record.get("pilot_authorized"),
         "target_weight_execution_complete": target_execution.get("complete"),
         "params_hash": target_plan.get("params_hash") or target_execution.get("params_hash"),
+        "benchmark_status": record.get("benchmark_status"),
+        "same_universe_excess": record.get("same_universe_excess"),
+        "exposure_matched_excess": record.get("exposure_matched_excess"),
+        "cash_adjusted_excess": record.get("cash_adjusted_excess"),
+        "daily_return": record.get("daily_return"),
+        "total_value": record.get("total_value"),
     }
 
     checks = [
@@ -2431,6 +2439,15 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
                 "expected": expected,
                 "actual": actual,
                 "tolerance": absolute_tolerance,
+            })
+
+    if not result["mismatches"]:
+        proof_valid, proof_reason = _target_weight_record_proof_status(plan.candidate_id, record)
+        if not proof_valid:
+            result["mismatches"].append({
+                "field": "target_weight_evidence_quality",
+                "expected": "verified_target_weight_pilot_evidence",
+                "actual": proof_reason,
             })
 
     if result["mismatches"]:
@@ -3818,18 +3835,35 @@ def build_target_weight_daily_ops_summary(
     blocking_reason_text = " ".join(
         str(reason).lower() for reason in audit.get("blocking_reasons") or []
     )
-    pilot_evidence_recorded_today = (
-        str(evidence_progress.get("latest_verified_pilot_date") or "") == str(audit.get("trade_day") or "")
-        and any(
-            needle in blocking_reason_text
-            for needle in (
-                "execution_idempotency",
-                "duplicate_execution",
-                "duplicate execution",
-            )
+    duplicate_execution_blocked = any(
+        needle in blocking_reason_text
+        for needle in (
+            "execution_idempotency",
+            "duplicate_execution",
+            "duplicate execution",
         )
     )
-    if pilot_evidence_recorded_today:
+    trade_day = str(audit.get("trade_day") or "")
+    latest_record_date = str(evidence_progress.get("latest_record_date") or "")
+    latest_verified_pilot_date = str(evidence_progress.get("latest_verified_pilot_date") or "")
+    try:
+        invalid_execution_days = int(evidence_progress.get("invalid_execution_days") or 0)
+    except (TypeError, ValueError):
+        invalid_execution_days = 0
+    pilot_evidence_recorded_today = (
+        latest_verified_pilot_date == trade_day
+        and duplicate_execution_blocked
+    )
+    pilot_evidence_invalid_today = (
+        latest_record_date == trade_day
+        and latest_verified_pilot_date != trade_day
+        and invalid_execution_days > 0
+        and duplicate_execution_blocked
+    )
+    if pilot_evidence_invalid_today:
+        status = "PILOT_EVIDENCE_INVALID"
+        next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
+    elif pilot_evidence_recorded_today:
         status = "PILOT_EVIDENCE_RECORDED"
         next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 daily ops 재점검"
     elif audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
@@ -3857,7 +3891,12 @@ def build_target_weight_daily_ops_summary(
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
     operator_commands = dict(audit.get("operator_commands") or {})
-    if pilot_evidence_recorded_today:
+    if pilot_evidence_invalid_today:
+        operator_commands["execute_capped_paper"] = (
+            f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
+            "repair benchmark/portfolio evidence before counting the day"
+        )
+    elif pilot_evidence_recorded_today:
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
         )
