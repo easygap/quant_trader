@@ -11,18 +11,38 @@ import os
 import yaml
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-    # 프로젝트 루트의 .env 파일 로드
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-except ImportError:
-    pass
-
 # 프로젝트 루트 디렉토리 (config/ 의 상위)
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
+ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def _load_env_file_fallback(env_path: Path = ENV_PATH) -> None:
+    """python-dotenv가 없어도 프로젝트 .env의 단순 KEY=value 항목을 로드한다."""
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+try:
+    from dotenv import load_dotenv
+    if ENV_PATH.exists():
+        load_dotenv(ENV_PATH)
+except ImportError:
+    _load_env_file_fallback(ENV_PATH)
 
 
 def load_yaml(file_path: str) -> dict:
