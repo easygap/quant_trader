@@ -1066,6 +1066,7 @@ def _target_weight_ops_priority_action(
     }
 
     if status == "PILOT_EVIDENCE_RECORDED":
+        next_trade_day = latest_daily_ops.get("next_operator_trade_day")
         return {
             **base_action,
             "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
@@ -1076,6 +1077,8 @@ def _target_weight_ops_priority_action(
             ),
             "order_safety": "no_order",
             "requires": "next KRX business day fresh readiness",
+            "not_before_date": next_trade_day,
+            "premature_run_guard": "target_weight_future_as_of_date_blocked",
             "follow_up": (
                 ops_commands.get("next_readiness_audit")
                 or ops_commands.get("rerun_readiness_audit")
@@ -1248,6 +1251,9 @@ def _build_current_blockers_operator_runbook(
             }
             for key in ("setup_required", "required_env", "config_path", "setup_hint"):
                 if key in ops_priority_action:
+                    priority_step[key] = ops_priority_action[key]
+            for key in ("not_before_date", "premature_run_guard"):
+                if ops_priority_action.get(key):
                     priority_step[key] = ops_priority_action[key]
             sequence.insert(2, priority_step)
             follow_up = str(ops_priority_action.get("follow_up") or "")
