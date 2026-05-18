@@ -1933,6 +1933,47 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
     assert str(summary_path) in output
 
 
+def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
+    import core.paper_pilot as paper_pilot
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    monkeypatch.setattr(ppc, "_is_target_weight_strategy_for_enable", lambda value: value == strategy)
+    monkeypatch.setattr(
+        paper_pilot,
+        "get_active_pilot",
+        lambda value: SimpleNamespace(
+            valid_from="2026-04-10",
+            valid_to="2026-07-03",
+            max_orders_per_day=3,
+            max_concurrent_positions=3,
+            max_notional_per_trade=2_000_000,
+            max_gross_exposure=10_000_000,
+        ),
+    )
+    monkeypatch.setattr(
+        paper_pilot,
+        "check_pilot_entry",
+        lambda value: SimpleNamespace(
+            allowed=True,
+            reason="pilot authorized",
+            remaining_orders=3,
+            remaining_exposure=10_000_000,
+        ),
+    )
+    monkeypatch.setattr(
+        ppc,
+        "_print_target_weight_daily_ops_status",
+        lambda value: print("\n  Target-weight Daily Ops: MISSING"),
+    )
+
+    ppc.run_status(strategy)
+
+    output = capsys.readouterr().out
+    assert "Core Entry Check: ALLOWED" in output
+    assert "Target-weight Daily Ops: MISSING" in output
+
+
 def test_paper_pilot_control_status_prints_daily_ops_command_when_missing(tmp_path, capsys):
     import tools.paper_pilot_control as ppc
 
