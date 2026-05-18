@@ -1303,13 +1303,37 @@ def _target_weight_record_performance_status(record: dict) -> tuple[bool, str]:
     return True, "target_weight_performance_verified"
 
 
-def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[bool, str]:
+def _target_weight_record_has_repaired_performance(record: dict) -> bool:
+    benchmark_meta = record.get("benchmark_meta") or {}
+    if (
+        isinstance(benchmark_meta, dict)
+        and benchmark_meta.get("performance_repair") is True
+    ):
+        return True
+    return record.get("performance_repair") is True
+
+
+def _target_weight_record_proof_status(
+    strategy: str,
+    record: dict,
+    *,
+    allow_repaired_performance: bool = False,
+) -> tuple[bool, str]:
     if record.get("execution_backed") is not True:
         return False, "not_execution_backed"
     if record.get("evidence_mode") != "pilot_paper" or record.get("session_mode") != "pilot_paper":
         return False, "not_pilot_paper"
     if record.get("pilot_authorized") is not True:
         return False, "pilot_not_authorized"
+    if not allow_repaired_performance and record.get("promotion_eligible") is False:
+        return False, str(
+            record.get("promotion_exclusion_reason") or "target_weight_promotion_excluded"
+        )
+    if (
+        not allow_repaired_performance
+        and _target_weight_record_has_repaired_performance(record)
+    ):
+        return False, "target_weight_repaired_performance_not_promotable"
 
     caps = record.get("pilot_caps_snapshot") or {}
     plan = caps.get("target_weight_plan") or {}
