@@ -1536,7 +1536,13 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
             "verified_pilot_days": 1,
             "shadow_days": 2,
         },
-        "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
+        "decision": {
+            "blocking_reasons": [],
+            "post_evidence_diagnostics": [
+                "execution_idempotency: duplicate",
+                "pilot_authorization_snapshot: stale same-day approval",
+            ],
+        },
         "operator_commands": {},
     }
 
@@ -1545,7 +1551,7 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
     action = report["next_actions"][0]
     assert action["daily_ops_status"] == "PILOT_EVIDENCE_RECORDED"
     assert action["order_safety"] == "no_order"
-    assert action["requires"] == "next KRX business day"
+    assert action["requires"] == "next KRX business day fresh readiness"
     assert action["command"].endswith("--daily-ops-summary")
 
 
