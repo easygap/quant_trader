@@ -239,11 +239,36 @@ def _target_weight_enable_guard(args):
             + f". Use the suggested caps in {result['report_path']}"
         )
     plan = result.get("plan")
-    if plan is not None:
-        result["target_weight_plan_snapshot"] = build_pilot_authorization_snapshot(
-            plan,
-            readiness_audit=audit,
+    if plan is None:
+        raise ValueError(
+            "target-weight readiness plan missing: "
+            f"pilot enable requires a plan snapshot from {result['report_path']}"
         )
+    plan_candidate_id = str(getattr(plan, "candidate_id", "") or "").strip()
+    if plan_candidate_id != args.strategy:
+        raise ValueError(
+            "target-weight readiness plan candidate mismatch: "
+            f"strategy={args.strategy} plan_candidate_id={plan_candidate_id or 'missing'}. "
+            f"Rerun enable with the matching plan in {result['report_path']}"
+        )
+    audit_trade_day = str(audit.get("trade_day") or "").strip()
+    if audit_trade_day != args.valid_from:
+        raise ValueError(
+            "target-weight readiness audit trade day mismatch: "
+            f"valid_from={args.valid_from} audit_trade_day={audit_trade_day or 'missing'}. "
+            f"Rerun enable with the audit trade day in {result['report_path']}"
+        )
+    plan_trade_day = str(getattr(plan, "trade_day", "") or "").strip()
+    if plan_trade_day and plan_trade_day != args.valid_from:
+        raise ValueError(
+            "target-weight readiness plan trade day mismatch: "
+            f"valid_from={args.valid_from} plan_trade_day={plan_trade_day}. "
+            f"Rerun enable with the plan trade day in {result['report_path']}"
+        )
+    result["target_weight_plan_snapshot"] = build_pilot_authorization_snapshot(
+        plan,
+        readiness_audit=audit,
+    )
     return result
 
 
