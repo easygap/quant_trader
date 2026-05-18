@@ -1,3 +1,4 @@
+import json
 import types
 
 import pandas as pd
@@ -52,7 +53,7 @@ def test_kis_fallback_runs_only_when_explicitly_enabled(monkeypatch):
     assert collector.has_kis_fallback_symbols() == ["005930"]
 
 
-def test_get_sector_map_uses_fdr_sector_column(monkeypatch):
+def test_get_sector_map_uses_fdr_sector_column(monkeypatch, tmp_path):
     import core.data_collector as data_collector
 
     fake_fdr = types.SimpleNamespace(
@@ -64,6 +65,7 @@ def test_get_sector_map_uses_fdr_sector_column(monkeypatch):
         )
     )
 
+    monkeypatch.setattr(data_collector, "SECTOR_MAP_CACHE_PATH", tmp_path / "sector_map_cache.json")
     monkeypatch.setattr(data_collector, "HAS_FDR", True)
     monkeypatch.setattr(data_collector, "fdr", fake_fdr)
     monkeypatch.setattr(data_collector, "HAS_PYKRX", False)
@@ -74,7 +76,71 @@ def test_get_sector_map_uses_fdr_sector_column(monkeypatch):
     assert mapping == {"005930": "반도체", "000660": "반도체"}
 
 
-def test_get_sector_map_falls_back_to_pykrx_when_fdr_has_no_sector(monkeypatch):
+def test_get_sector_map_writes_verified_cache(monkeypatch, tmp_path):
+    import core.data_collector as data_collector
+
+    cache_path = tmp_path / "sector_map_cache.json"
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame(
+            {
+                "Code": ["5930", "000660"],
+                "Sector": ["반도체", "반도체"],
+            }
+        )
+    )
+
+    monkeypatch.setattr(data_collector, "SECTOR_MAP_CACHE_PATH", cache_path)
+    monkeypatch.setattr(data_collector, "HAS_FDR", True)
+    monkeypatch.setattr(data_collector, "fdr", fake_fdr)
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", False)
+    monkeypatch.setattr(data_collector, "_pykrx_stock", None)
+
+    mapping = data_collector.DataCollector.get_sector_map()
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    assert mapping == {"005930": "반도체", "000660": "반도체"}
+    assert payload["schema_version"] == data_collector.SECTOR_MAP_CACHE_SCHEMA_VERSION
+    assert payload["source"] == "fdr"
+    assert payload["entry_count"] == 2
+    assert payload["mapping"] == mapping
+
+
+def test_get_sector_map_uses_cache_when_live_sources_empty(monkeypatch, tmp_path):
+    import core.data_collector as data_collector
+
+    cache_path = tmp_path / "sector_map_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": data_collector.SECTOR_MAP_CACHE_SCHEMA_VERSION,
+                "generated_at": "2026-05-18T09:00:00",
+                "source": "kind",
+                "entry_count": 2,
+                "mapping": {
+                    "5930": "반도체",
+                    "035720": "서비스업",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(data_collector, "SECTOR_MAP_CACHE_PATH", cache_path)
+    monkeypatch.setattr(data_collector, "HAS_FDR", False)
+    monkeypatch.setattr(data_collector.DataCollector, "_get_sector_map_from_kind", staticmethod(lambda: {}))
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", False)
+    monkeypatch.setattr(data_collector, "_pykrx_stock", None)
+
+    mapping = data_collector.DataCollector.get_sector_map()
+
+    assert mapping == {
+        "005930": "반도체",
+        "035720": "서비스업",
+    }
+
+
+def test_get_sector_map_falls_back_to_pykrx_when_fdr_has_no_sector(monkeypatch, tmp_path):
     import core.data_collector as data_collector
 
     fake_fdr = types.SimpleNamespace(
@@ -103,6 +169,7 @@ def test_get_sector_map_falls_back_to_pykrx_when_fdr_has_no_sector(monkeypatch):
                 }
             )
 
+    monkeypatch.setattr(data_collector, "SECTOR_MAP_CACHE_PATH", tmp_path / "sector_map_cache.json")
     monkeypatch.setattr(data_collector, "HAS_FDR", True)
     monkeypatch.setattr(data_collector, "fdr", fake_fdr)
     monkeypatch.setattr(data_collector.DataCollector, "_get_sector_map_from_kind", staticmethod(lambda: {}))
@@ -114,7 +181,7 @@ def test_get_sector_map_falls_back_to_pykrx_when_fdr_has_no_sector(monkeypatch):
     assert mapping == {"005930": "전기전자", "035720": "서비스업"}
 
 
-def test_get_sector_map_uses_kind_listing_when_fdr_has_no_sector(monkeypatch):
+def test_get_sector_map_uses_kind_listing_when_fdr_has_no_sector(monkeypatch, tmp_path):
     import sys
 
     import core.data_collector as data_collector
@@ -144,6 +211,7 @@ def test_get_sector_map_uses_kind_listing_when_fdr_has_no_sector(monkeypatch):
 
     fake_requests = types.SimpleNamespace(get=lambda url, timeout: FakeResponse())
 
+    monkeypatch.setattr(data_collector, "SECTOR_MAP_CACHE_PATH", tmp_path / "sector_map_cache.json")
     monkeypatch.setattr(data_collector, "HAS_FDR", True)
     monkeypatch.setattr(data_collector, "fdr", fake_fdr)
     monkeypatch.setattr(data_collector, "HAS_PYKRX", False)
