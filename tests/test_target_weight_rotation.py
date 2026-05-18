@@ -421,6 +421,57 @@ def test_target_weight_plan_applies_sector_cap_to_targets():
     assert plan.diagnostics["sector_map_missing_symbols"] == []
 
 
+def test_target_weight_plan_infers_preferred_share_sector_from_common_code():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class PreferredShareSectorCollector(FakeCollector):
+        def get_sector_map(self):
+            return {
+                "005930": "electronics",
+                "000660": "semiconductor",
+            }
+
+    dates = pd.bdate_range("2025-01-27", "2025-02-03")
+    frames = {
+        "005930": _ohlcv(dates, [100, 101, 102, 103, 104, 112]),
+        "005935": _ohlcv(dates, [100, 101, 102, 103, 104, 110]),
+        "000660": _ohlcv(dates, [100, 101, 102, 103, 104, 108]),
+        "KS11": _ohlcv(dates, [100] * len(dates)),
+    }
+
+    plan = build_target_weight_plan(
+        symbols=["005930", "005935", "000660"],
+        params={
+            "target_top_n": 2,
+            "target_exposure": 1.0,
+            "target_tolerance_pct": 0.0,
+            "short_lookback": 1,
+            "long_lookback": 1,
+            "short_weight": 1.0,
+            "score_mode": "absolute",
+            "max_targets_per_sector": 1,
+        },
+        cash=100_000.0,
+        positions={},
+        as_of_date="2025-02-03",
+        collector=PreferredShareSectorCollector(frames),
+    )
+
+    assert plan.targets == ["005930", "000660"]
+    assert plan.diagnostics["sector_map_missing_symbols"] == []
+    assert plan.diagnostics["sector_map_inferred_symbols"] == [
+        {
+            "symbol": "005935",
+            "source_symbol": "005930",
+            "sector": "electronics",
+        }
+    ]
+    assert plan.diagnostics["selected_sector_counts"] == {
+        "electronics": 1,
+        "semiconductor": 1,
+    }
+
+
 def test_target_weight_plan_blocks_incomplete_sector_map_before_fetch():
     from core.target_weight_rotation import build_target_weight_plan
 
