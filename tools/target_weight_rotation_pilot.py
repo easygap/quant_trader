@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import uuid
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -46,6 +47,12 @@ DEFAULT_MAX_ORDER_ADV_PCT = 5.0
 TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
 KST = timezone(timedelta(hours=9))
 NO_ORDER_OPERATION_ERRORS = (ValueError, DataCollectionError)
+REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS = {
+    "target_weight_benchmark_status_not_final",
+    "target_weight_excess_metrics_missing",
+    "target_weight_daily_return_missing",
+    "target_weight_portfolio_value_missing",
+}
 
 
 def _stable_manifest_hash(payload: dict[str, Any]) -> str:
@@ -2283,6 +2290,447 @@ def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] |
     return latest_record
 
 
+def _coerce_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _coerce_int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _positive_float_from(*values: Any) -> float | None:
+    for value in values:
+        number = _coerce_float_or_none(value)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _repairable_target_weight_execution_status(
+    candidate_id: str,
+    record: dict[str, Any],
+    *,
+    total_value: float | None,
+) -> tuple[bool, str]:
+    """성과 필드만 임시 통과시켜 실행 proof 자체가 완전한지 분리 검증한다."""
+    from core.paper_evidence import _target_weight_record_proof_status
+
+    probe = deepcopy(record)
+    probe["benchmark_status"] = "final"
+    probe["same_universe_excess"] = 0.0
+    probe["exposure_matched_excess"] = 0.0
+    probe["cash_adjusted_excess"] = 0.0
+    probe["daily_return"] = probe.get("daily_return") if probe.get("daily_return") is not None else 0.0
+    probe["total_value"] = _positive_float_from(total_value, probe.get("total_value"), 1.0)
+    valid, reason = _target_weight_record_proof_status(candidate_id, probe)
+    if valid:
+        return True, "target_weight_execution_proof_verified"
+    return False, reason
+
+
+def _target_weight_repair_watchlist(record: dict[str, Any]) -> list[str]:
+    caps = record.get("pilot_caps_snapshot") or {}
+    plan = caps.get("target_weight_plan") or {}
+    execution = caps.get("target_weight_execution") or {}
+    symbols = (
+        plan.get("targets")
+        or execution.get("target_symbols")
+        or plan.get("symbols")
+        or []
+    )
+    return [normalize_symbol(symbol) for symbol in symbols if normalize_symbol(symbol)]
+
+
+def _target_weight_repair_performance_fields(record: dict[str, Any]) -> dict[str, Any]:
+    caps = record.get("pilot_caps_snapshot") or {}
+    plan = caps.get("target_weight_plan") or {}
+    execution = caps.get("target_weight_execution") or {}
+    pre_trade = execution.get("pre_trade_risk_check") or {}
+    fill_reconciliation = execution.get("fill_reconciliation") or {}
+    order_costs = pre_trade.get("order_costs") if isinstance(pre_trade.get("order_costs"), list) else []
+    cost_summary = pre_trade.get("cost_summary") or {}
+
+    cash = _positive_float_from(pre_trade.get("projected_cash_after_costs"))
+    invested = _positive_float_from(pre_trade.get("projected_gross_exposure_after_costs"))
+    total_value = _positive_float_from(pre_trade.get("projected_total_value_after_costs"))
+
+    if cash is None and order_costs:
+        cash = _coerce_float_or_none((order_costs[-1] or {}).get("cash_after"))
+    if invested is None:
+        position_rows = pre_trade.get("position_ratios") or []
+        if isinstance(position_rows, list):
+            invested_sum = sum(
+                _coerce_float_or_none((row or {}).get("value")) or 0.0
+                for row in position_rows
+                if isinstance(row, dict)
+            )
+            invested = invested_sum if invested_sum > 0 else None
+    if invested is None:
+        invested = _positive_float_from(plan.get("gross_exposure_after"), execution.get("gross_exposure_after"))
+    if total_value is None and cash is not None and invested is not None:
+        total_value = cash + invested
+    if cash is None and total_value is not None and invested is not None:
+        cash = total_value - invested
+    if invested is None and total_value is not None and cash is not None:
+        invested = max(total_value - cash, 0.0)
+
+    base_value = None
+    for item in order_costs:
+        if isinstance(item, dict):
+            base_value = _positive_float_from(item.get("cash_before"))
+            if base_value is not None:
+                break
+    guard = plan.get("portfolio_drawdown_guard") or {}
+    if base_value is None and isinstance(guard, dict):
+        base_value = _positive_float_from(
+            guard.get("last_equity_value"),
+            guard.get("peak_equity_value"),
+            guard.get("peak_value"),
+            guard.get("last_value"),
+        )
+    if base_value is None:
+        explicit_costs = _coerce_float_or_none(cost_summary.get("total_explicit_costs")) or 0.0
+        base_value = _positive_float_from(record.get("total_value"), total_value + explicit_costs if total_value else None)
+
+    daily_return = _coerce_float_or_none(record.get("daily_return"))
+    if daily_return is None and total_value is not None and base_value is not None and base_value > 0:
+        daily_return = (total_value / base_value - 1.0) * 100.0
+
+    cumulative_return = _coerce_float_or_none(record.get("cumulative_return"))
+    if cumulative_return is None:
+        cumulative_return = daily_return
+
+    mdd = _coerce_float_or_none(record.get("mdd"))
+    if mdd is None and daily_return is not None:
+        mdd = min(0.0, daily_return)
+    elif mdd is not None and mdd > 0:
+        mdd = -abs(mdd)
+
+    target_quantities = plan.get("target_quantities_after") or {}
+    derived_position_count = 0
+    if isinstance(target_quantities, dict):
+        derived_position_count = sum(
+            1
+            for quantity in target_quantities.values()
+            if _coerce_int_or_zero(quantity) > 0
+        )
+    position_count = _coerce_int_or_zero(
+        pre_trade.get("target_position_count")
+        or plan.get("target_position_count")
+        or derived_position_count
+    )
+
+    fills = fill_reconciliation.get("fills") or []
+    fills = fills if isinstance(fills, list) else []
+    fill_count = _coerce_int_or_zero(fill_reconciliation.get("fill_count") or len(fills))
+    planned_orders = _coerce_int_or_zero(execution.get("planned_orders") or fill_count)
+    executed_orders = _coerce_int_or_zero(execution.get("executed_orders") or fill_count)
+    if executed_orders <= 0 and fill_reconciliation.get("complete") is True:
+        executed_orders = fill_count
+
+    buy_count = sum(1 for fill in fills if str((fill or {}).get("action", "")).upper() == "BUY")
+    sell_count = sum(1 for fill in fills if str((fill or {}).get("action", "")).upper() == "SELL")
+    if not fills:
+        expected_quantities = fill_reconciliation.get("expected_quantities") or {}
+        if isinstance(expected_quantities, dict):
+            for key in expected_quantities:
+                action = str(key).split(":", 1)[-1].upper()
+                if action == "BUY":
+                    buy_count += 1
+                elif action == "SELL":
+                    sell_count += 1
+    if buy_count + sell_count == 0:
+        buy_count = _coerce_int_or_zero(record.get("buy_count"))
+        sell_count = _coerce_int_or_zero(record.get("sell_count"))
+
+    traded_notional = 0.0
+    for item in order_costs:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).upper()
+        if action == "BUY":
+            traded_notional += abs(_coerce_float_or_none(item.get("required_cash")) or 0.0)
+        elif action == "SELL":
+            traded_notional += abs(_coerce_float_or_none(item.get("cash_delta")) or 0.0)
+    turnover = traded_notional / total_value if total_value and total_value > 0 and traded_notional > 0 else None
+
+    fill_rate = None
+    if planned_orders > 0:
+        fill_rate = min(max(executed_orders / planned_orders, 0.0), 1.0)
+    if fill_reconciliation.get("complete") is True and planned_orders > 0:
+        fill_rate = 1.0
+
+    return {
+        "total_value": round(total_value, 2) if total_value is not None else None,
+        "cash": round(cash, 2) if cash is not None else None,
+        "invested": round(invested, 2) if invested is not None else None,
+        "daily_return": round(daily_return, 6) if daily_return is not None else None,
+        "cumulative_return": round(cumulative_return, 6) if cumulative_return is not None else None,
+        "mdd": round(mdd, 6) if mdd is not None else None,
+        "position_count": position_count,
+        "total_trades": fill_count,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "order_submit_count": planned_orders,
+        "fill_count": fill_count,
+        "raw_fill_rate": round(fill_rate, 4) if fill_rate is not None else None,
+        "effective_fill_rate": round(fill_rate, 4) if fill_rate is not None else None,
+        "turnover": round(turnover, 6) if turnover is not None else None,
+        "base_value": round(base_value, 2) if base_value is not None else None,
+        "traded_notional": round(traded_notional, 2),
+        "performance_source": "target_weight_execution.pre_trade_risk_check",
+    }
+
+
+def render_target_weight_pilot_evidence_repair_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Target-weight Pilot Evidence Repair",
+        "",
+        f"- Candidate: `{report['candidate_id']}`",
+        f"- Repair date: `{report['repair_date']}`",
+        f"- Status: **{report['status']}**",
+        f"- Reason: {report['reason']}",
+        f"- Source record version: {report.get('source_record_version', 'N/A')}",
+        f"- Appended record version: {report.get('appended_record_version', 'N/A')}",
+        f"- Proof after repair: {report.get('proof_status_after', {}).get('reason', 'N/A')}",
+        "",
+        "## Repaired Fields",
+    ]
+    repaired_fields = report.get("repaired_fields") or {}
+    if repaired_fields:
+        lines.extend([f"- {key}: `{value}`" for key, value in sorted(repaired_fields.items())])
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## Safety",
+        "- No paper orders are submitted by this repair.",
+        "- Existing evidence is not overwritten; repaired evidence is appended as a newer record version.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_pilot_evidence_repair_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    repair_date = _safe_path_component(str(report.get("repair_date") or "unknown"))
+    stem = f"target_weight_pilot_evidence_repair_{candidate}_{repair_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(render_target_weight_pilot_evidence_repair_markdown(report), encoding="utf-8")
+    return json_path, md_path
+
+
+def repair_target_weight_pilot_evidence(
+    *,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    repair_date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """중복 주문 없이 target-weight pilot evidence의 성과/benchmark 필드를 append-only로 복구한다."""
+    from core.paper_evidence import (
+        _append_jsonl,
+        _compute_benchmark_excess,
+        _evidence_path,
+        _read_all_evidence,
+        _target_weight_record_proof_status,
+    )
+
+    parsed_date = datetime.strptime(repair_date, "%Y-%m-%d")
+    jsonl_path = _evidence_path(candidate_id)
+    records = _read_all_evidence(jsonl_path)
+    latest = None
+    for record in reversed(records):
+        if record.get("date") == repair_date:
+            latest = record
+            break
+
+    base_report = {
+        "artifact_type": "target_weight_pilot_evidence_repair",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": candidate_id,
+        "repair_date": repair_date,
+        "evidence_path": str(jsonl_path),
+        "status": "blocked",
+        "reason": "",
+        "repaired": False,
+        "source_record_version": None,
+        "appended_record_version": None,
+        "repaired_fields": {},
+        "proof_status_before": {},
+        "proof_status_after": {},
+        "no_order_safety": {
+            "orders_submitted": False,
+            "order_executor_called": False,
+            "existing_records_overwritten": False,
+            "append_only": True,
+        },
+    }
+
+    def finish(report: dict[str, Any], *, fail: bool = False) -> dict[str, Any]:
+        report["repair_hash"] = _stable_manifest_hash(report)
+        json_path, md_path = write_target_weight_pilot_evidence_repair_report(
+            report,
+            output_dir=output_dir,
+        )
+        report["artifact_path"] = str(json_path)
+        report["report_path"] = str(md_path)
+        if fail:
+            raise ValueError(report["reason"])
+        return report
+
+    if latest is None:
+        report = dict(base_report)
+        report["reason"] = f"target_weight_pilot_evidence_repair_missing: no evidence for {candidate_id} {repair_date}"
+        return finish(report, fail=True)
+
+    source_version = _coerce_int_or_zero(latest.get("record_version") or 1)
+    before_valid, before_reason = _target_weight_record_proof_status(candidate_id, latest)
+    report = {
+        **base_report,
+        "source_record_version": source_version,
+        "proof_status_before": {"valid": before_valid, "reason": before_reason},
+    }
+    if before_valid:
+        report.update({
+            "status": "already_valid",
+            "reason": "target_weight_pilot_evidence_already_valid",
+        })
+        return finish(report)
+    if before_reason not in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS:
+        report["reason"] = f"target_weight_pilot_evidence_repair_not_allowed: {before_reason}"
+        return finish(report, fail=True)
+
+    repaired_fields = _target_weight_repair_performance_fields(latest)
+    execution_valid, execution_reason = _repairable_target_weight_execution_status(
+        candidate_id,
+        latest,
+        total_value=repaired_fields.get("total_value"),
+    )
+    if not execution_valid:
+        report["reason"] = f"target_weight_pilot_evidence_repair_execution_invalid: {execution_reason}"
+        report["repaired_fields"] = repaired_fields
+        return finish(report, fail=True)
+
+    total_value = _positive_float_from(repaired_fields.get("total_value"))
+    daily_return = _coerce_float_or_none(repaired_fields.get("daily_return"))
+    if total_value is None or daily_return is None:
+        report["reason"] = "target_weight_pilot_evidence_repair_missing_performance: total_value/daily_return unavailable"
+        report["repaired_fields"] = repaired_fields
+        return finish(report, fail=True)
+
+    cash = _coerce_float_or_none(repaired_fields.get("cash")) or 0.0
+    cash_ratio = cash / total_value if total_value > 0 else 1.0
+    watchlist_symbols = _target_weight_repair_watchlist(latest)
+    benchmark = _compute_benchmark_excess(
+        date=parsed_date,
+        daily_return=daily_return,
+        cash_ratio=cash_ratio,
+        watchlist_symbols=watchlist_symbols,
+    )
+    benchmark_meta = dict(benchmark.get("benchmark_meta") or {})
+    benchmark_meta["repair_source"] = repaired_fields["performance_source"]
+    benchmark_meta["performance_repair"] = True
+    benchmark_meta["source_record_version"] = source_version
+    benchmark_meta["source_proof_reason"] = before_reason
+    benchmark_meta["base_value"] = repaired_fields.get("base_value")
+    benchmark_meta["traded_notional"] = repaired_fields.get("traded_notional")
+    benchmark_meta["watchlist_symbols"] = watchlist_symbols
+    benchmark_status = benchmark.get("benchmark_status", "failed")
+
+    updated = deepcopy(latest)
+    for field in (
+        "total_value",
+        "cash",
+        "invested",
+        "daily_return",
+        "cumulative_return",
+        "mdd",
+        "position_count",
+        "total_trades",
+        "buy_count",
+        "sell_count",
+        "order_submit_count",
+        "fill_count",
+        "raw_fill_rate",
+        "effective_fill_rate",
+        "turnover",
+    ):
+        value = repaired_fields.get(field)
+        if value is not None:
+            updated[field] = value
+    updated["same_universe_excess"] = benchmark.get("same_universe_excess")
+    updated["exposure_matched_excess"] = benchmark.get("exposure_matched_excess")
+    updated["cash_adjusted_excess"] = benchmark.get("cash_adjusted_excess")
+    updated["benchmark_meta"] = benchmark_meta
+    updated["benchmark_status"] = benchmark_status
+    updated["record_version"] = source_version + 1
+    updated["schema_version"] = max(_coerce_int_or_zero(updated.get("schema_version") or 2), 2)
+    updated["evidence_mode"] = "pilot_paper"
+    updated["session_mode"] = "pilot_paper"
+    updated["pilot_authorized"] = True
+    updated["execution_backed"] = True
+
+    warnings = list(updated.get("cross_validation_warnings") or [])
+    repair_warning = "target_weight_pilot_evidence_repaired_from_execution_snapshot"
+    if repair_warning not in warnings:
+        warnings.append(repair_warning)
+    updated["cross_validation_warnings"] = warnings
+
+    after_valid, after_reason = _target_weight_record_proof_status(candidate_id, updated)
+    if not after_valid:
+        report["reason"] = f"target_weight_pilot_evidence_repair_still_invalid: {after_reason}"
+        report["repaired_fields"] = repaired_fields
+        report["proof_status_after"] = {"valid": after_valid, "reason": after_reason}
+        return finish(report, fail=True)
+
+    _append_jsonl(jsonl_path, updated)
+    report.update({
+        "status": "repaired",
+        "reason": "target_weight_pilot_evidence_repaired",
+        "repaired": True,
+        "appended_record_version": updated["record_version"],
+        "repaired_fields": {
+            key: repaired_fields.get(key)
+            for key in (
+                "total_value",
+                "cash",
+                "invested",
+                "daily_return",
+                "cumulative_return",
+                "mdd",
+                "position_count",
+                "total_trades",
+                "buy_count",
+                "sell_count",
+                "order_submit_count",
+                "fill_count",
+                "raw_fill_rate",
+                "effective_fill_rate",
+                "turnover",
+            )
+        },
+        "benchmark_status": benchmark_status,
+        "proof_status_after": {"valid": after_valid, "reason": after_reason},
+    })
+    return finish(report)
+
+
 def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, Any]:
     from core.paper_evidence import _target_weight_record_proof_status
 
@@ -3292,6 +3740,7 @@ def _build_readiness_operator_commands(
         "python tools/target_weight_rotation_pilot.py "
         f"--candidate-id {plan.candidate_id} --as-of-date {plan.as_of_date}"
     )
+    repair_base = f"python tools/target_weight_rotation_pilot.py --candidate-id {plan.candidate_id}"
     execute_command = f"{base} --execute --collect-evidence"
     if execute_block_reason:
         execute_command = f"# blocked: {execute_block_reason}"
@@ -3326,6 +3775,7 @@ def _build_readiness_operator_commands(
         "rerun_readiness_audit": f"{base} --readiness-audit",
         "enable_suggested_caps": str(cap_recommendation.get("enable_command", "")).strip(),
         "execute_capped_paper": execute_command,
+        "repair_pilot_evidence": f"{repair_base} --repair-pilot-evidence --repair-date {plan.trade_day}",
     }
 
 
@@ -3891,6 +4341,14 @@ def build_target_weight_daily_ops_summary(
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
     operator_commands = dict(audit.get("operator_commands") or {})
+    operator_commands.setdefault(
+        "repair_pilot_evidence",
+        (
+            "python tools/target_weight_rotation_pilot.py "
+            f"--candidate-id {audit['candidate_id']} "
+            f"--repair-pilot-evidence --repair-date {audit['trade_day']}"
+        ),
+    )
     if pilot_evidence_invalid_today:
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
@@ -4080,6 +4538,11 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         "### Enable Suggested Caps",
         "```bash",
         commands.get("enable_suggested_caps", ""),
+        "```",
+        "",
+        "### Repair Pilot Evidence",
+        "```bash",
+        commands.get("repair_pilot_evidence", ""),
         "```",
         "",
         "### Execute Capped Paper",
@@ -5282,6 +5745,12 @@ def main() -> None:
         help="Write a no-order daily operator summary with readiness, risk, and evidence progress.",
     )
     parser.add_argument(
+        "--repair-pilot-evidence",
+        action="store_true",
+        help="Append a no-order repaired pilot_paper evidence record from stored target-weight execution proof.",
+    )
+    parser.add_argument("--repair-date", help="YYYY-MM-DD evidence date to repair with --repair-pilot-evidence.")
+    parser.add_argument(
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
@@ -5343,6 +5812,8 @@ def main() -> None:
             cash_blocked_modes.append("--execute")
         if args.collect_evidence:
             cash_blocked_modes.append("--collect-evidence")
+        if args.repair_pilot_evidence:
+            cash_blocked_modes.append("--repair-pilot-evidence")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -5350,6 +5821,26 @@ def main() -> None:
             )
     if args.collect_evidence and not args.execute:
         parser.error("--collect-evidence requires --execute; evidence must be tied to a completed paper execution")
+    if args.repair_pilot_evidence and (
+        args.readiness_audit
+        or args.daily_ops_summary
+        or args.execute
+        or args.collect_evidence
+        or args.record_shadow_evidence
+        or args.shadow_start_date is not None
+        or args.shadow_end_date is not None
+        or args.shadow_days is not None
+    ):
+        parser.error(
+            "--repair-pilot-evidence cannot be combined with readiness, daily ops, "
+            "execution, evidence collection, or shadow bootstrap modes"
+        )
+    if args.repair_pilot_evidence and not args.repair_date:
+        parser.error("--repair-date is required with --repair-pilot-evidence")
+    if args.repair_date and not args.repair_pilot_evidence:
+        parser.error("--repair-date is only used with --repair-pilot-evidence")
+    if args.repair_pilot_evidence and args.as_of_date:
+        parser.error("--as-of-date is not used with --repair-pilot-evidence; use --repair-date")
 
     from database.models import init_database
 
@@ -5439,6 +5930,32 @@ def main() -> None:
         print(f"  artifact: {batch['artifact_path']}")
         if shadow_incomplete:
             raise SystemExit(1)
+        return
+
+    if args.repair_pilot_evidence:
+        try:
+            result = repair_target_weight_pilot_evidence(
+                candidate_id=args.candidate_id,
+                repair_date=args.repair_date,
+                output_dir=Path(args.output_dir),
+            )
+        except ValueError as exc:
+            print("\nTarget-weight pilot evidence repair")
+            print(f"  candidate: {args.candidate_id}")
+            print(f"  repair_date: {args.repair_date}")
+            print(f"  status: BLOCKED - {exc}")
+            raise SystemExit(1)
+
+        print("\nTarget-weight pilot evidence repair")
+        print(f"  candidate: {result['candidate_id']}")
+        print(f"  repair_date: {result['repair_date']}")
+        print(f"  status: {result['status']}")
+        print(f"  reason: {result['reason']}")
+        if result.get("repaired"):
+            print(f"  appended_record_version: {result['appended_record_version']}")
+            print(f"  proof: {result['proof_status_after'].get('reason')}")
+        print(f"  artifact: {result['artifact_path']}")
+        print(f"  report: {result['report_path']}")
         return
 
     if args.daily_ops_summary:
