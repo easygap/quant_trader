@@ -1241,10 +1241,15 @@ def test_build_current_blockers_report_from_promotion_summary():
         },
     }
 
-    report = build_current_blockers_report(blocker_summary)
+    report = build_current_blockers_report(
+        blocker_summary,
+        generated_at="2026-05-18T15:00:00",
+    )
 
     assert report["artifact_type"] == "current_go_live_blockers"
     assert report["schema_version"] == 3
+    assert report["generated_at"] == "2026-05-18T15:00:00"
+    assert report["source_generated_at"] == "2026-05-13T14:07:37"
     assert report["source_artifact_hash"] == "a" * 64
     assert report["go_live"] is False
     assert "NO-GO" in report["verdict"]
