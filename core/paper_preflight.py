@@ -75,6 +75,36 @@ class PreflightResult:
     blocking_requirements: list = field(default_factory=list)
 
 
+def _is_target_weight_strategy(strategy: str) -> bool:
+    return str(strategy).startswith("target_weight")
+
+
+def _target_weight_shadow_command(strategy: str, date: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --shadow-days 3 --shadow-end-date {date}"
+    )
+
+
+def _target_weight_daily_ops_command(strategy: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --daily-ops-summary"
+    )
+
+
+def _target_weight_test_notification_command(strategy: str, date: str) -> str:
+    return (
+        "python tools/paper_preflight.py "
+        f"--strategy {strategy} --date {date} --with-pilot-check --send-test-notification"
+    )
+
+
+def _append_action(actions: list[str], action: str) -> None:
+    if action not in actions:
+        actions.append(action)
+
+
 # ═══════════════════════════════════════════════════════════════
 # Core: Preflight 실행
 # ═══════════════════════════════════════════════════════════════
@@ -203,7 +233,19 @@ def _check_runtime_state(strategy, date, result, checks, actions):
             checks.append(PreflightCheck("runtime_state", "warn",
                           f"{state.state}: {'; '.join(state.reasons)}"))
             if state.state == "blocked_insufficient_evidence":
-                actions.append("shadow bootstrap으로 evidence 수집 가능 (paper_bootstrap.py --mode shadow)")
+                if _is_target_weight_strategy(strategy):
+                    _append_action(
+                        actions,
+                        "target-weight shadow 3일 수집: "
+                        f"`{_target_weight_shadow_command(strategy, date)}`",
+                    )
+                    _append_action(
+                        actions,
+                        "target-weight daily ops 재점검: "
+                        f"`{_target_weight_daily_ops_command(strategy)}`",
+                    )
+                else:
+                    actions.append("shadow bootstrap으로 evidence 수집 가능 (paper_bootstrap.py --mode shadow)")
         elif state.state == "frozen":
             checks.append(PreflightCheck("runtime_state", "fail",
                           f"frozen: {'; '.join(state.reasons)}"))
@@ -227,7 +269,19 @@ def _check_evidence(strategy, date, result, checks, actions):
         if not all_records:
             checks.append(PreflightCheck("evidence", "fail", "no evidence records at all"))
             result.has_real_evidence = False
-            actions.append("최소 1일 이상 collect_daily_evidence 실행 필요")
+            if _is_target_weight_strategy(strategy):
+                _append_action(
+                    actions,
+                    "target-weight shadow 3일 수집: "
+                    f"`{_target_weight_shadow_command(strategy, date)}`",
+                )
+                _append_action(
+                    actions,
+                    "shadow 수집 후 target-weight daily ops 재점검: "
+                    f"`{_target_weight_daily_ops_command(strategy)}`",
+                )
+            else:
+                actions.append("최소 1일 이상 collect_daily_evidence 실행 필요")
             return
 
         result.has_real_evidence = len(eligible) > 0
@@ -390,6 +444,11 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
             checks.append(PreflightCheck("notifier_discord", "warn",
                           "Discord webhook not configured — 알림 미발송"))
             actions.append("Discord webhook 설정 필요 (settings.yaml discord.webhook_url)")
+            if _is_target_weight_strategy(result.strategy):
+                actions.append(
+                    "Discord 설정 후 도달성 확인: "
+                    f"`{_target_weight_test_notification_command(result.strategy, result.date)}`"
+                )
             result.notifier_health = "unconfigured"
         else:
             if send_test:
@@ -447,7 +506,13 @@ def _check_notifier_health(result, checks, actions, send_test: bool):
                         "warn",
                         "webhook configured but test send not verified",
                     ))
-                    actions.append("preflight를 --send-test-notification 옵션으로 다시 실행해 Discord 도달성 확인")
+                    if _is_target_weight_strategy(result.strategy):
+                        actions.append(
+                            "Discord 도달성 확인: "
+                            f"`{_target_weight_test_notification_command(result.strategy, result.date)}`"
+                        )
+                    else:
+                        actions.append("preflight를 --send-test-notification 옵션으로 다시 실행해 Discord 도달성 확인")
                     result.notifier_health = "unverified"
 
     except Exception as e:
