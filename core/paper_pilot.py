@@ -35,6 +35,38 @@ PILOT_ELIGIBLE_STATUSES = ("provisional_paper_candidate", "approved", "live_cand
 PILOT_MAX_NOTIFIER_HEALTH_AGE_HOURS = 24
 
 
+def _is_target_weight_strategy(strategy: str) -> bool:
+    return str(strategy).startswith("target_weight")
+
+
+def _target_weight_shadow_command(strategy: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --shadow-days 3 --shadow-end-date YYYY-MM-DD"
+    )
+
+
+def _target_weight_daily_ops_command(strategy: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --daily-ops-summary"
+    )
+
+
+def _target_weight_readiness_command(strategy: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --readiness-audit"
+    )
+
+
+def _paper_preflight_test_command(strategy: str) -> str:
+    return (
+        "python tools/paper_preflight.py "
+        f"--strategy {strategy} --with-pilot-check --send-test-notification"
+    )
+
+
 def _coerce_date(value: str | datetime | None = None) -> datetime:
     if value is None:
         return datetime.now()
@@ -1125,6 +1157,7 @@ def generate_pilot_runbook(strategy: str) -> Path:
     """operator-facing runbook markdown 생성."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     lr = compute_launch_readiness(strategy)
+    is_target_weight = _is_target_weight_strategy(strategy)
 
     lines = [
         f"# Pilot Runbook: {strategy}",
@@ -1150,32 +1183,62 @@ def generate_pilot_runbook(strategy: str) -> Path:
     step = 1
     if not lr["notifier_ready"]:
         lines.append(f"{step}. Discord webhook 설정: settings.yaml → discord.webhook_url")
-        lines.append(f"   확인: `python tools/paper_preflight.py --strategy {strategy} --with-pilot-check`")
+        check_command = (
+            _paper_preflight_test_command(strategy)
+            if is_target_weight
+            else f"python tools/paper_preflight.py --strategy {strategy} --with-pilot-check"
+        )
+        lines.append(f"   확인: `{check_command}`")
         step += 1
     if lr["remaining_clean_days"] > 0:
-        lines.append(f"{step}. Clean evidence {lr['remaining_clean_days']}일 추가 축적:")
-        lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --date YYYY-MM-DD`")
-        lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --finalize --date YYYY-MM-DD`")
+        if is_target_weight:
+            lines.append(f"{step}. Target-weight shadow clean day {lr['remaining_clean_days']}일 추가 축적:")
+            lines.append(f"   `{_target_weight_shadow_command(strategy)}`")
+            lines.append(f"   확인: `{_target_weight_daily_ops_command(strategy)}`")
+        else:
+            lines.append(f"{step}. Clean evidence {lr['remaining_clean_days']}일 추가 축적:")
+            lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --date YYYY-MM-DD`")
+            lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --finalize --date YYYY-MM-DD`")
         step += 1
     if not lr["evidence_fresh"]:
-        lines.append(f"{step}. Evidence 수집 (오늘 or 가장 최근 거래일):")
-        lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --date $(date +%Y-%m-%d)`")
+        if is_target_weight:
+            lines.append(f"{step}. 최신 target-weight 운영 요약 재생성:")
+            lines.append(f"   `{_target_weight_daily_ops_command(strategy)}`")
+        else:
+            lines.append(f"{step}. Evidence 수집 (오늘 or 가장 최근 거래일):")
+            lines.append(f"   `python tools/run_paper_evidence_pipeline.py --strategy {strategy} --date $(date +%Y-%m-%d)`")
         step += 1
     lines.append(f"{step}. Preflight 확인:")
     lines.append(f"   `python tools/paper_preflight.py --strategy {strategy} --with-pilot-check`")
     step += 1
     lines.append(f"{step}. Launch readiness 확인:")
-    lines.append(f"   `python tools/paper_launch_readiness.py --strategy {strategy}`")
+    readiness_command = (
+        _target_weight_readiness_command(strategy)
+        if is_target_weight
+        else f"python tools/paper_launch_readiness.py --strategy {strategy}"
+    )
+    lines.append(f"   `{readiness_command}`")
+
+    lines.extend(["", "## 4. Pilot Enable 명령"])
+    if is_target_weight:
+        lines.extend([
+            "readiness audit가 생성한 `enable_suggested_caps` 명령만 사용합니다.",
+            "```bash",
+            _target_weight_readiness_command(strategy),
+            "# 생성된 readiness artifact의 enable_suggested_caps를 검토 후 실행",
+            "```",
+        ])
+    else:
+        lines.extend([
+            "```bash",
+            f"python tools/paper_pilot_control.py --strategy {strategy} --enable \\",
+            f"  --from YYYY-MM-DD --to YYYY-MM-DD \\",
+            f"  --max-orders 2 --max-positions 2 --max-notional 1000000 --max-exposure 3000000 \\",
+            f'  --reason "first {strategy} pilot — collect execution-backed evidence"',
+            "```",
+        ])
 
     lines.extend([
-        "",
-        "## 4. Pilot Enable 명령",
-        "```bash",
-        f"python tools/paper_pilot_control.py --strategy {strategy} --enable \\",
-        f"  --from YYYY-MM-DD --to YYYY-MM-DD \\",
-        f"  --max-orders 2 --max-positions 2 --max-notional 1000000 --max-exposure 3000000 \\",
-        f'  --reason "first {strategy} pilot — collect execution-backed evidence"',
-        "```",
         "",
         "## 5. Pilot Disable / Rollback 명령",
         "```bash",
