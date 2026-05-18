@@ -1037,10 +1037,10 @@ def _target_weight_ops_priority_action(
     if status == "PILOT_EVIDENCE_RECORDED":
         return {
             **base_action,
-            "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 daily ops 재점검",
+            "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
             "command": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
             "order_safety": "no_order",
-            "requires": "next KRX business day",
+            "requires": "next KRX business day fresh readiness",
         }
 
     if status == "PILOT_EVIDENCE_INVALID":
