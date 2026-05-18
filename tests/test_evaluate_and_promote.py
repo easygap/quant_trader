@@ -1583,6 +1583,10 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
         "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
         "operator_commands": {
             "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best --daily-ops-summary",
+            "repair_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+                "--repair-pilot-evidence --repair-date 2026-05-18"
+            ),
         },
     }
 
@@ -1593,7 +1597,8 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
     assert action["order_safety"] == "no_order"
     assert action["requires"] == "benchmark/portfolio evidence repair"
     assert action["invalid_reasons"] == {"target_weight_benchmark_status_not_final": 1}
-    assert action["command"].endswith("--daily-ops-summary")
+    assert action["command"].endswith("--repair-pilot-evidence --repair-date 2026-05-18")
+    assert action["follow_up"].endswith("--daily-ops-summary")
 
 
 def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
