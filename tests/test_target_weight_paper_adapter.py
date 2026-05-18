@@ -4613,6 +4613,37 @@ def test_run_daily_ops_summary_blocks_future_as_of_before_audit(monkeypatch, tmp
         )
 
 
+@pytest.mark.parametrize("kwargs", [{}, {"execute": True}, {"record_shadow_evidence": True}])
+def test_run_pilot_blocks_future_as_of_before_plan(monkeypatch, tmp_path, kwargs):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: pytest.fail("build_plan should not run"))
+
+    with pytest.raises(ValueError, match="target_weight_future_as_of_date_blocked"):
+        twp.run_pilot(
+            as_of_date="2026-04-11",
+            output_dir=tmp_path,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            execution_now=datetime(2026, 4, 10, 9, 0),
+            **kwargs,
+        )
+
+
+def test_run_shadow_bootstrap_blocks_future_end_date_before_plan(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: pytest.fail("build_plan should not run"))
+
+    with pytest.raises(ValueError, match="target_weight_future_as_of_date_blocked"):
+        twp.run_shadow_bootstrap(
+            start_date="2026-04-10",
+            end_date="2026-04-11",
+            output_dir=tmp_path,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            execution_now=datetime(2026, 4, 10, 9, 0),
+        )
+
+
 @pytest.mark.parametrize("kwargs", [{"execute": True}, {"collect_evidence": True}])
 def test_run_pilot_blocks_cash_override_for_operational_paths(monkeypatch, tmp_path, kwargs):
     import tools.target_weight_rotation_pilot as twp
