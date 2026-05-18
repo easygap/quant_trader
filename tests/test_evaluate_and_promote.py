@@ -1764,12 +1764,33 @@ def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, 
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute"
         },
     }
+    malformed_daily_ops = {
+        **current_daily_ops,
+        "generated_at": "2026-05-18T10:15:21",
+        "trade_day": "not-a-date",
+        "status": "READY_TO_EXECUTE",
+    }
+    missing_trade_day_daily_ops = {
+        key: value for key, value in current_daily_ops.items() if key != "trade_day"
+    }
+    missing_trade_day_daily_ops.update(
+        {
+            "generated_at": "2026-05-18T10:20:21",
+            "status": "READY_TO_EXECUTE",
+        }
+    )
     current_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
     future_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-19.json"
+    malformed_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_malformed.json"
+    missing_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_missing_trade_day.json"
     current_path.write_text(json.dumps(current_daily_ops, ensure_ascii=False), encoding="utf-8")
     future_path.write_text(json.dumps(future_daily_ops, ensure_ascii=False), encoding="utf-8")
+    malformed_path.write_text(json.dumps(malformed_daily_ops, ensure_ascii=False), encoding="utf-8")
+    missing_path.write_text(json.dumps(missing_trade_day_daily_ops, ensure_ascii=False), encoding="utf-8")
     os.utime(current_path, (1_000, 1_000))
     os.utime(future_path, (2_000, 2_000))
+    os.utime(malformed_path, (3_000, 3_000))
+    os.utime(missing_path, (4_000, 4_000))
     monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
 
     latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
