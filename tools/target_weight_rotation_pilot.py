@@ -45,6 +45,8 @@ DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 DEFAULT_MAX_ORDER_ADV_PCT = 5.0
 TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
+AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION = 1
+AUTHORIZATION_SNAPSHOT_TYPE = "target_weight_plan_authorization"
 KST = timezone(timedelta(hours=9))
 NO_ORDER_OPERATION_ERRORS = (ValueError, DataCollectionError)
 REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS = {
@@ -279,8 +281,8 @@ def build_pilot_authorization_snapshot(
 ) -> dict[str, Any]:
     portfolio_drawdown_guard = plan.diagnostics.get("portfolio_drawdown_guard")
     snapshot = {
-        "schema_version": 1,
-        "snapshot_type": "target_weight_plan_authorization",
+        "schema_version": AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION,
+        "snapshot_type": AUTHORIZATION_SNAPSHOT_TYPE,
         "candidate_id": plan.candidate_id,
         "as_of_date": plan.as_of_date,
         "trade_day": plan.trade_day,
@@ -453,6 +455,8 @@ def validate_pilot_authorization_snapshot(
 
     expected = build_pilot_authorization_snapshot(plan)
     checks: list[tuple[str, Any, Any]] = [
+        ("schema_version", snapshot.get("schema_version"), expected["schema_version"]),
+        ("snapshot_type", snapshot.get("snapshot_type"), expected["snapshot_type"]),
         ("candidate_id", snapshot.get("candidate_id"), expected["candidate_id"]),
         ("as_of_date", snapshot.get("as_of_date"), expected["as_of_date"]),
         ("trade_day", snapshot.get("trade_day"), expected["trade_day"]),
