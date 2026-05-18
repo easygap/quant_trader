@@ -318,6 +318,50 @@ def _load_latest_target_weight_daily_ops(
     return None
 
 
+def _load_target_weight_current_blockers_run_guard(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> dict:
+    path = Path(reports_dir) / "current_blockers.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    candidates: list[dict] = []
+    next_actions = payload.get("next_actions")
+    if isinstance(next_actions, list):
+        candidates.extend(
+            action
+            for action in next_actions
+            if isinstance(action, dict) and action.get("strategy") == strategy
+        )
+
+    runbook = payload.get("operator_runbook")
+    if isinstance(runbook, dict) and runbook.get("primary_strategy") == strategy:
+        priority = runbook.get("current_priority_action")
+        if isinstance(priority, dict):
+            candidates.append(priority)
+        sequence = runbook.get("sequence")
+        if isinstance(sequence, list):
+            candidates.extend(step for step in sequence if isinstance(step, dict))
+
+    for candidate in candidates:
+        guard = {
+            key: candidate[key]
+            for key in ("not_before_date", "premature_run_guard")
+            if candidate.get(key)
+        }
+        if guard:
+            return guard
+    return {}
+
+
 def _current_kst_date() -> str:
     return datetime.now(KST).date().isoformat()
 
@@ -358,11 +402,31 @@ def _print_target_weight_daily_ops_status(
     next_daily_ops_command = operator_commands.get("next_daily_ops_summary") or ""
     next_readiness_command = operator_commands.get("next_readiness_audit") or ""
     next_operator_trade_day = summary.get("next_operator_trade_day")
+    run_guard = _load_target_weight_current_blockers_run_guard(
+        strategy,
+        reports_dir=reports_dir,
+    )
+    not_before_date = (
+        run_guard.get("not_before_date")
+        or summary.get("not_before_date")
+        or (
+            next_operator_trade_day
+            if summary.get("status") == "PILOT_EVIDENCE_RECORDED"
+            else None
+        )
+    )
+    premature_run_guard = run_guard.get("premature_run_guard") or summary.get(
+        "premature_run_guard"
+    )
     print("\n  Target-weight Daily Ops:")
     print(f"    Status: {summary.get('status', 'unknown')}")
     print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
     if next_operator_trade_day:
         print(f"    Next operator trade day: {next_operator_trade_day}")
+    if not_before_date:
+        print(f"    Not before date: {not_before_date}")
+    if premature_run_guard:
+        print(f"    Premature run guard: {premature_run_guard}")
     print(
         "    Verified pilot days: "
         f"{progress.get('verified_pilot_days', 0)}/{progress.get('target_days', 'N/A')}"
