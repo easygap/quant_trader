@@ -1253,14 +1253,24 @@ def test_build_current_blockers_report_from_promotion_summary():
     assert report["next_actions"][0]["strategy"] == "target_weight_best"
     assert report["next_actions"][0]["command"] == (
         "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --daily-ops-summary"
+    )
+    assert report["next_actions"][0]["follow_up"] == (
+        "python tools/target_weight_rotation_pilot.py "
         "--candidate-id target_weight_best --readiness-audit"
     )
-    assert report["next_actions"][1]["order_safety"] == "paper_order_only"
+    assert report["next_actions"][1]["command"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --readiness-audit"
+    )
+    assert report["next_actions"][2]["order_safety"] == "paper_order_only"
+    assert report["next_actions"][2]["command"].startswith("# blocked:")
     assert report["operator_runbook"]["primary_strategy"] == "target_weight_best"
     assert report["operator_runbook"]["commands"]["daily_ops_summary"] == (
         "python tools/target_weight_rotation_pilot.py "
         "--candidate-id target_weight_best --daily-ops-summary"
     )
+    assert report["operator_runbook"]["commands"]["execute_capped_paper_after_ready"].startswith("# blocked:")
     assert report["operator_runbook"]["sequence"][0]["order_safety"] == "no_order"
     assert "target_weight_best" in report["default_strategy"]
 
@@ -1472,6 +1482,79 @@ def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
     assert action["desc"].startswith("readiness artifact의 추천 cap 승인")
     assert "--enable" in action["command"]
     assert action["follow_up"].endswith("--readiness-audit")
+    assert report["next_actions"][1]["command"].startswith("# blocked:")
+
+
+def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_path):
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "BLOCKED",
+        "evidence_progress": {"verified_pilot_days": 0, "shadow_days": 0},
+        "decision": {
+            "blocking_reasons": [
+                "launch_readiness: clean_final_days 0/3",
+                "notifier: Discord webhook 미설정",
+            ],
+        },
+        "operator_commands": {
+            "collect_shadow_days": (
+                f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy} "
+                "--shadow-days 3 --shadow-end-date 2026-05-18"
+            ),
+            "execute_capped_paper": (
+                f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy} "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (paper_runtime / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action = report["next_actions"][0]
+    assert action["source_path"].endswith(
+        f"paper_runtime/target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    ) or action["source_path"].endswith(
+        f"paper_runtime\\target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    )
+    assert action["desc"].startswith("target-weight shadow 3일 수집")
+    assert action["command"].endswith("--shadow-days 3 --shadow-end-date 2026-05-18")
+    assert report["next_actions"][1]["command"].startswith("# blocked:")
+    assert (
+        report["operator_runbook"]["latest_daily_ops"]["operator_commands"]["execute_capped_paper"]
+        .startswith("# blocked:")
+    )
+
+
+def test_static_paper_experiment_manifest_uses_explicit_target_weight_candidate_and_blocked_execute():
+    manifest_path = Path("reports/paper_experiment_manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    pilot = manifest["target_weight_pilot"]
+    candidate_id = pilot["candidate_id"]
+    run_modes = pilot["run_modes"]
+
+    for key in ("shadow_bootstrap", "daily_ops_summary", "readiness_audit"):
+        assert f"--candidate-id {candidate_id}" in run_modes[key]
+
+    assert run_modes["execute_capped_paper"].startswith("# blocked:")
+    assert "--execute --collect-evidence" not in run_modes["execute_capped_paper"]
 
 
 def test_current_blockers_check_detects_stale_report(tmp_path):
