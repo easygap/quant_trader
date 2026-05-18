@@ -938,6 +938,49 @@ def test_target_weight_daily_ops_cli_marks_not_checked_gates(monkeypatch, tmp_pa
     assert "market session: N/A (PASS)" not in output
 
 
+def test_target_weight_daily_ops_cli_writes_failure_artifact(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    def fail_daily_ops(**kwargs):
+        raise ValueError("target_weight_sector_map_missing: sector map is required")
+
+    monkeypatch.setattr(twp, "run_daily_ops_summary", fail_daily_ops)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--candidate-id",
+            "target_weight_rotation_test",
+            "--daily-ops-summary",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    artifacts = list(tmp_path.glob("target_weight_daily_ops_summary_failure_*.json"))
+    reports = list(tmp_path.glob("target_weight_daily_ops_summary_failure_*.md"))
+    assert len(artifacts) == 1
+    assert len(reports) == 1
+    payload = json.loads(artifacts[0].read_text(encoding="utf-8"))
+    report = reports[0].read_text(encoding="utf-8")
+
+    assert exc.value.code == 1
+    assert "status: BLOCKED" in output
+    assert "orders_submitted: false" in output
+    assert payload["artifact_type"] == "target_weight_no_order_operation_failure"
+    assert payload["mode"] == "daily_ops_summary"
+    assert payload["status"] == "BLOCKED"
+    assert payload["no_order_safety"]["orders_submitted"] is False
+    assert "target_weight_sector_map_missing" in payload["reason"]
+    assert "Target-weight No-order Operation Failure" in report
+    assert "target_weight_sector_map_missing" in report
+
+
 def test_target_weight_readiness_cli_marks_not_checked_gates(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
@@ -1027,6 +1070,49 @@ def test_target_weight_readiness_cli_marks_not_checked_gates(monkeypatch, tmp_pa
     assert "pilot auth snapshot: NOT CHECKED - pilot authorization snapshot check not required" in output
     assert "execution day: N/A (PASS)" not in output
     assert "market session: N/A (PASS)" not in output
+
+
+def test_target_weight_readiness_cli_writes_failure_artifact(monkeypatch, tmp_path, capsys):
+    import tools.target_weight_rotation_pilot as twp
+
+    def fail_readiness(**kwargs):
+        raise ValueError("target_weight_sector_map_missing: sector map is required")
+
+    monkeypatch.setattr(twp, "run_pilot_readiness_audit", fail_readiness)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--candidate-id",
+            "target_weight_rotation_test",
+            "--readiness-audit",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    artifacts = list(tmp_path.glob("target_weight_readiness_audit_failure_*.json"))
+    reports = list(tmp_path.glob("target_weight_readiness_audit_failure_*.md"))
+    assert len(artifacts) == 1
+    assert len(reports) == 1
+    payload = json.loads(artifacts[0].read_text(encoding="utf-8"))
+    report = reports[0].read_text(encoding="utf-8")
+
+    assert exc.value.code == 1
+    assert "status: BLOCKED" in output
+    assert "orders_submitted: false" in output
+    assert payload["artifact_type"] == "target_weight_no_order_operation_failure"
+    assert payload["mode"] == "readiness_audit"
+    assert payload["status"] == "BLOCKED"
+    assert payload["no_order_safety"]["pilot_evidence_recorded"] is False
+    assert "target_weight_sector_map_missing" in payload["reason"]
+    assert "Target-weight No-order Operation Failure" in report
+    assert "target_weight_sector_map_missing" in report
 
 
 def test_target_weight_pilot_control_enable_guard_blocks_requested_caps(monkeypatch, tmp_path):
