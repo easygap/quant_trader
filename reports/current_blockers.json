@@ -71,7 +71,11 @@
       "daily_ops_trade_day": "2026-05-18",
       "verified_pilot_days": 0,
       "shadow_days": 3,
-      "desc": "Discord webhook 도달성 확인 preflight 실행",
+      "desc": "Discord webhook 설정 후 도달성 확인 preflight 실행",
+      "setup_required": true,
+      "required_env": "DISCORD_WEBHOOK_URL",
+      "config_path": "config/settings.yaml: discord.enabled=true",
+      "setup_hint": ".env의 DISCORD_WEBHOOK_URL을 채운 뒤 preflight test send를 실행",
       "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
       "order_safety": "no_order"
     },
@@ -117,9 +121,13 @@
       },
       {
         "step": 3,
-        "desc": "Discord webhook 도달성 확인 preflight 실행",
+        "desc": "Discord webhook 설정 후 도달성 확인 preflight 실행",
         "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
-        "order_safety": "no_order"
+        "order_safety": "no_order",
+        "setup_required": true,
+        "required_env": "DISCORD_WEBHOOK_URL",
+        "config_path": "config/settings.yaml: discord.enabled=true",
+        "setup_hint": ".env의 DISCORD_WEBHOOK_URL을 채운 뒤 preflight test send를 실행"
       },
       {
         "step": 4,
@@ -282,7 +290,11 @@
       "daily_ops_trade_day": "2026-05-18",
       "verified_pilot_days": 0,
       "shadow_days": 3,
-      "desc": "Discord webhook 도달성 확인 preflight 실행",
+      "desc": "Discord webhook 설정 후 도달성 확인 preflight 실행",
+      "setup_required": true,
+      "required_env": "DISCORD_WEBHOOK_URL",
+      "config_path": "config/settings.yaml: discord.enabled=true",
+      "setup_hint": ".env의 DISCORD_WEBHOOK_URL을 채운 뒤 preflight test send를 실행",
       "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
       "order_safety": "no_order"
     }
