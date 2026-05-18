@@ -267,14 +267,16 @@ def run_status(strategy):
         print(f"  Max notional/trade: {auth.max_notional_per_trade:,}")
         print(f"  Max exposure: {auth.max_gross_exposure:,}")
 
+    is_target_weight = _is_target_weight_strategy_for_enable(strategy)
     check = check_pilot_entry(strategy)
-    print(f"\n  Entry Check: {'ALLOWED' if check.allowed else 'BLOCKED'}")
+    entry_label = "Core Entry Check" if is_target_weight else "Entry Check"
+    print(f"\n  {entry_label}: {'ALLOWED' if check.allowed else 'BLOCKED'}")
     print(f"  Reason: {check.reason}")
     if check.remaining_orders is not None:
         print(f"  Remaining orders: {check.remaining_orders}")
     if check.remaining_exposure is not None:
         print(f"  Remaining exposure: {check.remaining_exposure:,}")
-    if _is_target_weight_strategy_for_enable(strategy):
+    if is_target_weight:
         _print_target_weight_daily_ops_status(strategy)
 
 
