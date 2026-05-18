@@ -1871,6 +1871,64 @@ def test_paper_pilot_control_enable_writes_target_weight_plan_snapshot(monkeypat
     assert captured["target_weight_plan_snapshot"]["params_hash"] == plan.params_hash
 
 
+def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, capsys):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {
+                    "post_evidence_diagnostics": [
+                        "execution_idempotency: duplicate",
+                        "pilot_authorization_snapshot: stale same-day approval",
+                    ],
+                },
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: pilot_paper evidence already recorded for 2026-04-10",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops" in output
+    assert "Status: PILOT_EVIDENCE_RECORDED" in output
+    assert "Verified pilot days: 1/60" in output
+    assert "Post-evidence diagnostics: 2" in output
+    assert "Adapter execution: BLOCKED by daily ops" in output
+    assert "pilot_paper evidence already recorded" in output
+    assert str(summary_path) in output
+
+
+def test_paper_pilot_control_status_prints_daily_ops_command_when_missing(tmp_path, capsys):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops: MISSING" in output
+    assert f"--candidate-id {strategy} --daily-ops-summary" in output
+
+
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
