@@ -806,7 +806,7 @@ class DataCollector:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
             temp_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
             temp_path.replace(cache_path)
