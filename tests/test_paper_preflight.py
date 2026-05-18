@@ -167,8 +167,9 @@ class TestPreflightBasic:
 
 class TestNotifierHealth:
 
-    def test_webhook_not_configured(self, evidence_dir, runtime_dir, fresh_db):
+    def test_webhook_not_configured(self, monkeypatch, evidence_dir, runtime_dir, fresh_db):
         """webhook 미설정 → notifier_health=unconfigured, warn."""
+        monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
         _seed_v2(evidence_dir, "notif_s", [
             {"date": "2026-04-06", "benchmark_status": "final"},
         ])
