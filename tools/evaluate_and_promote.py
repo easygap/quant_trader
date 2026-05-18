@@ -1262,6 +1262,7 @@ def build_current_blockers_report(
     blocker_summary: dict,
     *,
     latest_daily_ops: dict | None = None,
+    generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
     if not isinstance(blocker_summary, dict):
@@ -1373,8 +1374,9 @@ def build_current_blockers_report(
     return {
         "artifact_type": "current_go_live_blockers",
         "schema_version": CURRENT_BLOCKERS_SCHEMA_VERSION,
-        "generated_at": blocker_summary.get("generated_at") or datetime.now().isoformat(),
+        "generated_at": generated_at or datetime.now().isoformat(),
         "source": "reports/promotion/promotion_blocker_summary.json",
+        "source_generated_at": blocker_summary.get("generated_at"),
         "source_artifact_hash": blocker_summary.get("source_artifact_hash"),
         "go_live": go_live,
         "verdict": verdict,
