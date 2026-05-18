@@ -2025,12 +2025,27 @@ def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypa
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute"
         },
     }
+    malformed_summary = {
+        **current_summary,
+        "trade_day": "not-a-date",
+        "status": "READY_TO_EXECUTE",
+    }
+    missing_trade_day_summary = {
+        key: value for key, value in current_summary.items() if key != "trade_day"
+    }
+    missing_trade_day_summary["status"] = "READY_TO_EXECUTE"
     current_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
     future_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-13.json"
+    malformed_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_malformed.json"
+    missing_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_missing_trade_day.json"
     current_path.write_text(json.dumps(current_summary, ensure_ascii=False), encoding="utf-8")
     future_path.write_text(json.dumps(future_summary, ensure_ascii=False), encoding="utf-8")
+    malformed_path.write_text(json.dumps(malformed_summary, ensure_ascii=False), encoding="utf-8")
+    missing_path.write_text(json.dumps(missing_trade_day_summary, ensure_ascii=False), encoding="utf-8")
     os.utime(current_path, (1_000, 1_000))
     os.utime(future_path, (2_000, 2_000))
+    os.utime(malformed_path, (3_000, 3_000))
+    os.utime(missing_path, (4_000, 4_000))
     monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
 
     summary = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
