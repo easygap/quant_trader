@@ -22,12 +22,14 @@ Usage:
 import argparse
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 PROMOTION_METADATA_PATH = Path("reports/promotion/run_metadata.json")
+KST = timezone(timedelta(hours=9))
 REPORTS_DIR = Path("reports")
 TARGET_WEIGHT_BASE_STRATEGIES = frozenset({"target_weight_rotation"})
 TARGET_WEIGHT_SUGGESTED_CAP_FIELDS = (
@@ -307,9 +309,28 @@ def _load_latest_target_weight_daily_ops(
             continue
         if payload.get("candidate_id") != strategy:
             continue
+        if not _daily_ops_trade_day_is_available(payload):
+            continue
         payload["source_path"] = str(path)
         return payload
     return None
+
+
+def _current_kst_date() -> str:
+    return datetime.now(KST).date().isoformat()
+
+
+def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
+    trade_day = str(payload.get("trade_day") or "").strip()
+    if not trade_day:
+        return True
+    today = current_date or _current_kst_date()
+    try:
+        trade_date = datetime.strptime(trade_day, "%Y-%m-%d").date()
+        current = datetime.strptime(today, "%Y-%m-%d").date()
+        return trade_date <= current
+    except ValueError:
+        return True
 
 
 def _print_target_weight_daily_ops_status(
