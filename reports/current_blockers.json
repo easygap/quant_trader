@@ -1,8 +1,9 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-13T14:07:37.832443",
+  "generated_at": "2026-05-18T14:32:10.853597",
   "source": "reports/promotion/promotion_blocker_summary.json",
+  "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
   "go_live": false,
   "verdict": "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음",
