@@ -3867,6 +3867,147 @@ def write_target_weight_daily_ops_summary(
     return json_path, md_path
 
 
+def _safe_path_component(value: str) -> str:
+    return "".join(
+        char if char.isalnum() or char in {"_", "-"} else "_"
+        for char in str(value)
+    ).strip("_") or "target_weight"
+
+
+def _base_no_order_command(
+    *,
+    candidate_id: str,
+    as_of_date: str | None = None,
+    raw_symbols: str | None = None,
+) -> str:
+    command = f"python tools/target_weight_rotation_pilot.py --candidate-id {candidate_id}"
+    if as_of_date:
+        command += f" --as-of-date {as_of_date}"
+    if raw_symbols:
+        command += f' --symbols "{raw_symbols}"'
+    return command
+
+
+def build_no_order_operation_failure_artifact(
+    *,
+    mode: str,
+    candidate_id: str,
+    error: Exception,
+    as_of_date: str | None = None,
+    raw_symbols: str | None = None,
+) -> dict[str, Any]:
+    """주문 없는 운영 점검이 plan 생성 전에 막혀도 blocker artifact를 남긴다."""
+    base_command = _base_no_order_command(
+        candidate_id=candidate_id,
+        as_of_date=as_of_date,
+        raw_symbols=raw_symbols,
+    )
+    reason = f"target_weight_{mode}_blocked: {error}"
+    return {
+        "artifact_type": "target_weight_no_order_operation_failure",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "mode": mode,
+        "candidate_id": candidate_id,
+        "as_of_date": as_of_date,
+        "status": "BLOCKED",
+        "reason": reason,
+        "blocking_reasons": [reason],
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "operator_commands": {
+            "daily_ops_summary": f"{base_command} --daily-ops-summary",
+            "readiness_audit": f"{base_command} --readiness-audit",
+            "check_promotion_artifacts": "python tools/evaluate_and_promote.py --check-only",
+        },
+        "no_order_safety": {
+            "orders_submitted": False,
+            "shadow_evidence_recorded": False,
+            "pilot_evidence_recorded": False,
+            "pilot_session_written": False,
+            "failure_artifact_only": True,
+        },
+    }
+
+
+def render_no_order_operation_failure_markdown(payload: dict[str, Any]) -> str:
+    commands = payload.get("operator_commands") or {}
+    error = payload.get("error") or {}
+    lines = [
+        "# Target-weight No-order Operation Failure",
+        "",
+        f"- Candidate: `{payload.get('candidate_id')}`",
+        f"- Mode: `{payload.get('mode')}`",
+        f"- Status: **{payload.get('status', 'BLOCKED')}**",
+        f"- Reason: {payload.get('reason', '')}",
+        f"- Error type: `{error.get('type', 'unknown')}`",
+        f"- Error message: {error.get('message', '')}",
+        "",
+        "## Blocking Reasons",
+    ]
+    lines.extend([f"- {reason}" for reason in payload.get("blocking_reasons") or []] or ["- none"])
+    lines.extend([
+        "",
+        "## Operator Commands",
+        "",
+        "### Check Promotion Artifacts",
+        "```bash",
+        commands.get("check_promotion_artifacts", ""),
+        "```",
+        "",
+        "### Daily Ops Summary",
+        "```bash",
+        commands.get("daily_ops_summary", ""),
+        "```",
+        "",
+        "### Readiness Audit",
+        "```bash",
+        commands.get("readiness_audit", ""),
+        "```",
+        "",
+        "## No-order Safety",
+        "- orders_submitted: false",
+        "- pilot_evidence_recorded: false",
+        "- pilot_session_written: false",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def write_no_order_operation_failure_artifacts(
+    payload: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(payload.get("candidate_id") or "target_weight"))
+    mode = _safe_path_component(str(payload.get("mode") or "operation"))
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    stem = f"target_weight_{mode}_failure_{candidate}_{stamp}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(render_no_order_operation_failure_markdown(payload), encoding="utf-8")
+    return json_path, md_path
+
+
+def _print_no_order_failure(
+    *,
+    label: str,
+    payload: dict[str, Any],
+    artifact_path: Path,
+    report_path: Path,
+) -> None:
+    print(f"\nTarget-weight {label}")
+    print(f"  candidate: {payload['candidate_id']}")
+    print(f"  status: BLOCKED")
+    print(f"  blocker: {payload['reason']}")
+    print(f"  artifact: {artifact_path}")
+    print(f"  report: {report_path}")
+    print("  orders_submitted: false")
+
+
 def _pilot_readiness_audit_path_stem(audit: dict[str, Any]) -> str:
     return f"target_weight_pilot_readiness_audit_{audit['candidate_id']}_{audit['trade_day']}"
 
@@ -5064,16 +5205,36 @@ def main() -> None:
                 "--execute, --collect-evidence, or --record-shadow-evidence"
             )
 
-        result = run_daily_ops_summary(
-            candidate_id=args.candidate_id,
-            raw_symbols=args.symbols,
-            as_of_date=args.as_of_date,
-            cash=args.cash,
-            allow_rerun=args.allow_rerun,
-            preview_caps=preview_caps,
-            max_order_adv_pct=args.max_order_adv_pct,
-            output_dir=Path(args.output_dir),
-        )
+        try:
+            result = run_daily_ops_summary(
+                candidate_id=args.candidate_id,
+                raw_symbols=args.symbols,
+                as_of_date=args.as_of_date,
+                cash=args.cash,
+                allow_rerun=args.allow_rerun,
+                preview_caps=preview_caps,
+                max_order_adv_pct=args.max_order_adv_pct,
+                output_dir=Path(args.output_dir),
+            )
+        except ValueError as exc:
+            failure = build_no_order_operation_failure_artifact(
+                mode="daily_ops_summary",
+                candidate_id=args.candidate_id,
+                as_of_date=args.as_of_date,
+                raw_symbols=args.symbols,
+                error=exc,
+            )
+            artifact_path, report_path = write_no_order_operation_failure_artifacts(
+                failure,
+                output_dir=Path(args.output_dir),
+            )
+            _print_no_order_failure(
+                label="daily ops summary",
+                payload=failure,
+                artifact_path=artifact_path,
+                report_path=report_path,
+            )
+            raise SystemExit(1)
         summary = result["daily_ops_summary"]
         progress = summary["evidence_progress"]
         print("\nTarget-weight daily ops summary")
@@ -5129,16 +5290,36 @@ def main() -> None:
                 "--collect-evidence, or --record-shadow-evidence"
             )
 
-        result = run_pilot_readiness_audit(
-            candidate_id=args.candidate_id,
-            raw_symbols=args.symbols,
-            as_of_date=args.as_of_date,
-            cash=args.cash,
-            allow_rerun=args.allow_rerun,
-            preview_caps=preview_caps,
-            max_order_adv_pct=args.max_order_adv_pct,
-            output_dir=Path(args.output_dir),
-        )
+        try:
+            result = run_pilot_readiness_audit(
+                candidate_id=args.candidate_id,
+                raw_symbols=args.symbols,
+                as_of_date=args.as_of_date,
+                cash=args.cash,
+                allow_rerun=args.allow_rerun,
+                preview_caps=preview_caps,
+                max_order_adv_pct=args.max_order_adv_pct,
+                output_dir=Path(args.output_dir),
+            )
+        except ValueError as exc:
+            failure = build_no_order_operation_failure_artifact(
+                mode="readiness_audit",
+                candidate_id=args.candidate_id,
+                as_of_date=args.as_of_date,
+                raw_symbols=args.symbols,
+                error=exc,
+            )
+            artifact_path, report_path = write_no_order_operation_failure_artifacts(
+                failure,
+                output_dir=Path(args.output_dir),
+            )
+            _print_no_order_failure(
+                label="pilot readiness audit",
+                payload=failure,
+                artifact_path=artifact_path,
+                report_path=report_path,
+            )
+            raise SystemExit(1)
         audit = result["audit"]
         plan_summary = audit["plan_summary"]
         launch = audit["launch_readiness"]
