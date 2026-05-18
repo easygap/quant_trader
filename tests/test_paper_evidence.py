@@ -2140,6 +2140,27 @@ class TestShadowEvidenceNotPromotable:
         assert valid is False
         assert reason == "target_weight_benchmark_status_not_final"
 
+    def test_target_weight_pilot_proof_excludes_repaired_performance_by_default(self):
+        from core.paper_evidence import _target_weight_record_proof_status
+
+        record = _target_weight_pilot_proof_record()
+        record["benchmark_meta"] = {
+            "performance_repair": True,
+            "repair_source": "target_weight_execution.pre_trade_risk_check",
+        }
+
+        valid, reason = _target_weight_record_proof_status(record["strategy"], record)
+        repair_valid, repair_reason = _target_weight_record_proof_status(
+            record["strategy"],
+            record,
+            allow_repaired_performance=True,
+        )
+
+        assert valid is False
+        assert reason == "target_weight_repaired_performance_not_promotable"
+        assert repair_valid is True
+        assert repair_reason == "verified_target_weight_pilot_evidence"
+
     def test_target_weight_pilot_proof_requires_excess_metrics(self):
         from core.paper_evidence import _target_weight_record_proof_status
 
