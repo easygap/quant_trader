@@ -64,12 +64,13 @@
       ]
     },
     "run_modes": {
-      "shadow_bootstrap": "python tools/target_weight_rotation_pilot.py --shadow-days 3",
-      "readiness_audit": "python tools/target_weight_rotation_pilot.py --readiness-audit",
+      "shadow_bootstrap": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date YYYY-MM-DD",
+      "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+      "readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
       "enable_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable --from YYYY-MM-DD --to YYYY-MM-DD --max-orders N --max-positions N --max-notional N --max-exposure N --reason \"target-weight capped paper pilot\"",
-      "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence"
+      "execute_capped_paper": "# blocked: daily ops summary가 READY_TO_EXECUTE일 때 해당 artifact의 execute_capped_paper 명령만 사용"
     },
-    "operator_notes": "기존 scoring 60영업일 실험과 별개로 신규 target-weight 기본 후보의 실행 증거를 누적한다. readiness audit이 생성하는 target_weight_paper_experiment_manifest_*.json의 추천 cap과 차단 사유를 기준으로 승인·실행한다."
+    "operator_notes": "기존 scoring 60영업일 실험과 별개로 신규 target-weight 기본 후보의 실행 증거를 누적한다. 모든 target-weight 명령은 candidate_id를 명시하고, readiness audit이 생성하는 target_weight_paper_experiment_manifest_*.json의 추천 cap과 차단 사유를 기준으로 승인한다. 실행은 daily ops summary가 READY_TO_EXECUTE일 때 해당 artifact의 execute_capped_paper 명령만 사용한다."
   },
   "operator_notes": "scoring experimental 상태. 모든 전략 검증 미통과. live 전환 불가. 60영업일 관측 후 GoLive 체크."
 }
