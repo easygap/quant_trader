@@ -526,6 +526,10 @@ def _target_weight_pilot_proof_record(
             },
             "target_weight_execution": _target_weight_execution_proof(params_hash),
         },
+        "total_value": 10_000_000,
+        "cash": 3_000_000,
+        "invested": 7_000_000,
+        "position_count": 2,
         "daily_return": 0.1,
         "cumulative_return": 1.0,
         "mdd": -1.0,
@@ -2121,6 +2125,32 @@ class TestShadowEvidenceNotPromotable:
             assert valid is False
             assert reason == expected_reason
 
+    def test_target_weight_pilot_proof_requires_final_performance_evidence(self):
+        from core.paper_evidence import _target_weight_record_proof_status
+
+        record = _target_weight_pilot_proof_record()
+        record["benchmark_status"] = "failed"
+        record["same_universe_excess"] = None
+        record["exposure_matched_excess"] = None
+        record["cash_adjusted_excess"] = None
+        record["total_value"] = 0
+
+        valid, reason = _target_weight_record_proof_status(record["strategy"], record)
+
+        assert valid is False
+        assert reason == "target_weight_benchmark_status_not_final"
+
+    def test_target_weight_pilot_proof_requires_excess_metrics(self):
+        from core.paper_evidence import _target_weight_record_proof_status
+
+        record = _target_weight_pilot_proof_record()
+        record["cash_adjusted_excess"] = None
+
+        valid, reason = _target_weight_record_proof_status(record["strategy"], record)
+
+        assert valid is False
+        assert reason == "target_weight_excess_metrics_missing"
+
     def test_target_weight_promotion_blocks_unbacked_pilot_paper_record(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, generate_promotion_package
 
@@ -2259,6 +2289,45 @@ class TestShadowEvidenceNotPromotable:
         assert pkg["target_weight_params_hash"] == params_hash
         assert pkg["target_weight_verified_pilot_days"] == 60
         assert pkg["pilot_real_paper_days"] == 60
+
+    def test_target_weight_promotion_rejects_failed_benchmark_pilot_day(self, evidence_dir, fresh_db):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "target_weight_rotation_test"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        for i in range(60):
+            record = _target_weight_pilot_proof_record(
+                strategy,
+                record_date=(start + timedelta(days=i)).strftime("%Y-%m-%d"),
+            )
+            record["day_number"] = i + 1
+            record["cumulative_return"] = 6.0
+            if i == 59:
+                record["benchmark_status"] = "failed"
+                record["same_universe_excess"] = None
+                record["exposure_matched_excess"] = None
+                record["cash_adjusted_excess"] = None
+                record["total_value"] = 0
+            _append_jsonl(jsonl_path, record)
+        _seed_paper_trades_for_evidence(
+            strategy,
+            start=start,
+            day_count=59,
+            trades_per_day=2,
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["target_weight_verified_pilot_days"] == 59
+        assert pkg["target_weight_invalid_days"] == 1
+        assert pkg["target_weight_evidence"]["invalid_reasons"] == {
+            "target_weight_benchmark_status_not_final": 1
+        }
+        assert "target_weight_invalid_execution_evidence=1" in pkg["block_reasons"]
+        assert "insufficient_days=59/60" in pkg["block_reasons"]
 
     def test_target_weight_promotion_blocks_mixed_params_hash(self, evidence_dir):
         from core.paper_evidence import _append_jsonl, generate_promotion_package

@@ -1277,6 +1277,32 @@ def _is_target_weight_strategy(
     return metadata_required or strategy.startswith("target_weight_")
 
 
+def _target_weight_record_performance_status(record: dict) -> tuple[bool, str]:
+    if record.get("benchmark_status") != "final":
+        return False, "target_weight_benchmark_status_not_final"
+
+    required_excess_fields = (
+        "same_universe_excess",
+        "exposure_matched_excess",
+        "cash_adjusted_excess",
+    )
+    if any(record.get(field) is None for field in required_excess_fields):
+        return False, "target_weight_excess_metrics_missing"
+
+    if record.get("daily_return") is None:
+        return False, "target_weight_daily_return_missing"
+
+    total_value = record.get("total_value")
+    if total_value is not None:
+        try:
+            if float(total_value) <= 0:
+                return False, "target_weight_portfolio_value_missing"
+        except (TypeError, ValueError):
+            return False, "target_weight_portfolio_value_missing"
+
+    return True, "target_weight_performance_verified"
+
+
 def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[bool, str]:
     if record.get("execution_backed") is not True:
         return False, "not_execution_backed"
@@ -1334,7 +1360,11 @@ def _target_weight_record_proof_status(strategy: str, record: dict) -> tuple[boo
     if position_reconciliation.get("complete") is not True:
         return False, "target_weight_position_reconciliation_incomplete"
 
-    return True, "verified_target_weight_pilot_execution"
+    performance_valid, performance_reason = _target_weight_record_performance_status(record)
+    if not performance_valid:
+        return False, performance_reason
+
+    return True, "verified_target_weight_pilot_evidence"
 
 
 def _target_weight_record_params_hash(record: dict) -> str | None:
