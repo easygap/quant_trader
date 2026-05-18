@@ -4315,7 +4315,7 @@ def build_target_weight_daily_ops_summary(
         next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
     elif pilot_evidence_recorded_today:
         status = "PILOT_EVIDENCE_RECORDED"
-        next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 daily ops 재점검"
+        next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 fresh readiness와 cap 재승인 점검"
     elif audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
@@ -4340,6 +4340,21 @@ def build_target_weight_daily_ops_summary(
     plan = audit.get("plan_summary") or {}
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
+    raw_blocking_reasons = list(audit.get("blocking_reasons") or [])
+    post_evidence_diagnostics: list[str] = []
+    decision_blocking_reasons = raw_blocking_reasons
+    if pilot_evidence_recorded_today:
+        post_evidence_diagnostics = [
+            reason
+            for reason in raw_blocking_reasons
+            if str(reason).startswith("execution_idempotency:")
+            or str(reason).startswith("pilot_authorization_snapshot:")
+        ]
+        decision_blocking_reasons = [
+            reason
+            for reason in raw_blocking_reasons
+            if reason not in post_evidence_diagnostics
+        ]
     operator_commands = dict(audit.get("operator_commands") or {})
     operator_commands.setdefault(
         "repair_pilot_evidence",
@@ -4374,8 +4389,9 @@ def build_target_weight_daily_ops_summary(
             "ready_for_cap_approval": bool(audit.get("ready_for_cap_approval")),
             "ready_for_capped_pilot": bool(audit.get("ready_for_capped_pilot")),
             "readiness_next_action": audit.get("next_action", ""),
-            "blocking_reasons": list(audit.get("blocking_reasons") or []),
+            "blocking_reasons": decision_blocking_reasons,
             "warning_reasons": list(audit.get("warning_reasons") or []),
+            "post_evidence_diagnostics": post_evidence_diagnostics,
             "execution_trade_day_check": execution_trade_day_check,
             "execution_market_session_check": execution_market_session_check,
             "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
@@ -4519,6 +4535,11 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         "## Blocking Reasons",
     ]
     lines.extend([f"- {reason}" for reason in decision.get("blocking_reasons") or []] or ["- none"])
+    lines.extend(["", "## Post-evidence Diagnostics"])
+    lines.extend(
+        [f"- {reason}" for reason in decision.get("post_evidence_diagnostics") or []]
+        or ["- none"]
+    )
     lines.extend(["", "## Warnings"])
     lines.extend([f"- {reason}" for reason in decision.get("warning_reasons") or []] or ["- none"])
     lines.extend([
@@ -6016,12 +6037,22 @@ def main() -> None:
             "pilot_authorization_snapshot_check",
             {},
         )
-        print(
-            "  pilot auth snapshot: "
-            f"{_check_display_status(authorization_snapshot)} - "
-            f"{authorization_snapshot.get('reason', 'not checked')}"
-        )
         print(f"  status: {summary['status']}")
+        if (
+            summary["status"] == "PILOT_EVIDENCE_RECORDED"
+            and authorization_snapshot.get("checked", False)
+            and not authorization_snapshot.get("allowed", True)
+        ):
+            print(
+                "  pilot auth snapshot: DIAGNOSTIC - "
+                "same-day evidence already recorded; refresh readiness/caps next business day"
+            )
+        else:
+            print(
+                "  pilot auth snapshot: "
+                f"{_check_display_status(authorization_snapshot)} - "
+                f"{authorization_snapshot.get('reason', 'not checked')}"
+            )
         print(
             "  evidence: "
             f"verified={progress['verified_pilot_days']}/{progress['target_days']} "

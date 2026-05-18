@@ -3311,6 +3311,13 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
         "complete": True,
         "reason": "ok",
     }
+    snapshot_mismatch = {
+        "checked": True,
+        "allowed": False,
+        "complete": False,
+        "reason": "target_weight_pilot_authorization_snapshot_mismatch: stale same-day approval",
+        "mismatches": [{"field": "portfolio_drawdown_guard"}],
+    }
     audit = {
         "candidate_id": plan.candidate_id,
         "trade_day": plan.trade_day,
@@ -3318,14 +3325,15 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
         "ready_for_capped_pilot": False,
         "next_action": "resolve duplicate execution blocker",
         "blocking_reasons": [
-            "execution_idempotency: target_weight_duplicate_execution_attempt"
+            "execution_idempotency: target_weight_duplicate_execution_attempt",
+            "pilot_authorization_snapshot: target_weight_pilot_authorization_snapshot_mismatch",
         ],
         "warning_reasons": [],
         "launch_readiness": {"launch_ready": False},
         "plan_validation": {"allowed": True},
         "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
         "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
-        "pilot_authorization_snapshot_check": pass_check,
+        "pilot_authorization_snapshot_check": snapshot_mismatch,
         "operator_commands": {
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
         },
@@ -3370,9 +3378,16 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
     report = md_path.read_text(encoding="utf-8")
 
     assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
+    assert summary["decision"]["blocking_reasons"] == []
+    assert summary["decision"]["post_evidence_diagnostics"] == [
+        "execution_idempotency: target_weight_duplicate_execution_attempt",
+        "pilot_authorization_snapshot: target_weight_pilot_authorization_snapshot_mismatch",
+    ]
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
     assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
+    assert "fresh readiness" in summary["next_step"]
     assert "PILOT_EVIDENCE_RECORDED" in report
+    assert "Post-evidence Diagnostics" in report
 
 
 def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
