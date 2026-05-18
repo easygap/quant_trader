@@ -1884,6 +1884,7 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
+                "next_operator_trade_day": "2026-04-13",
                 "status": "PILOT_EVIDENCE_RECORDED",
                 "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
                 "evidence_progress": {
@@ -1898,6 +1899,16 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
                 },
                 "operator_commands": {
                     "execute_capped_paper": "# blocked: pilot_paper evidence already recorded for 2026-04-10",
+                    "next_daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate --as-of-date 2026-04-13 "
+                        "--daily-ops-summary"
+                    ),
+                    "next_readiness_audit": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate --as-of-date 2026-04-13 "
+                        "--readiness-audit"
+                    ),
                 },
             },
             ensure_ascii=False,
@@ -1910,10 +1921,15 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
     output = capsys.readouterr().out
     assert "Target-weight Daily Ops" in output
     assert "Status: PILOT_EVIDENCE_RECORDED" in output
+    assert "Next operator trade day: 2026-04-13" in output
     assert "Verified pilot days: 1/60" in output
     assert "Post-evidence diagnostics: 2" in output
     assert "Adapter execution: BLOCKED by daily ops" in output
     assert "pilot_paper evidence already recorded" in output
+    assert "Next daily ops command:" in output
+    assert "--as-of-date 2026-04-13 --daily-ops-summary" in output
+    assert "Next readiness command:" in output
+    assert "--as-of-date 2026-04-13 --readiness-audit" in output
     assert str(summary_path) in output
 
 

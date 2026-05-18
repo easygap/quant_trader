@@ -332,9 +332,14 @@ def _print_target_weight_daily_ops_status(
     diagnostics = decision.get("post_evidence_diagnostics") or []
     operator_commands = summary.get("operator_commands") or {}
     execute_command = operator_commands.get("execute_capped_paper") or ""
+    next_daily_ops_command = operator_commands.get("next_daily_ops_summary") or ""
+    next_readiness_command = operator_commands.get("next_readiness_audit") or ""
+    next_operator_trade_day = summary.get("next_operator_trade_day")
     print("\n  Target-weight Daily Ops:")
     print(f"    Status: {summary.get('status', 'unknown')}")
     print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
+    if next_operator_trade_day:
+        print(f"    Next operator trade day: {next_operator_trade_day}")
     print(
         "    Verified pilot days: "
         f"{progress.get('verified_pilot_days', 0)}/{progress.get('target_days', 'N/A')}"
@@ -348,6 +353,10 @@ def _print_target_weight_daily_ops_status(
         else:
             print("    Adapter execution: follow daily ops READY_TO_EXECUTE command only")
         print(f"    Execute command: {execute_command}")
+    if next_daily_ops_command:
+        print(f"    Next daily ops command: {next_daily_ops_command}")
+    if next_readiness_command:
+        print(f"    Next readiness command: {next_readiness_command}")
     print(f"    Source: {summary.get('source_path')}")
 
 
