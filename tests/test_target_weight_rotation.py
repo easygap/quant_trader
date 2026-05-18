@@ -418,6 +418,39 @@ def test_target_weight_plan_applies_sector_cap_to_targets():
     assert plan.targets == ["AAA", "CCC"]
     assert plan.diagnostics["max_targets_per_sector"] == 1
     assert plan.diagnostics["selected_sector_counts"] == {"tech": 1, "finance": 1}
+    assert plan.diagnostics["sector_map_missing_symbols"] == []
+
+
+def test_target_weight_plan_blocks_incomplete_sector_map_before_fetch():
+    from core.target_weight_rotation import build_target_weight_plan
+
+    class PartialSectorCollector:
+        quiet_ohlcv_log = False
+
+        def get_sector_map(self):
+            return {"AAA": "tech"}
+
+        def fetch_korean_stock(self, *_args, **_kwargs):
+            raise AssertionError("incomplete sector map should block before price fetch")
+
+    with pytest.raises(ValueError, match="target_weight_sector_map_incomplete.*BBB"):
+        build_target_weight_plan(
+            symbols=["AAA", "BBB"],
+            params={
+                "target_top_n": 2,
+                "target_exposure": 1.0,
+                "target_tolerance_pct": 0.0,
+                "short_lookback": 1,
+                "long_lookback": 1,
+                "short_weight": 1.0,
+                "score_mode": "absolute",
+                "max_targets_per_sector": 1,
+            },
+            cash=100_000.0,
+            positions={},
+            as_of_date="2025-02-03",
+            collector=PartialSectorCollector(),
+        )
 
 
 def test_target_weight_plan_position_loss_reduction_bypasses_tolerance():
