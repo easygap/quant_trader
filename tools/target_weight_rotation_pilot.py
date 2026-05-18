@@ -5212,12 +5212,18 @@ def run_shadow_bootstrap(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     config: Any | None = None,
     collector: Any | None = None,
+    execution_now: datetime | None = None,
 ) -> dict[str, Any]:
     """Record non-promotable target-weight shadow evidence over a date range."""
     from config.config_loader import Config
     from core.paper_evidence import get_canonical_records
     from core.paper_pilot import check_pilot_entry
 
+    _require_not_future_as_of_date(
+        end_date,
+        context="shadow bootstrap",
+        now=execution_now,
+    )
     config = config or Config.get()
     requested_dates = _date_range(start_date, end_date)
     prebuilt_plans: dict[str, TargetWeightPlan] = {}
@@ -5444,6 +5450,11 @@ def run_pilot(
             "target_weight_collect_evidence_requires_execute: "
             "pilot_paper evidence collection requires --execute --collect-evidence"
         )
+    _require_not_future_as_of_date(
+        as_of_date,
+        context="pilot adapter",
+        now=execution_now,
+    )
 
     config = config or Config.get()
     plan = build_plan(
