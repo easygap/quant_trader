@@ -1915,6 +1915,21 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
         ),
         encoding="utf-8",
     )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "current_priority_action": {
+                        "not_before_date": "2026-04-13",
+                        "premature_run_guard": "target_weight_future_as_of_date_blocked",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
 
@@ -1922,6 +1937,8 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
     assert "Target-weight Daily Ops" in output
     assert "Status: PILOT_EVIDENCE_RECORDED" in output
     assert "Next operator trade day: 2026-04-13" in output
+    assert "Not before date: 2026-04-13" in output
+    assert "Premature run guard: target_weight_future_as_of_date_blocked" in output
     assert "Verified pilot days: 1/60" in output
     assert "Post-evidence diagnostics: 2" in output
     assert "Adapter execution: BLOCKED by daily ops" in output
