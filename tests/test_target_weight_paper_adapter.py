@@ -486,7 +486,8 @@ def test_validate_pilot_authorization_snapshot_blocks_large_money_drift():
 
     plan = _adapter_plan()
     snapshot = twp.build_pilot_authorization_snapshot(plan)
-    snapshot["gross_exposure_after"] += twp.AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW + 1.0
+    tolerance = twp._authorization_snapshot_money_tolerance(snapshot["gross_exposure_after"])
+    snapshot["gross_exposure_after"] += tolerance + 1.0
 
     check = twp.validate_pilot_authorization_snapshot(
         plan,
@@ -497,7 +498,7 @@ def test_validate_pilot_authorization_snapshot_blocks_large_money_drift():
     assert check["complete"] is False
     assert "target_weight_pilot_authorization_snapshot_mismatch" in check["reason"]
     assert check["mismatches"][0]["field"] == "gross_exposure_after"
-    assert check["mismatches"][0]["tolerance"] == twp.AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW
+    assert check["mismatches"][0]["tolerance"] == pytest.approx(tolerance)
 
 
 def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
@@ -644,6 +645,36 @@ def test_authorization_snapshot_tracks_portfolio_drawdown_guard():
     assert snapshot["portfolio_drawdown_guard"] == guard
     assert check["allowed"] is False
     assert check["mismatches"][0]["field"] == "portfolio_drawdown_guard"
+
+
+def test_authorization_snapshot_ignores_portfolio_drawdown_guard_metadata_drift():
+    import tools.target_weight_rotation_pilot as twp
+
+    guard = {
+        "enabled": True,
+        "active": False,
+        "triggered": False,
+        "drawdown_pct": 0.0,
+        "cooldown_after_plan": 0,
+        "state_record_count": 3,
+        "latest_record_date": "2026-05-18",
+    }
+    plan = _adapter_plan()
+    plan = replace(plan, diagnostics={**plan.diagnostics, "portfolio_drawdown_guard": guard})
+
+    stale_snapshot = twp.build_pilot_authorization_snapshot(plan)
+    stale_snapshot["portfolio_drawdown_guard"] = {
+        **guard,
+        "state_record_count": 2,
+        "latest_record_date": "2026-05-15",
+    }
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+
+    assert check["allowed"] is True
+    assert check["mismatches"] == []
 
 
 def test_build_pilot_evidence_caps_snapshot_persists_portfolio_drawdown_guard():
@@ -1261,7 +1292,15 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
                     "allowed": True,
                     "reason": "proposed pilot caps satisfied",
                 },
-                "cap_recommendation": {"suggested_caps": suggested_caps},
+                "cap_recommendation": {
+                    "minimum_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_200_000,
+                        "max_gross_exposure": 3_200_000,
+                    },
+                    "suggested_caps": suggested_caps,
+                },
             },
             "artifact_path": tmp_path / "audit.json",
             "report_path": tmp_path / "audit.md",
@@ -1285,7 +1324,108 @@ def test_target_weight_pilot_control_enable_guard_passes_safe_requested_caps(mon
     assert result["audit"]["cap_preview"]["allowed"] is True
 
 
-def test_target_weight_pilot_control_enable_guard_requires_exact_suggested_caps(monkeypatch, tmp_path):
+def test_target_weight_pilot_control_enable_guard_allows_tighter_safe_caps(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "tighter caps still satisfy the plan",
+                },
+                "cap_recommendation": {
+                    "minimum_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_200_000,
+                        "max_gross_exposure": 3_200_000,
+                    },
+                    "suggested_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_310_000,
+                        "max_gross_exposure": 3_350_000,
+                    },
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    result = _target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+
+
+def test_target_weight_pilot_control_enable_guard_allows_one_step_money_cap_drift(monkeypatch, tmp_path):
+    from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
+    from tools.paper_pilot_control import _target_weight_enable_guard
+
+    def fake_run_pilot_readiness_audit(**kwargs):
+        return {
+            "audit": {
+                "ready_for_cap_approval": True,
+                "blocking_reasons": [],
+                "cap_preview": {
+                    "allowed": True,
+                    "reason": "one rounding step drift still satisfies the plan",
+                },
+                "cap_recommendation": {
+                    "minimum_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_200_000,
+                        "max_gross_exposure": 3_200_000,
+                    },
+                    "suggested_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_290_000,
+                        "max_gross_exposure": 3_290_000,
+                    },
+                    "rounding_step": 10_000,
+                },
+            },
+            "artifact_path": tmp_path / "audit.json",
+            "report_path": tmp_path / "audit.md",
+        }
+
+    monkeypatch.setattr(
+        "tools.target_weight_rotation_pilot.run_pilot_readiness_audit",
+        fake_run_pilot_readiness_audit,
+    )
+    args = SimpleNamespace(
+        strategy=DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+        valid_from="2026-04-10",
+        max_orders=3,
+        max_positions=3,
+        max_notional=1_300_000,
+        max_exposure=3_300_000,
+    )
+
+    result = _target_weight_enable_guard(args)
+
+    assert result["audit"]["cap_preview"]["allowed"] is True
+
+
+def test_target_weight_pilot_control_enable_guard_blocks_caps_above_suggested(monkeypatch, tmp_path):
     from core.target_weight_rotation import DEFAULT_TARGET_WEIGHT_CANDIDATE_ID
     from tools.paper_pilot_control import _target_weight_enable_guard
 
@@ -1299,6 +1439,12 @@ def test_target_weight_pilot_control_enable_guard_requires_exact_suggested_caps(
                     "reason": "looser caps still satisfy the plan",
                 },
                 "cap_recommendation": {
+                    "minimum_caps": {
+                        "max_orders_per_day": 3,
+                        "max_concurrent_positions": 3,
+                        "max_notional_per_trade": 1_200_000,
+                        "max_gross_exposure": 3_200_000,
+                    },
                     "suggested_caps": {
                         "max_orders_per_day": 3,
                         "max_concurrent_positions": 3,
@@ -1324,7 +1470,7 @@ def test_target_weight_pilot_control_enable_guard_requires_exact_suggested_caps(
         max_exposure=4_000_000,
     )
 
-    with pytest.raises(ValueError, match="must exactly match readiness suggested caps"):
+    with pytest.raises(ValueError, match="must stay within readiness cap envelope"):
         _target_weight_enable_guard(args)
 
 
@@ -2510,10 +2656,31 @@ def test_pilot_plan_validation_uses_net_exposure_increase_for_existing_positions
     assert validation.allowed is True
 
 
-def test_recommend_pilot_caps_matches_target_weight_plan():
-    from tools.target_weight_rotation_pilot import recommend_pilot_caps
+def test_pilot_valid_to_counts_inclusive_krx_business_days(monkeypatch):
+    import tools.target_weight_rotation_pilot as twp
 
-    rec = recommend_pilot_caps(_adapter_plan())
+    monkeypatch.setattr(twp, "_load_kr_market_holidays", lambda: {"2026-04-14"})
+
+    assert twp._pilot_valid_to("2026-04-10", target_pilot_days=3) == "2026-04-15"
+
+
+def test_pilot_valid_to_rejects_invalid_target_days():
+    import tools.target_weight_rotation_pilot as twp
+
+    with pytest.raises(ValueError, match="target_pilot_days"):
+        twp._pilot_valid_to("2026-04-10", target_pilot_days=0)
+
+
+def test_recommend_pilot_caps_matches_target_weight_plan(monkeypatch):
+    import tools.target_weight_rotation_pilot as twp
+
+    monkeypatch.setattr(
+        twp,
+        "_load_kr_market_holidays",
+        lambda: {"2026-05-05", "2026-05-24", "2026-06-06"},
+    )
+
+    rec = twp.recommend_pilot_caps(_adapter_plan())
     minimum = rec["minimum_caps"]
     suggested = rec["suggested_caps"]
 
@@ -2526,6 +2693,11 @@ def test_recommend_pilot_caps_matches_target_weight_plan():
     assert suggested["max_notional_per_trade"] == 1_260_000
     assert suggested["max_gross_exposure"] == 3_360_000
     assert rec["suggested_preview"]["allowed"] is True
+    assert rec["valid_from"] == "2026-04-10"
+    assert rec["valid_to"] == "2026-07-03"
+    assert rec["target_pilot_days"] == 60
+    assert "YYYY-MM-DD" not in rec["enable_command"]
+    assert "--from 2026-04-10 --to 2026-07-03" in rec["enable_command"]
     assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
 
@@ -2854,6 +3026,86 @@ def test_build_target_weight_daily_ops_summary_allows_execute_only_when_ready(tm
     assert manifest["operator_commands"]["execute_capped_paper"] == execute_command
     assert "# blocked:" not in report
     assert "READY_TO_EXECUTE" in report
+
+
+def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path):
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+        write_target_weight_daily_ops_summary,
+    )
+
+    plan = _adapter_plan()
+    cap_recommendation = recommend_pilot_caps(plan)
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "next_action": "resolve duplicate execution blocker",
+        "blocking_reasons": [
+            "execution_idempotency: target_weight_duplicate_execution_attempt"
+        ],
+        "warning_reasons": [],
+        "launch_readiness": {"launch_ready": False},
+        "plan_validation": {"allowed": True},
+        "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
+        "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+        "pilot_authorization_snapshot_check": pass_check,
+        "operator_commands": {
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 1,
+        "remaining_pilot_days": 59,
+        "progress_ratio": 0.0167,
+        "shadow_days": 2,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 3,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": plan.trade_day,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+    _json_path, md_path = write_target_weight_daily_ops_summary(summary, output_dir=tmp_path)
+    report = md_path.read_text(encoding="utf-8")
+
+    assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
+    assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
+    assert "PILOT_EVIDENCE_RECORDED" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
