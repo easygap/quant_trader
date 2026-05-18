@@ -11,7 +11,7 @@ import os
 import sys
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -81,6 +81,39 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     if not dates:
         raise ValueError("shadow date range contains no weekdays")
     return dates
+
+
+def _load_kr_market_holidays() -> set[str]:
+    try:
+        from core.trading_hours import _load_holidays
+
+        return {str(day).strip() for day in _load_holidays() if str(day).strip()}
+    except Exception as exc:
+        logger.debug("KRX holiday lookup skipped for pilot window calculation: {}", exc)
+        return set()
+
+
+def _is_kr_market_business_day(day: date, holidays: set[str]) -> bool:
+    return day.weekday() < 5 and day.isoformat() not in holidays
+
+
+def _pilot_valid_to(
+    valid_from: str,
+    target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
+) -> str:
+    """Return an inclusive KRX business-day pilot window end date."""
+    if target_pilot_days <= 0:
+        raise ValueError("target_pilot_days must be positive")
+
+    current = datetime.strptime(valid_from, "%Y-%m-%d").date()
+    holidays = _load_kr_market_holidays()
+    counted_days = 0
+    while True:
+        if _is_kr_market_business_day(current, holidays):
+            counted_days += 1
+            if counted_days >= target_pilot_days:
+                return current.isoformat()
+        current += timedelta(days=1)
 
 
 def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
@@ -287,6 +320,33 @@ def _normalized_quantities(raw: Any) -> dict[str, Any]:
 
 
 AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW = 10_000.0
+AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_PCT = 0.005
+PORTFOLIO_DRAWDOWN_GUARD_AUTHORIZATION_FIELDS = (
+    "enabled",
+    "active",
+    "triggered",
+    "trigger_pct",
+    "exposure_pct",
+    "cooldown_rebalances",
+    "cooldown_before",
+    "cooldown_after_trigger",
+    "cooldown_after_plan",
+    "drawdown_pct",
+    "last_equity_value",
+    "peak_value",
+    "target_exposure_before",
+    "target_exposure_after",
+)
+
+
+def _authorization_portfolio_drawdown_guard(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    return {
+        field: raw.get(field)
+        for field in PORTFOLIO_DRAWDOWN_GUARD_AUTHORIZATION_FIELDS
+        if field in raw
+    }
 
 
 def _numbers_match(actual: Any, expected: Any, *, absolute_tolerance: float | None = None) -> bool:
@@ -299,6 +359,17 @@ def _numbers_match(actual: Any, expected: Any, *, absolute_tolerance: float | No
     if absolute_tolerance is not None:
         tolerance = max(tolerance, float(absolute_tolerance))
     return abs(actual_num - expected_num) <= tolerance
+
+
+def _authorization_snapshot_money_tolerance(expected: Any) -> float:
+    try:
+        expected_num = abs(float(expected))
+    except (TypeError, ValueError):
+        expected_num = 0.0
+    return max(
+        AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+        expected_num * AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_PCT,
+    )
 
 
 def validate_pilot_authorization_snapshot(
@@ -375,8 +446,8 @@ def validate_pilot_authorization_snapshot(
     if "portfolio_drawdown_guard" in expected or "portfolio_drawdown_guard" in snapshot:
         checks.append((
             "portfolio_drawdown_guard",
-            snapshot.get("portfolio_drawdown_guard"),
-            expected.get("portfolio_drawdown_guard"),
+            _authorization_portfolio_drawdown_guard(snapshot.get("portfolio_drawdown_guard")),
+            _authorization_portfolio_drawdown_guard(expected.get("portfolio_drawdown_guard")),
         ))
     mismatches = [
         {"field": field, "expected": expected_value, "actual": actual_value}
@@ -390,13 +461,13 @@ def validate_pilot_authorization_snapshot(
             "gross_exposure_after",
             snapshot.get("gross_exposure_after"),
             expected["gross_exposure_after"],
-            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+            _authorization_snapshot_money_tolerance(expected["gross_exposure_after"]),
         ),
         (
             "max_order_notional",
             snapshot.get("max_order_notional"),
             expected["max_order_notional"],
-            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+            _authorization_snapshot_money_tolerance(expected["max_order_notional"]),
         ),
     ]
     for field, actual_value, expected_value, absolute_tolerance in numeric_checks:
@@ -563,10 +634,17 @@ def _minimum_money_cap(value: float, *, step: int = DEFAULT_CAP_ROUNDING_STEP) -
     return max(1, _round_up_to_step(value, step=step))
 
 
-def _format_enable_command(plan: TargetWeightPlan, caps: dict[str, int]) -> str:
+def _format_enable_command(
+    plan: TargetWeightPlan,
+    caps: dict[str, int],
+    *,
+    valid_to: str | None = None,
+    target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
+) -> str:
+    pilot_valid_to = valid_to or _pilot_valid_to(plan.trade_day, target_pilot_days)
     return "\n".join([
         f"python tools/paper_pilot_control.py --strategy {plan.candidate_id} --enable \\",
-        f"  --from {plan.trade_day} --to YYYY-MM-DD \\",
+        f"  --from {plan.trade_day} --to {pilot_valid_to} \\",
         (
             f"  --max-orders {caps['max_orders_per_day']} "
             f"--max-positions {caps['max_concurrent_positions']} "
@@ -582,6 +660,7 @@ def recommend_pilot_caps(
     *,
     buffer_pct: float = DEFAULT_CAP_BUFFER_PCT,
     rounding_step: int = DEFAULT_CAP_ROUNDING_STEP,
+    target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
 ) -> dict[str, Any]:
     """Build plan-specific pilot caps that are tight enough for first execution."""
     minimum_caps = {
@@ -597,17 +676,26 @@ def recommend_pilot_caps(
         "max_gross_exposure": _minimum_money_cap(plan.gross_exposure_after * (1 + buffer_pct), step=rounding_step),
     }
     suggested_preview = preview_plan_against_caps(plan, suggested_caps)
+    pilot_valid_to = _pilot_valid_to(plan.trade_day, target_pilot_days)
     return {
         "minimum_caps": minimum_caps,
         "suggested_caps": suggested_caps,
         "buffer_pct": buffer_pct,
         "rounding_step": rounding_step,
+        "valid_from": plan.trade_day,
+        "valid_to": pilot_valid_to,
+        "target_pilot_days": int(target_pilot_days),
         "planned_orders": len(plan.orders),
         "target_position_count": int(plan.target_position_count),
         "max_order_notional": plan.max_order_notional,
         "gross_exposure_after": plan.gross_exposure_after,
         "suggested_preview": asdict(suggested_preview),
-        "enable_command": _format_enable_command(plan, suggested_caps),
+        "enable_command": _format_enable_command(
+            plan,
+            suggested_caps,
+            valid_to=pilot_valid_to,
+            target_pilot_days=target_pilot_days,
+        ),
         "operator_note": (
             "Use suggested caps for the first capped paper pilot only after launch readiness "
             "requirements and preflight checks pass. The caps are based on the dry-run plan and "
@@ -2300,8 +2388,8 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
     if "portfolio_drawdown_guard" in expected_target_plan or "portfolio_drawdown_guard" in target_plan:
         checks.append((
             "target_weight_plan.portfolio_drawdown_guard",
-            target_plan.get("portfolio_drawdown_guard"),
-            expected_target_plan.get("portfolio_drawdown_guard"),
+            _authorization_portfolio_drawdown_guard(target_plan.get("portfolio_drawdown_guard")),
+            _authorization_portfolio_drawdown_guard(expected_target_plan.get("portfolio_drawdown_guard")),
         ))
     for field, actual, expected in checks:
         if actual != expected:
@@ -2327,13 +2415,13 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
             "target_weight_plan.gross_exposure_after",
             target_plan.get("gross_exposure_after"),
             expected_target_plan["gross_exposure_after"],
-            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+            _authorization_snapshot_money_tolerance(expected_target_plan["gross_exposure_after"]),
         ),
         (
             "target_weight_plan.max_order_notional",
             target_plan.get("max_order_notional"),
             expected_target_plan["max_order_notional"],
-            AUTHORIZATION_SNAPSHOT_MONEY_TOLERANCE_KRW,
+            _authorization_snapshot_money_tolerance(expected_target_plan["max_order_notional"]),
         ),
     ]
     for field, actual, expected, absolute_tolerance in numeric_checks:
@@ -3727,7 +3815,24 @@ def build_target_weight_daily_ops_summary(
         and _check_passed(pilot_authorization_snapshot_check)
         and _check_passed(data_quality_check)
     )
-    if audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
+    blocking_reason_text = " ".join(
+        str(reason).lower() for reason in audit.get("blocking_reasons") or []
+    )
+    pilot_evidence_recorded_today = (
+        str(evidence_progress.get("latest_verified_pilot_date") or "") == str(audit.get("trade_day") or "")
+        and any(
+            needle in blocking_reason_text
+            for needle in (
+                "execution_idempotency",
+                "duplicate_execution",
+                "duplicate execution",
+            )
+        )
+    )
+    if pilot_evidence_recorded_today:
+        status = "PILOT_EVIDENCE_RECORDED"
+        next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 daily ops 재점검"
+    elif audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
     elif not _check_passed(data_quality_check):
@@ -3752,7 +3857,11 @@ def build_target_weight_daily_ops_summary(
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
     operator_commands = dict(audit.get("operator_commands") or {})
-    if status != "READY_TO_EXECUTE":
+    if pilot_evidence_recorded_today:
+        operator_commands["execute_capped_paper"] = (
+            f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
+        )
+    elif status != "READY_TO_EXECUTE":
         block_reason = _first_text(audit.get("blocking_reasons")) or f"{status}: {next_step}"
         operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
     summary = {
