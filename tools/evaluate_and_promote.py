@@ -1038,6 +1038,12 @@ def _first_text(items) -> str | None:
     return None
 
 
+def _not_before_blocked_command(not_before_date: str | None) -> str:
+    if not_before_date:
+        return f"# blocked: not before {not_before_date}; target_weight_future_as_of_date_blocked"
+    return "# blocked: next KRX business day fresh readiness required"
+
+
 def _target_weight_ops_priority_action(
     strategy: str,
     commands: dict[str, str],
@@ -1067,23 +1073,28 @@ def _target_weight_ops_priority_action(
 
     if status == "PILOT_EVIDENCE_RECORDED":
         next_trade_day = latest_daily_ops.get("next_operator_trade_day")
+        scheduled_command = (
+            ops_commands.get("next_daily_ops_summary")
+            or ops_commands.get("daily_ops_summary")
+            or commands.get("daily_ops_summary")
+        )
+        scheduled_follow_up = (
+            ops_commands.get("next_readiness_audit")
+            or ops_commands.get("rerun_readiness_audit")
+            or commands.get("readiness_audit")
+        )
+        blocked_command = _not_before_blocked_command(next_trade_day)
         return {
             **base_action,
             "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-            "command": (
-                ops_commands.get("next_daily_ops_summary")
-                or ops_commands.get("daily_ops_summary")
-                or commands.get("daily_ops_summary")
-            ),
+            "command": blocked_command,
+            "scheduled_command": scheduled_command,
             "order_safety": "no_order",
             "requires": "next KRX business day fresh readiness",
             "not_before_date": next_trade_day,
             "premature_run_guard": "target_weight_future_as_of_date_blocked",
-            "follow_up": (
-                ops_commands.get("next_readiness_audit")
-                or ops_commands.get("rerun_readiness_audit")
-                or commands.get("readiness_audit")
-            ),
+            "follow_up": blocked_command,
+            "scheduled_follow_up": scheduled_follow_up,
         }
 
     if status == "PILOT_EVIDENCE_INVALID":
@@ -1255,12 +1266,18 @@ def _build_current_blockers_operator_runbook(
             for key in ("not_before_date", "premature_run_guard"):
                 if ops_priority_action.get(key):
                     priority_step[key] = ops_priority_action[key]
+            for key in ("scheduled_command", "scheduled_follow_up"):
+                if ops_priority_action.get(key):
+                    priority_step[key] = ops_priority_action[key]
             sequence.insert(2, priority_step)
             follow_up = str(ops_priority_action.get("follow_up") or "")
-            if "--readiness-audit" in follow_up:
+            scheduled_follow_up = str(ops_priority_action.get("scheduled_follow_up") or "")
+            if "--readiness-audit" in follow_up or "--readiness-audit" in scheduled_follow_up:
                 for item in sequence:
                     if item.get("command") == commands["readiness_audit"]:
                         item["command"] = follow_up
+                        if scheduled_follow_up:
+                            item["scheduled_command"] = scheduled_follow_up
                         break
             for index, item in enumerate(sequence, start=1):
                 item["step"] = index
