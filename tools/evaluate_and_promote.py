@@ -914,14 +914,14 @@ def _current_kst_date() -> str:
 def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
     trade_day = str(payload.get("trade_day") or "").strip()
     if not trade_day:
-        return True
+        return False
     today = current_date or _current_kst_date()
     try:
         trade_date = datetime.strptime(trade_day, "%Y-%m-%d").date()
         current = datetime.strptime(today, "%Y-%m-%d").date()
         return trade_date <= current
     except ValueError:
-        return True
+        return False
 
 
 def _load_latest_target_weight_daily_ops(
