@@ -984,6 +984,14 @@ def _reason_contains(reasons: list[str], *needles: str) -> bool:
     return any(needle.lower() in lowered for needle in needles)
 
 
+def _blocked_command(command: str | None) -> bool:
+    return str(command or "").lstrip().startswith("# blocked:")
+
+
+def _paper_execute_order_safety(command: str | None) -> str:
+    return "no_order" if _blocked_command(command) else "paper_order_only"
+
+
 def _target_weight_discord_action(
     strategy: str,
     base_action: dict,
@@ -1092,12 +1100,15 @@ def _target_weight_ops_priority_action(
         }
 
     if status == "READY_TO_EXECUTE":
+        command = (
+            ops_commands.get("execute_capped_paper")
+            or commands.get("execute_capped_paper_after_ready")
+        )
         return {
             **base_action,
             "desc": "READY_TO_EXECUTE 당일 capped paper 실행 및 pilot_paper 증거 수집",
-            "command": ops_commands.get("execute_capped_paper")
-            or commands.get("execute_capped_paper_after_ready"),
-            "order_safety": "paper_order_only",
+            "command": command,
+            "order_safety": _paper_execute_order_safety(command),
             "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
         }
 
@@ -1214,7 +1225,7 @@ def _build_current_blockers_operator_runbook(
                 "step": 4,
                 "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
                 "command": commands["execute_capped_paper_after_ready"],
-                "order_safety": "paper_order_only",
+                "order_safety": _paper_execute_order_safety(commands["execute_capped_paper_after_ready"]),
                 "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
             },
         ]
@@ -1376,7 +1387,9 @@ def build_current_blockers_report(
             "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
             "strategy": provisional_candidates[0],
             "command": runbook_commands.get("execute_capped_paper_after_ready"),
-            "order_safety": "paper_order_only",
+            "order_safety": _paper_execute_order_safety(
+                runbook_commands.get("execute_capped_paper_after_ready")
+            ),
             "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
         })
     else:

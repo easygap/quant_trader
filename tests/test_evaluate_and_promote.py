@@ -1268,7 +1268,7 @@ def test_build_current_blockers_report_from_promotion_summary():
         "python tools/target_weight_rotation_pilot.py "
         "--candidate-id target_weight_best --readiness-audit"
     )
-    assert report["next_actions"][2]["order_safety"] == "paper_order_only"
+    assert report["next_actions"][2]["order_safety"] == "no_order"
     assert report["next_actions"][2]["command"].startswith("# blocked:")
     assert report["operator_runbook"]["primary_strategy"] == "target_weight_best"
     assert report["operator_runbook"]["commands"]["daily_ops_summary"] == (
@@ -1277,6 +1277,7 @@ def test_build_current_blockers_report_from_promotion_summary():
     )
     assert report["operator_runbook"]["commands"]["execute_capped_paper_after_ready"].startswith("# blocked:")
     assert report["operator_runbook"]["sequence"][0]["order_safety"] == "no_order"
+    assert report["operator_runbook"]["sequence"][3]["order_safety"] == "no_order"
     assert "target_weight_best" in report["default_strategy"]
 
 
@@ -1567,6 +1568,8 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
     assert action["requires"] == "next KRX business day fresh readiness"
     assert action["command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
     assert action["follow_up"].endswith("--as-of-date 2026-05-19 --readiness-audit")
+    assert report["next_actions"][1]["command"].startswith("# blocked:")
+    assert report["next_actions"][1]["order_safety"] == "no_order"
 
 
 def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_daily_ops():
