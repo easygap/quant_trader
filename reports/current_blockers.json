@@ -70,16 +70,16 @@
       "daily_ops_status": "BLOCKED",
       "daily_ops_trade_day": "2026-05-18",
       "verified_pilot_days": 0,
-      "shadow_days": 0,
-      "desc": "target-weight shadow 3일 수집으로 launch readiness 증거 먼저 확보",
-      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-18",
+      "shadow_days": 3,
+      "desc": "Discord webhook 도달성 확인 preflight 실행",
+      "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
       "order_safety": "no_order"
     },
     {
       "priority": 2,
       "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
-      "command": "# blocked: preflight_refresh: paper preflight failed: no eligible (v2+) evidence records",
+      "command": "# blocked: launch_readiness: notifier: Discord webhook 미설정",
       "order_safety": "paper_order_only",
       "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
     },
@@ -99,7 +99,7 @@
       "readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
       "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date YYYY-MM-DD",
       "pilot_status": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
-      "execute_capped_paper_after_ready": "# blocked: preflight_refresh: paper preflight failed: no eligible (v2+) evidence records",
+      "execute_capped_paper_after_ready": "# blocked: launch_readiness: notifier: Discord webhook 미설정",
       "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers"
     },
     "sequence": [
@@ -117,8 +117,8 @@
       },
       {
         "step": 3,
-        "desc": "target-weight shadow 3일 수집으로 launch readiness 증거 먼저 확보",
-        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-18",
+        "desc": "Discord webhook 도달성 확인 preflight 실행",
+        "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
         "order_safety": "no_order"
       },
       {
@@ -130,7 +130,7 @@
       {
         "step": 5,
         "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
-        "command": "# blocked: preflight_refresh: paper preflight failed: no eligible (v2+) evidence records",
+        "command": "# blocked: launch_readiness: notifier: Discord webhook 미설정",
         "order_safety": "paper_order_only",
         "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
       }
@@ -142,7 +142,7 @@
     ],
     "latest_daily_ops": {
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-18.json",
-      "generated_at": "2026-05-18T11:52:14.667234",
+      "generated_at": "2026-05-18T13:03:44.134356",
       "trade_day": "2026-05-18",
       "status": "BLOCKED",
       "next_step": "차단 사유 해소 후 shadow/readiness 재점검",
@@ -152,14 +152,14 @@
         "verified_pilot_days": 0,
         "remaining_pilot_days": 60,
         "progress_ratio": 0.0,
-        "shadow_days": 0,
+        "shadow_days": 3,
         "invalid_execution_days": 0,
         "invalid_reasons": {},
         "non_promotable_days": 0,
-        "total_canonical_records": 0,
-        "latest_record_date": null,
+        "total_canonical_records": 3,
+        "latest_record_date": "2026-05-18",
         "latest_verified_pilot_date": null,
-        "latest_shadow_date": null,
+        "latest_shadow_date": "2026-05-18",
         "ready_for_promotion_day_count": false
       },
       "decision": {
@@ -167,17 +167,13 @@
         "ready_for_capped_pilot": false,
         "readiness_next_action": "resolve blocking requirements before enabling or executing pilot",
         "blocking_reasons": [
-          "preflight_refresh: paper preflight failed: no eligible (v2+) evidence records",
-          "launch_readiness: clean_final_days: 0/3 (need 3 more)",
-          "launch_readiness: evidence_freshness: no evidence",
-          "launch_readiness: benchmark_final_ratio: N/A < 40%",
           "launch_readiness: notifier: Discord webhook 미설정",
           "launch_readiness: infrastructure requirements are not met",
           "pilot_authorization: no active capped pilot authorization",
           "pilot_validation: no active pilot authorization"
         ],
         "warning_reasons": [
-          "preview_caps: orders 4 > remaining_orders 2; required exposure increase 4,893,500 > remaining_exposure 3,000,000; max order notional 1,417,500 > cap 1,000,000; target positions 4 > cap 2; gross exposure 4,893,500 > cap 3,000,000"
+          "preview_caps: orders 4 > remaining_orders 2; required exposure increase 4,902,500 > remaining_exposure 3,000,000; max order notional 1,417,500 > cap 1,000,000; target positions 4 > cap 2; gross exposure 4,902,500 > cap 3,000,000"
         ],
         "execution_trade_day_check": {
           "checked": true,
@@ -194,7 +190,7 @@
           "plan_trade_day": "2026-05-18",
           "plan_as_of_date": "2026-05-18",
           "execution_day": "2026-05-18",
-          "execution_time": "11:52:14",
+          "execution_time": "13:03:44",
           "timezone": "Asia/Seoul",
           "allowed": true,
           "complete": true,
@@ -274,8 +270,8 @@
       "operator_commands": {
         "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-18",
         "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-18 --readiness-audit",
-        "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-18 --to YYYY-MM-DD \\\n  --max-orders 4 --max-positions 4 --max-notional 1490000 --max-exposure 5140000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
-        "execute_capped_paper": "# blocked: preflight_refresh: paper preflight failed: no eligible (v2+) evidence records"
+        "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-18 --to YYYY-MM-DD \\\n  --max-orders 4 --max-positions 4 --max-notional 1490000 --max-exposure 5150000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
+        "execute_capped_paper": "# blocked: launch_readiness: notifier: Discord webhook 미설정"
       }
     },
     "current_priority_action": {
@@ -285,9 +281,9 @@
       "daily_ops_status": "BLOCKED",
       "daily_ops_trade_day": "2026-05-18",
       "verified_pilot_days": 0,
-      "shadow_days": 0,
-      "desc": "target-weight shadow 3일 수집으로 launch readiness 증거 먼저 확보",
-      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-18",
+      "shadow_days": 3,
+      "desc": "Discord webhook 도달성 확인 preflight 실행",
+      "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
       "order_safety": "no_order"
     }
   },
