@@ -3053,19 +3053,33 @@ def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch
     assert result["status"] == "repaired"
     assert result["appended_record_version"] == 2
     assert result["proof_status_after"]["reason"] == "verified_target_weight_pilot_evidence"
+    assert result["promotion_status_after"]["eligible"] is False
+    assert (
+        result["promotion_status_after"]["reason"]
+        == "target_weight_repaired_performance_not_promotable"
+    )
 
     records = pe._read_all_evidence(pe._evidence_path(plan.candidate_id))
     assert len(records) == 2
     repaired = records[-1]
     valid, reason = pe._target_weight_record_proof_status(plan.candidate_id, repaired)
+    repair_valid, repair_reason = pe._target_weight_record_proof_status(
+        plan.candidate_id,
+        repaired,
+        allow_repaired_performance=True,
+    )
 
     expected_total_value = (
         record["pilot_caps_snapshot"]["target_weight_execution"]["pre_trade_risk_check"][
             "projected_total_value_after_costs"
         ]
     )
-    assert valid is True
-    assert reason == "verified_target_weight_pilot_evidence"
+    assert valid is False
+    assert reason == "target_weight_repaired_performance_not_promotable"
+    assert repair_valid is True
+    assert repair_reason == "verified_target_weight_pilot_evidence"
+    assert repaired["promotion_eligible"] is False
+    assert repaired["promotion_exclusion_reason"] == "target_weight_repaired_performance_not_promotable"
     assert repaired["total_value"] == expected_total_value
     assert repaired["daily_return"] == pytest.approx((expected_total_value / plan.cash_before - 1.0) * 100)
     assert repaired["benchmark_status"] == "final"
