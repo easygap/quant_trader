@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-18T15:38:20.411514",
+  "generated_at": "2026-05-18T15:53:03.743044",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -130,7 +130,7 @@
       {
         "step": 4,
         "desc": "readiness audit 실행 후 artifact의 추천 cap만 승인",
-        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit",
         "order_safety": "no_order"
       },
       {
