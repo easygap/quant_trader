@@ -1361,3 +1361,20 @@ class TestLaunchReadiness:
         assert "Disable" in rb_text or "disable" in rb_text.lower()
         assert "Success Criteria" in rb_text
         assert "Abort Criteria" in rb_text
+
+    def test_target_weight_runbook_uses_target_weight_operator_flow(self, runtime_dir, fresh_db):
+        """target-weight runbook은 generic evidence pipeline 대신 전용 shadow/readiness 흐름을 안내한다."""
+        strategy = "target_weight_best"
+
+        from core.paper_pilot import generate_pilot_runbook
+
+        rb_path = generate_pilot_runbook(strategy)
+        rb_text = rb_path.read_text(encoding="utf-8")
+
+        assert "tools/target_weight_rotation_pilot.py" in rb_text
+        assert "--shadow-days 3 --shadow-end-date YYYY-MM-DD" in rb_text
+        assert "--daily-ops-summary" in rb_text
+        assert "--readiness-audit" in rb_text
+        assert "--send-test-notification" in rb_text
+        assert "enable_suggested_caps" in rb_text
+        assert "tools/run_paper_evidence_pipeline.py" not in rb_text
