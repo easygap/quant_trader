@@ -519,6 +519,34 @@ def test_validate_pilot_authorization_snapshot_blocks_params_hash_mismatch():
     assert check["mismatches"][0]["field"] == "params_hash"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 0),
+        ("snapshot_type", "legacy_target_weight_authorization"),
+    ],
+)
+def test_validate_pilot_authorization_snapshot_blocks_snapshot_contract_mismatch(
+    field,
+    value,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    stale_snapshot = twp.build_pilot_authorization_snapshot(plan)
+    stale_snapshot[field] = value
+
+    check = twp.validate_pilot_authorization_snapshot(
+        plan,
+        _pilot_check_for_plan(plan, snapshot=stale_snapshot),
+    )
+
+    assert check["allowed"] is False
+    assert check["complete"] is False
+    assert "target_weight_pilot_authorization_snapshot_mismatch" in check["reason"]
+    assert check["mismatches"][0]["field"] == field
+
+
 def test_validate_pilot_authorization_snapshot_blocks_risk_off_mismatch():
     import tools.target_weight_rotation_pilot as twp
 
