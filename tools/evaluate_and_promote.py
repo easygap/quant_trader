@@ -948,6 +948,7 @@ def _load_latest_target_weight_daily_ops(
             "source_path": str(path),
             "generated_at": payload.get("generated_at"),
             "trade_day": payload.get("trade_day"),
+            "next_operator_trade_day": payload.get("next_operator_trade_day"),
             "status": status,
             "next_step": payload.get("next_step"),
             "evidence_progress": payload.get("evidence_progress") or {},
@@ -1030,6 +1031,7 @@ def _target_weight_ops_priority_action(
         "source_path": latest_daily_ops.get("source_path"),
         "daily_ops_status": status,
         "daily_ops_trade_day": latest_daily_ops.get("trade_day"),
+        "next_operator_trade_day": latest_daily_ops.get("next_operator_trade_day"),
         "verified_pilot_days": verified_days,
         "shadow_days": shadow_days,
     }
@@ -1038,9 +1040,18 @@ def _target_weight_ops_priority_action(
         return {
             **base_action,
             "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-            "command": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
+            "command": (
+                ops_commands.get("next_daily_ops_summary")
+                or ops_commands.get("daily_ops_summary")
+                or commands.get("daily_ops_summary")
+            ),
             "order_safety": "no_order",
             "requires": "next KRX business day fresh readiness",
+            "follow_up": (
+                ops_commands.get("next_readiness_audit")
+                or ops_commands.get("rerun_readiness_audit")
+                or commands.get("readiness_audit")
+            ),
         }
 
     if status == "PILOT_EVIDENCE_INVALID":

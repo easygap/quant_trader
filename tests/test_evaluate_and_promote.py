@@ -1531,6 +1531,7 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
     latest_daily_ops = {
         "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
         "trade_day": "2026-05-18",
+        "next_operator_trade_day": "2026-05-19",
         "status": "PILOT_EVIDENCE_RECORDED",
         "evidence_progress": {
             "verified_pilot_days": 1,
@@ -1543,16 +1544,29 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
                 "pilot_authorization_snapshot: stale same-day approval",
             ],
         },
-        "operator_commands": {},
+        "operator_commands": {
+            "next_daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-19 "
+                "--daily-ops-summary"
+            ),
+            "next_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-19 "
+                "--readiness-audit"
+            ),
+        },
     }
 
     report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
 
     action = report["next_actions"][0]
     assert action["daily_ops_status"] == "PILOT_EVIDENCE_RECORDED"
+    assert action["next_operator_trade_day"] == "2026-05-19"
     assert action["order_safety"] == "no_order"
     assert action["requires"] == "next KRX business day fresh readiness"
-    assert action["command"].endswith("--daily-ops-summary")
+    assert action["command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
+    assert action["follow_up"].endswith("--as-of-date 2026-05-19 --readiness-audit")
 
 
 def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_daily_ops():

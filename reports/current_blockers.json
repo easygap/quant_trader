@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-18T14:40:42.124314",
+  "generated_at": "2026-05-18T15:07:11.887114",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -70,12 +70,14 @@
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-18.json",
       "daily_ops_status": "PILOT_EVIDENCE_RECORDED",
       "daily_ops_trade_day": "2026-05-18",
+      "next_operator_trade_day": "2026-05-19",
       "verified_pilot_days": 1,
       "shadow_days": 2,
       "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --daily-ops-summary",
       "order_safety": "no_order",
-      "requires": "next KRX business day fresh readiness"
+      "requires": "next KRX business day fresh readiness",
+      "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit"
     },
     {
       "priority": 2,
@@ -120,9 +122,10 @@
       {
         "step": 3,
         "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --daily-ops-summary",
         "order_safety": "no_order",
-        "requires": "next KRX business day fresh readiness"
+        "requires": "next KRX business day fresh readiness",
+        "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit"
       },
       {
         "step": 4,
@@ -145,8 +148,9 @@
     ],
     "latest_daily_ops": {
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-18.json",
-      "generated_at": "2026-05-18T14:40:33.574885",
+      "generated_at": "2026-05-18T15:07:07.626068",
       "trade_day": "2026-05-18",
+      "next_operator_trade_day": "2026-05-19",
       "status": "PILOT_EVIDENCE_RECORDED",
       "next_step": "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
       "evidence_progress": {
@@ -171,7 +175,7 @@
         "readiness_next_action": "resolve blocking requirements before enabling or executing pilot",
         "blocking_reasons": [],
         "warning_reasons": [
-          "preview_caps: orders 4 > remaining_orders 2; required exposure increase 4,864,500 > remaining_exposure 3,000,000; max order notional 1,412,500 > cap 1,000,000; target positions 4 > cap 2; gross exposure 4,864,500 > cap 3,000,000"
+          "preview_caps: orders 4 > remaining_orders 2; required exposure increase 4,864,250 > remaining_exposure 3,000,000; max order notional 1,411,250 > cap 1,000,000; target positions 4 > cap 2; gross exposure 4,864,250 > cap 3,000,000"
         ],
         "post_evidence_diagnostics": [
           "execution_idempotency: target_weight_duplicate_execution_attempt: existing pilot session artifact for target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 2026-05-18",
@@ -192,7 +196,7 @@
           "plan_trade_day": "2026-05-18",
           "plan_as_of_date": "2026-05-18",
           "execution_day": "2026-05-18",
-          "execution_time": "14:40:33",
+          "execution_time": "15:07:07",
           "timezone": "Asia/Seoul",
           "allowed": true,
           "complete": true,
@@ -345,8 +349,8 @@
             "target_exposure": 0.75,
             "base_target_exposure": 0.75,
             "risk_off": false,
-            "gross_exposure_after": 4864500.0,
-            "max_order_notional": 1412500.0,
+            "gross_exposure_after": 4864250.0,
+            "max_order_notional": 1411250.0,
             "order_count": 4,
             "position_quantities_before": {},
             "target_quantities_after": {
@@ -445,7 +449,9 @@
         "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-18 --readiness-audit",
         "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-18 --to 2026-08-07 \\\n  --max-orders 4 --max-positions 4 --max-notional 1490000 --max-exposure 5110000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
         "execute_capped_paper": "# blocked: pilot_paper evidence already recorded for 2026-05-18",
-        "repair_pilot_evidence": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --repair-pilot-evidence --repair-date 2026-05-18"
+        "repair_pilot_evidence": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --repair-pilot-evidence --repair-date 2026-05-18",
+        "next_daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --daily-ops-summary",
+        "next_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit"
       }
     },
     "current_priority_action": {
@@ -454,12 +460,14 @@
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-18.json",
       "daily_ops_status": "PILOT_EVIDENCE_RECORDED",
       "daily_ops_trade_day": "2026-05-18",
+      "next_operator_trade_day": "2026-05-19",
       "verified_pilot_days": 1,
       "shadow_days": 2,
       "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --daily-ops-summary",
       "order_safety": "no_order",
-      "requires": "next KRX business day fresh readiness"
+      "requires": "next KRX business day fresh readiness",
+      "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit"
     }
   },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
