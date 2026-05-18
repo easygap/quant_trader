@@ -1945,6 +1945,43 @@ def test_paper_pilot_control_status_prints_daily_ops_command_when_missing(tmp_pa
     assert f"--candidate-id {strategy} --daily-ops-summary" in output
 
 
+def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypatch):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    current_summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    future_summary = {
+        **current_summary,
+        "trade_day": "2026-04-13",
+        "status": "BLOCKED",
+        "operator_commands": {
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute"
+        },
+    }
+    current_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    future_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-13.json"
+    current_path.write_text(json.dumps(current_summary, ensure_ascii=False), encoding="utf-8")
+    future_path.write_text(json.dumps(future_summary, ensure_ascii=False), encoding="utf-8")
+    os.utime(current_path, (1_000, 1_000))
+    os.utime(future_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    summary = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert summary is not None
+    assert summary["trade_day"] == "2026-04-10"
+    assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
