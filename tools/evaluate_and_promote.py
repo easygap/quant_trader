@@ -17,7 +17,7 @@ invalid paper evidence 격리: python tools/evaluate_and_promote.py --paper-evid
   - promotion_blocker_summary.json/md (운영자용 차단 사유 요약)
 """
 import sys, os, json, hashlib, subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +28,8 @@ from loguru import logger
 
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
+
+KST = timezone(timedelta(hours=9))
 
 
 CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
@@ -905,6 +907,23 @@ def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
     }
 
 
+def _current_kst_date() -> str:
+    return datetime.now(KST).date().isoformat()
+
+
+def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
+    trade_day = str(payload.get("trade_day") or "").strip()
+    if not trade_day:
+        return True
+    today = current_date or _current_kst_date()
+    try:
+        trade_date = datetime.strptime(trade_day, "%Y-%m-%d").date()
+        current = datetime.strptime(today, "%Y-%m-%d").date()
+        return trade_date <= current
+    except ValueError:
+        return True
+
+
 def _load_latest_target_weight_daily_ops(
     strategy: str,
     reports_dir: str | Path = "reports",
@@ -935,6 +954,8 @@ def _load_latest_target_weight_daily_ops(
         if payload.get("artifact_type") != "target_weight_daily_ops_summary":
             continue
         if payload.get("candidate_id") != strategy:
+            continue
+        if not _daily_ops_trade_day_is_available(payload):
             continue
         status = payload.get("status")
         decision = payload.get("decision") or {}

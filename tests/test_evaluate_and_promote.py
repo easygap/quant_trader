@@ -1727,6 +1727,45 @@ def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_
     )
 
 
+def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, monkeypatch):
+    import os
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    current_daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 2},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    future_daily_ops = {
+        **current_daily_ops,
+        "generated_at": "2026-05-18T10:10:21",
+        "trade_day": "2026-05-19",
+        "status": "BLOCKED",
+        "operator_commands": {
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute"
+        },
+    }
+    current_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    future_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-19.json"
+    current_path.write_text(json.dumps(current_daily_ops, ensure_ascii=False), encoding="utf-8")
+    future_path.write_text(json.dumps(future_daily_ops, ensure_ascii=False), encoding="utf-8")
+    os.utime(current_path, (1_000, 1_000))
+    os.utime(future_path, (2_000, 2_000))
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    assert latest["trade_day"] == "2026-05-18"
+    assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
 def test_static_paper_experiment_manifest_uses_explicit_target_weight_candidate_and_blocked_execute():
     manifest_path = Path("reports/paper_experiment_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
