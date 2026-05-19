@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import sys
 import uuid
 from copy import deepcopy
@@ -4568,16 +4569,28 @@ def build_target_weight_daily_ops_summary(
         required_flags: tuple[str, ...] = (),
     ) -> list[str]:
         issues: list[str] = []
-        command_targets_candidate = (
-            f"--candidate-id {candidate_id}" in command
-            or f"--strategy {candidate_id}" in command
-        )
-        if not command_targets_candidate:
+        try:
+            tokens = shlex.split(command)
+        except ValueError as exc:
+            return [f"command parse failed: {exc}"]
+
+        def flag_value_matches(flag: str, expected: str) -> bool:
+            for idx, token in enumerate(tokens):
+                if token == flag and idx + 1 < len(tokens) and tokens[idx + 1] == expected:
+                    return True
+                if token.startswith(f"{flag}=") and token.split("=", 1)[1] == expected:
+                    return True
+            return False
+
+        if not (
+            flag_value_matches("--candidate-id", candidate_id)
+            or flag_value_matches("--strategy", candidate_id)
+        ):
             issues.append(f"candidate_id mismatch expected={candidate_id}")
-        if require_trade_day and f"--as-of-date {trade_day}" not in command:
+        if require_trade_day and not flag_value_matches("--as-of-date", trade_day):
             issues.append(f"as_of_date mismatch expected={trade_day}")
         for flag in required_flags:
-            if flag not in command:
+            if flag not in tokens:
                 issues.append(f"missing {flag}")
         return issues
 
