@@ -1587,9 +1587,10 @@ def test_build_current_blockers_report_promotes_discord_retest_when_configured()
     assert action["command"].endswith("--with-pilot-check --send-test-notification")
 
 
-def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops():
+def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops(monkeypatch):
     from tools.evaluate_and_promote import build_current_blockers_report
 
+    monkeypatch.setattr("tools.evaluate_and_promote._current_kst_date", lambda: "2026-05-18")
     blocker_summary = {
         "artifact_type": "promotion_blocker_summary",
         "schema_version": 1,
@@ -1919,6 +1920,9 @@ def test_build_current_blockers_report_schedules_next_day_after_repaired_non_pro
         },
         "decision": {"blocking_reasons": []},
         "operator_commands": {
+            "enable_suggested_caps": (
+                "python tools/paper_pilot_control.py --strategy target_weight_best --enable"
+            ),
             "next_daily_ops_summary": (
                 "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
                 "--as-of-date 2026-05-19 --daily-ops-summary"
@@ -1945,6 +1949,11 @@ def test_build_current_blockers_report_schedules_next_day_after_repaired_non_pro
     assert action["command"].startswith("# blocked: not before 2026-05-19")
     assert action["scheduled_command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
     assert "복구 보존" in action["desc"]
+    sanitized_commands = report["operator_runbook"]["latest_daily_ops"]["operator_commands"]
+    assert sanitized_commands["enable_suggested_caps"].startswith(
+        "# blocked: repaired pilot_paper evidence already recorded"
+    )
+    assert "--strategy target_weight_best --enable" not in sanitized_commands["enable_suggested_caps"]
 
 
 def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
@@ -2106,6 +2115,41 @@ def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, 
     assert latest is not None
     assert latest["trade_day"] == "2026-05-18"
     assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
+def test_load_latest_target_weight_daily_ops_blocks_stale_ready_execute(tmp_path, monkeypatch):
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-18 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-19")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    assert latest["status"] == "READY_TO_EXECUTE"
+    assert latest["operator_commands"]["execute_capped_paper"].startswith(
+        "# blocked: daily_ops_summary.trade_day is stale"
+    )
 
 
 def test_static_paper_experiment_manifest_uses_explicit_target_weight_candidate_and_blocked_execute():
