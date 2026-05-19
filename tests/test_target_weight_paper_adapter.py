@@ -2296,6 +2296,49 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
     assert str(summary_path) in output
 
 
+def test_paper_pilot_control_status_warns_when_current_blockers_missing(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    )
+    summary_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {},
+                "operator_commands": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Current blockers warning: current_blockers.json missing" in output
+    assert (
+        "Regenerate current blockers command: "
+        "python tools/evaluate_and_promote.py --current-blockers"
+    ) in output
+    assert str(summary_path) in output
+
+
 def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
     tmp_path,
     capsys,
