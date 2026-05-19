@@ -2073,6 +2073,168 @@ def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_
     )
 
 
+def test_load_current_blockers_from_artifacts_prioritizes_daily_ops_failure_when_no_summary(
+    tmp_path,
+):
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    failure_path = (
+        paper_runtime
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260518100500.json"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-05-18T10:05:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-05-18",
+                "status": "BLOCKED",
+                "reason": "target_weight_daily_ops_summary_blocked: market data stale",
+                "error": {
+                    "type": "ValueError",
+                    "message": "market data stale",
+                },
+                "operator_commands": {
+                    "daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        f"--candidate-id {strategy} --as-of-date 2026-05-18 "
+                        "--daily-ops-summary"
+                    ),
+                    "readiness_audit": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        f"--candidate-id {strategy} --as-of-date 2026-05-18 "
+                        "--readiness-audit"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action = report["next_actions"][0]
+    runbook = report["operator_runbook"]
+    assert action["source"] == "latest_daily_ops_failure"
+    assert action["daily_ops_status"] == "FAILED"
+    assert action["failure_reason"] == (
+        "target_weight_daily_ops_summary_blocked: market data stale"
+    )
+    assert action["failure_error"] == "ValueError: market data stale"
+    assert action["source_path"].endswith(failure_path.name)
+    assert action["command"].endswith("--as-of-date 2026-05-18 --daily-ops-summary")
+    assert action["follow_up"].endswith("--as-of-date 2026-05-18 --readiness-audit")
+    assert action["order_safety"] == "no_order"
+    assert runbook["latest_daily_ops_failure"]["source_path"].endswith(failure_path.name)
+    assert runbook["current_priority_action"]["source"] == "latest_daily_ops_failure"
+    assert report["next_actions"][1]["command"].startswith(
+        "# blocked: latest daily ops summary failure unresolved"
+    )
+    assert report["next_actions"][1]["order_safety"] == "no_order"
+
+
+def test_load_current_blockers_from_artifacts_prioritizes_newer_daily_ops_failure(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+    import tools.evaluate_and_promote as ep
+
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    daily_ops_path = paper_runtime / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    failure_path = (
+        paper_runtime
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260518101000.json"
+    )
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:00:00",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {strategy} --as-of-date 2026-05-18 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    daily_ops_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-05-18T10:10:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-05-18",
+                "status": "BLOCKED",
+                "reason": "target_weight_daily_ops_summary_blocked: missing readiness audit",
+                "error": {
+                    "type": "ValueError",
+                    "message": "missing readiness audit",
+                },
+                "operator_commands": {
+                    "daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        f"--candidate-id {strategy} --as-of-date 2026-05-18 "
+                        "--daily-ops-summary"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    os.utime(daily_ops_path, (1_000, 1_000))
+    os.utime(failure_path, (2_000, 2_000))
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action = report["next_actions"][0]
+    runbook = report["operator_runbook"]
+    assert action["source"] == "latest_daily_ops_failure"
+    assert action["failure_reason"] == (
+        "target_weight_daily_ops_summary_blocked: missing readiness audit"
+    )
+    assert runbook["latest_daily_ops"]["status"] == "READY_TO_EXECUTE"
+    assert runbook["latest_daily_ops_failure"]["source_path"].endswith(failure_path.name)
+    assert runbook["commands"]["execute_capped_paper_after_ready"].startswith("# blocked:")
+    assert report["next_actions"][1]["command"].startswith("# blocked:")
+    assert report["next_actions"][1]["order_safety"] == "no_order"
+
+
 def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, monkeypatch):
     import os
     import tools.evaluate_and_promote as ep
