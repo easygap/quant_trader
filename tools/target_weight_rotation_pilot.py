@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import os
-import shlex
 import sys
 import uuid
 from copy import deepcopy
@@ -24,6 +23,7 @@ sys.path.insert(0, str(_ROOT))
 from loguru import logger
 
 from core.data_collector import DataCollectionError
+from core.target_weight_commands import command_scope_issues as target_weight_command_scope_issues
 from core.target_weight_rotation import (
     DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
     TargetWeightPlan,
@@ -4568,31 +4568,12 @@ def build_target_weight_daily_ops_summary(
         require_trade_day: bool,
         required_flags: tuple[str, ...] = (),
     ) -> list[str]:
-        issues: list[str] = []
-        try:
-            tokens = shlex.split(command)
-        except ValueError as exc:
-            return [f"command parse failed: {exc}"]
-
-        def flag_value_matches(flag: str, expected: str) -> bool:
-            for idx, token in enumerate(tokens):
-                if token == flag and idx + 1 < len(tokens) and tokens[idx + 1] == expected:
-                    return True
-                if token.startswith(f"{flag}=") and token.split("=", 1)[1] == expected:
-                    return True
-            return False
-
-        if not (
-            flag_value_matches("--candidate-id", candidate_id)
-            or flag_value_matches("--strategy", candidate_id)
-        ):
-            issues.append(f"candidate_id mismatch expected={candidate_id}")
-        if require_trade_day and not flag_value_matches("--as-of-date", trade_day):
-            issues.append(f"as_of_date mismatch expected={trade_day}")
-        for flag in required_flags:
-            if flag not in tokens:
-                issues.append(f"missing {flag}")
-        return issues
+        return target_weight_command_scope_issues(
+            {"candidate_id": candidate_id, "trade_day": trade_day},
+            command,
+            require_trade_day=require_trade_day,
+            required_flags=required_flags,
+        )
 
     audit_enable_command = str(
         audit_operator_commands.get("enable_suggested_caps") or ""
