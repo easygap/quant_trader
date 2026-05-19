@@ -1,17 +1,17 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T13:38:04.738108",
+  "generated_at": "2026-05-19T17:12:49.863874",
   "source": "reports/promotion/promotion_blocker_summary.json",
-  "source_generated_at": "2026-05-13T14:07:37.832443",
-  "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
+  "source_generated_at": "2026-05-19T17:12:49.816814",
+  "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
-    "canonical_generated_at": "2026-05-13T14:07:37.832443",
-    "checked_at": "2026-05-19T13:38:04.738108",
-    "age_days": 5.98,
+    "canonical_generated_at": "2026-05-19T17:12:49.816814",
+    "checked_at": "2026-05-19T17:12:49.863874",
+    "age_days": 0.0,
     "max_age_days": 7,
-    "status": "AGING",
-    "warning": "canonical artifact is close to the freshness limit; plan a canonical refresh before live review",
+    "status": "FRESH",
+    "warning": "",
     "check_command": "python tools/evaluate_and_promote.py --check-only",
     "refresh_command": "python tools/evaluate_and_promote.py --canonical"
   },
@@ -177,12 +177,12 @@
       "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용"
     ],
     "promotion_artifact_freshness": {
-      "canonical_generated_at": "2026-05-13T14:07:37.832443",
-      "checked_at": "2026-05-19T13:38:04.738108",
-      "age_days": 5.98,
+      "canonical_generated_at": "2026-05-19T17:12:49.816814",
+      "checked_at": "2026-05-19T17:12:49.863874",
+      "age_days": 0.0,
       "max_age_days": 7,
-      "status": "AGING",
-      "warning": "canonical artifact is close to the freshness limit; plan a canonical refresh before live review",
+      "status": "FRESH",
+      "warning": "",
       "check_command": "python tools/evaluate_and_promote.py --check-only",
       "refresh_command": "python tools/evaluate_and_promote.py --canonical"
     },
