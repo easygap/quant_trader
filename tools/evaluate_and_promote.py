@@ -924,6 +924,81 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return False
 
 
+def _target_weight_enable_blocker(payload: dict, command: str | None = None) -> str | None:
+    status = str(payload.get("status") or "")
+    trade_day = str(payload.get("trade_day") or "").strip() or "UNKNOWN"
+    next_trade_day = str(payload.get("next_operator_trade_day") or "").strip()
+    next_hint = next_trade_day or "next KRX business day"
+    if status == "PILOT_EVIDENCE_RECORDED":
+        return (
+            f"# blocked: pilot_paper evidence already recorded for {trade_day}; "
+            f"rerun readiness audit for {next_hint}"
+        )
+    if status == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE":
+        return (
+            f"# blocked: repaired pilot_paper evidence already recorded for {trade_day}; "
+            f"rerun readiness audit for {next_hint}"
+        )
+    if status == "PILOT_EVIDENCE_INVALID":
+        return (
+            f"# blocked: pilot_paper evidence invalid for {trade_day}; "
+            "finalize or repair evidence before changing pilot caps"
+        )
+    if status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
+        return None
+    if str(command or "").strip():
+        return (
+            f"# blocked: daily_ops_summary.status == {status}; "
+            "READY_TO_ENABLE_CAPS 전 cap 변경 금지"
+        )
+    return None
+
+
+def _ready_to_execute_trade_day_is_current(payload: dict) -> bool:
+    trade_day = str(payload.get("trade_day") or "").strip()
+    if not trade_day:
+        return False
+    try:
+        trade_date = datetime.strptime(trade_day, "%Y-%m-%d").date()
+        current = datetime.strptime(_current_kst_date(), "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return trade_date == current
+
+
+def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    sanitized = dict(payload)
+    status = sanitized.get("status")
+    decision = sanitized.get("decision") or {}
+    operator_commands = dict(sanitized.get("operator_commands") or {})
+
+    enable_command = str(operator_commands.get("enable_suggested_caps") or "")
+    enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
+    if enable_blocker:
+        operator_commands["enable_suggested_caps"] = enable_blocker
+
+    execute_command = str(operator_commands.get("execute_capped_paper") or "")
+    if status == "READY_TO_EXECUTE" and not _ready_to_execute_trade_day_is_current(sanitized):
+        operator_commands["execute_capped_paper"] = (
+            "# blocked: daily_ops_summary.trade_day is stale; "
+            "rerun daily ops summary for the current KRX business day"
+        )
+    elif status != "READY_TO_EXECUTE":
+        if not execute_command.lstrip().startswith("# blocked:"):
+            reason = (
+                _first_text(decision.get("blocking_reasons"))
+                or sanitized.get("next_step")
+                or status
+            )
+            operator_commands["execute_capped_paper"] = f"# blocked: {reason}"
+
+    sanitized["decision"] = decision
+    sanitized["operator_commands"] = operator_commands
+    return sanitized
+
+
 def _load_latest_target_weight_daily_ops(
     strategy: str,
     reports_dir: str | Path = "reports",
@@ -957,25 +1032,17 @@ def _load_latest_target_weight_daily_ops(
             continue
         if not _daily_ops_trade_day_is_available(payload):
             continue
-        status = payload.get("status")
-        decision = payload.get("decision") or {}
-        operator_commands = dict(payload.get("operator_commands") or {})
-        if status != "READY_TO_EXECUTE":
-            execute_command = str(operator_commands.get("execute_capped_paper") or "")
-            if not execute_command.lstrip().startswith("# blocked:"):
-                reason = _first_text(decision.get("blocking_reasons")) or payload.get("next_step") or status
-                operator_commands["execute_capped_paper"] = f"# blocked: {reason}"
-        return {
+        return _sanitize_target_weight_daily_ops_summary({
             "source_path": str(path),
             "generated_at": payload.get("generated_at"),
             "trade_day": payload.get("trade_day"),
             "next_operator_trade_day": payload.get("next_operator_trade_day"),
-            "status": status,
+            "status": payload.get("status"),
             "next_step": payload.get("next_step"),
             "evidence_progress": payload.get("evidence_progress") or {},
-            "decision": decision,
-            "operator_commands": operator_commands,
-        }
+            "decision": payload.get("decision") or {},
+            "operator_commands": payload.get("operator_commands") or {},
+        })
     return None
 
 
@@ -1410,6 +1477,7 @@ def build_current_blockers_report(
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
     if not isinstance(blocker_summary, dict):
         blocker_summary = {}
+    latest_daily_ops = _sanitize_target_weight_daily_ops_summary(latest_daily_ops)
     summary = blocker_summary.get("summary") or {}
     live_candidates = _strategy_names_by_status(blocker_summary, "live_candidate")
     provisional_candidates = _ranked_provisional_candidates(blocker_summary)

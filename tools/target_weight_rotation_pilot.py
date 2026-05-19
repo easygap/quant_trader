@@ -4809,9 +4809,31 @@ def build_target_weight_daily_ops_summary(
         )
         operator_commands["next_daily_ops_summary"] = f"{next_base} --daily-ops-summary"
         operator_commands["next_readiness_audit"] = f"{next_base} --readiness-audit"
-    elif status != "READY_TO_EXECUTE":
-        block_reason = _first_text(decision_blocking_reasons) or f"{status}: {next_step}"
-        operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
+    enable_allowed_statuses = {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}
+    enable_command = str(operator_commands.get("enable_suggested_caps") or "").strip()
+    if status == "BLOCKED" and audit.get("ready_for_cap_approval") and enable_command_issue_reason:
+        operator_commands["enable_suggested_caps"] = f"# blocked: {enable_command_issue_reason}"
+    elif (
+        status not in enable_allowed_statuses
+        and enable_command
+        and not enable_command.lstrip().startswith("# blocked:")
+    ):
+        operator_commands["enable_suggested_caps"] = (
+            f"# blocked: daily_ops_summary.status == {status}; "
+            "READY_TO_ENABLE_CAPS 전 cap 변경 금지"
+        )
+    if status != "READY_TO_EXECUTE":
+        execute_command = str(operator_commands.get("execute_capped_paper") or "").strip()
+        if (
+            status == "BLOCKED"
+            and audit.get("ready_for_capped_pilot")
+            and execution_ready_checks_passed
+            and execute_command_issue_reason
+        ):
+            operator_commands["execute_capped_paper"] = f"# blocked: {execute_command_issue_reason}"
+        elif not execute_command.lstrip().startswith("# blocked:"):
+            block_reason = _first_text(decision_blocking_reasons) or f"{status}: {next_step}"
+            operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
     summary = {
         "artifact_type": "target_weight_daily_ops_summary",
         "schema_version": 1,
