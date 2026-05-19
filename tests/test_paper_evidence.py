@@ -2547,6 +2547,54 @@ class TestArtifactQuarantine:
         assert "promotion/promotion_result.json" in found
         assert "promotion/metrics_summary.json" not in found
 
+    def test_scan_preserves_target_weight_operator_artifacts(self, tmp_path):
+        from tools.quarantine_test_artifacts import scan_test_artifacts
+
+        candidate = (
+            "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_"
+            "sectorcap2_posloss8_frac50_pdd10_floor40_cd1"
+        )
+        reports_dir = tmp_path / "reports"
+        evidence_dir = reports_dir / "paper_evidence"
+        runtime_dir = reports_dir / "paper_runtime"
+        promotion_dir = reports_dir / "promotion"
+        evidence_dir.mkdir(parents=True)
+        runtime_dir.mkdir(parents=True)
+        promotion_dir.mkdir(parents=True)
+        (evidence_dir / f"daily_evidence_{candidate}.jsonl").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (runtime_dir / f"preflight_status_{candidate}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (runtime_dir / f"runtime_status_{candidate}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        (promotion_dir / "promotion_blocker_summary.json").write_text(
+            json.dumps(
+                {
+                    "next_actions": [{"strategy": candidate}],
+                    "operator_runbook": {"primary_strategy": candidate},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (evidence_dir / "daily_evidence_dedup_test.jsonl").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+
+        found = [
+            path.relative_to(reports_dir).as_posix()
+            for path in scan_test_artifacts(reports_dir)
+        ]
+
+        assert found == ["paper_evidence/daily_evidence_dedup_test.jsonl"]
+
     def test_quarantine_moves_only_test_artifacts(self, tmp_path):
         from tools.quarantine_test_artifacts import quarantine
 
