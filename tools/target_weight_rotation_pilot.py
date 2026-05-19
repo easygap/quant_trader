@@ -2584,6 +2584,221 @@ def write_target_weight_pilot_evidence_repair_report(
     return json_path, md_path
 
 
+def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Target-weight Pilot Evidence Finalize",
+        "",
+        f"- Candidate: `{report['candidate_id']}`",
+        f"- Finalize date: `{report['finalize_date']}`",
+        f"- Status: **{report['status']}**",
+        f"- Reason: {report['reason']}",
+        f"- Source record version: {report.get('source_record_version', 'N/A')}",
+        f"- Appended record version: {report.get('appended_record_version', 'N/A')}",
+        f"- Proof after finalize: {report.get('proof_status_after', {}).get('reason', 'N/A')}",
+        "",
+        "## Finalized Fields",
+    ]
+    finalized_fields = report.get("finalized_fields") or {}
+    if finalized_fields:
+        lines.extend([f"- {key}: `{value}`" for key, value in sorted(finalized_fields.items())])
+    else:
+        lines.append("- none")
+    lines.extend([
+        "",
+        "## No-order Safety",
+    ])
+    for key, value in (report.get("no_order_safety") or {}).items():
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_pilot_evidence_finalize_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = str(report["candidate_id"])
+    finalize_date = str(report["finalize_date"])
+    stem = f"target_weight_pilot_evidence_finalize_{candidate}_{finalize_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(render_target_weight_pilot_evidence_finalize_markdown(report), encoding="utf-8")
+    return json_path, md_path
+
+
+def finalize_target_weight_pilot_evidence(
+    *,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    finalize_date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """기존 execution-backed pilot evidence를 주문 없이 final benchmark 성과 record로 확정한다."""
+    from core.paper_evidence import (
+        _append_jsonl,
+        _collect_portfolio_metrics,
+        _compute_benchmark_excess,
+        _evidence_path,
+        _read_all_evidence,
+        _target_weight_record_proof_status,
+    )
+
+    parsed_date = datetime.strptime(finalize_date, "%Y-%m-%d")
+    jsonl_path = _evidence_path(candidate_id)
+    records = _read_all_evidence(jsonl_path)
+    latest = None
+    for record in reversed(records):
+        if record.get("date") == finalize_date:
+            latest = record
+            break
+
+    base_report = {
+        "artifact_type": "target_weight_pilot_evidence_finalize",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": candidate_id,
+        "finalize_date": finalize_date,
+        "evidence_path": str(jsonl_path),
+        "status": "blocked",
+        "reason": "",
+        "finalized": False,
+        "source_record_version": None,
+        "appended_record_version": None,
+        "finalized_fields": {},
+        "proof_status_before": {},
+        "proof_status_after": {},
+        "no_order_safety": {
+            "orders_submitted": False,
+            "order_executor_called": False,
+            "existing_records_overwritten": False,
+            "append_only": True,
+        },
+    }
+
+    def finish(report: dict[str, Any], *, fail: bool = False) -> dict[str, Any]:
+        report["finalize_hash"] = _stable_manifest_hash(report)
+        json_path, md_path = write_target_weight_pilot_evidence_finalize_report(
+            report,
+            output_dir=output_dir,
+        )
+        report["artifact_path"] = str(json_path)
+        report["report_path"] = str(md_path)
+        if fail:
+            raise ValueError(report["reason"])
+        return report
+
+    if latest is None:
+        report = dict(base_report)
+        report["reason"] = (
+            "target_weight_pilot_evidence_finalize_missing: "
+            f"no evidence for {candidate_id} {finalize_date}"
+        )
+        return finish(report, fail=True)
+
+    source_version = _coerce_int_or_zero(latest.get("record_version") or 1)
+    before_valid, before_reason = _target_weight_record_proof_status(candidate_id, latest)
+    report = {
+        **base_report,
+        "source_record_version": source_version,
+        "proof_status_before": {"valid": before_valid, "reason": before_reason},
+    }
+    if before_valid:
+        report.update({
+            "status": "already_valid",
+            "reason": "target_weight_pilot_evidence_already_valid",
+        })
+        return finish(report)
+    if before_reason == "target_weight_repaired_performance_not_promotable":
+        report.update({
+            "status": "already_repaired_non_promotable",
+            "reason": "target_weight_pilot_evidence_already_repaired_non_promotable",
+        })
+        return finish(report)
+    if before_reason not in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS:
+        report["reason"] = f"target_weight_pilot_evidence_finalize_not_allowed: {before_reason}"
+        return finish(report, fail=True)
+
+    updated = deepcopy(latest)
+    finalized_fields: dict[str, Any] = {}
+    total_value = _positive_float_from(updated.get("total_value"))
+    cash = _coerce_float_or_none(updated.get("cash"))
+    daily_return = _coerce_float_or_none(updated.get("daily_return"))
+    portfolio: dict[str, Any] = {}
+    if total_value is None or daily_return is None:
+        portfolio = _collect_portfolio_metrics(candidate_id, parsed_date)
+        for field in (
+            "total_value",
+            "cash",
+            "invested",
+            "daily_return",
+            "cumulative_return",
+            "mdd",
+            "position_count",
+        ):
+            value = portfolio.get(field)
+            if value is not None:
+                updated[field] = value
+                finalized_fields[field] = value
+        total_value = _positive_float_from(updated.get("total_value"))
+        cash = _coerce_float_or_none(updated.get("cash"))
+        daily_return = _coerce_float_or_none(updated.get("daily_return"))
+
+    if total_value is None or total_value <= 0 or daily_return is None:
+        report["reason"] = "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable"
+        report["finalized_fields"] = finalized_fields
+        return finish(report, fail=True)
+
+    cash_ratio = (cash or 0.0) / total_value if total_value > 0 else 1.0
+    benchmark = _compute_benchmark_excess(
+        date=parsed_date,
+        daily_return=daily_return,
+        cash_ratio=cash_ratio,
+        watchlist_symbols=_target_weight_repair_watchlist(latest),
+    )
+    benchmark_status = benchmark.get("benchmark_status", "failed")
+    if benchmark_status != "final":
+        report.update({
+            "status": "waiting_for_final_benchmark",
+            "reason": f"target_weight_pilot_evidence_finalize_waiting: benchmark_status={benchmark_status}",
+            "finalized_fields": finalized_fields,
+            "benchmark_status": benchmark_status,
+        })
+        return finish(report)
+
+    for field in (
+        "same_universe_excess",
+        "exposure_matched_excess",
+        "cash_adjusted_excess",
+        "benchmark_meta",
+        "benchmark_status",
+    ):
+        value = benchmark.get(field) if field != "benchmark_status" else benchmark_status
+        updated[field] = value
+        finalized_fields[field] = value
+    updated["record_version"] = source_version + 1
+    updated["schema_version"] = max(_coerce_int_or_zero(updated.get("schema_version") or 2), 2)
+
+    after_valid, after_reason = _target_weight_record_proof_status(candidate_id, updated)
+    if not after_valid:
+        report["reason"] = f"target_weight_pilot_evidence_finalize_still_invalid: {after_reason}"
+        report["finalized_fields"] = finalized_fields
+        report["proof_status_after"] = {"valid": after_valid, "reason": after_reason}
+        return finish(report, fail=True)
+
+    _append_jsonl(jsonl_path, updated)
+    report.update({
+        "status": "finalized",
+        "reason": "target_weight_pilot_evidence_finalized",
+        "finalized": True,
+        "appended_record_version": updated["record_version"],
+        "finalized_fields": finalized_fields,
+        "proof_status_after": {"valid": after_valid, "reason": after_reason},
+        "benchmark_status": benchmark_status,
+    })
+    return finish(report)
+
+
 def repair_target_weight_pilot_evidence(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -3835,6 +4050,7 @@ def _build_readiness_operator_commands(
         "rerun_readiness_audit": f"{base} --readiness-audit",
         "enable_suggested_caps": str(cap_recommendation.get("enable_command", "")).strip(),
         "execute_capped_paper": execute_command,
+        "finalize_pilot_evidence": f"{repair_base} --finalize-pilot-evidence --finalize-date {plan.trade_day}",
         "repair_pilot_evidence": f"{repair_base} --repair-pilot-evidence --repair-date {plan.trade_day}",
     }
 
@@ -4393,7 +4609,11 @@ def build_target_weight_daily_ops_summary(
         next_step = "오늘 pilot_paper 실행 증거는 복구 보존됐지만 promotion 카운트에서는 제외; 다음 KRX 영업일 fresh readiness 점검"
     elif pilot_evidence_invalid_today:
         status = "PILOT_EVIDENCE_INVALID"
-        next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
+        invalid_reasons = evidence_progress.get("invalid_reasons") or {}
+        if "target_weight_benchmark_status_not_final" in invalid_reasons:
+            next_step = "오늘 pilot_paper 증거 품질 미확정; final benchmark/portfolio evidence 확정 후 daily ops 재점검"
+        else:
+            next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
     elif pilot_evidence_recorded_today:
         status = "PILOT_EVIDENCE_RECORDED"
         next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 fresh readiness와 cap 재승인 점검"
@@ -4441,6 +4661,14 @@ def build_target_weight_daily_ops_summary(
         ]
     operator_commands = dict(audit.get("operator_commands") or {})
     operator_commands.setdefault(
+        "finalize_pilot_evidence",
+        (
+            "python tools/target_weight_rotation_pilot.py "
+            f"--candidate-id {audit['candidate_id']} "
+            f"--finalize-pilot-evidence --finalize-date {audit['trade_day']}"
+        ),
+    )
+    operator_commands.setdefault(
         "repair_pilot_evidence",
         (
             "python tools/target_weight_rotation_pilot.py "
@@ -4449,13 +4677,22 @@ def build_target_weight_daily_ops_summary(
         ),
     )
     if pilot_evidence_invalid_today:
+        invalid_reasons = evidence_progress.get("invalid_reasons") or {}
+        if "target_weight_benchmark_status_not_final" in invalid_reasons:
+            operator_commands["repair_pilot_evidence"] = (
+                "# fallback: use only if finalize cannot produce promotable proof; "
+                + operator_commands["repair_pilot_evidence"]
+            )
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
-            "repair benchmark/portfolio evidence before counting the day"
+            "finalize benchmark/portfolio evidence before counting the day"
         )
     elif pilot_evidence_repaired_today:
         operator_commands["execute_capped_paper"] = (
             f"# blocked: repaired pilot_paper evidence already recorded for {audit['trade_day']}"
+        )
+        operator_commands["finalize_pilot_evidence"] = (
+            f"# blocked: repaired pilot_paper evidence already appended for {audit['trade_day']}"
         )
         operator_commands["repair_pilot_evidence"] = (
             f"# blocked: repaired pilot_paper evidence already appended for {audit['trade_day']}"
@@ -4469,6 +4706,9 @@ def build_target_weight_daily_ops_summary(
     elif pilot_evidence_recorded_today:
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
+        )
+        operator_commands["finalize_pilot_evidence"] = (
+            f"# blocked: pilot_paper evidence already finalized for {audit['trade_day']}"
         )
         next_base = _base_no_order_command(
             candidate_id=str(audit["candidate_id"]),
@@ -4681,6 +4921,11 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         "### Enable Suggested Caps",
         "```bash",
         commands.get("enable_suggested_caps", ""),
+        "```",
+        "",
+        "### Finalize Pilot Evidence",
+        "```bash",
+        commands.get("finalize_pilot_evidence", ""),
         "```",
         "",
         "### Repair Pilot Evidence",
@@ -5915,6 +6160,12 @@ def main() -> None:
     )
     parser.add_argument("--repair-date", help="YYYY-MM-DD evidence date to repair with --repair-pilot-evidence.")
     parser.add_argument(
+        "--finalize-pilot-evidence",
+        action="store_true",
+        help="Append a no-order finalized pilot_paper evidence record when final benchmark data is available.",
+    )
+    parser.add_argument("--finalize-date", help="YYYY-MM-DD evidence date to finalize with --finalize-pilot-evidence.")
+    parser.add_argument(
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
@@ -5978,6 +6229,8 @@ def main() -> None:
             cash_blocked_modes.append("--collect-evidence")
         if args.repair_pilot_evidence:
             cash_blocked_modes.append("--repair-pilot-evidence")
+        if args.finalize_pilot_evidence:
+            cash_blocked_modes.append("--finalize-pilot-evidence")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -5985,7 +6238,10 @@ def main() -> None:
             )
     if args.collect_evidence and not args.execute:
         parser.error("--collect-evidence requires --execute; evidence must be tied to a completed paper execution")
-    if args.repair_pilot_evidence and (
+    evidence_maintenance_modes = [args.repair_pilot_evidence, args.finalize_pilot_evidence]
+    if sum(1 for enabled in evidence_maintenance_modes if enabled) > 1:
+        parser.error("--repair-pilot-evidence and --finalize-pilot-evidence are mutually exclusive")
+    if (args.repair_pilot_evidence or args.finalize_pilot_evidence) and (
         args.readiness_audit
         or args.daily_ops_summary
         or args.execute
@@ -5996,7 +6252,7 @@ def main() -> None:
         or args.shadow_days is not None
     ):
         parser.error(
-            "--repair-pilot-evidence cannot be combined with readiness, daily ops, "
+            "evidence maintenance cannot be combined with readiness, daily ops, "
             "execution, evidence collection, or shadow bootstrap modes"
         )
     if args.repair_pilot_evidence and not args.repair_date:
@@ -6005,6 +6261,12 @@ def main() -> None:
         parser.error("--repair-date is only used with --repair-pilot-evidence")
     if args.repair_pilot_evidence and args.as_of_date:
         parser.error("--as-of-date is not used with --repair-pilot-evidence; use --repair-date")
+    if args.finalize_pilot_evidence and not args.finalize_date:
+        parser.error("--finalize-date is required with --finalize-pilot-evidence")
+    if args.finalize_date and not args.finalize_pilot_evidence:
+        parser.error("--finalize-date is only used with --finalize-pilot-evidence")
+    if args.finalize_pilot_evidence and args.as_of_date:
+        parser.error("--as-of-date is not used with --finalize-pilot-evidence; use --finalize-date")
 
     from database.models import init_database
 
@@ -6120,6 +6382,34 @@ def main() -> None:
             print(f"  proof: {result['proof_status_after'].get('reason')}")
         print(f"  artifact: {result['artifact_path']}")
         print(f"  report: {result['report_path']}")
+        return
+
+    if args.finalize_pilot_evidence:
+        try:
+            result = finalize_target_weight_pilot_evidence(
+                candidate_id=args.candidate_id,
+                finalize_date=args.finalize_date,
+                output_dir=Path(args.output_dir),
+            )
+        except ValueError as exc:
+            print("\nTarget-weight pilot evidence finalize")
+            print(f"  candidate: {args.candidate_id}")
+            print(f"  finalize_date: {args.finalize_date}")
+            print(f"  status: BLOCKED - {exc}")
+            raise SystemExit(1)
+
+        print("\nTarget-weight pilot evidence finalize")
+        print(f"  candidate: {result['candidate_id']}")
+        print(f"  finalize_date: {result['finalize_date']}")
+        print(f"  status: {result['status']}")
+        print(f"  reason: {result['reason']}")
+        if result.get("finalized"):
+            print(f"  appended_record_version: {result['appended_record_version']}")
+            print(f"  proof: {result['proof_status_after'].get('reason')}")
+        print(f"  artifact: {result['artifact_path']}")
+        print(f"  report: {result['report_path']}")
+        if result["status"] == "waiting_for_final_benchmark":
+            raise SystemExit(1)
         return
 
     if args.daily_ops_summary:
