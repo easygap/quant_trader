@@ -2146,6 +2146,64 @@ def test_load_current_blockers_from_artifacts_prioritizes_daily_ops_failure_when
     assert report["next_actions"][1]["order_safety"] == "no_order"
 
 
+def test_current_blockers_daily_ops_failure_payload_excludes_volatile_mtime(
+    tmp_path,
+):
+    import os
+
+    from tools.evaluate_and_promote import (
+        load_current_blockers_from_artifacts,
+        validate_current_blockers_artifact,
+        write_current_blockers_report,
+    )
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    failure_path = (
+        paper_runtime
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260518100500.json"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-05-18T10:05:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-05-18",
+                "status": "BLOCKED",
+                "reason": "target_weight_daily_ops_summary_blocked: market data stale",
+                "operator_commands": {
+                    "daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        f"--candidate-id {strategy} --as-of-date 2026-05-18 "
+                        "--daily-ops-summary"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+    current_blockers_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(report, current_blockers_path)
+    os.utime(failure_path, (3_000, 3_000))
+
+    failure = report["operator_runbook"]["latest_daily_ops_failure"]
+    assert "source_mtime" not in failure
+    assert validate_current_blockers_artifact(promotion_dir, current_blockers_path) == []
+
+
 def test_load_current_blockers_from_artifacts_prioritizes_newer_daily_ops_failure(
     tmp_path,
     monkeypatch,
