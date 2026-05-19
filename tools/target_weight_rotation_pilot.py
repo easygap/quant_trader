@@ -4261,6 +4261,7 @@ def summarize_target_weight_evidence_progress(
     verified_dates: set[str] = set()
     invalid_dates: set[str] = set()
     invalid_reasons: dict[str, int] = {}
+    repaired_dates: set[str] = set()
     shadow_dates: set[str] = set()
     non_promotable_dates: set[str] = set()
     all_dates: set[str] = set()
@@ -4286,6 +4287,14 @@ def summarize_target_weight_evidence_progress(
             if date:
                 verified_dates.add(date)
         else:
+            if reason == "target_weight_repaired_performance_not_promotable":
+                repair_valid, _ = _target_weight_record_proof_status(
+                    candidate_id,
+                    record,
+                    allow_repaired_performance=True,
+                )
+                if repair_valid and date:
+                    repaired_dates.add(date)
             if date:
                 invalid_dates.add(date)
             invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
@@ -4302,10 +4311,12 @@ def summarize_target_weight_evidence_progress(
         "shadow_days": len(shadow_dates),
         "invalid_execution_days": len(invalid_dates),
         "invalid_reasons": invalid_reasons,
+        "repaired_pilot_days": len(repaired_dates),
         "non_promotable_days": len(non_promotable_dates),
         "total_canonical_records": len(records),
         "latest_record_date": max(all_dates) if all_dates else None,
         "latest_verified_pilot_date": max(verified_dates) if verified_dates else None,
+        "latest_repaired_pilot_date": max(repaired_dates) if repaired_dates else None,
         "latest_shadow_date": max(shadow_dates) if shadow_dates else None,
         "ready_for_promotion_day_count": verified_days >= int(target_days),
     }
@@ -4356,6 +4367,7 @@ def build_target_weight_daily_ops_summary(
     trade_day = str(audit.get("trade_day") or "")
     latest_record_date = str(evidence_progress.get("latest_record_date") or "")
     latest_verified_pilot_date = str(evidence_progress.get("latest_verified_pilot_date") or "")
+    latest_repaired_pilot_date = str(evidence_progress.get("latest_repaired_pilot_date") or "")
     try:
         invalid_execution_days = int(evidence_progress.get("invalid_execution_days") or 0)
     except (TypeError, ValueError):
@@ -4364,13 +4376,22 @@ def build_target_weight_daily_ops_summary(
         latest_verified_pilot_date == trade_day
         and duplicate_execution_blocked
     )
+    pilot_evidence_repaired_today = (
+        latest_repaired_pilot_date == trade_day
+        and latest_verified_pilot_date != trade_day
+        and duplicate_execution_blocked
+    )
     pilot_evidence_invalid_today = (
         latest_record_date == trade_day
         and latest_verified_pilot_date != trade_day
+        and latest_repaired_pilot_date != trade_day
         and invalid_execution_days > 0
         and duplicate_execution_blocked
     )
-    if pilot_evidence_invalid_today:
+    if pilot_evidence_repaired_today:
+        status = "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+        next_step = "오늘 pilot_paper 실행 증거는 복구 보존됐지만 promotion 카운트에서는 제외; 다음 KRX 영업일 fresh readiness 점검"
+    elif pilot_evidence_invalid_today:
         status = "PILOT_EVIDENCE_INVALID"
         next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
     elif pilot_evidence_recorded_today:
@@ -4404,13 +4425,14 @@ def build_target_weight_daily_ops_summary(
     post_evidence_diagnostics: list[str] = []
     decision_blocking_reasons = raw_blocking_reasons
     next_operator_trade_day: str | None = None
-    if pilot_evidence_recorded_today:
+    if pilot_evidence_recorded_today or pilot_evidence_repaired_today:
         next_operator_trade_day = _next_kr_market_business_day(trade_day)
         post_evidence_diagnostics = [
             reason
             for reason in raw_blocking_reasons
             if str(reason).startswith("execution_idempotency:")
             or str(reason).startswith("pilot_authorization_snapshot:")
+            or str(reason).startswith("pilot_validation: max_orders_per_day")
         ]
         decision_blocking_reasons = [
             reason
@@ -4431,6 +4453,19 @@ def build_target_weight_daily_ops_summary(
             f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
             "repair benchmark/portfolio evidence before counting the day"
         )
+    elif pilot_evidence_repaired_today:
+        operator_commands["execute_capped_paper"] = (
+            f"# blocked: repaired pilot_paper evidence already recorded for {audit['trade_day']}"
+        )
+        operator_commands["repair_pilot_evidence"] = (
+            f"# blocked: repaired pilot_paper evidence already appended for {audit['trade_day']}"
+        )
+        next_base = _base_no_order_command(
+            candidate_id=str(audit["candidate_id"]),
+            as_of_date=next_operator_trade_day,
+        )
+        operator_commands["next_daily_ops_summary"] = f"{next_base} --daily-ops-summary"
+        operator_commands["next_readiness_audit"] = f"{next_base} --readiness-audit"
     elif pilot_evidence_recorded_today:
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
@@ -4558,8 +4593,10 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         ),
         f"- Remaining pilot days: {progress['remaining_pilot_days']}",
         f"- Shadow days: {progress['shadow_days']}",
+        f"- Repaired non-promotable pilot days: {progress.get('repaired_pilot_days', 0)}",
         f"- Invalid execution days: {progress['invalid_execution_days']}",
         f"- Latest verified pilot date: {progress.get('latest_verified_pilot_date') or 'N/A'}",
+        f"- Latest repaired pilot date: {progress.get('latest_repaired_pilot_date') or 'N/A'}",
         "",
         "## Risk Snapshot",
         f"- Orders: {risk['orders']}",
@@ -6164,6 +6201,7 @@ def main() -> None:
             f"verified={progress['verified_pilot_days']}/{progress['target_days']} "
             f"remaining={progress['remaining_pilot_days']} "
             f"shadow={progress['shadow_days']} "
+            f"repaired={progress.get('repaired_pilot_days', 0)} "
             f"invalid={progress['invalid_execution_days']}"
         )
         print(f"  next: {summary['next_step']}")
