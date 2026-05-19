@@ -4146,6 +4146,92 @@ def test_build_target_weight_daily_ops_summary_allows_execute_only_when_ready(tm
     assert "READY_TO_EXECUTE" in report
 
 
+def test_build_target_weight_daily_ops_summary_blocks_ready_audit_without_execute_command(tmp_path):
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        build_target_weight_experiment_manifest,
+        recommend_pilot_caps,
+    )
+
+    plan = _adapter_plan()
+    cap_recommendation = recommend_pilot_caps(plan)
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": True,
+        "ready_for_capped_pilot": True,
+        "next_action": "execute capped paper pilot with --execute --collect-evidence",
+        "blocking_reasons": [],
+        "warning_reasons": [],
+        "launch_readiness": {"launch_ready": True},
+        "plan_validation": {"allowed": True},
+        "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
+        "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+        "pilot_authorization_snapshot_check": pass_check,
+        "operator_commands": {
+            "execute_capped_paper": "# blocked: stale readiness command",
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+        },
+        "pre_trade_risk_check": {
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+        },
+    }
+    manifest = build_target_weight_experiment_manifest(
+        plan=plan,
+        cap_recommendation=cap_recommendation,
+        readiness_audit=audit,
+    )
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 12,
+        "remaining_pilot_days": 48,
+        "progress_ratio": 0.2,
+        "shadow_days": 3,
+        "invalid_execution_days": 0,
+        "invalid_reasons": {},
+        "non_promotable_days": 0,
+        "total_canonical_records": 15,
+        "latest_record_date": "2026-04-10",
+        "latest_verified_pilot_date": "2026-04-10",
+        "latest_shadow_date": "2026-04-03",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest=manifest,
+        evidence_progress=progress,
+    )
+
+    assert summary["status"] == "BLOCKED"
+    assert "실행 명령이 차단 또는 누락됨" in summary["next_step"]
+    assert summary["operator_commands"]["execute_capped_paper"].startswith(
+        "# blocked: daily_ops_execute_command_unavailable"
+    )
+    assert any(
+        "daily_ops_execute_command_unavailable" in reason
+        for reason in summary["decision"]["blocking_reasons"]
+    )
+
+
 def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, monkeypatch):
     import tools.target_weight_rotation_pilot as twp
 
