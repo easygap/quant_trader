@@ -4764,11 +4764,19 @@ def build_target_weight_daily_ops_summary(
                 "# fallback: use only if finalize cannot produce promotable proof; "
                 + operator_commands["repair_pilot_evidence"]
             )
+        operator_commands["enable_suggested_caps"] = (
+            f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
+            "finalize or repair evidence before changing pilot caps"
+        )
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
             "finalize benchmark/portfolio evidence before counting the day"
         )
     elif pilot_evidence_repaired_today:
+        operator_commands["enable_suggested_caps"] = (
+            f"# blocked: repaired pilot_paper evidence already recorded for {audit['trade_day']}; "
+            f"rerun readiness audit for {next_operator_trade_day}"
+        )
         operator_commands["execute_capped_paper"] = (
             f"# blocked: repaired pilot_paper evidence already recorded for {audit['trade_day']}"
         )
@@ -4785,6 +4793,10 @@ def build_target_weight_daily_ops_summary(
         operator_commands["next_daily_ops_summary"] = f"{next_base} --daily-ops-summary"
         operator_commands["next_readiness_audit"] = f"{next_base} --readiness-audit"
     elif pilot_evidence_recorded_today:
+        operator_commands["enable_suggested_caps"] = (
+            f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}; "
+            f"rerun readiness audit for {next_operator_trade_day}"
+        )
         operator_commands["execute_capped_paper"] = (
             f"# blocked: pilot_paper evidence already recorded for {audit['trade_day']}"
         )
