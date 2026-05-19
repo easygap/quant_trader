@@ -1125,18 +1125,35 @@ def _target_weight_ops_priority_action(
         }
 
     if status == "PILOT_EVIDENCE_INVALID":
-        return {
-            **base_action,
-            "invalid_execution_days": _safe_int(progress.get("invalid_execution_days")),
-            "invalid_reasons": progress.get("invalid_reasons") or {},
-            "desc": "오늘 target-weight pilot_paper 증거 품질 실패, benchmark/portfolio evidence 복구 후 daily ops 재점검",
-            "command": (
+        invalid_reasons = progress.get("invalid_reasons") or {}
+        finalize_first = "target_weight_benchmark_status_not_final" in invalid_reasons
+        command = (
+            ops_commands.get("finalize_pilot_evidence")
+            if finalize_first
+            else ops_commands.get("repair_pilot_evidence")
+        )
+        if not command:
+            command = (
                 ops_commands.get("repair_pilot_evidence")
                 or ops_commands.get("daily_ops_summary")
                 or commands.get("daily_ops_summary")
+            )
+        return {
+            **base_action,
+            "invalid_execution_days": _safe_int(progress.get("invalid_execution_days")),
+            "invalid_reasons": invalid_reasons,
+            "desc": (
+                "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검"
+                if finalize_first
+                else "오늘 target-weight pilot_paper 증거 품질 실패, benchmark/portfolio evidence 복구 후 daily ops 재점검"
             ),
+            "command": command,
             "order_safety": "no_order",
-            "requires": "benchmark/portfolio evidence repair",
+            "requires": (
+                "benchmark/portfolio evidence finalization"
+                if finalize_first
+                else "benchmark/portfolio evidence repair"
+            ),
             "follow_up": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
         }
 
