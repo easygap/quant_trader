@@ -4935,6 +4935,28 @@ def test_run_pilot_readiness_audit_blocks_future_as_of_before_plan(monkeypatch, 
         )
 
 
+def test_run_pilot_readiness_audit_blocks_requested_as_of_when_trade_day_stale(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    stale_plan = replace(_adapter_plan(), as_of_date="2026-04-11", trade_day="2026-04-10")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: stale_plan)
+    monkeypatch.setattr(
+        twp,
+        "refresh_paper_preflight_status",
+        lambda *args, **kwargs: pytest.fail("preflight should not run for stale requested trade day"),
+    )
+
+    with pytest.raises(ValueError, match="target_weight_requested_trade_day_unavailable"):
+        twp.run_pilot_readiness_audit(
+            as_of_date="2026-04-11",
+            output_dir=tmp_path,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            execution_now=datetime(2026, 4, 11, 9, 0),
+        )
+
+    assert list(tmp_path.glob("target_weight_pilot_readiness_audit_*.json")) == []
+
+
 def test_run_daily_ops_summary_blocks_cash_override(monkeypatch, tmp_path):
     import tools.target_weight_rotation_pilot as twp
 
@@ -4959,6 +4981,23 @@ def test_run_daily_ops_summary_blocks_future_as_of_before_audit(monkeypatch, tmp
             output_dir=tmp_path,
             execution_now=datetime(2026, 4, 10, 9, 0),
         )
+
+
+def test_run_daily_ops_summary_blocks_requested_as_of_when_trade_day_stale(monkeypatch, tmp_path):
+    import tools.target_weight_rotation_pilot as twp
+
+    stale_plan = replace(_adapter_plan(), as_of_date="2026-04-11", trade_day="2026-04-10")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: stale_plan)
+
+    with pytest.raises(ValueError, match="target_weight_requested_trade_day_unavailable"):
+        twp.run_daily_ops_summary(
+            as_of_date="2026-04-11",
+            output_dir=tmp_path,
+            config=SimpleNamespace(trading={"mode": "paper"}),
+            execution_now=datetime(2026, 4, 11, 9, 0),
+        )
+
+    assert list(tmp_path.glob("target_weight_daily_ops_summary_*.json")) == []
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"execute": True}, {"record_shadow_evidence": True}])
