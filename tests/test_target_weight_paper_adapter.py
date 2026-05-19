@@ -4552,6 +4552,7 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
         "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
         "pilot_authorization_snapshot_check": snapshot_mismatch,
         "operator_commands": {
+            "enable_suggested_caps": cap_recommendation["enable_command"],
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
         },
         "plan_summary": {
@@ -4602,6 +4603,10 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
     ]
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
     assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: pilot_paper evidence already recorded"
+    )
+    assert "2026-04-14" in summary["operator_commands"]["enable_suggested_caps"]
     assert summary["operator_commands"]["finalize_pilot_evidence"].startswith(
         "# blocked: pilot_paper evidence already finalized"
     )
@@ -4658,6 +4663,9 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
         "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
         "pilot_authorization_snapshot_check": pass_check,
         "operator_commands": {
+            "enable_suggested_caps": (
+                f"python tools/paper_pilot_control.py --strategy {plan.candidate_id} --enable"
+            ),
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
             "finalize_pilot_evidence": (
                 "python tools/target_weight_rotation_pilot.py "
@@ -4699,6 +4707,9 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
     report = render_target_weight_daily_ops_markdown(summary)
 
     assert summary["status"] == "PILOT_EVIDENCE_INVALID"
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: pilot_paper evidence invalid"
+    )
     assert "evidence invalid" in summary["operator_commands"]["execute_capped_paper"]
     assert summary["operator_commands"]["finalize_pilot_evidence"].endswith(
         f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
@@ -4739,6 +4750,9 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
         "pilot_authorization_snapshot_check": pass_check,
         "operator_commands": {
             "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --daily-ops-summary",
+            "enable_suggested_caps": (
+                f"python tools/paper_pilot_control.py --strategy {plan.candidate_id} --enable"
+            ),
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
         },
         "plan_summary": {
@@ -4782,6 +4796,10 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
     assert summary["operator_commands"]["execute_capped_paper"].startswith(
         "# blocked: repaired pilot_paper evidence already recorded"
     )
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: repaired pilot_paper evidence already recorded"
+    )
+    assert summary["next_operator_trade_day"] in summary["operator_commands"]["enable_suggested_caps"]
     assert summary["operator_commands"]["finalize_pilot_evidence"].startswith(
         "# blocked: repaired pilot_paper evidence already appended"
     )
