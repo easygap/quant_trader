@@ -286,6 +286,114 @@ def test_build_data_snapshot_manifest_hash_changes_with_coverage():
     assert list(first["liquidity_coverage"]) == ["000660", "005930"]
 
 
+def test_load_reusable_canonical_universe_snapshot_accepts_matching_metadata(tmp_path):
+    from tools.evaluate_and_promote import (
+        CANONICAL_EVAL_END,
+        CANONICAL_EVAL_START,
+        CANONICAL_TOP_N,
+        CANONICAL_UNIVERSE_LOOKBACK_END,
+        CANONICAL_UNIVERSE_LOOKBACK_START,
+        CANONICAL_UNIVERSE_RULE,
+        _load_reusable_canonical_universe_snapshot,
+    )
+
+    universe = [f"{idx:06d}" for idx in range(CANONICAL_TOP_N)]
+    metadata_path = tmp_path / "run_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "canonical_promotion_bundle",
+                "generated_at": "2026-05-19T10:00:00",
+                "eval_start": CANONICAL_EVAL_START,
+                "eval_end": CANONICAL_EVAL_END,
+                "universe_rule": CANONICAL_UNIVERSE_RULE,
+                "universe": universe,
+                "data_snapshot_hash": "abc123",
+                "data_snapshot_manifest": {
+                    "universe": universe,
+                    "universe_lookback_start": CANONICAL_UNIVERSE_LOOKBACK_START,
+                    "universe_lookback_end": CANONICAL_UNIVERSE_LOOKBACK_END,
+                    "liquidity_coverage": {
+                        universe[0]: {"rows": 61},
+                        universe[1]: {"rows": 62},
+                    },
+                    "fetch_errors": {
+                        "liquidity:000001": {"stage": "universe_liquidity"},
+                        "benchmark:000002": {"stage": "benchmark"},
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = _load_reusable_canonical_universe_snapshot(metadata_path)
+
+    assert snapshot["universe"] == universe
+    assert snapshot["liquidity_coverage"][universe[0]]["rows"] == 61
+    assert snapshot["fetch_errors"] == {
+        "liquidity:000001": {"stage": "universe_liquidity"}
+    }
+    assert snapshot["source_data_snapshot_hash"] == "abc123"
+
+
+def test_load_reusable_canonical_universe_snapshot_rejects_mismatch(tmp_path):
+    from tools.evaluate_and_promote import (
+        CANONICAL_EVAL_END,
+        CANONICAL_EVAL_START,
+        CANONICAL_TOP_N,
+        CANONICAL_UNIVERSE_LOOKBACK_END,
+        CANONICAL_UNIVERSE_LOOKBACK_START,
+        _load_reusable_canonical_universe_snapshot,
+    )
+
+    metadata_path = tmp_path / "run_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "canonical_promotion_bundle",
+                "eval_start": CANONICAL_EVAL_START,
+                "eval_end": CANONICAL_EVAL_END,
+                "universe_rule": "old rule",
+                "universe": [f"{idx:06d}" for idx in range(CANONICAL_TOP_N)],
+                "data_snapshot_manifest": {
+                    "universe_lookback_start": CANONICAL_UNIVERSE_LOOKBACK_START,
+                    "universe_lookback_end": CANONICAL_UNIVERSE_LOOKBACK_END,
+                    "liquidity_coverage": {},
+                    "fetch_errors": {},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert _load_reusable_canonical_universe_snapshot(metadata_path) is None
+
+
+def test_write_canonical_progress_records_stage(tmp_path):
+    from tools.evaluate_and_promote import _write_canonical_progress
+
+    progress_path = tmp_path / "canonical_progress.json"
+
+    _write_canonical_progress(
+        "research_walk_forward",
+        progress_path=progress_path,
+        strategy="target_weight_candidate",
+        window=2,
+        total_windows=6,
+    )
+
+    payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert payload["artifact_type"] == "canonical_promotion_progress"
+    assert payload["stage"] == "research_walk_forward"
+    assert payload["strategy"] == "target_weight_candidate"
+    assert payload["window"] == 2
+    assert payload["total_windows"] == 6
+    assert "updated_at" in payload
+
+
 def test_failed_canonical_metrics_separates_evaluation_error_from_zero_return():
     from tools.evaluate_and_promote import failed_canonical_metrics
 
