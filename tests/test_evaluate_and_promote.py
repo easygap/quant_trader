@@ -1,9 +1,23 @@
+import hashlib
 import json
 from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+
+def _daily_ops_with_summary_hash(payload: dict) -> dict:
+    payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    payload["summary_hash"] = hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 def test_build_canonical_research_candidate_specs_selects_target_weight_candidates():
@@ -1988,7 +2002,7 @@ def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
         },
     }
     (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
-        json.dumps(daily_ops, ensure_ascii=False),
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -2038,7 +2052,7 @@ def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_
         },
     }
     (paper_runtime / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
-        json.dumps(daily_ops, ensure_ascii=False),
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -2102,10 +2116,22 @@ def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, 
     future_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-19.json"
     malformed_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_malformed.json"
     missing_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_missing_trade_day.json"
-    current_path.write_text(json.dumps(current_daily_ops, ensure_ascii=False), encoding="utf-8")
-    future_path.write_text(json.dumps(future_daily_ops, ensure_ascii=False), encoding="utf-8")
-    malformed_path.write_text(json.dumps(malformed_daily_ops, ensure_ascii=False), encoding="utf-8")
-    missing_path.write_text(json.dumps(missing_trade_day_daily_ops, ensure_ascii=False), encoding="utf-8")
+    current_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(current_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    future_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(future_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    malformed_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(malformed_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    missing_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(missing_trade_day_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
     os.utime(current_path, (1_000, 1_000))
     os.utime(future_path, (2_000, 2_000))
     os.utime(malformed_path, (3_000, 3_000))
@@ -2116,6 +2142,52 @@ def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, 
 
     assert latest is not None
     assert latest["trade_day"] == "2026-05-18"
+    assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
+def test_load_latest_target_weight_daily_ops_skips_summary_hash_mismatch(tmp_path, monkeypatch):
+    import os
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    valid_daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:00:21",
+        "trade_day": "2026-05-18",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    tampered_daily_ops = {
+        **valid_daily_ops,
+        "generated_at": "2026-05-18T10:10:21",
+        "status": "READY_TO_EXECUTE",
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-18 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    valid_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    tampered_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_tampered.json"
+    valid_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(valid_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tampered_payload = _daily_ops_with_summary_hash(tampered_daily_ops)
+    tampered_payload["next_step"] = "tampered after hash"
+    tampered_path.write_text(json.dumps(tampered_payload, ensure_ascii=False), encoding="utf-8")
+    os.utime(valid_path, (1_000, 1_000))
+    os.utime(tampered_path, (2_000, 2_000))
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
     assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
@@ -2140,7 +2212,7 @@ def test_load_latest_target_weight_daily_ops_blocks_stale_ready_execute(tmp_path
         },
     }
     (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
-        json.dumps(daily_ops, ensure_ascii=False),
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
         encoding="utf-8",
     )
     monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-19")
@@ -2175,7 +2247,7 @@ def test_load_latest_target_weight_daily_ops_blocks_ready_execute_scope_mismatch
         },
     }
     (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
-        json.dumps(daily_ops, ensure_ascii=False),
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
         encoding="utf-8",
     )
     monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
@@ -2206,7 +2278,7 @@ def test_load_latest_target_weight_daily_ops_blocks_ready_enable_scope_mismatch(
         },
     }
     (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
-        json.dumps(daily_ops, ensure_ascii=False),
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
         encoding="utf-8",
     )
 
