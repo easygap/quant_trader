@@ -29,7 +29,10 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from core.target_weight_commands import command_scope_issues as target_weight_command_scope_issues
+from core.target_weight_commands import (
+    command_scope_issues as target_weight_command_scope_issues,
+    next_check_command_or_default as target_weight_next_check_command_or_default,
+)
 
 PROMOTION_METADATA_PATH = Path("reports/promotion/run_metadata.json")
 KST = timezone(timedelta(hours=9))
@@ -794,9 +797,18 @@ def _artifact_source_path(path: Path) -> str:
 def _target_weight_priority_action_warnings(
     summary: dict,
     priority_action: dict,
+    *,
+    latest_failure: dict | None = None,
 ) -> list[str]:
     warnings: list[str] = []
     if not priority_action:
+        return warnings
+    if (
+        latest_failure
+        and priority_action.get("source") == "latest_daily_ops_failure"
+        and _path_leaf(priority_action.get("source_path"))
+        == _path_leaf(latest_failure.get("source_path"))
+    ):
         return warnings
 
     latest_status = str(summary.get("status") or "").strip()
@@ -852,6 +864,7 @@ def _target_weight_operator_next_action(
     premature_run_guard: str | None,
     priority_command: str,
     priority_scheduled_command: str,
+    priority_failure_reason: str,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -865,6 +878,16 @@ def _target_weight_operator_next_action(
             "do not run the scheduled command early"
         )
     if priority_command and not _command_is_blocked(priority_command):
+        if priority_failure_reason:
+            if "target_weight_requested_trade_day_unavailable" in priority_failure_reason:
+                return (
+                    "WAIT for requested trade-day market data, then rerun "
+                    f"daily ops recovery command: {priority_command}"
+                )
+            return (
+                "RESOLVE latest daily ops failure, then rerun current blockers "
+                f"priority command: {priority_command}"
+            )
         return f"RUN current blockers priority command: {priority_command}"
     if priority_scheduled_command:
         return f"RUN no-order scheduled priority check: {priority_scheduled_command}"
@@ -1025,6 +1048,21 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
                 "# blocked: daily_ops_execute_command_unavailable: "
                 + "; ".join(execute_issues)
             )
+    if status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}:
+        operator_commands["next_daily_ops_summary"] = (
+            target_weight_next_check_command_or_default(
+                sanitized,
+                operator_commands.get("next_daily_ops_summary"),
+                "--daily-ops-summary",
+            )
+        )
+        operator_commands["next_readiness_audit"] = (
+            target_weight_next_check_command_or_default(
+                sanitized,
+                operator_commands.get("next_readiness_audit"),
+                "--readiness-audit",
+            )
+        )
     sanitized["operator_commands"] = operator_commands
     return sanitized
 
@@ -1169,6 +1207,9 @@ def _print_target_weight_daily_ops_status(
     priority_warnings = _target_weight_priority_action_warnings(
         summary,
         priority_action,
+        latest_failure=latest_failure
+        if _daily_ops_failure_is_newer_than_summary(latest_failure, summary)
+        else None,
     )
     if priority_warnings:
         print(
@@ -1225,6 +1266,9 @@ def _print_target_weight_daily_ops_status(
         premature_run_guard=premature_run_guard,
         priority_command=priority_command,
         priority_scheduled_command=priority_scheduled_command,
+        priority_failure_reason=str(priority_action.get("failure_reason") or "")
+        if priority_action.get("source") == "latest_daily_ops_failure"
+        else "",
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),
