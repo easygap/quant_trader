@@ -431,6 +431,35 @@ def _load_target_weight_current_blockers_run_guard(
     return {}
 
 
+def _load_target_weight_current_blockers_priority_action(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> dict:
+    path = Path(reports_dir) / "current_blockers.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    runbook = payload.get("operator_runbook")
+    if isinstance(runbook, dict) and runbook.get("primary_strategy") == strategy:
+        priority = runbook.get("current_priority_action")
+        if isinstance(priority, dict) and priority.get("strategy") == strategy:
+            return priority
+
+    next_actions = payload.get("next_actions")
+    if isinstance(next_actions, list):
+        for action in next_actions:
+            if isinstance(action, dict) and action.get("strategy") == strategy:
+                return action
+    return {}
+
+
 def _current_kst_date() -> str:
     return datetime.now(KST).date().isoformat()
 
@@ -488,6 +517,10 @@ def _print_target_weight_daily_ops_status(
         strategy,
         reports_dir=reports_dir,
     )
+    priority_action = _load_target_weight_current_blockers_priority_action(
+        strategy,
+        reports_dir=reports_dir,
+    )
     not_before_date = (
         run_guard.get("not_before_date")
         or summary.get("not_before_date")
@@ -526,6 +559,45 @@ def _print_target_weight_daily_ops_status(
     if evidence_breakdown:
         print(f"    Evidence breakdown: {' '.join(evidence_breakdown)}")
     print(f"    Next: {summary.get('next_step', 'N/A')}")
+    priority_desc = str(priority_action.get("desc") or "").strip()
+    priority_command = str(priority_action.get("command") or "").strip()
+    priority_scheduled_command = str(
+        priority_action.get("scheduled_command") or ""
+    ).strip()
+    priority_follow_up = str(
+        priority_action.get("scheduled_follow_up") or priority_action.get("follow_up") or ""
+    ).strip()
+    if priority_desc or priority_command or priority_scheduled_command:
+        print(f"    Current blockers priority: {priority_desc or 'N/A'}")
+        priority_evidence = []
+        if "target_days" in priority_action:
+            priority_evidence.append(
+                "verified="
+                f"{priority_action.get('verified_pilot_days', 0)}/{priority_action.get('target_days')}"
+            )
+        elif "verified_pilot_days" in priority_action:
+            priority_evidence.append(
+                f"verified={priority_action.get('verified_pilot_days', 0)}"
+            )
+        for key, label in (
+            ("remaining_pilot_days", "remaining"),
+            ("shadow_days", "shadow"),
+            ("repaired_pilot_days", "repaired"),
+            ("invalid_execution_days", "invalid"),
+        ):
+            if key in priority_action:
+                priority_evidence.append(f"{label}={priority_action.get(key, 0)}")
+        if priority_evidence:
+            print(f"    Priority evidence: {' '.join(priority_evidence)}")
+        if priority_command:
+            print(f"    Priority command: {priority_command}")
+        if priority_scheduled_command and priority_scheduled_command != priority_command:
+            print(f"    Scheduled priority command: {priority_scheduled_command}")
+        if priority_follow_up and priority_follow_up not in {
+            priority_command,
+            priority_scheduled_command,
+        }:
+            print(f"    Priority follow-up: {priority_follow_up}")
     if diagnostics:
         print(f"    Post-evidence diagnostics: {len(diagnostics)}")
     if execute_command:
