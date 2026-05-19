@@ -67,7 +67,7 @@
       "priority": 1,
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "source": "latest_daily_ops_summary",
-      "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
+      "source_path": "reports/paper_runtime/target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
       "daily_ops_status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
       "daily_ops_trade_day": "2026-05-19",
       "next_operator_trade_day": "2026-05-20",
@@ -167,7 +167,7 @@
       "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용"
     ],
     "latest_daily_ops": {
-      "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
+      "source_path": "reports/paper_runtime/target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
       "generated_at": "2026-05-19T09:53:22.441297",
       "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "trade_day": "2026-05-19",
@@ -313,7 +313,7 @@
     "current_priority_action": {
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "source": "latest_daily_ops_summary",
-      "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
+      "source_path": "reports/paper_runtime/target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
       "daily_ops_status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
       "daily_ops_trade_day": "2026-05-19",
       "next_operator_trade_day": "2026-05-20",
