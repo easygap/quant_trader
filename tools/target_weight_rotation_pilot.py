@@ -4727,8 +4727,12 @@ def build_target_weight_daily_ops_summary(
     post_evidence_diagnostics: list[str] = []
     decision_blocking_reasons = raw_blocking_reasons
     next_operator_trade_day: str | None = None
+    not_before_date: str | None = None
+    premature_run_guard: str | None = None
     if pilot_evidence_recorded_today or pilot_evidence_repaired_today:
         next_operator_trade_day = _next_kr_market_business_day(trade_day)
+        not_before_date = next_operator_trade_day
+        premature_run_guard = "target_weight_future_as_of_date_blocked"
         post_evidence_diagnostics = [
             reason
             for reason in raw_blocking_reasons
@@ -4905,6 +4909,10 @@ def build_target_weight_daily_ops_summary(
             "summary_only": True,
         },
     }
+    if not_before_date:
+        summary["not_before_date"] = not_before_date
+    if premature_run_guard:
+        summary["premature_run_guard"] = premature_run_guard
     summary["summary_hash"] = _stable_manifest_hash(summary)
     return summary
 
@@ -4938,6 +4946,12 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         f"- Execution day (KST): `{execution_day.get('execution_day', 'N/A')}`",
         f"- Execution time (KST): `{market_session.get('execution_time', 'N/A')}`",
         f"- Next operator trade day: `{summary.get('next_operator_trade_day') or 'N/A'}`",
+    ]
+    if summary.get("not_before_date"):
+        lines.append(f"- Not before date: `{summary.get('not_before_date')}`")
+    if summary.get("premature_run_guard"):
+        lines.append(f"- Premature run guard: `{summary.get('premature_run_guard')}`")
+    lines.extend([
         f"- Status: **{summary['status']}**",
         f"- Next step: {summary['next_step']}",
         "",
@@ -4996,7 +5010,7 @@ def render_target_weight_daily_ops_markdown(summary: dict[str, Any]) -> str:
         f"- Stale price symbols: {', '.join((data_quality.get('stale_price_symbols') or {}).keys()) or 'none'}",
         "",
         "## Blocking Reasons",
-    ]
+    ])
     lines.extend([f"- {reason}" for reason in decision.get("blocking_reasons") or []] or ["- none"])
     lines.extend(["", "## Post-evidence Diagnostics"])
     lines.extend(
