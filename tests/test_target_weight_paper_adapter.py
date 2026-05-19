@@ -2636,6 +2636,39 @@ def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypa
     assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
+def test_paper_pilot_control_blocks_loaded_ready_execute_scope_mismatch(tmp_path, monkeypatch):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "READY_TO_EXECUTE",
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id other_candidate --as-of-date 2026-04-09 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    ).write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    command = loaded["operator_commands"]["execute_capped_paper"]
+    assert command.startswith("# blocked: daily_ops_execute_command_unavailable")
+    assert "candidate_id mismatch" in command
+    assert "as_of_date mismatch" in command
+
+
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
