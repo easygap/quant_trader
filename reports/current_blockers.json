@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T09:58:36.422113",
+  "generated_at": "2026-05-19T10:16:25.321234",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -73,6 +73,15 @@
       "next_operator_trade_day": "2026-05-20",
       "verified_pilot_days": 0,
       "shadow_days": 2,
+      "target_days": 60,
+      "remaining_pilot_days": 60,
+      "invalid_execution_days": 2,
+      "repaired_pilot_days": 2,
+      "non_promotable_days": 0,
+      "progress_ratio": 0.0,
+      "invalid_reasons": {
+        "target_weight_repaired_performance_not_promotable": 2
+      },
       "desc": "오늘 target-weight pilot_paper 실행 증거는 복구 보존됐지만 promotion 카운트에서는 제외, 다음 KRX 영업일 fresh readiness 점검",
       "command": "# blocked: not before 2026-05-20; target_weight_future_as_of_date_blocked",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-20 --daily-ops-summary",
@@ -309,6 +318,15 @@
       "next_operator_trade_day": "2026-05-20",
       "verified_pilot_days": 0,
       "shadow_days": 2,
+      "target_days": 60,
+      "remaining_pilot_days": 60,
+      "invalid_execution_days": 2,
+      "repaired_pilot_days": 2,
+      "non_promotable_days": 0,
+      "progress_ratio": 0.0,
+      "invalid_reasons": {
+        "target_weight_repaired_performance_not_promotable": 2
+      },
       "desc": "오늘 target-weight pilot_paper 실행 증거는 복구 보존됐지만 promotion 카운트에서는 제외, 다음 KRX 영업일 fresh readiness 점검",
       "command": "# blocked: not before 2026-05-20; target_weight_future_as_of_date_blocked",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-20 --daily-ops-summary",
