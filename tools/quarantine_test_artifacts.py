@@ -88,22 +88,14 @@ def extract_strategy_name(name: str) -> str | None:
     return None
 
 
-def _is_paper_eligible_strategy(strategy: str) -> bool:
-    try:
-        from core.strategy_universe import is_paper_eligible
-        return bool(is_paper_eligible(strategy))
-    except Exception:
-        return True
-
-
 def is_test_artifact(name: str) -> bool:
-    """파일명이나 전략명이 test/demo 패턴인지."""
+    """파일명이나 전략명이 명시적인 test/demo 패턴인지."""
     lower = name.lower()
     if _matches_test_pattern(lower):
         return True
 
     strategy = extract_strategy_name(name)
-    if strategy and (_matches_test_pattern(strategy) or not _is_paper_eligible_strategy(strategy)):
+    if strategy and _matches_test_pattern(strategy):
         return True
 
     return False
