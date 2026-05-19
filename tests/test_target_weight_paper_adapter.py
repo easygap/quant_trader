@@ -8732,7 +8732,10 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
     )
     write_json(
         promotion_dir.parent / "current_blockers.json",
-        build_current_blockers_report(blocker_summary),
+        build_current_blockers_report(
+            blocker_summary,
+            generated_at=run_metadata["generated_at"],
+        ),
     )
 
     issues = validate_live_readiness(

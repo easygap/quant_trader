@@ -623,19 +623,20 @@ def _validate_current_blockers_gate(
         artifacts["run_metadata.json"],
     )
     expected_blocker_summary = None
+    build_current_blockers_report = None
     expected_current_blockers = None
     try:
         from tools.evaluate_and_promote import (
-            build_current_blockers_report,
+            build_current_blockers_report as _build_current_blockers_report,
             build_promotion_blocker_summary,
         )
 
+        build_current_blockers_report = _build_current_blockers_report
         expected_blocker_summary = build_promotion_blocker_summary(
             promotions_for_gate,
             artifacts["metrics_summary.json"],
             artifacts["run_metadata.json"],
         )
-        expected_current_blockers = build_current_blockers_report(expected_blocker_summary)
     except Exception as exc:
         issues.append(f"promotion blocker summary 재계산 실패: {exc}")
 
@@ -665,6 +666,14 @@ def _validate_current_blockers_gate(
     if current is None:
         issues.append(f"current blockers 파싱 오류: {current_blockers_path} ({current_err})")
         return issues
+    if build_current_blockers_report is not None and expected_blocker_summary is not None:
+        try:
+            expected_current_blockers = build_current_blockers_report(
+                expected_blocker_summary,
+                generated_at=str(current.get("generated_at") or "") or None,
+            )
+        except Exception as exc:
+            issues.append(f"current blockers 재계산 실패: {exc}")
 
     if current.get("artifact_type") != CURRENT_BLOCKERS_ARTIFACT_TYPE:
         issues.append(
@@ -692,6 +701,7 @@ def _validate_current_blockers_gate(
             "artifact_type",
             "schema_version",
             "source_artifact_hash",
+            "promotion_artifact_freshness",
             "go_live",
             "verdict",
             "promotion_summary",
