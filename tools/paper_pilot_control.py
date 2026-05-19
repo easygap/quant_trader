@@ -479,6 +479,8 @@ def _print_target_weight_daily_ops_status(
     diagnostics = decision.get("post_evidence_diagnostics") or []
     operator_commands = summary.get("operator_commands") or {}
     execute_command = operator_commands.get("execute_capped_paper") or ""
+    finalize_command = operator_commands.get("finalize_pilot_evidence") or ""
+    repair_command = operator_commands.get("repair_pilot_evidence") or ""
     next_daily_ops_command = operator_commands.get("next_daily_ops_summary") or ""
     next_readiness_command = operator_commands.get("next_readiness_audit") or ""
     next_operator_trade_day = summary.get("next_operator_trade_day")
@@ -523,6 +525,10 @@ def _print_target_weight_daily_ops_status(
         else:
             print("    Adapter execution: follow daily ops READY_TO_EXECUTE command only")
         print(f"    Execute command: {execute_command}")
+    if finalize_command:
+        print(f"    Finalize evidence command: {finalize_command}")
+    if repair_command:
+        print(f"    Repair evidence command: {repair_command}")
     if next_daily_ops_command:
         print(f"    Next daily ops command: {next_daily_ops_command}")
     if next_readiness_command:
