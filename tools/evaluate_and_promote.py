@@ -16,7 +16,7 @@ invalid paper evidence 격리: python tools/evaluate_and_promote.py --paper-evid
   - promotion_result.json  (최종 상태 계산 결과)
   - promotion_blocker_summary.json/md (운영자용 차단 사유 요약)
 """
-import sys, os, json, hashlib, shlex, subprocess
+import sys, os, json, hashlib, subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 from loguru import logger
+from core.target_weight_commands import command_scope_issues as target_weight_command_scope_issues
 
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
@@ -1101,37 +1102,12 @@ def _target_weight_command_scope_issues(
     require_trade_day: bool,
     required_flags: tuple[str, ...],
 ) -> list[str]:
-    candidate_id = str(payload.get("candidate_id") or "").strip()
-    trade_day = str(payload.get("trade_day") or "").strip()
-    issues: list[str] = []
-    if not command.strip() or command.lstrip().startswith("# blocked:"):
-        issues.append(command.strip() or "missing command")
-        return issues
-    try:
-        tokens = shlex.split(command)
-    except ValueError as exc:
-        return [f"command parse failed: {exc}"]
-
-    def flag_value_matches(flag: str, expected: str) -> bool:
-        for idx, token in enumerate(tokens):
-            if token == flag and idx + 1 < len(tokens) and tokens[idx + 1] == expected:
-                return True
-            if token.startswith(f"{flag}=") and token.split("=", 1)[1] == expected:
-                return True
-        return False
-
-    if candidate_id:
-        if not (
-            flag_value_matches("--candidate-id", candidate_id)
-            or flag_value_matches("--strategy", candidate_id)
-        ):
-            issues.append(f"candidate_id mismatch expected={candidate_id}")
-    if require_trade_day and trade_day and not flag_value_matches("--as-of-date", trade_day):
-        issues.append(f"as_of_date mismatch expected={trade_day}")
-    for flag in required_flags:
-        if flag not in tokens:
-            issues.append(f"missing {flag}")
-    return issues
+    return target_weight_command_scope_issues(
+        payload,
+        command,
+        require_trade_day=require_trade_day,
+        required_flags=required_flags,
+    )
 
 
 def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | None:
