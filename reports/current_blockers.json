@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T11:11:00.504201",
+  "generated_at": "2026-05-19T11:22:17.758528",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -169,6 +169,7 @@
     "latest_daily_ops": {
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
       "generated_at": "2026-05-19T09:53:22.441297",
+      "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "trade_day": "2026-05-19",
       "next_operator_trade_day": "2026-05-20",
       "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",

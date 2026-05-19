@@ -1616,6 +1616,7 @@ def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops(mon
     }
     latest_daily_ops = {
         "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "candidate_id": "target_weight_best",
         "trade_day": "2026-05-18",
         "status": "READY_TO_EXECUTE",
         "evidence_progress": {
@@ -1626,7 +1627,8 @@ def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops(mon
         "operator_commands": {
             "execute_capped_paper": (
                 "python tools/target_weight_rotation_pilot.py "
-                "--candidate-id target_weight_best --execute --collect-evidence"
+                "--candidate-id target_weight_best --as-of-date 2026-05-18 "
+                "--execute --collect-evidence"
             ),
         },
     }
@@ -2150,6 +2152,71 @@ def test_load_latest_target_weight_daily_ops_blocks_stale_ready_execute(tmp_path
     assert latest["operator_commands"]["execute_capped_paper"].startswith(
         "# blocked: daily_ops_summary.trade_day is stale"
     )
+
+
+def test_load_latest_target_weight_daily_ops_blocks_ready_execute_scope_mismatch(tmp_path, monkeypatch):
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id other_strategy --as-of-date 2026-05-17 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    command = latest["operator_commands"]["execute_capped_paper"]
+    assert command.startswith("# blocked: daily_ops_execute_command_unavailable")
+    assert "candidate_id mismatch" in command
+    assert "as_of_date mismatch" in command
+
+
+def test_load_latest_target_weight_daily_ops_blocks_ready_enable_scope_mismatch(tmp_path):
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_ENABLE_CAPS",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy other_strategy",
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    command = latest["operator_commands"]["enable_suggested_caps"]
+    assert command.startswith("# blocked: daily_ops_enable_command_unavailable")
+    assert "candidate_id mismatch" in command
+    assert "missing --enable" in command
 
 
 def test_static_paper_experiment_manifest_uses_explicit_target_weight_candidate_and_blocked_execute():
