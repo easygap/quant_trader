@@ -2158,6 +2158,9 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
                     ],
                 },
                 "operator_commands": {
+                    "enable_suggested_caps": (
+                        "python tools/paper_pilot_control.py --strategy target_weight_candidate --enable"
+                    ),
                     "execute_capped_paper": "# blocked: pilot_paper evidence already recorded for 2026-04-10",
                     "next_daily_ops_summary": (
                         "python tools/target_weight_rotation_pilot.py "
@@ -2225,6 +2228,9 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     ) in output
     assert "Scheduled priority command:" in output
     assert "Post-evidence diagnostics: 2" in output
+    assert "Cap approval: BLOCKED by daily ops" in output
+    assert "Enable cap command: # blocked: pilot_paper evidence already recorded" in output
+    assert "--strategy target_weight_candidate --enable" not in output
     assert "Adapter execution: BLOCKED by daily ops" in output
     assert "pilot_paper evidence already recorded" in output
     assert "Next daily ops command:" in output
@@ -4306,8 +4312,11 @@ def test_build_target_weight_daily_ops_summary_allows_execute_only_when_ready(tm
 
     assert summary["status"] == "READY_TO_EXECUTE"
     assert summary["operator_commands"]["execute_capped_paper"] == execute_command
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: daily_ops_summary.status == READY_TO_EXECUTE"
+    )
     assert manifest["operator_commands"]["execute_capped_paper"] == execute_command
-    assert "# blocked:" not in report
+    assert "Execute Capped Paper" in report
     assert "READY_TO_EXECUTE" in report
 
 
@@ -4906,9 +4915,12 @@ def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_pa
     assert summary["status"] == "BLOCKED"
     assert summary["decision"]["execution_trade_day_check"]["allowed"] is False
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: daily_ops_summary.status == BLOCKED"
+    )
     assert payload["risk_snapshot"]["execution_trade_day_allowed"] is False
     assert "READY_TO_EXECUTE" not in report
-    assert "READY_TO_ENABLE_CAPS" not in report
+    assert "Status: `READY_TO_ENABLE_CAPS`" not in report
     assert "Execution day check: BLOCKED" in report
     assert "target_weight_execution_trade_day_mismatch" in report
 
