@@ -776,8 +776,15 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return False
 
 
-def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float]:
-    return (str(payload.get("trade_day") or ""), path.stat().st_mtime)
+def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float, float]:
+    source_mtime = path.stat().st_mtime
+    payload_with_source = {
+        **payload,
+        "source_path": str(path),
+        "source_mtime": source_mtime,
+    }
+    artifact_ts = _daily_ops_artifact_time_key(payload_with_source)[0]
+    return (str(payload.get("trade_day") or ""), artifact_ts, source_mtime)
 
 
 def _stable_daily_ops_hash(payload: dict) -> str:
