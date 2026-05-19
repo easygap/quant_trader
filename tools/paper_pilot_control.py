@@ -352,21 +352,7 @@ def _load_latest_target_weight_daily_ops(
     *,
     reports_dir: str | Path = REPORTS_DIR,
 ) -> dict | None:
-    base = Path(reports_dir)
-    prefix = f"target_weight_daily_ops_summary_{strategy}_"
-    search_dirs = [base]
-    paper_runtime_dir = base / "paper_runtime"
-    if paper_runtime_dir != base:
-        search_dirs.append(paper_runtime_dir)
-    candidates = sorted(
-        {
-            path
-            for search_dir in search_dirs
-            for path in search_dir.glob(f"{prefix}*.json")
-        },
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
+    candidates = _target_weight_daily_ops_summary_paths(strategy, reports_dir=reports_dir)
     valid_candidates: list[tuple[tuple[str, float], dict]] = []
     for path in candidates:
         try:
@@ -390,6 +376,57 @@ def _load_latest_target_weight_daily_ops(
     if valid_candidates:
         return max(valid_candidates, key=lambda item: item[0])[1]
     return None
+
+
+def _target_weight_daily_ops_summary_paths(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> list[Path]:
+    base = Path(reports_dir)
+    prefix = f"target_weight_daily_ops_summary_{strategy}_"
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
+    return sorted(
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob(f"{prefix}*.json")
+            if not path.name.startswith("target_weight_daily_ops_summary_failure_")
+        },
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _target_weight_daily_ops_integrity_warnings(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> list[str]:
+    warnings: list[str] = []
+    for path in _target_weight_daily_ops_summary_paths(strategy, reports_dir=reports_dir):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            warnings.append(f"{path}: unreadable {exc.__class__.__name__}")
+            continue
+        if not isinstance(payload, dict):
+            warnings.append(f"{path}: top-level JSON is not an object")
+            continue
+        if payload.get("artifact_type") != "target_weight_daily_ops_summary":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("schema_version") != 1:
+            warnings.append(f"{path}: schema_version mismatch")
+        if not _daily_ops_summary_hash_is_valid(payload):
+            warnings.append(f"{path}: summary_hash mismatch or missing")
+        if not str(payload.get("trade_day") or "").strip():
+            warnings.append(f"{path}: trade_day missing")
+    return warnings
 
 
 def _load_target_weight_current_blockers_run_guard(
@@ -746,12 +783,19 @@ def _print_target_weight_daily_ops_status(
     reports_dir: str | Path = REPORTS_DIR,
 ) -> None:
     summary = _load_latest_target_weight_daily_ops(strategy, reports_dir=reports_dir)
+    integrity_warnings = _target_weight_daily_ops_integrity_warnings(
+        strategy,
+        reports_dir=reports_dir,
+    )
     command = (
         "python tools/target_weight_rotation_pilot.py "
         f"--candidate-id {strategy} --daily-ops-summary"
     )
     if summary is None:
-        print("\n  Target-weight Daily Ops: MISSING")
+        status_label = "INVALID" if integrity_warnings else "MISSING"
+        print(f"\n  Target-weight Daily Ops: {status_label}")
+        for warning in integrity_warnings[:3]:
+            print(f"  Integrity warning: {warning}")
         print(f"  Run: {command}")
         return
 
@@ -790,6 +834,8 @@ def _print_target_weight_daily_ops_status(
         "premature_run_guard"
     )
     print("\n  Target-weight Daily Ops:")
+    for warning in integrity_warnings[:3]:
+        print(f"    Integrity warning: {warning}")
     print(f"    Status: {summary.get('status', 'unknown')}")
     print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
     if next_operator_trade_day:
