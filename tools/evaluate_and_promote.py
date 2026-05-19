@@ -1651,12 +1651,80 @@ def _research_operator_commands() -> dict[str, str]:
     }
 
 
+def _promotion_artifact_freshness_snapshot(
+    blocker_summary: dict,
+    *,
+    checked_at: str,
+    max_artifact_age_days: int | None = None,
+) -> dict:
+    from core.live_gate import LIVE_GATE_MAX_ARTIFACT_AGE_DAYS
+
+    max_days = (
+        LIVE_GATE_MAX_ARTIFACT_AGE_DAYS
+        if max_artifact_age_days is None
+        else max_artifact_age_days
+    )
+    canonical_generated_at = str(blocker_summary.get("generated_at") or "").strip()
+    base = {
+        "canonical_generated_at": canonical_generated_at or None,
+        "checked_at": checked_at,
+        "age_days": None,
+        "max_age_days": max_days,
+        "status": "UNKNOWN",
+        "warning": "canonical_generated_at missing",
+        "check_command": "python tools/evaluate_and_promote.py --check-only",
+        "refresh_command": "python tools/evaluate_and_promote.py --canonical",
+    }
+    source_time = _parse_iso_datetime(canonical_generated_at)
+    checked_time = _parse_iso_datetime(checked_at)
+    if source_time is None or checked_time is None:
+        return base
+
+    age_days = _datetime_age_days(source_time, checked_time)
+    snapshot = {**base, "age_days": round(age_days, 2)}
+    if age_days < 0:
+        return {
+            **snapshot,
+            "status": "FUTURE",
+            "warning": "canonical artifact timestamp is in the future",
+        }
+    if age_days > max_days:
+        return {
+            **snapshot,
+            "status": "STALE",
+            "warning": (
+                "canonical artifact is older than the live gate freshness limit; "
+                "rerun canonical evaluation before operator decisions"
+            ),
+        }
+    aging_threshold_days = max(0.0, max_days - 2)
+    if age_days >= aging_threshold_days:
+        return {
+            **snapshot,
+            "status": "AGING",
+            "warning": (
+                "canonical artifact is close to the freshness limit; "
+                "plan a canonical refresh before live review"
+            ),
+        }
+    return {
+        **snapshot,
+        "status": "FRESH",
+        "warning": "",
+    }
+
+
+def _promotion_freshness_blocks_live(freshness: dict) -> bool:
+    return freshness.get("status") in {"UNKNOWN", "FUTURE", "STALE"}
+
+
 def _build_current_blockers_operator_runbook(
     *,
     provisional_candidates: list[str],
     live_candidates: list[str],
     latest_daily_ops: dict | None = None,
     latest_daily_ops_failure: dict | None = None,
+    promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
     if primary_strategy:
@@ -1768,6 +1836,8 @@ def _build_current_blockers_operator_runbook(
                 "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용",
             ],
         }
+        if promotion_artifact_freshness:
+            runbook["promotion_artifact_freshness"] = promotion_artifact_freshness
         if latest_daily_ops:
             runbook["latest_daily_ops"] = latest_daily_ops
         if active_failure:
@@ -1779,7 +1849,7 @@ def _build_current_blockers_operator_runbook(
         return runbook
 
     commands = _research_operator_commands()
-    return {
+    runbook = {
         "primary_strategy": live_candidates[0] if live_candidates else None,
         "mode": "research_recovery" if not live_candidates else "live_gate_review",
         "commands": commands,
@@ -1808,6 +1878,9 @@ def _build_current_blockers_operator_runbook(
             "live 후보가 생겨도 live gate와 current_blockers.go_live=true 전까지 실전 전환 금지",
         ],
     }
+    if promotion_artifact_freshness:
+        runbook["promotion_artifact_freshness"] = promotion_artifact_freshness
+    return runbook
 
 
 def build_current_blockers_report(
@@ -1820,15 +1893,27 @@ def build_current_blockers_report(
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
     if not isinstance(blocker_summary, dict):
         blocker_summary = {}
+    report_generated_at = generated_at or datetime.now().isoformat()
+    promotion_artifact_freshness = _promotion_artifact_freshness_snapshot(
+        blocker_summary,
+        checked_at=report_generated_at,
+    )
     latest_daily_ops = _sanitize_target_weight_daily_ops_summary(latest_daily_ops)
     summary = blocker_summary.get("summary") or {}
     live_candidates = _strategy_names_by_status(blocker_summary, "live_candidate")
     provisional_candidates = _ranked_provisional_candidates(blocker_summary)
     paper_only = _strategy_names_by_status(blocker_summary, "paper_only")
     research_only = _strategy_names_by_status(blocker_summary, "research_only")
-    go_live = bool(live_candidates)
+    freshness_blocks_live = _promotion_freshness_blocks_live(promotion_artifact_freshness)
+    go_live = bool(live_candidates) and not freshness_blocks_live
 
     hard_blockers = []
+    if freshness_blocks_live:
+        hard_blockers.append({
+            "desc": "canonical promotion artifact 최신성 미충족",
+            "evidence": promotion_artifact_freshness.get("warning")
+                or f"freshness_status={promotion_artifact_freshness.get('status')}",
+        })
     if not live_candidates:
         hard_blockers.append({
             "desc": "live_candidate 상태의 전략이 없음",
@@ -1865,6 +1950,7 @@ def build_current_blockers_report(
         live_candidates=live_candidates,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
+        promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
     ops_priority_action = operator_runbook.get("current_priority_action")
@@ -1918,11 +2004,12 @@ def build_current_blockers_report(
         "order_safety": "no_order",
     })
 
-    verdict = (
-        f"GO: live_candidate {len(live_candidates)}개 사용 가능"
-        if go_live
-        else "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음"
-    )
+    if go_live:
+        verdict = f"GO: live_candidate {len(live_candidates)}개 사용 가능"
+    elif live_candidates and freshness_blocks_live:
+        verdict = "NO-GO: canonical promotion artifact 최신성 미충족"
+    else:
+        verdict = "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음"
     default_strategy = (
         f"{provisional_candidates[0]} capped paper pilot 우선, scoring은 관찰만 유지"
         if provisional_candidates
@@ -1931,10 +2018,11 @@ def build_current_blockers_report(
     return {
         "artifact_type": "current_go_live_blockers",
         "schema_version": CURRENT_BLOCKERS_SCHEMA_VERSION,
-        "generated_at": generated_at or datetime.now().isoformat(),
+        "generated_at": report_generated_at,
         "source": "reports/promotion/promotion_blocker_summary.json",
         "source_generated_at": blocker_summary.get("generated_at"),
         "source_artifact_hash": blocker_summary.get("source_artifact_hash"),
+        "promotion_artifact_freshness": promotion_artifact_freshness,
         "go_live": go_live,
         "verdict": verdict,
         "promotion_summary": summary,
@@ -1950,6 +2038,8 @@ def build_current_blockers_report(
 
 def load_current_blockers_from_artifacts(
     promotion_dir: str | Path = "reports/promotion",
+    *,
+    generated_at: str | None = None,
 ) -> dict:
     summary_issues = validate_promotion_blocker_summary_artifact(promotion_dir)
     if summary_issues:
@@ -1963,6 +2053,7 @@ def load_current_blockers_from_artifacts(
     return _build_current_blockers_report_with_latest_ops(
         blocker_summary,
         reports_dir=Path(promotion_dir).parent,
+        generated_at=generated_at,
     )
 
 
@@ -1970,6 +2061,7 @@ def _build_current_blockers_report_with_latest_ops(
     blocker_summary: dict,
     *,
     reports_dir: str | Path = "reports",
+    generated_at: str | None = None,
 ) -> dict:
     provisional_candidates = _ranked_provisional_candidates(blocker_summary)
     latest_daily_ops = (
@@ -1989,6 +2081,7 @@ def _build_current_blockers_report_with_latest_ops(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
+        generated_at=generated_at,
     )
 
 
@@ -2025,7 +2118,10 @@ def validate_current_blockers_artifact(
     if issues:
         return issues
     try:
-        expected = load_current_blockers_from_artifacts(promotion_dir)
+        expected = load_current_blockers_from_artifacts(
+            promotion_dir,
+            generated_at=str(current.get("generated_at") or "") or None,
+        )
     except Exception as exc:
         issues.append(f"current blocker source artifact 로드 실패: {exc}")
         return issues
@@ -2034,6 +2130,7 @@ def validate_current_blockers_artifact(
         "artifact_type",
         "schema_version",
         "source_artifact_hash",
+        "promotion_artifact_freshness",
         "go_live",
         "verdict",
         "promotion_summary",
