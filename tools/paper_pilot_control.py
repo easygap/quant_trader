@@ -446,14 +446,8 @@ def _load_target_weight_current_blockers_priority_action(
     if not isinstance(payload, dict):
         return {}
 
-    regenerate_command = "python tools/evaluate_and_promote.py --current-blockers"
+    regenerate_command = _target_weight_current_blockers_regenerate_command(payload)
     runbook = payload.get("operator_runbook")
-    if isinstance(runbook, dict):
-        commands = runbook.get("commands")
-        if isinstance(commands, dict):
-            regenerate_command = str(
-                commands.get("regenerate_current_blockers") or regenerate_command
-            ).strip()
 
     def with_regenerate_command(action: dict) -> dict:
         result = dict(action)
@@ -471,6 +465,65 @@ def _load_target_weight_current_blockers_priority_action(
             if isinstance(action, dict) and action.get("strategy") == strategy:
                 return with_regenerate_command(action)
     return {}
+
+
+def _target_weight_current_blockers_regenerate_command(
+    payload: dict | None = None,
+) -> str:
+    command = "python tools/evaluate_and_promote.py --current-blockers"
+    runbook = payload.get("operator_runbook") if isinstance(payload, dict) else None
+    if isinstance(runbook, dict):
+        commands = runbook.get("commands")
+        if isinstance(commands, dict):
+            command = str(
+                commands.get("regenerate_current_blockers") or command
+            ).strip()
+    return command
+
+
+def _target_weight_current_blockers_priority_issue(
+    strategy: str,
+    priority_action: dict,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> tuple[str | None, str]:
+    if priority_action:
+        return None, str(
+            priority_action.get("regenerate_current_blockers_command")
+            or _target_weight_current_blockers_regenerate_command()
+        ).strip()
+
+    path = Path(reports_dir) / "current_blockers.json"
+    if not path.exists():
+        return (
+            "current_blockers.json missing",
+            _target_weight_current_blockers_regenerate_command(),
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return (
+            f"current_blockers.json unreadable: {exc.__class__.__name__}",
+            _target_weight_current_blockers_regenerate_command(),
+        )
+    if not isinstance(payload, dict):
+        return (
+            "current_blockers.json invalid",
+            _target_weight_current_blockers_regenerate_command(),
+        )
+
+    command = _target_weight_current_blockers_regenerate_command(payload)
+    runbook = payload.get("operator_runbook")
+    if isinstance(runbook, dict):
+        primary = str(runbook.get("primary_strategy") or "").strip()
+        if primary and primary != strategy:
+            return (
+                "primary_strategy mismatch "
+                f"current_blockers={primary} status={strategy}",
+                command,
+            )
+
+    return f"priority action missing for strategy={strategy}", command
 
 
 def _path_leaf(value: object) -> str:
@@ -611,6 +664,14 @@ def _print_target_weight_daily_ops_status(
     if evidence_breakdown:
         print(f"    Evidence breakdown: {' '.join(evidence_breakdown)}")
     print(f"    Next: {summary.get('next_step', 'N/A')}")
+    priority_issue, regenerate_command = _target_weight_current_blockers_priority_issue(
+        strategy,
+        priority_action,
+        reports_dir=reports_dir,
+    )
+    if priority_issue:
+        print(f"    Current blockers warning: {priority_issue}")
+        print(f"    Regenerate current blockers command: {regenerate_command}")
     priority_warnings = _target_weight_priority_action_warnings(
         summary,
         priority_action,
