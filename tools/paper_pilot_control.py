@@ -516,6 +516,15 @@ def _print_target_weight_daily_ops_status(
         "    Verified pilot days: "
         f"{progress.get('verified_pilot_days', 0)}/{progress.get('target_days', 'N/A')}"
     )
+    evidence_breakdown = []
+    if "shadow_days" in progress:
+        evidence_breakdown.append(f"shadow={progress.get('shadow_days', 0)}")
+    if "repaired_pilot_days" in progress:
+        evidence_breakdown.append(f"repaired={progress.get('repaired_pilot_days', 0)}")
+    if "invalid_execution_days" in progress:
+        evidence_breakdown.append(f"invalid={progress.get('invalid_execution_days', 0)}")
+    if evidence_breakdown:
+        print(f"    Evidence breakdown: {' '.join(evidence_breakdown)}")
     print(f"    Next: {summary.get('next_step', 'N/A')}")
     if diagnostics:
         print(f"    Post-evidence diagnostics: {len(diagnostics)}")

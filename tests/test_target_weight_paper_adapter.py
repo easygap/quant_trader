@@ -2290,6 +2290,9 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
                 "evidence_progress": {
                     "verified_pilot_days": 0,
                     "target_days": 60,
+                    "shadow_days": 3,
+                    "repaired_pilot_days": 1,
+                    "invalid_execution_days": 2,
                     "invalid_reasons": {"target_weight_benchmark_status_not_final": 1},
                 },
                 "decision": {},
@@ -2317,6 +2320,7 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
 
     output = capsys.readouterr().out
     assert "Status: PILOT_EVIDENCE_INVALID" in output
+    assert "Evidence breakdown: shadow=3 repaired=1 invalid=2" in output
     assert "Finalize evidence command:" in output
     assert "--finalize-pilot-evidence --finalize-date 2026-04-10" in output
     assert "Repair evidence command:" in output
