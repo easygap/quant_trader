@@ -766,7 +766,10 @@ def refresh_promotion_artifacts_from_existing_inputs(
         base,
     )
     current_path = write_current_blockers_report(
-        build_current_blockers_report(blocker_summary),
+        _build_current_blockers_report_with_latest_ops(
+            blocker_summary,
+            reports_dir=base.parent,
+        ),
         current_blockers_path,
     )
     return {
@@ -1130,6 +1133,176 @@ def _load_latest_target_weight_daily_ops(
     return None
 
 
+def _target_weight_daily_ops_failure_paths(
+    strategy: str,
+    reports_dir: str | Path = "reports",
+) -> list[Path]:
+    base = Path(reports_dir)
+    prefix = f"target_weight_daily_ops_summary_failure_{strategy}_"
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
+    return sorted(
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob(f"{prefix}*.json")
+        },
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _artifact_generated_timestamp(payload: dict) -> float:
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if not generated_at:
+        return 0.0
+    try:
+        return datetime.fromisoformat(generated_at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _artifact_source_mtime(payload: dict) -> float:
+    try:
+        return float(payload.get("source_mtime") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _artifact_time_key(payload: dict) -> tuple[float, float]:
+    source_mtime = _artifact_source_mtime(payload)
+    source_path = str(payload.get("source_path") or "").strip()
+    if not source_mtime and source_path:
+        try:
+            source_mtime = Path(source_path).stat().st_mtime
+        except OSError:
+            source_mtime = 0.0
+    generated_ts = _artifact_generated_timestamp(payload)
+    return (generated_ts or source_mtime, source_mtime)
+
+
+def _load_latest_target_weight_daily_ops_failure(
+    strategy: str,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in _target_weight_daily_ops_failure_paths(strategy, reports_dir):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        artifact_type = str(payload.get("artifact_type") or "")
+        mode = str(payload.get("mode") or "")
+        if artifact_type == "target_weight_no_order_operation_failure":
+            if mode != "daily_ops_summary":
+                continue
+        elif artifact_type != "target_weight_daily_ops_summary_failure":
+            continue
+        payload = dict(payload)
+        payload["source_path"] = str(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append((_artifact_time_key(payload), payload))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
+def _daily_ops_failure_is_active(
+    failure: dict | None,
+    latest_daily_ops: dict | None,
+) -> bool:
+    if not failure:
+        return False
+    if not latest_daily_ops:
+        return True
+    return _artifact_time_key(failure) > _artifact_time_key(latest_daily_ops)
+
+
+def _target_weight_daily_ops_failure_reason(payload: dict) -> str:
+    reason = str(payload.get("reason") or "").strip()
+    if reason:
+        return reason
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        if message:
+            return message
+    elif error:
+        return str(error)
+    blocking_reasons = payload.get("blocking_reasons")
+    if isinstance(blocking_reasons, list) and blocking_reasons:
+        return str(blocking_reasons[0])
+    return "unknown"
+
+
+def _target_weight_daily_ops_failure_error(payload: dict) -> str:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return str(error or "").strip()
+    error_type = str(error.get("type") or "").strip()
+    message = str(error.get("message") or "").strip()
+    if error_type and message:
+        return f"{error_type}: {message}"
+    return error_type or message
+
+
+def _target_weight_daily_ops_failure_command(
+    payload: dict,
+    commands: dict[str, str],
+) -> str:
+    payload_commands = payload.get("operator_commands")
+    if isinstance(payload_commands, dict):
+        command = str(payload_commands.get("daily_ops_summary") or "").strip()
+        if command:
+            return command
+    return commands.get("daily_ops_summary") or ""
+
+
+def _target_weight_daily_ops_failure_follow_up(
+    payload: dict,
+    commands: dict[str, str],
+) -> str:
+    payload_commands = payload.get("operator_commands")
+    if isinstance(payload_commands, dict):
+        command = str(payload_commands.get("readiness_audit") or "").strip()
+        if command:
+            return command
+    return commands.get("readiness_audit") or ""
+
+
+def _target_weight_daily_ops_failure_action(
+    strategy: str,
+    commands: dict[str, str],
+    failure: dict,
+) -> dict:
+    reason = _target_weight_daily_ops_failure_reason(failure)
+    action = {
+        "strategy": strategy,
+        "source": "latest_daily_ops_failure",
+        "source_path": failure.get("source_path"),
+        "daily_ops_status": "FAILED",
+        "failure_status": failure.get("status") or "BLOCKED",
+        "failure_reason": reason,
+        "generated_at": failure.get("generated_at"),
+        "as_of_date": failure.get("as_of_date"),
+        "desc": "daily ops summary 실패 원인 해소 후 summary 재생성",
+        "command": _target_weight_daily_ops_failure_command(failure, commands),
+        "order_safety": "no_order",
+        "requires": "daily ops failure resolved",
+        "follow_up": _target_weight_daily_ops_failure_follow_up(failure, commands),
+    }
+    failure_error = _target_weight_daily_ops_failure_error(failure)
+    if failure_error:
+        action["failure_error"] = failure_error
+    return action
+
+
 def validate_target_weight_daily_ops_artifacts(
     reports_dir: str | Path = "reports",
 ) -> list[str]:
@@ -1466,19 +1639,42 @@ def _build_current_blockers_operator_runbook(
     provisional_candidates: list[str],
     live_candidates: list[str],
     latest_daily_ops: dict | None = None,
+    latest_daily_ops_failure: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
     if primary_strategy:
         commands = _target_weight_operator_commands(primary_strategy)
-        commands["execute_capped_paper_after_ready"] = _target_weight_execute_after_ready_command(
-            commands,
-            latest_daily_ops,
+        active_failure = (
+            latest_daily_ops_failure
+            if _daily_ops_failure_is_active(latest_daily_ops_failure, latest_daily_ops)
+            else None
         )
-        ops_priority_action = _target_weight_ops_priority_action(
-            primary_strategy,
-            commands,
-            latest_daily_ops,
-        )
+        if active_failure:
+            commands["daily_ops_summary"] = _target_weight_daily_ops_failure_command(
+                active_failure,
+                commands,
+            )
+            commands["execute_capped_paper_after_ready"] = (
+                "# blocked: latest daily ops summary failure unresolved; "
+                "rerun daily ops summary before capped paper execution"
+            )
+            ops_priority_action = _target_weight_daily_ops_failure_action(
+                primary_strategy,
+                commands,
+                active_failure,
+            )
+        else:
+            commands["execute_capped_paper_after_ready"] = (
+                _target_weight_execute_after_ready_command(
+                    commands,
+                    latest_daily_ops,
+                )
+            )
+            ops_priority_action = _target_weight_ops_priority_action(
+                primary_strategy,
+                commands,
+                latest_daily_ops,
+            )
         sequence = [
             {
                 "step": 1,
@@ -1557,6 +1753,8 @@ def _build_current_blockers_operator_runbook(
         }
         if latest_daily_ops:
             runbook["latest_daily_ops"] = latest_daily_ops
+        if active_failure:
+            runbook["latest_daily_ops_failure"] = active_failure
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
@@ -1597,6 +1795,7 @@ def build_current_blockers_report(
     blocker_summary: dict,
     *,
     latest_daily_ops: dict | None = None,
+    latest_daily_ops_failure: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -1646,6 +1845,7 @@ def build_current_blockers_report(
         provisional_candidates=provisional_candidates,
         live_candidates=live_candidates,
         latest_daily_ops=latest_daily_ops,
+        latest_daily_ops_failure=latest_daily_ops_failure,
     )
     runbook_commands = operator_runbook.get("commands") or {}
     ops_priority_action = operator_runbook.get("current_priority_action")
@@ -1741,13 +1941,36 @@ def load_current_blockers_from_artifacts(
     blocker_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if not isinstance(blocker_summary, dict):
         raise ValueError(f"{summary_path} top-level JSON is not an object")
+    return _build_current_blockers_report_with_latest_ops(
+        blocker_summary,
+        reports_dir=Path(promotion_dir).parent,
+    )
+
+
+def _build_current_blockers_report_with_latest_ops(
+    blocker_summary: dict,
+    *,
+    reports_dir: str | Path = "reports",
+) -> dict:
     provisional_candidates = _ranked_provisional_candidates(blocker_summary)
     latest_daily_ops = (
-        _load_latest_target_weight_daily_ops(provisional_candidates[0], Path(promotion_dir).parent)
+        _load_latest_target_weight_daily_ops(provisional_candidates[0], reports_dir)
         if provisional_candidates
         else None
     )
-    return build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+    latest_daily_ops_failure = (
+        _load_latest_target_weight_daily_ops_failure(
+            provisional_candidates[0],
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
+    return build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_daily_ops_failure=latest_daily_ops_failure,
+    )
 
 
 def write_current_blockers_report(
@@ -2346,7 +2569,10 @@ def run_canonical():
     _, blocker_md_path = write_promotion_blocker_summary(blocker_summary, out_dir)
     print(f"  → {blocker_md_path}")
     current_blockers_path = write_current_blockers_report(
-        build_current_blockers_report(blocker_summary),
+        _build_current_blockers_report_with_latest_ops(
+            blocker_summary,
+            reports_dir=out_dir.parent,
+        ),
         "reports/current_blockers.json",
     )
     print(f"  → {current_blockers_path}")
