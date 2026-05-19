@@ -1081,6 +1081,22 @@ def _target_weight_ops_priority_action(
         "verified_pilot_days": verified_days,
         "shadow_days": shadow_days,
     }
+    for field in (
+        "target_days",
+        "remaining_pilot_days",
+        "invalid_execution_days",
+        "repaired_pilot_days",
+        "non_promotable_days",
+    ):
+        if field in progress:
+            base_action[field] = _safe_int(progress.get(field))
+    if "progress_ratio" in progress:
+        try:
+            base_action["progress_ratio"] = float(progress.get("progress_ratio"))
+        except (TypeError, ValueError):
+            base_action["progress_ratio"] = 0.0
+    if progress.get("invalid_reasons"):
+        base_action["invalid_reasons"] = progress.get("invalid_reasons")
 
     if status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}:
         next_trade_day = latest_daily_ops.get("next_operator_trade_day")
