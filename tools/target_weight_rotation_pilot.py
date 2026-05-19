@@ -4556,6 +4556,20 @@ def build_target_weight_daily_ops_summary(
         "pilot authorization snapshot check not required"
     )
     execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
+    audit_operator_commands = dict(audit.get("operator_commands") or {})
+    audit_execute_command = str(
+        audit_operator_commands.get("execute_capped_paper") or ""
+    ).strip()
+    execute_command_ready = (
+        bool(audit_execute_command)
+        and not audit_execute_command.lstrip().startswith("# blocked:")
+    )
+    execute_command_issue_reason = ""
+    if not execute_command_ready:
+        execute_command_issue_reason = (
+            "daily_ops_execute_command_unavailable: "
+            + (audit_execute_command or "missing execute_capped_paper command")
+        )
     execution_ready_checks_passed = (
         _check_passed(data_quality_check)
         and _check_passed(execution_trade_day_check)
@@ -4617,9 +4631,16 @@ def build_target_weight_daily_ops_summary(
     elif pilot_evidence_recorded_today:
         status = "PILOT_EVIDENCE_RECORDED"
         next_step = "오늘 pilot_paper 증거 기록 완료; 다음 KRX 영업일 fresh readiness와 cap 재승인 점검"
-    elif audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
+    elif (
+        audit.get("ready_for_capped_pilot")
+        and execution_ready_checks_passed
+        and execute_command_ready
+    ):
         status = "READY_TO_EXECUTE"
         next_step = "승인된 cap으로 capped paper 실행"
+    elif audit.get("ready_for_capped_pilot") and execution_ready_checks_passed:
+        status = "BLOCKED"
+        next_step = "실행 명령이 차단 또는 누락됨; readiness audit 재생성 후 재점검"
     elif not _check_passed(data_quality_check):
         status = "BLOCKED"
         next_step = "target-weight 데이터 품질 진단 해소 후 readiness 재점검"
@@ -4642,6 +4663,13 @@ def build_target_weight_daily_ops_summary(
     liquidity = audit.get("liquidity_check") or {}
     pre_trade_risk = audit.get("pre_trade_risk_check") or {}
     raw_blocking_reasons = list(audit.get("blocking_reasons") or [])
+    if (
+        status == "BLOCKED"
+        and audit.get("ready_for_capped_pilot")
+        and execution_ready_checks_passed
+        and execute_command_issue_reason
+    ):
+        raw_blocking_reasons.append(execute_command_issue_reason)
     post_evidence_diagnostics: list[str] = []
     decision_blocking_reasons = raw_blocking_reasons
     next_operator_trade_day: str | None = None
@@ -4659,7 +4687,7 @@ def build_target_weight_daily_ops_summary(
             for reason in raw_blocking_reasons
             if reason not in post_evidence_diagnostics
         ]
-    operator_commands = dict(audit.get("operator_commands") or {})
+    operator_commands = audit_operator_commands
     operator_commands.setdefault(
         "finalize_pilot_evidence",
         (
@@ -4717,7 +4745,7 @@ def build_target_weight_daily_ops_summary(
         operator_commands["next_daily_ops_summary"] = f"{next_base} --daily-ops-summary"
         operator_commands["next_readiness_audit"] = f"{next_base} --readiness-audit"
     elif status != "READY_TO_EXECUTE":
-        block_reason = _first_text(audit.get("blocking_reasons")) or f"{status}: {next_step}"
+        block_reason = _first_text(decision_blocking_reasons) or f"{status}: {next_step}"
         operator_commands["execute_capped_paper"] = f"# blocked: {block_reason}"
     summary = {
         "artifact_type": "target_weight_daily_ops_summary",
