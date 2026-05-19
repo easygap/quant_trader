@@ -4561,7 +4561,12 @@ def build_target_weight_daily_ops_summary(
     candidate_id = str(audit["candidate_id"])
     trade_day = str(audit.get("trade_day") or "")
 
-    def command_scope_issues(command: str, *, require_trade_day: bool) -> list[str]:
+    def command_scope_issues(
+        command: str,
+        *,
+        require_trade_day: bool,
+        required_flags: tuple[str, ...] = (),
+    ) -> list[str]:
         issues: list[str] = []
         command_targets_candidate = (
             f"--candidate-id {candidate_id}" in command
@@ -4571,6 +4576,9 @@ def build_target_weight_daily_ops_summary(
             issues.append(f"candidate_id mismatch expected={candidate_id}")
         if require_trade_day and f"--as-of-date {trade_day}" not in command:
             issues.append(f"as_of_date mismatch expected={trade_day}")
+        for flag in required_flags:
+            if flag not in command:
+                issues.append(f"missing {flag}")
         return issues
 
     audit_enable_command = str(
@@ -4581,7 +4589,11 @@ def build_target_weight_daily_ops_summary(
         and not audit_enable_command.lstrip().startswith("# blocked:")
     )
     enable_command_scope_issues = (
-        command_scope_issues(audit_enable_command, require_trade_day=False)
+        command_scope_issues(
+            audit_enable_command,
+            require_trade_day=False,
+            required_flags=("--enable",),
+        )
         if enable_command_ready
         else []
     )
@@ -4602,7 +4614,11 @@ def build_target_weight_daily_ops_summary(
         and not audit_execute_command.lstrip().startswith("# blocked:")
     )
     execute_command_scope_issues = (
-        command_scope_issues(audit_execute_command, require_trade_day=True)
+        command_scope_issues(
+            audit_execute_command,
+            require_trade_day=True,
+            required_flags=("--execute", "--collect-evidence"),
+        )
         if execute_command_ready
         else []
     )
