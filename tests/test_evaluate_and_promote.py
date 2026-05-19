@@ -1863,6 +1863,69 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
+def test_build_current_blockers_report_schedules_next_day_after_repaired_non_promotable_daily_ops(monkeypatch):
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    monkeypatch.setattr("tools.evaluate_and_promote._current_kst_date", lambda: "2026-05-18")
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "next_operator_trade_day": "2026-05-19",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_repaired_performance_not_promotable": 1},
+            "repaired_pilot_days": 1,
+        },
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "next_daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+                "--as-of-date 2026-05-19 --daily-ops-summary"
+            ),
+            "next_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+                "--as-of-date 2026-05-19 --readiness-audit"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["daily_ops_status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+    assert action["order_safety"] == "no_order"
+    assert action["not_before_date"] == "2026-05-19"
+    assert action["command"].startswith("# blocked: not before 2026-05-19")
+    assert action["scheduled_command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
+    assert "복구 보존" in action["desc"]
+
+
 def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
     from tools.evaluate_and_promote import load_current_blockers_from_artifacts
 
