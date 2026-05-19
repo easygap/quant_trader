@@ -2251,7 +2251,11 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     assert "--as-of-date 2026-04-13 --daily-ops-summary" in output
     assert "Next readiness command:" in output
     assert "--as-of-date 2026-04-13 --readiness-audit" in output
-    assert str(summary_path) in output
+    assert (
+        "Operator next action: WAIT until 2026-04-13: "
+        "target_weight_future_as_of_date_blocked"
+    ) in output
+    assert summary_path.as_posix() in output
 
 
 def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, monkeypatch, capsys):
@@ -2313,7 +2317,8 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
     assert "Not before date:" not in output
     assert "Premature run guard:" not in output
     assert "Next daily ops command:" in output
-    assert str(summary_path) in output
+    assert "Operator next action: RUN no-order daily ops check:" in output
+    assert summary_path.as_posix() in output
 
 
 def test_paper_pilot_control_status_warns_when_current_blockers_missing(
@@ -2356,7 +2361,7 @@ def test_paper_pilot_control_status_warns_when_current_blockers_missing(
         "Regenerate current blockers command: "
         "python tools/evaluate_and_promote.py --current-blockers"
     ) in output
-    assert str(summary_path) in output
+    assert summary_path.as_posix() in output
 
 
 def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
@@ -2495,7 +2500,7 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
     assert "--finalize-pilot-evidence --finalize-date 2026-04-10" in output
     assert "Repair evidence command:" in output
     assert "fallback: use only if finalize cannot produce promotable proof" in output
-    assert str(summary_path) in output
+    assert summary_path.as_posix() in output
 
 
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
@@ -2643,7 +2648,7 @@ def test_paper_pilot_control_status_prints_daily_ops_failure_when_no_summary(
 
     output = capsys.readouterr().out
     assert "Target-weight Daily Ops: FAILED" in output
-    assert f"Failure source: {failure_path}" in output
+    assert f"Failure source: {failure_path.as_posix()}" in output
     assert (
         "Failure reason: target_weight_daily_ops_summary_blocked: market data stale"
         in output
@@ -2724,7 +2729,7 @@ def test_paper_pilot_control_status_warns_when_daily_ops_failure_is_newer(
     output = capsys.readouterr().out
     assert "Target-weight Daily Ops:" in output
     assert "Failure warning: latest daily ops failure is newer than loaded summary" in output
-    assert f"Failure source: {failure_path}" in output
+    assert f"Failure source: {failure_path.as_posix()}" in output
     assert (
         "Failure reason: target_weight_daily_ops_summary_blocked: missing readiness audit"
         in output
@@ -5500,6 +5505,26 @@ def test_assess_plan_data_quality_blocks_stale_symbol_price():
     assert quality["checked"] is True
     assert quality["complete"] is False
     assert quality["stale_price_symbols"] == {"BBB": "2026-04-09"}
+    assert "target_weight_data_quality_failed" in quality["reason"]
+
+
+def test_assess_plan_data_quality_blocks_benchmark_before_trade_day():
+    from tools.target_weight_rotation_pilot import assess_plan_data_quality
+
+    plan = _adapter_plan()
+    diagnostics = dict(plan.diagnostics)
+    diagnostics["benchmark_last_date"] = plan.score_day
+    plan = replace(plan, diagnostics=diagnostics)
+
+    quality = assess_plan_data_quality(plan)
+
+    assert quality["checked"] is True
+    assert quality["complete"] is False
+    assert quality["benchmark_stale"] is True
+    assert any(
+        "benchmark_latest_before_trade_day" in violation
+        for violation in quality["violations"]
+    )
     assert "target_weight_data_quality_failed" in quality["reason"]
 
 
