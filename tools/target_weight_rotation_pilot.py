@@ -4557,6 +4557,21 @@ def build_target_weight_daily_ops_summary(
     )
     execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     audit_operator_commands = dict(audit.get("operator_commands") or {})
+    candidate_id = str(audit["candidate_id"])
+    trade_day = str(audit.get("trade_day") or "")
+
+    def command_scope_issues(command: str, *, require_trade_day: bool) -> list[str]:
+        issues: list[str] = []
+        command_targets_candidate = (
+            f"--candidate-id {candidate_id}" in command
+            or f"--strategy {candidate_id}" in command
+        )
+        if not command_targets_candidate:
+            issues.append(f"candidate_id mismatch expected={candidate_id}")
+        if require_trade_day and f"--as-of-date {trade_day}" not in command:
+            issues.append(f"as_of_date mismatch expected={trade_day}")
+        return issues
+
     audit_enable_command = str(
         audit_operator_commands.get("enable_suggested_caps") or ""
     ).strip()
@@ -4564,12 +4579,20 @@ def build_target_weight_daily_ops_summary(
         bool(audit_enable_command)
         and not audit_enable_command.lstrip().startswith("# blocked:")
     )
+    enable_command_scope_issues = (
+        command_scope_issues(audit_enable_command, require_trade_day=False)
+        if enable_command_ready
+        else []
+    )
+    enable_command_ready = enable_command_ready and not enable_command_scope_issues
     enable_command_issue_reason = ""
     if not enable_command_ready:
         enable_command_issue_reason = (
             "daily_ops_enable_command_unavailable: "
             + (audit_enable_command or "missing enable_suggested_caps command")
         )
+        if enable_command_scope_issues:
+            enable_command_issue_reason += "; " + "; ".join(enable_command_scope_issues)
     audit_execute_command = str(
         audit_operator_commands.get("execute_capped_paper") or ""
     ).strip()
@@ -4577,12 +4600,20 @@ def build_target_weight_daily_ops_summary(
         bool(audit_execute_command)
         and not audit_execute_command.lstrip().startswith("# blocked:")
     )
+    execute_command_scope_issues = (
+        command_scope_issues(audit_execute_command, require_trade_day=True)
+        if execute_command_ready
+        else []
+    )
+    execute_command_ready = execute_command_ready and not execute_command_scope_issues
     execute_command_issue_reason = ""
     if not execute_command_ready:
         execute_command_issue_reason = (
             "daily_ops_execute_command_unavailable: "
             + (audit_execute_command or "missing execute_capped_paper command")
         )
+        if execute_command_scope_issues:
+            execute_command_issue_reason += "; " + "; ".join(execute_command_scope_issues)
     execution_ready_checks_passed = (
         _check_passed(data_quality_check)
         and _check_passed(execution_trade_day_check)
@@ -4607,7 +4638,6 @@ def build_target_weight_daily_ops_summary(
             "duplicate execution",
         )
     )
-    trade_day = str(audit.get("trade_day") or "")
     latest_record_date = str(evidence_progress.get("latest_record_date") or "")
     latest_verified_pilot_date = str(evidence_progress.get("latest_verified_pilot_date") or "")
     latest_repaired_pilot_date = str(evidence_progress.get("latest_repaired_pilot_date") or "")
