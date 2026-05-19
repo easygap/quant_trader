@@ -1908,7 +1908,10 @@ def test_build_current_blockers_report_schedules_next_day_after_repaired_non_pro
         "next_operator_trade_day": "2026-05-19",
         "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
         "evidence_progress": {
+            "target_days": 60,
             "verified_pilot_days": 0,
+            "remaining_pilot_days": 60,
+            "progress_ratio": 0.0,
             "shadow_days": 2,
             "invalid_execution_days": 1,
             "invalid_reasons": {"target_weight_repaired_performance_not_promotable": 1},
@@ -1931,6 +1934,12 @@ def test_build_current_blockers_report_schedules_next_day_after_repaired_non_pro
 
     action = report["next_actions"][0]
     assert action["daily_ops_status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+    assert action["target_days"] == 60
+    assert action["remaining_pilot_days"] == 60
+    assert action["progress_ratio"] == 0.0
+    assert action["invalid_execution_days"] == 1
+    assert action["repaired_pilot_days"] == 1
+    assert action["invalid_reasons"] == {"target_weight_repaired_performance_not_promotable": 1}
     assert action["order_safety"] == "no_order"
     assert action["not_before_date"] == "2026-05-19"
     assert action["command"].startswith("# blocked: not before 2026-05-19")
