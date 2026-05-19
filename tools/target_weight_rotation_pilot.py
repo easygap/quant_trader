@@ -4557,6 +4557,19 @@ def build_target_weight_daily_ops_summary(
     )
     execution_trade_day_check = audit.get("execution_trade_day_check") or execution_trade_day_check_not_required()
     audit_operator_commands = dict(audit.get("operator_commands") or {})
+    audit_enable_command = str(
+        audit_operator_commands.get("enable_suggested_caps") or ""
+    ).strip()
+    enable_command_ready = (
+        bool(audit_enable_command)
+        and not audit_enable_command.lstrip().startswith("# blocked:")
+    )
+    enable_command_issue_reason = ""
+    if not enable_command_ready:
+        enable_command_issue_reason = (
+            "daily_ops_enable_command_unavailable: "
+            + (audit_enable_command or "missing enable_suggested_caps command")
+        )
     audit_execute_command = str(
         audit_operator_commands.get("execute_capped_paper") or ""
     ).strip()
@@ -4649,12 +4662,16 @@ def build_target_weight_daily_ops_summary(
         and capped_launch_ready
         and execution_market_session_check.get("checked", False)
         and not execution_market_session_check.get("allowed", False)
+        and enable_command_ready
     ):
         status = "WAITING_FOR_MARKET_SESSION"
         next_step = "KRX 정규장 시간에 readiness audit 재실행 후 capped paper 실행"
-    elif audit.get("ready_for_cap_approval"):
+    elif audit.get("ready_for_cap_approval") and enable_command_ready:
         status = "READY_TO_ENABLE_CAPS"
         next_step = "추천 cap 승인 후 readiness audit 재실행"
+    elif audit.get("ready_for_cap_approval"):
+        status = "BLOCKED"
+        next_step = "cap 승인 명령이 차단 또는 누락됨; readiness audit 재생성 후 재점검"
     else:
         status = "BLOCKED"
         next_step = "차단 사유 해소 후 shadow/readiness 재점검"
@@ -4670,6 +4687,12 @@ def build_target_weight_daily_ops_summary(
         and execute_command_issue_reason
     ):
         raw_blocking_reasons.append(execute_command_issue_reason)
+    elif (
+        status == "BLOCKED"
+        and audit.get("ready_for_cap_approval")
+        and enable_command_issue_reason
+    ):
+        raw_blocking_reasons.append(enable_command_issue_reason)
     post_evidence_diagnostics: list[str] = []
     decision_blocking_reasons = raw_blocking_reasons
     next_operator_trade_day: str | None = None
