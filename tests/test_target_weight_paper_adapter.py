@@ -2272,6 +2272,58 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
     assert str(summary_path) in output
 
 
+def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_path, capsys):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "next_step": "final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "invalid_reasons": {"target_weight_benchmark_status_not_final": 1},
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: pilot_paper evidence invalid for 2026-04-10",
+                    "finalize_pilot_evidence": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate "
+                        "--finalize-pilot-evidence --finalize-date 2026-04-10"
+                    ),
+                    "repair_pilot_evidence": (
+                        "# fallback: use only if finalize cannot produce promotable proof; "
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate "
+                        "--repair-pilot-evidence --repair-date 2026-04-10"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Status: PILOT_EVIDENCE_INVALID" in output
+    assert "Finalize evidence command:" in output
+    assert "--finalize-pilot-evidence --finalize-date 2026-04-10" in output
+    assert "Repair evidence command:" in output
+    assert "fallback: use only if finalize cannot produce promotable proof" in output
+    assert str(summary_path) in output
+
+
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
     import core.paper_pilot as paper_pilot
     import tools.paper_pilot_control as ppc
