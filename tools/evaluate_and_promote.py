@@ -900,6 +900,8 @@ def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
         "readiness_audit": f"{base} --readiness-audit",
         "collect_shadow_days": f"{base} --shadow-days 3 --shadow-end-date YYYY-MM-DD",
         "pilot_status": f"python tools/paper_pilot_control.py --strategy {strategy} --status",
+        "finalize_pilot_evidence": f"{base} --finalize-pilot-evidence --finalize-date YYYY-MM-DD",
+        "repair_pilot_evidence": f"{base} --repair-pilot-evidence --repair-date YYYY-MM-DD",
         "execute_capped_paper_after_ready": f"{base} --execute --collect-evidence",
         "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers",
     }
