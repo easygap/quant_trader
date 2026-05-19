@@ -418,6 +418,9 @@ def _load_target_weight_current_blockers_run_guard(
             candidates.extend(step for step in sequence if isinstance(step, dict))
 
     for candidate in candidates:
+        not_before = candidate.get("not_before_date")
+        if not_before and not _not_before_date_pending(not_before):
+            continue
         guard = {
             key: candidate[key]
             for key in ("not_before_date", "premature_run_guard")
@@ -430,6 +433,17 @@ def _load_target_weight_current_blockers_run_guard(
 
 def _current_kst_date() -> str:
     return datetime.now(KST).date().isoformat()
+
+
+def _not_before_date_pending(not_before_date: str | None, *, current_date: str | None = None) -> bool:
+    if not not_before_date:
+        return False
+    try:
+        target = datetime.strptime(str(not_before_date), "%Y-%m-%d").date()
+        current = datetime.strptime(current_date or _current_kst_date(), "%Y-%m-%d").date()
+    except ValueError:
+        return True
+    return target > current
 
 
 def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
@@ -477,7 +491,10 @@ def _print_target_weight_daily_ops_status(
         or summary.get("not_before_date")
         or (
             next_operator_trade_day
-            if summary.get("status") == "PILOT_EVIDENCE_RECORDED"
+            if (
+                summary.get("status") == "PILOT_EVIDENCE_RECORDED"
+                and _not_before_date_pending(next_operator_trade_day)
+            )
             else None
         )
     )
