@@ -924,6 +924,10 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return False
 
 
+def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float]:
+    return (str(payload.get("trade_day") or ""), path.stat().st_mtime)
+
+
 def _stable_daily_ops_hash(payload: dict) -> str:
     encoded = json.dumps(
         payload,
@@ -1091,6 +1095,7 @@ def _load_latest_target_weight_daily_ops(
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    valid_candidates: list[tuple[tuple[str, float], dict]] = []
     for path in candidates:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1106,7 +1111,7 @@ def _load_latest_target_weight_daily_ops(
             continue
         if not _daily_ops_trade_day_is_available(payload):
             continue
-        return _sanitize_target_weight_daily_ops_summary({
+        sanitized = _sanitize_target_weight_daily_ops_summary({
             "source_path": str(path),
             "generated_at": payload.get("generated_at"),
             "candidate_id": payload.get("candidate_id"),
@@ -1118,7 +1123,52 @@ def _load_latest_target_weight_daily_ops(
             "decision": payload.get("decision") or {},
             "operator_commands": payload.get("operator_commands") or {},
         })
+        if sanitized is not None:
+            valid_candidates.append((_daily_ops_trade_day_sort_key(payload, path), sanitized))
+    if valid_candidates:
+        return max(valid_candidates, key=lambda item: item[0])[1]
     return None
+
+
+def validate_target_weight_daily_ops_artifacts(
+    reports_dir: str | Path = "reports",
+) -> list[str]:
+    """저장된 target-weight daily ops summary artifact의 무결성을 검사한다."""
+    base = Path(reports_dir)
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
+
+    issues: list[str] = []
+    paths = sorted(
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob("target_weight_daily_ops_summary_*.json")
+            if not path.name.startswith("target_weight_daily_ops_summary_failure_")
+        }
+    )
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"{path} 로드 실패: {exc.__class__.__name__}")
+            continue
+        if not isinstance(payload, dict):
+            issues.append(f"{path} top-level JSON is not an object")
+            continue
+        if payload.get("artifact_type") != "target_weight_daily_ops_summary":
+            continue
+        if payload.get("schema_version") != 1:
+            issues.append(f"{path} schema_version 불일치")
+        if not str(payload.get("candidate_id") or "").strip():
+            issues.append(f"{path} candidate_id 누락")
+        if not str(payload.get("trade_day") or "").strip():
+            issues.append(f"{path} trade_day 누락")
+        if not _daily_ops_summary_hash_is_valid(payload):
+            issues.append(f"{path} summary_hash 불일치 또는 누락")
+    return issues
 
 
 def _reason_contains(reasons: list[str], *needles: str) -> bool:
@@ -1971,6 +2021,13 @@ def validate_promotion_operator_artifacts(
         return [
             "blocker summary 동기화 실패: " + issue
             for issue in summary_issues
+        ]
+
+    daily_ops_issues = validate_target_weight_daily_ops_artifacts(Path(promotion_dir).parent)
+    if daily_ops_issues:
+        return [
+            "target-weight daily ops artifact 무결성 실패: " + issue
+            for issue in daily_ops_issues
         ]
 
     return [
