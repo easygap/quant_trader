@@ -32,6 +32,7 @@ reports/*.md
 reports/paper_evidence/
 reports/paper_runtime/
 reports/promotion/
+reports/_quarantine/
 reports/research_sweeps/
 reports/paper_weekly_*.json
 reports/paper_weekly_*.txt
