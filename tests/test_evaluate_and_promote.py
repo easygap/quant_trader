@@ -1983,6 +1983,67 @@ def test_build_current_blockers_report_releases_recorded_pilot_day_on_not_before
     assert "not_before_date" not in report["operator_runbook"]["sequence"][2]
 
 
+def test_build_current_blockers_report_repairs_next_check_command_scope_mismatch(monkeypatch):
+    import tools.evaluate_and_promote as eap
+
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    monkeypatch.setattr(eap, "_current_kst_date", lambda: "2026-05-19")
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "d" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "candidate_id": "target_weight_best",
+        "trade_day": "2026-05-18",
+        "next_operator_trade_day": "2026-05-19",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 2},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "next_daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best_shadow --as-of-date 2026-05-18 "
+                "--readiness-audit"
+            ),
+            "next_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-18 "
+                "--daily-ops-summary"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["command"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --as-of-date 2026-05-19 --daily-ops-summary"
+    )
+    assert action["follow_up"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --as-of-date 2026-05-19 --readiness-audit"
+    )
+    assert report["operator_runbook"]["sequence"][2]["command"] == action["command"]
+
+
 def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_daily_ops():
     from tools.evaluate_and_promote import build_current_blockers_report
 
