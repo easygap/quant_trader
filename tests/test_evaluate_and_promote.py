@@ -1562,9 +1562,12 @@ def test_build_current_blockers_report_promotes_ready_execute_from_daily_ops():
     assert action["command"].endswith("--execute --collect-evidence")
 
 
-def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops():
+def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops(monkeypatch):
+    import tools.evaluate_and_promote as eap
+
     from tools.evaluate_and_promote import build_current_blockers_report
 
+    monkeypatch.setattr(eap, "_current_kst_date", lambda: "2026-05-18")
     blocker_summary = {
         "artifact_type": "promotion_blocker_summary",
         "schema_version": 1,
@@ -1653,6 +1656,85 @@ def test_build_current_blockers_report_marks_recorded_pilot_day_from_daily_ops()
     )
     assert report["next_actions"][1]["command"].startswith("# blocked:")
     assert report["next_actions"][1]["order_safety"] == "no_order"
+
+
+def test_build_current_blockers_report_releases_recorded_pilot_day_on_not_before_date(monkeypatch):
+    import tools.evaluate_and_promote as eap
+
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    monkeypatch.setattr(eap, "_current_kst_date", lambda: "2026-05-19")
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "d" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-18.json",
+        "trade_day": "2026-05-18",
+        "next_operator_trade_day": "2026-05-19",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {
+            "verified_pilot_days": 1,
+            "shadow_days": 2,
+        },
+        "decision": {
+            "blocking_reasons": [],
+            "post_evidence_diagnostics": [
+                "execution_idempotency: duplicate",
+                "pilot_authorization_snapshot: stale same-day approval",
+            ],
+        },
+        "operator_commands": {
+            "next_daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-19 "
+                "--daily-ops-summary"
+            ),
+            "next_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-19 "
+                "--readiness-audit"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["daily_ops_status"] == "PILOT_EVIDENCE_RECORDED"
+    assert action["order_safety"] == "no_order"
+    assert action["requires"] == "current KRX business day fresh readiness"
+    assert "not_before_date" not in action
+    assert "premature_run_guard" not in action
+    assert action["command"].endswith("--as-of-date 2026-05-19 --daily-ops-summary")
+    assert action["follow_up"].endswith("--as-of-date 2026-05-19 --readiness-audit")
+    assert not action["command"].startswith("# blocked:")
+    assert report["operator_runbook"]["sequence"][2]["command"].endswith(
+        "--as-of-date 2026-05-19 --daily-ops-summary"
+    )
+    assert report["operator_runbook"]["sequence"][2]["follow_up"].endswith(
+        "--as-of-date 2026-05-19 --readiness-audit"
+    )
+    assert "not_before_date" not in report["operator_runbook"]["sequence"][2]
 
 
 def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_daily_ops():
