@@ -130,7 +130,7 @@ def _write_bundle(
     _write_json(promotion_dir / "promotion_blocker_summary.json", blocker_summary)
     _write_json(
         promotion_dir.parent / "current_blockers.json",
-        build_current_blockers_report(blocker_summary),
+        build_current_blockers_report(blocker_summary, generated_at=generated_at),
     )
 
 
