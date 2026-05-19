@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T10:16:25.321234",
+  "generated_at": "2026-05-19T11:11:00.504201",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -301,7 +301,7 @@
       "operator_commands": {
         "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-19",
         "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit",
-        "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-19 --to 2026-08-10 \\\n  --max-orders 1 --max-positions 4 --max-notional 1 --max-exposure 5110000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
+        "enable_suggested_caps": "# blocked: repaired pilot_paper evidence already recorded for 2026-05-19; rerun readiness audit for 2026-05-20",
         "execute_capped_paper": "# blocked: repaired pilot_paper evidence already recorded for 2026-05-19",
         "finalize_pilot_evidence": "# blocked: repaired pilot_paper evidence already appended for 2026-05-19",
         "repair_pilot_evidence": "# blocked: repaired pilot_paper evidence already appended for 2026-05-19",

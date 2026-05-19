@@ -380,7 +380,7 @@ def _load_latest_target_weight_daily_ops(
         if not _daily_ops_trade_day_is_available(payload):
             continue
         payload["source_path"] = str(path)
-        return payload
+        return _sanitize_target_weight_daily_ops_summary(payload)
     return None
 
 
@@ -593,6 +593,69 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return False
 
 
+def _target_weight_enable_blocker(payload: dict, command: str | None = None) -> str | None:
+    status = str(payload.get("status") or "")
+    trade_day = str(payload.get("trade_day") or "").strip() or "UNKNOWN"
+    next_trade_day = str(payload.get("next_operator_trade_day") or "").strip()
+    next_hint = next_trade_day or "next KRX business day"
+    if status == "PILOT_EVIDENCE_RECORDED":
+        return (
+            f"# blocked: pilot_paper evidence already recorded for {trade_day}; "
+            f"rerun readiness audit for {next_hint}"
+        )
+    if status == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE":
+        return (
+            f"# blocked: repaired pilot_paper evidence already recorded for {trade_day}; "
+            f"rerun readiness audit for {next_hint}"
+        )
+    if status == "PILOT_EVIDENCE_INVALID":
+        return (
+            f"# blocked: pilot_paper evidence invalid for {trade_day}; "
+            "finalize or repair evidence before changing pilot caps"
+        )
+    if status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
+        return None
+    if str(command or "").strip():
+        return (
+            f"# blocked: daily_ops_summary.status == {status}; "
+            "READY_TO_ENABLE_CAPS 전 cap 변경 금지"
+        )
+    return None
+
+
+def _ready_to_execute_trade_day_is_current(payload: dict) -> bool:
+    trade_day = str(payload.get("trade_day") or "").strip()
+    if not trade_day:
+        return False
+    try:
+        trade_date = datetime.strptime(trade_day, "%Y-%m-%d").date()
+        current = datetime.strptime(_current_kst_date(), "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return trade_date == current
+
+
+def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    sanitized = dict(payload)
+    operator_commands = dict(sanitized.get("operator_commands") or {})
+    enable_command = str(operator_commands.get("enable_suggested_caps") or "")
+    enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
+    if enable_blocker:
+        operator_commands["enable_suggested_caps"] = enable_blocker
+    if (
+        sanitized.get("status") == "READY_TO_EXECUTE"
+        and not _ready_to_execute_trade_day_is_current(sanitized)
+    ):
+        operator_commands["execute_capped_paper"] = (
+            "# blocked: daily_ops_summary.trade_day is stale; "
+            "rerun daily ops summary for the current KRX business day"
+        )
+    sanitized["operator_commands"] = operator_commands
+    return sanitized
+
+
 def _print_target_weight_daily_ops_status(
     strategy: str,
     *,
@@ -612,6 +675,7 @@ def _print_target_weight_daily_ops_status(
     decision = summary.get("decision") or {}
     diagnostics = decision.get("post_evidence_diagnostics") or []
     operator_commands = summary.get("operator_commands") or {}
+    enable_command = operator_commands.get("enable_suggested_caps") or ""
     execute_command = operator_commands.get("execute_capped_paper") or ""
     finalize_command = operator_commands.get("finalize_pilot_evidence") or ""
     repair_command = operator_commands.get("repair_pilot_evidence") or ""
@@ -727,6 +791,12 @@ def _print_target_weight_daily_ops_status(
             print(f"    Priority follow-up: {priority_follow_up}")
     if diagnostics:
         print(f"    Post-evidence diagnostics: {len(diagnostics)}")
+    if enable_command:
+        if str(enable_command).lstrip().startswith("# blocked:"):
+            print("    Cap approval: BLOCKED by daily ops")
+        else:
+            print("    Cap approval: follow daily ops READY_TO_ENABLE_CAPS command only")
+        print(f"    Enable cap command: {enable_command}")
     if execute_command:
         if str(execute_command).lstrip().startswith("# blocked:"):
             print("    Adapter execution: BLOCKED by daily ops")
