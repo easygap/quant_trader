@@ -1146,6 +1146,15 @@ def _target_weight_ops_priority_action(
             "requires": "daily_ops_summary.status == READY_TO_EXECUTE",
         }
 
+    if status == "READY_TO_ENABLE_CAPS":
+        return {
+            **base_action,
+            "desc": "readiness artifact의 추천 cap 승인 후 readiness 재점검",
+            "command": ops_commands.get("enable_suggested_caps") or "",
+            "order_safety": "no_order",
+            "follow_up": ops_commands.get("rerun_readiness_audit") or commands.get("readiness_audit"),
+        }
+
     if shadow_days < 3 or _reason_contains(
         blockers,
         "clean_final_days",
@@ -1163,7 +1172,7 @@ def _target_weight_ops_priority_action(
     if _reason_contains(blockers, "discord", "webhook", "notifier"):
         return _target_weight_discord_action(strategy, base_action, blockers)
 
-    if status == "READY_TO_ENABLE_CAPS" or _reason_contains(blockers, "pilot_authorization"):
+    if _reason_contains(blockers, "pilot_authorization"):
         return {
             **base_action,
             "desc": "readiness artifact의 추천 cap 승인 후 readiness 재점검",

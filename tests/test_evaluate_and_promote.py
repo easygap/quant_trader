@@ -1404,6 +1404,75 @@ def test_build_current_blockers_report_prioritizes_shadow_from_daily_ops():
     assert report["operator_runbook"]["sequence"][2]["command"] == action["command"]
 
 
+def test_build_current_blockers_report_prioritizes_cap_approval_when_ready_even_with_two_shadow_days():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "a" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {
+                    "benchmark_excess_return": 48.7,
+                    "sharpe": 1.57,
+                    "mdd": -17.18,
+                },
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-19.json",
+        "trade_day": "2026-05-19",
+        "status": "READY_TO_ENABLE_CAPS",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+        },
+        "decision": {
+            "blocking_reasons": [
+                "pilot_authorization_snapshot: target_weight_pilot_authorization_snapshot_mismatch",
+            ],
+        },
+        "operator_commands": {
+            "collect_shadow_days": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --shadow-days 3 --shadow-end-date 2026-05-19"
+            ),
+            "enable_suggested_caps": (
+                "python tools/paper_pilot_control.py --strategy target_weight_best "
+                "--enable --from 2026-05-19 --to 2026-08-10 "
+                "--max-orders 4 --max-positions 4 --max-notional 1500000 --max-exposure 5060000 "
+                '--reason "target-weight shadow dry-run matched suggested pilot caps"'
+            ),
+            "rerun_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-19 --readiness-audit"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    action = report["next_actions"][0]
+    assert action["daily_ops_status"] == "READY_TO_ENABLE_CAPS"
+    assert action["desc"] == "readiness artifact의 추천 cap 승인 후 readiness 재점검"
+    assert action["command"].startswith("python tools/paper_pilot_control.py")
+    assert "--enable" in action["command"]
+    assert action["follow_up"].endswith("--as-of-date 2026-05-19 --readiness-audit")
+    assert "--shadow-days 3" not in action["command"]
+    assert report["operator_runbook"]["sequence"][2]["command"] == action["command"]
+
+
 def test_build_current_blockers_report_promotes_discord_test_after_shadow():
     from tools.evaluate_and_promote import build_current_blockers_report
 
