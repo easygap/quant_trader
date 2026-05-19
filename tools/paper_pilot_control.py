@@ -446,18 +446,70 @@ def _load_target_weight_current_blockers_priority_action(
     if not isinstance(payload, dict):
         return {}
 
+    regenerate_command = "python tools/evaluate_and_promote.py --current-blockers"
     runbook = payload.get("operator_runbook")
+    if isinstance(runbook, dict):
+        commands = runbook.get("commands")
+        if isinstance(commands, dict):
+            regenerate_command = str(
+                commands.get("regenerate_current_blockers") or regenerate_command
+            ).strip()
+
+    def with_regenerate_command(action: dict) -> dict:
+        result = dict(action)
+        result["regenerate_current_blockers_command"] = regenerate_command
+        return result
+
     if isinstance(runbook, dict) and runbook.get("primary_strategy") == strategy:
         priority = runbook.get("current_priority_action")
         if isinstance(priority, dict) and priority.get("strategy") == strategy:
-            return priority
+            return with_regenerate_command(priority)
 
     next_actions = payload.get("next_actions")
     if isinstance(next_actions, list):
         for action in next_actions:
             if isinstance(action, dict) and action.get("strategy") == strategy:
-                return action
+                return with_regenerate_command(action)
     return {}
+
+
+def _path_leaf(value: object) -> str:
+    return str(value or "").replace("\\", "/").rstrip("/").split("/")[-1]
+
+
+def _target_weight_priority_action_warnings(
+    summary: dict,
+    priority_action: dict,
+) -> list[str]:
+    warnings: list[str] = []
+    if not priority_action:
+        return warnings
+
+    latest_status = str(summary.get("status") or "").strip()
+    priority_status = str(priority_action.get("daily_ops_status") or "").strip()
+    if priority_status and latest_status and priority_status != latest_status:
+        warnings.append(
+            f"daily_ops_status priority={priority_status} latest={latest_status}"
+        )
+
+    latest_trade_day = str(summary.get("trade_day") or "").strip()
+    priority_trade_day = str(priority_action.get("daily_ops_trade_day") or "").strip()
+    if (
+        priority_trade_day
+        and latest_trade_day
+        and priority_trade_day != latest_trade_day
+    ):
+        warnings.append(
+            f"daily_ops_trade_day priority={priority_trade_day} latest={latest_trade_day}"
+        )
+
+    latest_source = _path_leaf(summary.get("source_path"))
+    priority_source = _path_leaf(priority_action.get("source_path"))
+    if priority_source and latest_source and priority_source != latest_source:
+        warnings.append(
+            f"source_path priority={priority_source} latest={latest_source}"
+        )
+    return warnings
 
 
 def _current_kst_date() -> str:
@@ -559,6 +611,20 @@ def _print_target_weight_daily_ops_status(
     if evidence_breakdown:
         print(f"    Evidence breakdown: {' '.join(evidence_breakdown)}")
     print(f"    Next: {summary.get('next_step', 'N/A')}")
+    priority_warnings = _target_weight_priority_action_warnings(
+        summary,
+        priority_action,
+    )
+    if priority_warnings:
+        print(
+            "    Current blockers warning: stale priority action; "
+            + "; ".join(priority_warnings)
+        )
+        regenerate_command = str(
+            priority_action.get("regenerate_current_blockers_command")
+            or "python tools/evaluate_and_promote.py --current-blockers"
+        ).strip()
+        print(f"    Regenerate current blockers command: {regenerate_command}")
     priority_desc = str(priority_action.get("desc") or "").strip()
     priority_command = str(priority_action.get("command") or "").strip()
     priority_scheduled_command = str(
