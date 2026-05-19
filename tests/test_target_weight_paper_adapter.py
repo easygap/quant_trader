@@ -3211,6 +3211,14 @@ def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch
     assert repaired["benchmark_meta"]["repair_source"] == "target_weight_execution.pre_trade_risk_check"
     assert repaired["total_trades"] == len(plan.orders)
 
+    progress = twp.summarize_target_weight_evidence_progress(plan.candidate_id)
+    assert progress["verified_pilot_days"] == 0
+    assert progress["repaired_pilot_days"] == 1
+    assert progress["latest_repaired_pilot_date"] == plan.trade_day
+    assert progress["invalid_reasons"] == {
+        "target_weight_repaired_performance_not_promotable": 1,
+    }
+
 
 def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
     import core.paper_evidence as pe
@@ -4065,6 +4073,84 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
     assert "benchmark/portfolio evidence" in summary["next_step"]
     assert "PILOT_EVIDENCE_INVALID" in report
     assert "Repair Pilot Evidence" in report
+
+
+def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_evidence():
+    from tools.target_weight_rotation_pilot import build_target_weight_daily_ops_summary
+
+    plan = _adapter_plan()
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "next_action": "resolve duplicate execution blocker",
+        "blocking_reasons": [
+            "pilot_validation: max_orders_per_day=4 reached (today=4)",
+            "execution_idempotency: target_weight_duplicate_execution_attempt",
+        ],
+        "warning_reasons": [],
+        "launch_readiness": {"launch_ready": False},
+        "plan_validation": {"allowed": True},
+        "execution_trade_day_check": {**pass_check, "execution_day": plan.trade_day},
+        "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+        "pilot_authorization_snapshot_check": pass_check,
+        "operator_commands": {
+            "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --daily-ops-summary",
+            "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+        },
+        "plan_summary": {
+            "order_count": 0,
+            "target_position_count": 3,
+            "max_order_notional": 0.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+        "invalid_reasons": {"target_weight_repaired_performance_not_promotable": 1},
+        "repaired_pilot_days": 1,
+        "non_promotable_days": 0,
+        "total_canonical_records": 4,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": None,
+        "latest_repaired_pilot_date": plan.trade_day,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest={"manifest_hash": "m" * 64},
+        evidence_progress=progress,
+    )
+
+    assert summary["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+    assert summary["next_operator_trade_day"] is not None
+    assert "복구 보존" in summary["next_step"]
+    assert summary["operator_commands"]["execute_capped_paper"].startswith(
+        "# blocked: repaired pilot_paper evidence already recorded"
+    )
+    assert summary["operator_commands"]["repair_pilot_evidence"].startswith(
+        "# blocked: repaired pilot_paper evidence already appended"
+    )
+    assert summary["decision"]["blocking_reasons"] == []
+    assert len(summary["decision"]["post_evidence_diagnostics"]) == 2
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):

@@ -1080,8 +1080,15 @@ def _target_weight_ops_priority_action(
         "shadow_days": shadow_days,
     }
 
-    if status == "PILOT_EVIDENCE_RECORDED":
+    if status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}:
         next_trade_day = latest_daily_ops.get("next_operator_trade_day")
+        if status == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE":
+            desc = (
+                "오늘 target-weight pilot_paper 실행 증거는 복구 보존됐지만 "
+                "promotion 카운트에서는 제외, 다음 KRX 영업일 fresh readiness 점검"
+            )
+        else:
+            desc = "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검"
         scheduled_command = (
             ops_commands.get("next_daily_ops_summary")
             or ops_commands.get("daily_ops_summary")
@@ -1096,7 +1103,7 @@ def _target_weight_ops_priority_action(
             blocked_command = _not_before_blocked_command(next_trade_day)
             return {
                 **base_action,
-                "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "desc": desc,
                 "command": blocked_command,
                 "scheduled_command": scheduled_command,
                 "order_safety": "no_order",
@@ -1108,7 +1115,7 @@ def _target_weight_ops_priority_action(
             }
         return {
             **base_action,
-            "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+            "desc": desc,
             "command": scheduled_command,
             "scheduled_command": scheduled_command,
             "order_safety": "no_order",
