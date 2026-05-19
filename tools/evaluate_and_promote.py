@@ -1310,6 +1310,12 @@ def _target_weight_daily_ops_failure_action(
     return action
 
 
+def _public_target_weight_daily_ops_failure(payload: dict) -> dict:
+    public = dict(payload)
+    public.pop("source_mtime", None)
+    return public
+
+
 def validate_target_weight_daily_ops_artifacts(
     reports_dir: str | Path = "reports",
 ) -> list[str]:
@@ -1761,7 +1767,9 @@ def _build_current_blockers_operator_runbook(
         if latest_daily_ops:
             runbook["latest_daily_ops"] = latest_daily_ops
         if active_failure:
-            runbook["latest_daily_ops_failure"] = active_failure
+            runbook["latest_daily_ops_failure"] = _public_target_weight_daily_ops_failure(
+                active_failure
+            )
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
