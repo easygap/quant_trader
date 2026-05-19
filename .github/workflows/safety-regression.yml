@@ -60,3 +60,15 @@ jobs:
             tests/test_paper_evidence.py \
             tests/test_promotion_engine.py \
             tests/test_evaluate_and_promote.py
+
+      - name: Run operator artifact checks
+        run: |
+          if [ -f reports/promotion/metrics_summary.json ] && \
+             [ -f reports/promotion/promotion_result.json ] && \
+             [ -f reports/promotion/promotion_blocker_summary.json ] && \
+             [ -f reports/current_blockers.json ]; then
+            python tools/evaluate_and_promote.py --check-only
+            python tools/evaluate_and_promote.py --current-blockers-check
+          else
+            echo "operator artifacts not present in this checkout; skipping artifact sync checks"
+          fi

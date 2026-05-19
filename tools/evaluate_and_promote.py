@@ -914,6 +914,10 @@ def _current_kst_date() -> str:
     return datetime.now(KST).date().isoformat()
 
 
+def _artifact_source_path(path: Path) -> str:
+    return path.as_posix()
+
+
 def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
     trade_day = str(payload.get("trade_day") or "").strip()
     if not trade_day:
@@ -931,7 +935,7 @@ def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float
     source_mtime = path.stat().st_mtime
     payload_with_source = {
         **payload,
-        "source_path": str(path),
+        "source_path": _artifact_source_path(path),
         "source_mtime": source_mtime,
     }
     artifact_ts = _artifact_time_key(payload_with_source)[0]
@@ -1122,7 +1126,7 @@ def _load_latest_target_weight_daily_ops(
         if not _daily_ops_trade_day_is_available(payload):
             continue
         sanitized = _sanitize_target_weight_daily_ops_summary({
-            "source_path": str(path),
+            "source_path": _artifact_source_path(path),
             "generated_at": payload.get("generated_at"),
             "candidate_id": payload.get("candidate_id"),
             "trade_day": payload.get("trade_day"),
@@ -1212,7 +1216,7 @@ def _load_latest_target_weight_daily_ops_failure(
         elif artifact_type != "target_weight_daily_ops_summary_failure":
             continue
         payload = dict(payload)
-        payload["source_path"] = str(path)
+        payload["source_path"] = _artifact_source_path(path)
         payload["source_mtime"] = path.stat().st_mtime
         candidates.append((_artifact_time_key(payload), payload))
     if candidates:
