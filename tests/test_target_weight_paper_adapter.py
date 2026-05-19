@@ -2258,6 +2258,64 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     assert summary_path.as_posix() in output
 
 
+def test_paper_pilot_control_status_uses_repaired_summary_run_guard_without_blockers(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-12")
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "next_operator_trade_day": "2026-04-13",
+                "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+                "next_step": "다음 KRX 영업일 fresh readiness 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "repaired_pilot_days": 1,
+                    "invalid_execution_days": 1,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": (
+                        "# blocked: repaired pilot_paper evidence already recorded for 2026-04-10"
+                    ),
+                    "next_daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate --as-of-date 2026-04-13 "
+                        "--daily-ops-summary"
+                    ),
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Current blockers warning: current_blockers.json missing" in output
+    assert "Status: PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE" in output
+    assert "Not before date: 2026-04-13" in output
+    assert "Premature run guard: target_weight_future_as_of_date_blocked" in output
+    assert (
+        "Operator next action: WAIT until 2026-04-13: "
+        "target_weight_future_as_of_date_blocked"
+    ) in output
+    assert summary_path.as_posix() in output
+
+
 def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, monkeypatch, capsys):
     import tools.paper_pilot_control as ppc
 
@@ -5309,6 +5367,8 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
         "# blocked: pilot_paper evidence already finalized"
     )
     assert summary["next_operator_trade_day"] == "2026-04-14"
+    assert summary["not_before_date"] == "2026-04-14"
+    assert summary["premature_run_guard"] == "target_weight_future_as_of_date_blocked"
     assert (
         summary["operator_commands"]["next_daily_ops_summary"]
         == (
@@ -5327,6 +5387,8 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
     )
     assert "fresh readiness" in summary["next_step"]
     assert "PILOT_EVIDENCE_RECORDED" in report
+    assert "Not before date: `2026-04-14`" in report
+    assert "Premature run guard: `target_weight_future_as_of_date_blocked`" in report
     assert "Next Daily Ops Summary" in report
     assert "--as-of-date 2026-04-14 --daily-ops-summary" in report
     assert "Post-evidence Diagnostics" in report
@@ -5421,7 +5483,10 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
 
 
 def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_evidence():
-    from tools.target_weight_rotation_pilot import build_target_weight_daily_ops_summary
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        render_target_weight_daily_ops_markdown,
+    )
 
     plan = _adapter_plan()
     pass_check = {
@@ -5487,9 +5552,12 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
         experiment_manifest={"manifest_hash": "m" * 64},
         evidence_progress=progress,
     )
+    report = render_target_weight_daily_ops_markdown(summary)
 
     assert summary["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
     assert summary["next_operator_trade_day"] is not None
+    assert summary["not_before_date"] == summary["next_operator_trade_day"]
+    assert summary["premature_run_guard"] == "target_weight_future_as_of_date_blocked"
     assert "복구 보존" in summary["next_step"]
     assert summary["operator_commands"]["execute_capped_paper"].startswith(
         "# blocked: repaired pilot_paper evidence already recorded"
@@ -5506,6 +5574,8 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
     )
     assert summary["decision"]["blocking_reasons"] == []
     assert len(summary["decision"]["post_evidence_diagnostics"]) == 2
+    assert f"Not before date: `{summary['next_operator_trade_day']}`" in report
+    assert "Premature run guard: `target_weight_future_as_of_date_blocked`" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):

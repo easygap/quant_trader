@@ -1109,7 +1109,11 @@ def _print_target_weight_daily_ops_status(
         or (
             next_operator_trade_day
             if (
-                summary.get("status") == "PILOT_EVIDENCE_RECORDED"
+                summary.get("status")
+                in {
+                    "PILOT_EVIDENCE_RECORDED",
+                    "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+                }
                 and _not_before_date_pending(next_operator_trade_day)
             )
             else None
@@ -1118,6 +1122,16 @@ def _print_target_weight_daily_ops_status(
     premature_run_guard = run_guard.get("premature_run_guard") or summary.get(
         "premature_run_guard"
     )
+    if (
+        not premature_run_guard
+        and not_before_date
+        and summary.get("status")
+        in {
+            "PILOT_EVIDENCE_RECORDED",
+            "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+        }
+    ):
+        premature_run_guard = "target_weight_future_as_of_date_blocked"
     print("\n  Target-weight Daily Ops:")
     _print_promotion_artifact_freshness(promotion_freshness)
     for warning in integrity_warnings[:3]:
