@@ -2984,6 +2984,50 @@ def test_paper_pilot_control_prefers_latest_trade_day_over_mtime(tmp_path, monke
     assert loaded["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
 
 
+def test_paper_pilot_control_prefers_latest_generated_summary_for_same_trade_day(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    earlier_summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-04-10T10:00:00",
+        "trade_day": "2026-04-10",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    later_summary = {
+        **earlier_summary,
+        "generated_at": "2026-04-10T10:10:00",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+    }
+    earlier_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_earlier.json"
+    later_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_later.json"
+    earlier_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(earlier_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    later_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(later_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(later_path, (1_000, 1_000))
+    os.utime(earlier_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    assert loaded["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+    assert loaded["generated_at"] == "2026-04-10T10:10:00"
+
+
 def test_paper_pilot_control_skips_daily_ops_summary_hash_mismatch(tmp_path, monkeypatch):
     import os
     import tools.paper_pilot_control as ppc
