@@ -163,6 +163,23 @@ def _require_not_future_as_of_date(
         )
 
 
+def _require_requested_as_of_trade_day(
+    plan: TargetWeightPlan,
+    as_of_date: str | None,
+    *,
+    context: str,
+) -> None:
+    if not as_of_date:
+        return
+    if str(plan.trade_day) == str(as_of_date):
+        return
+    raise ValueError(
+        "target_weight_requested_trade_day_unavailable: "
+        f"{context} as_of_date={as_of_date} resolved_trade_day={plan.trade_day}; "
+        "refresh current market data or rerun for a date whose resolved trade day matches the request"
+    )
+
+
 def make_execution_session_id(plan: TargetWeightPlan, now: datetime | None = None) -> str:
     current = _coerce_kst_datetime(now)
     stamp = current.strftime("%Y%m%d%H%M%S")
@@ -5027,6 +5044,11 @@ def run_pilot_readiness_audit(
         cash=cash,
         config=config,
         collector=collector,
+    )
+    _require_requested_as_of_trade_day(
+        plan,
+        as_of_date,
+        context="readiness audit",
     )
     preflight_refresh = refresh_paper_preflight_status(plan.candidate_id, plan.trade_day)
     pilot_check = check_pilot_entry(
