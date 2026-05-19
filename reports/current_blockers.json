@@ -1,7 +1,7 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T09:41:06.831259",
+  "generated_at": "2026-05-19T09:53:29.075647",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
@@ -157,7 +157,7 @@
     ],
     "latest_daily_ops": {
       "source_path": "reports\\paper_runtime\\target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
-      "generated_at": "2026-05-19T09:40:54.954069",
+      "generated_at": "2026-05-19T09:53:22.441297",
       "trade_day": "2026-05-19",
       "next_operator_trade_day": "2026-05-20",
       "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
@@ -188,7 +188,7 @@
         "readiness_next_action": "resolve blocking requirements before enabling or executing pilot",
         "blocking_reasons": [],
         "warning_reasons": [
-          "preview_caps: target positions 4 > cap 2; gross exposure 4,845,300 > cap 3,000,000",
+          "preview_caps: target positions 4 > cap 2; gross exposure 4,858,100 > cap 3,000,000",
           "plan_orders: no rebalance orders for this trade day"
         ],
         "post_evidence_diagnostics": [
@@ -210,7 +210,7 @@
           "plan_trade_day": "2026-05-19",
           "plan_as_of_date": "2026-05-19",
           "execution_day": "2026-05-19",
-          "execution_time": "09:40:54",
+          "execution_time": "09:53:22",
           "timezone": "Asia/Seoul",
           "allowed": true,
           "complete": true,
@@ -290,8 +290,9 @@
       "operator_commands": {
         "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-19",
         "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-19 --readiness-audit",
-        "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-19 --to 2026-08-10 \\\n  --max-orders 1 --max-positions 4 --max-notional 1 --max-exposure 5090000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
+        "enable_suggested_caps": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --enable \\\n  --from 2026-05-19 --to 2026-08-10 \\\n  --max-orders 1 --max-positions 4 --max-notional 1 --max-exposure 5110000 \\\n  --reason \"target-weight shadow dry-run matched suggested pilot caps\"",
         "execute_capped_paper": "# blocked: repaired pilot_paper evidence already recorded for 2026-05-19",
+        "finalize_pilot_evidence": "# blocked: repaired pilot_paper evidence already appended for 2026-05-19",
         "repair_pilot_evidence": "# blocked: repaired pilot_paper evidence already appended for 2026-05-19",
         "next_daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-20 --daily-ops-summary",
         "next_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-20 --readiness-audit"
