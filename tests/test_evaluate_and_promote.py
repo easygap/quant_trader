@@ -1845,6 +1845,10 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
         "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
         "operator_commands": {
             "daily_ops_summary": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best --daily-ops-summary",
+            "finalize_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+                "--finalize-pilot-evidence --finalize-date 2026-05-18"
+            ),
             "repair_pilot_evidence": (
                 "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
                 "--repair-pilot-evidence --repair-date 2026-05-18"
@@ -1857,9 +1861,9 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
     action = report["next_actions"][0]
     assert action["daily_ops_status"] == "PILOT_EVIDENCE_INVALID"
     assert action["order_safety"] == "no_order"
-    assert action["requires"] == "benchmark/portfolio evidence repair"
+    assert action["requires"] == "benchmark/portfolio evidence finalization"
     assert action["invalid_reasons"] == {"target_weight_benchmark_status_not_final": 1}
-    assert action["command"].endswith("--repair-pilot-evidence --repair-date 2026-05-18")
+    assert action["command"].endswith("--finalize-pilot-evidence --finalize-date 2026-05-18")
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
