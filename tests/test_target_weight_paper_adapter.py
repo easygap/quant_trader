@@ -2447,6 +2447,91 @@ def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
     assert "Current blockers priority: READY_TO_EXECUTE 당일 capped paper 실행" in output
 
 
+def test_paper_pilot_control_status_prints_promotion_freshness_warning(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    )
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {},
+                "operator_commands": {},
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "promotion_artifact_freshness": {
+                    "status": "AGING",
+                    "age_days": 5.98,
+                    "max_age_days": 7,
+                    "warning": (
+                        "canonical artifact is close to the freshness limit; "
+                        "plan a canonical refresh before live review"
+                    ),
+                    "check_command": (
+                        "python tools/evaluate_and_promote.py --check-only"
+                    ),
+                    "refresh_command": (
+                        "python tools/evaluate_and_promote.py --canonical"
+                    ),
+                },
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "commands": {
+                        "regenerate_current_blockers": (
+                            "python tools/evaluate_and_promote.py --current-blockers"
+                        ),
+                    },
+                    "current_priority_action": {
+                        "strategy": strategy,
+                        "desc": "다음 KRX 영업일 fresh readiness 점검",
+                        "daily_ops_status": "PILOT_EVIDENCE_RECORDED",
+                        "daily_ops_trade_day": "2026-04-10",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Promotion artifact freshness: AGING (age=5.98/7 days)" in output
+    assert "Promotion freshness warning: canonical artifact is close" in output
+    assert (
+        "Promotion freshness check command: "
+        "python tools/evaluate_and_promote.py --check-only"
+    ) in output
+    assert (
+        "Promotion freshness refresh command: "
+        "python tools/evaluate_and_promote.py --canonical"
+    ) in output
+    assert summary_path.as_posix() in output
+
+
 def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_path, capsys):
     import tools.paper_pilot_control as ppc
 
@@ -2542,6 +2627,47 @@ def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypat
     output = capsys.readouterr().out
     assert "Core Entry Check: ALLOWED" in output
     assert "Target-weight Daily Ops: MISSING" in output
+
+
+def test_paper_pilot_control_status_prints_notifier_recovery_command(
+    monkeypatch,
+    capsys,
+):
+    import core.paper_pilot as paper_pilot
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    monkeypatch.setattr(
+        ppc,
+        "_is_target_weight_strategy_for_enable",
+        lambda value: value == strategy,
+    )
+    monkeypatch.setattr(paper_pilot, "get_active_pilot", lambda value: None)
+    monkeypatch.setattr(
+        paper_pilot,
+        "check_pilot_entry",
+        lambda value: SimpleNamespace(
+            allowed=False,
+            reason="notifier stale - rerun preflight with --send-test-notification",
+            remaining_orders=None,
+            remaining_exposure=None,
+        ),
+    )
+    monkeypatch.setattr(
+        ppc,
+        "_print_target_weight_daily_ops_status",
+        lambda value: None,
+    )
+
+    ppc.run_status(strategy)
+
+    output = capsys.readouterr().out
+    assert "Core Entry Check: BLOCKED" in output
+    assert (
+        "Core recovery command: "
+        "python tools/paper_preflight.py --strategy target_weight_candidate "
+        "--with-pilot-check --send-test-notification"
+    ) in output
 
 
 def test_paper_pilot_control_status_uses_current_blockers_default_strategy(

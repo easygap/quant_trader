@@ -339,12 +339,28 @@ def run_status(strategy):
     entry_label = "Core Entry Check" if is_target_weight else "Entry Check"
     print(f"\n  {entry_label}: {'ALLOWED' if check.allowed else 'BLOCKED'}")
     print(f"  Reason: {check.reason}")
+    recovery_command = _pilot_entry_recovery_command(strategy, check.reason)
+    if recovery_command:
+        recovery_label = (
+            "Core recovery command" if is_target_weight else "Recovery command"
+        )
+        print(f"  {recovery_label}: {recovery_command}")
     if check.remaining_orders is not None:
         print(f"  Remaining orders: {check.remaining_orders}")
     if check.remaining_exposure is not None:
         print(f"  Remaining exposure: {check.remaining_exposure:,}")
     if is_target_weight:
         _print_target_weight_daily_ops_status(strategy)
+
+
+def _pilot_entry_recovery_command(strategy: str, reason: object) -> str | None:
+    reason_text = str(reason or "").lower()
+    if "--send-test-notification" not in reason_text and "notifier" not in reason_text:
+        return None
+    return (
+        "python tools/paper_preflight.py "
+        f"--strategy {strategy} --with-pilot-check --send-test-notification"
+    )
 
 
 def _load_latest_target_weight_daily_ops(
@@ -648,6 +664,62 @@ def _load_target_weight_current_blockers_priority_action(
             if isinstance(action, dict) and action.get("strategy") == strategy:
                 return with_regenerate_command(action)
     return {}
+
+
+def _load_target_weight_promotion_artifact_freshness(
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> dict:
+    path = Path(reports_dir) / "current_blockers.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    freshness = payload.get("promotion_artifact_freshness")
+    if not isinstance(freshness, dict):
+        return {}
+    return freshness
+
+
+def _print_promotion_artifact_freshness(freshness: dict) -> None:
+    if not freshness:
+        return
+
+    status = str(freshness.get("status") or "UNKNOWN").strip() or "UNKNOWN"
+    age_days = freshness.get("age_days")
+    max_age_days = freshness.get("max_age_days")
+    age_label = ""
+    if age_days is not None and max_age_days is not None:
+        age_label = f" (age={age_days}/{max_age_days} days)"
+    elif age_days is not None:
+        age_label = f" (age={age_days} days)"
+    print(f"    Promotion artifact freshness: {status}{age_label}")
+
+    warning = str(freshness.get("warning") or "").strip()
+    if warning:
+        print(f"    Promotion freshness warning: {warning}")
+
+    status_upper = status.upper()
+    if status_upper in {"STALE", "FUTURE", "UNKNOWN"}:
+        print(
+            "    Promotion freshness gate: "
+            "BLOCKED until canonical artifact is refreshed"
+        )
+
+    should_print_commands = (
+        status_upper in {"AGING", "STALE", "FUTURE", "UNKNOWN"} or bool(warning)
+    )
+    if should_print_commands:
+        check_command = str(freshness.get("check_command") or "").strip()
+        refresh_command = str(freshness.get("refresh_command") or "").strip()
+        if check_command:
+            print(f"    Promotion freshness check command: {check_command}")
+        if refresh_command:
+            print(f"    Promotion freshness refresh command: {refresh_command}")
 
 
 def _target_weight_current_blockers_regenerate_command(
@@ -982,6 +1054,9 @@ def _print_target_weight_daily_ops_status(
         strategy,
         reports_dir=reports_dir,
     )
+    promotion_freshness = _load_target_weight_promotion_artifact_freshness(
+        reports_dir=reports_dir,
+    )
     command = (
         "python tools/target_weight_rotation_pilot.py "
         f"--candidate-id {strategy} --daily-ops-summary"
@@ -993,6 +1068,7 @@ def _print_target_weight_daily_ops_status(
             else ("INVALID" if integrity_warnings else "MISSING")
         )
         print(f"\n  Target-weight Daily Ops: {status_label}")
+        _print_promotion_artifact_freshness(promotion_freshness)
         for warning in integrity_warnings[:3]:
             print(f"  Integrity warning: {warning}")
         if latest_failure:
@@ -1043,6 +1119,7 @@ def _print_target_weight_daily_ops_status(
         "premature_run_guard"
     )
     print("\n  Target-weight Daily Ops:")
+    _print_promotion_artifact_freshness(promotion_freshness)
     for warning in integrity_warnings[:3]:
         print(f"    Integrity warning: {warning}")
     if _daily_ops_failure_is_newer_than_summary(latest_failure, summary):
