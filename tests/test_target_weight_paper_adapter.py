@@ -3220,6 +3220,63 @@ def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch
     }
 
 
+def test_finalize_target_weight_pilot_evidence_appends_promotable_record(monkeypatch, tmp_path):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+
+    def final_benchmark(*, date, daily_return, cash_ratio, watchlist_symbols):
+        assert daily_return == pytest.approx(0.1)
+        assert watchlist_symbols == list(plan.targets)
+        return {
+            "same_universe_excess": 0.11,
+            "exposure_matched_excess": 0.09,
+            "cash_adjusted_excess": 0.07,
+            "benchmark_status": "final",
+            "benchmark_meta": {
+                "type": "universe_equal_weight",
+                "date": date.strftime("%Y-%m-%d"),
+                "cash_ratio": cash_ratio,
+            },
+        }
+
+    monkeypatch.setattr(pe, "_compute_benchmark_excess", final_benchmark)
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    result = twp.finalize_target_weight_pilot_evidence(
+        candidate_id=plan.candidate_id,
+        finalize_date=plan.trade_day,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    assert result["status"] == "finalized"
+    assert result["appended_record_version"] == 2
+    assert result["proof_status_after"]["reason"] == "verified_target_weight_pilot_evidence"
+
+    records = pe._read_all_evidence(pe._evidence_path(plan.candidate_id))
+    assert len(records) == 2
+    finalized = records[-1]
+    valid, reason = pe._target_weight_record_proof_status(plan.candidate_id, finalized)
+    assert valid is True
+    assert reason == "verified_target_weight_pilot_evidence"
+    assert finalized["benchmark_status"] == "final"
+    assert finalized["same_universe_excess"] == 0.11
+    assert finalized.get("promotion_eligible") is not False
+    assert (finalized.get("benchmark_meta") or {}).get("performance_repair") is not True
+
+    progress = twp.summarize_target_weight_evidence_progress(plan.candidate_id)
+    assert progress["verified_pilot_days"] == 1
+    assert progress["repaired_pilot_days"] == 0
+    assert progress["latest_verified_pilot_date"] == plan.trade_day
+
+
 def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import tools.target_weight_rotation_pilot as twp
@@ -3976,6 +4033,9 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
     ]
     assert summary["operator_commands"]["execute_capped_paper"].startswith("# blocked:")
     assert "already recorded" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["operator_commands"]["finalize_pilot_evidence"].startswith(
+        "# blocked: pilot_paper evidence already finalized"
+    )
     assert summary["next_operator_trade_day"] == "2026-04-14"
     assert (
         summary["operator_commands"]["next_daily_ops_summary"]
@@ -4030,6 +4090,10 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
         "pilot_authorization_snapshot_check": pass_check,
         "operator_commands": {
             "execute_capped_paper": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+            "finalize_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} --finalize-pilot-evidence --finalize-date {plan.trade_day}"
+            ),
         },
         "plan_summary": {
             "order_count": 3,
@@ -4067,12 +4131,15 @@ def test_build_target_weight_daily_ops_summary_marks_today_invalid_evidence():
 
     assert summary["status"] == "PILOT_EVIDENCE_INVALID"
     assert "evidence invalid" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["operator_commands"]["finalize_pilot_evidence"].endswith(
+        f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
+    )
     assert summary["operator_commands"]["repair_pilot_evidence"].endswith(
         f"--repair-pilot-evidence --repair-date {plan.trade_day}"
     )
-    assert "benchmark/portfolio evidence" in summary["next_step"]
+    assert "final benchmark/portfolio evidence" in summary["next_step"]
     assert "PILOT_EVIDENCE_INVALID" in report
-    assert "Repair Pilot Evidence" in report
+    assert "Finalize Pilot Evidence" in report
 
 
 def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_evidence():
@@ -4145,6 +4212,9 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
     assert "복구 보존" in summary["next_step"]
     assert summary["operator_commands"]["execute_capped_paper"].startswith(
         "# blocked: repaired pilot_paper evidence already recorded"
+    )
+    assert summary["operator_commands"]["finalize_pilot_evidence"].startswith(
+        "# blocked: repaired pilot_paper evidence already appended"
     )
     assert summary["operator_commands"]["repair_pilot_evidence"].startswith(
         "# blocked: repaired pilot_paper evidence already appended"
