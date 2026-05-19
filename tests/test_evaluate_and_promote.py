@@ -1334,6 +1334,14 @@ def test_build_current_blockers_report_from_promotion_summary():
         "python tools/target_weight_rotation_pilot.py "
         "--candidate-id target_weight_best --daily-ops-summary"
     )
+    assert report["operator_runbook"]["commands"]["finalize_pilot_evidence"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --finalize-pilot-evidence --finalize-date YYYY-MM-DD"
+    )
+    assert report["operator_runbook"]["commands"]["repair_pilot_evidence"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_best --repair-pilot-evidence --repair-date YYYY-MM-DD"
+    )
     assert report["operator_runbook"]["commands"]["execute_capped_paper_after_ready"].startswith("# blocked:")
     assert report["operator_runbook"]["sequence"][0]["order_safety"] == "no_order"
     assert report["operator_runbook"]["sequence"][3]["order_safety"] == "no_order"
