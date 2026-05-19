@@ -2130,9 +2130,10 @@ def test_paper_pilot_control_enable_writes_target_weight_plan_snapshot(monkeypat
     assert captured["target_weight_plan_snapshot"]["params_hash"] == plan.params_hash
 
 
-def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, capsys):
+def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, monkeypatch, capsys):
     import tools.paper_pilot_control as ppc
 
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-12")
     strategy = "target_weight_candidate"
     summary_dir = tmp_path / "paper_runtime"
     summary_dir.mkdir(parents=True)
@@ -2206,6 +2207,68 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, cap
     assert "--as-of-date 2026-04-13 --daily-ops-summary" in output
     assert "Next readiness command:" in output
     assert "--as-of-date 2026-04-13 --readiness-audit" in output
+    assert str(summary_path) in output
+
+
+def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, monkeypatch, capsys):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-13")
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "next_operator_trade_day": "2026-04-13",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: pilot_paper evidence already recorded for 2026-04-10",
+                    "next_daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate --as-of-date 2026-04-13 "
+                        "--daily-ops-summary"
+                    ),
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "current_priority_action": {
+                        "not_before_date": "2026-04-13",
+                        "premature_run_guard": "target_weight_future_as_of_date_blocked",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops" in output
+    assert "Next operator trade day: 2026-04-13" in output
+    assert "Not before date:" not in output
+    assert "Premature run guard:" not in output
+    assert "Next daily ops command:" in output
     assert str(summary_path) in output
 
 

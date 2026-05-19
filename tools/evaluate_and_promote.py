@@ -1042,6 +1042,17 @@ def _not_before_blocked_command(not_before_date: str | None) -> str:
     return "# blocked: next KRX business day fresh readiness required"
 
 
+def _not_before_date_pending(not_before_date: str | None, *, current_date: str | None = None) -> bool:
+    if not not_before_date:
+        return False
+    try:
+        target = datetime.strptime(str(not_before_date), "%Y-%m-%d").date()
+        current = datetime.strptime(current_date or _current_kst_date(), "%Y-%m-%d").date()
+    except ValueError:
+        return True
+    return target > current
+
+
 def _target_weight_ops_priority_action(
     strategy: str,
     commands: dict[str, str],
@@ -1081,17 +1092,28 @@ def _target_weight_ops_priority_action(
             or ops_commands.get("rerun_readiness_audit")
             or commands.get("readiness_audit")
         )
-        blocked_command = _not_before_blocked_command(next_trade_day)
+        if _not_before_date_pending(next_trade_day):
+            blocked_command = _not_before_blocked_command(next_trade_day)
+            return {
+                **base_action,
+                "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "command": blocked_command,
+                "scheduled_command": scheduled_command,
+                "order_safety": "no_order",
+                "requires": "next KRX business day fresh readiness",
+                "not_before_date": next_trade_day,
+                "premature_run_guard": "target_weight_future_as_of_date_blocked",
+                "follow_up": blocked_command,
+                "scheduled_follow_up": scheduled_follow_up,
+            }
         return {
             **base_action,
             "desc": "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
-            "command": blocked_command,
+            "command": scheduled_command,
             "scheduled_command": scheduled_command,
             "order_safety": "no_order",
-            "requires": "next KRX business day fresh readiness",
-            "not_before_date": next_trade_day,
-            "premature_run_guard": "target_weight_future_as_of_date_blocked",
-            "follow_up": blocked_command,
+            "requires": "current KRX business day fresh readiness",
+            "follow_up": scheduled_follow_up,
             "scheduled_follow_up": scheduled_follow_up,
         }
 
