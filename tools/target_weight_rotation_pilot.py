@@ -3605,7 +3605,8 @@ def assess_plan_data_quality(plan: TargetWeightPlan) -> dict[str, Any]:
                 f"benchmark={benchmark_symbol} latest={benchmark_last_date} score_day={score_day}"
             )
         elif trade_day and benchmark_last_date < trade_day:
-            warnings.append(
+            benchmark_stale = True
+            violations.append(
                 "benchmark_latest_before_trade_day: "
                 f"benchmark={benchmark_symbol} latest={benchmark_last_date} trade_day={trade_day}"
             )

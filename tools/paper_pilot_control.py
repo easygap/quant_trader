@@ -369,7 +369,7 @@ def _load_latest_target_weight_daily_ops(
             continue
         if not _daily_ops_trade_day_is_available(payload):
             continue
-        payload["source_path"] = str(path)
+        payload["source_path"] = _artifact_source_path(path)
         payload["source_mtime"] = path.stat().st_mtime
         sanitized = _sanitize_target_weight_daily_ops_summary(payload)
         if sanitized is not None:
@@ -458,7 +458,7 @@ def _target_weight_daily_ops_failure_sort_key(
     path: Path,
 ) -> tuple[float, float]:
     sortable = dict(payload)
-    sortable["source_path"] = str(path)
+    sortable["source_path"] = _artifact_source_path(path)
     sortable["source_mtime"] = path.stat().st_mtime
     return _daily_ops_artifact_time_key(sortable)
 
@@ -486,7 +486,7 @@ def _load_latest_target_weight_daily_ops_failure(
         elif artifact_type != "target_weight_daily_ops_summary_failure":
             continue
         payload = dict(payload)
-        payload["source_path"] = str(path)
+        payload["source_path"] = _artifact_source_path(path)
         payload["source_mtime"] = path.stat().st_mtime
         candidates.append(
             (_target_weight_daily_ops_failure_sort_key(payload, path), payload)
@@ -713,6 +713,10 @@ def _path_leaf(value: object) -> str:
     return str(value or "").replace("\\", "/").rstrip("/").split("/")[-1]
 
 
+def _artifact_source_path(path: Path) -> str:
+    return path.as_posix()
+
+
 def _target_weight_priority_action_warnings(
     summary: dict,
     priority_action: dict,
@@ -763,6 +767,48 @@ def _not_before_date_pending(not_before_date: str | None, *, current_date: str |
     return target > current
 
 
+def _command_is_blocked(command: object) -> bool:
+    return str(command or "").lstrip().startswith("# blocked:")
+
+
+def _target_weight_operator_next_action(
+    summary: dict,
+    *,
+    not_before_date: str | None,
+    premature_run_guard: str | None,
+    priority_command: str,
+    priority_scheduled_command: str,
+    enable_command: str,
+    execute_command: str,
+    next_daily_ops_command: str,
+    next_readiness_command: str,
+) -> str | None:
+    status = str(summary.get("status") or "").strip()
+    if _not_before_date_pending(not_before_date):
+        guard = str(premature_run_guard or "not_before_date").strip()
+        return (
+            f"WAIT until {not_before_date}: {guard}; "
+            "do not run the scheduled command early"
+        )
+    if priority_command and not _command_is_blocked(priority_command):
+        return f"RUN current blockers priority command: {priority_command}"
+    if priority_scheduled_command:
+        return f"RUN no-order scheduled priority check: {priority_scheduled_command}"
+    if status == "READY_TO_EXECUTE" and execute_command and not _command_is_blocked(execute_command):
+        return f"RUN capped paper command from daily ops: {execute_command}"
+    if (
+        status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}
+        and enable_command
+        and not _command_is_blocked(enable_command)
+    ):
+        return f"RUN cap approval command from daily ops: {enable_command}"
+    if next_daily_ops_command:
+        return f"RUN no-order daily ops check: {next_daily_ops_command}"
+    if next_readiness_command:
+        return f"RUN no-order readiness check: {next_readiness_command}"
+    return None
+
+
 def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
     trade_day = str(payload.get("trade_day") or "").strip()
     if not trade_day:
@@ -780,7 +826,7 @@ def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float
     source_mtime = path.stat().st_mtime
     payload_with_source = {
         **payload,
-        "source_path": str(path),
+        "source_path": _artifact_source_path(path),
         "source_mtime": source_mtime,
     }
     artifact_ts = _daily_ops_artifact_time_key(payload_with_source)[0]
@@ -1093,6 +1139,19 @@ def _print_target_weight_daily_ops_status(
             priority_scheduled_command,
         }:
             print(f"    Priority follow-up: {priority_follow_up}")
+    operator_next_action = _target_weight_operator_next_action(
+        summary,
+        not_before_date=not_before_date,
+        premature_run_guard=premature_run_guard,
+        priority_command=priority_command,
+        priority_scheduled_command=priority_scheduled_command,
+        enable_command=str(enable_command),
+        execute_command=str(execute_command),
+        next_daily_ops_command=str(next_daily_ops_command),
+        next_readiness_command=str(next_readiness_command),
+    )
+    if operator_next_action:
+        print(f"    Operator next action: {operator_next_action}")
     if diagnostics:
         print(f"    Post-evidence diagnostics: {len(diagnostics)}")
     if enable_command:
