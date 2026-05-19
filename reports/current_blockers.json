@@ -1,10 +1,20 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-19T11:22:17.758528",
+  "generated_at": "2026-05-19T13:38:04.738108",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-13T14:07:37.832443",
   "source_artifact_hash": "2be6cddc0f9838d60002f4f9b562f1b1809c2697e53fd857ab7264fb33a27a0e",
+  "promotion_artifact_freshness": {
+    "canonical_generated_at": "2026-05-13T14:07:37.832443",
+    "checked_at": "2026-05-19T13:38:04.738108",
+    "age_days": 5.98,
+    "max_age_days": 7,
+    "status": "AGING",
+    "warning": "canonical artifact is close to the freshness limit; plan a canonical refresh before live review",
+    "check_command": "python tools/evaluate_and_promote.py --check-only",
+    "refresh_command": "python tools/evaluate_and_promote.py --canonical"
+  },
   "go_live": false,
   "verdict": "NO-GO: 현재 canonical/paper evidence 기준 live_candidate 없음",
   "promotion_summary": {
@@ -166,6 +176,16 @@
       "daily ops summary와 readiness audit은 주문과 pilot evidence를 쓰지 않는 no-order 점검",
       "execute_capped_paper_after_ready는 READY_TO_EXECUTE 상태와 KRX 정규장 조건을 만족한 날에만 사용"
     ],
+    "promotion_artifact_freshness": {
+      "canonical_generated_at": "2026-05-13T14:07:37.832443",
+      "checked_at": "2026-05-19T13:38:04.738108",
+      "age_days": 5.98,
+      "max_age_days": 7,
+      "status": "AGING",
+      "warning": "canonical artifact is close to the freshness limit; plan a canonical refresh before live review",
+      "check_command": "python tools/evaluate_and_promote.py --check-only",
+      "refresh_command": "python tools/evaluate_and_promote.py --canonical"
+    },
     "latest_daily_ops": {
       "source_path": "reports/paper_runtime/target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-19.json",
       "generated_at": "2026-05-19T09:53:22.441297",
