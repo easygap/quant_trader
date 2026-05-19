@@ -1,4 +1,5 @@
 import json
+import hashlib
 import subprocess
 import sys
 from copy import deepcopy
@@ -14,6 +15,19 @@ import pytest
 
 
 TEST_EXECUTION_SESSION_ID = "target_weight_candidate_2026-04-10_test_session"
+
+
+def _daily_ops_with_summary_hash(payload: dict) -> dict:
+    payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    payload["summary_hash"] = hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 class FakeCollector:
@@ -2140,7 +2154,7 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
     summary_path.write_text(
         json.dumps(
-            {
+            _daily_ops_with_summary_hash({
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
@@ -2173,7 +2187,7 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
                         "--readiness-audit"
                     ),
                 },
-            },
+            }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2250,7 +2264,7 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
     summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
     summary_path.write_text(
         json.dumps(
-            {
+            _daily_ops_with_summary_hash({
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
@@ -2270,7 +2284,7 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
                         "--daily-ops-summary"
                     ),
                 },
-            },
+            }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2316,7 +2330,7 @@ def test_paper_pilot_control_status_warns_when_current_blockers_missing(
     )
     summary_path.write_text(
         json.dumps(
-            {
+            _daily_ops_with_summary_hash({
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
@@ -2328,7 +2342,7 @@ def test_paper_pilot_control_status_warns_when_current_blockers_missing(
                 },
                 "decision": {},
                 "operator_commands": {},
-            },
+            }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2359,7 +2373,7 @@ def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
     )
     summary_path.write_text(
         json.dumps(
-            {
+            _daily_ops_with_summary_hash({
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
@@ -2371,7 +2385,7 @@ def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
                 },
                 "decision": {},
                 "operator_commands": {},
-            },
+            }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2437,7 +2451,7 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
     summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
     summary_path.write_text(
         json.dumps(
-            {
+            _daily_ops_with_summary_hash({
                 "artifact_type": "target_weight_daily_ops_summary",
                 "candidate_id": strategy,
                 "trade_day": "2026-04-10",
@@ -2466,7 +2480,7 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
                         "--repair-pilot-evidence --repair-date 2026-04-10"
                     ),
                 },
-            },
+            }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2619,10 +2633,22 @@ def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypa
     future_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-13.json"
     malformed_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_malformed.json"
     missing_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_missing_trade_day.json"
-    current_path.write_text(json.dumps(current_summary, ensure_ascii=False), encoding="utf-8")
-    future_path.write_text(json.dumps(future_summary, ensure_ascii=False), encoding="utf-8")
-    malformed_path.write_text(json.dumps(malformed_summary, ensure_ascii=False), encoding="utf-8")
-    missing_path.write_text(json.dumps(missing_trade_day_summary, ensure_ascii=False), encoding="utf-8")
+    current_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(current_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    future_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(future_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    malformed_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(malformed_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    missing_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(missing_trade_day_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
     os.utime(current_path, (1_000, 1_000))
     os.utime(future_path, (2_000, 2_000))
     os.utime(malformed_path, (3_000, 3_000))
@@ -2634,6 +2660,50 @@ def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypa
     assert summary is not None
     assert summary["trade_day"] == "2026-04-10"
     assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
+def test_paper_pilot_control_skips_daily_ops_summary_hash_mismatch(tmp_path, monkeypatch):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    valid_summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    tampered_summary = {
+        **valid_summary,
+        "status": "READY_TO_EXECUTE",
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_candidate --as-of-date 2026-04-10 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    valid_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    tampered_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_tampered.json"
+    valid_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(valid_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tampered_payload = _daily_ops_with_summary_hash(tampered_summary)
+    tampered_payload["next_step"] = "tampered after hash"
+    tampered_path.write_text(json.dumps(tampered_payload, ensure_ascii=False), encoding="utf-8")
+    os.utime(valid_path, (1_000, 1_000))
+    os.utime(tampered_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    assert loaded["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
 def test_paper_pilot_control_blocks_loaded_ready_execute_scope_mismatch(tmp_path, monkeypatch):
@@ -2657,7 +2727,10 @@ def test_paper_pilot_control_blocks_loaded_ready_execute_scope_mismatch(tmp_path
     }
     (
         summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
-    ).write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+    ).write_text(
+        json.dumps(_daily_ops_with_summary_hash(summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
 
     loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
