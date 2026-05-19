@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -377,6 +378,8 @@ def _load_latest_target_weight_daily_ops(
             continue
         if payload.get("candidate_id") != strategy:
             continue
+        if not _daily_ops_summary_hash_is_valid(payload):
+            continue
         if not _daily_ops_trade_day_is_available(payload):
             continue
         payload["source_path"] = str(path)
@@ -591,6 +594,26 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return trade_date <= current
     except ValueError:
         return False
+
+
+def _stable_daily_ops_hash(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _daily_ops_summary_hash_is_valid(payload: dict) -> bool:
+    summary_hash = str(payload.get("summary_hash") or "").strip()
+    if not summary_hash:
+        return False
+    normalized = dict(payload)
+    normalized.pop("summary_hash", None)
+    return _stable_daily_ops_hash(normalized) == summary_hash
 
 
 def _target_weight_enable_blocker(payload: dict, command: str | None = None) -> str | None:
