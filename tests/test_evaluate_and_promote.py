@@ -1324,6 +1324,12 @@ def test_build_current_blockers_report_from_promotion_summary():
     assert report["generated_at"] == "2026-05-18T15:00:00"
     assert report["source_generated_at"] == "2026-05-13T14:07:37"
     assert report["source_artifact_hash"] == "a" * 64
+    assert report["promotion_artifact_freshness"]["status"] == "AGING"
+    assert report["promotion_artifact_freshness"]["age_days"] == 5.04
+    assert (
+        report["operator_runbook"]["promotion_artifact_freshness"]["status"]
+        == "AGING"
+    )
     assert report["go_live"] is False
     assert "NO-GO" in report["verdict"]
     assert report["provisional_paper_candidates"] == ["target_weight_best"]
@@ -1360,6 +1366,44 @@ def test_build_current_blockers_report_from_promotion_summary():
     assert report["operator_runbook"]["sequence"][0]["order_safety"] == "no_order"
     assert report["operator_runbook"]["sequence"][3]["order_safety"] == "no_order"
     assert "target_weight_best" in report["default_strategy"]
+
+
+def test_build_current_blockers_blocks_live_when_canonical_artifact_is_stale():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-01T09:00:00",
+        "source_artifact_hash": "a" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"live_candidate": 1},
+            "live_ready_count": 1,
+            "blocked_from_live_count": 0,
+        },
+        "strategies": {
+            "paper_ready_strategy": {
+                "status": "live_candidate",
+                "allowed_modes": ["backtest", "paper", "live"],
+                "metrics": {},
+                "reason": "live_candidate 충족",
+            },
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        generated_at="2026-05-13T12:00:00",
+    )
+
+    assert report["promotion_artifact_freshness"]["status"] == "STALE"
+    assert report["go_live"] is False
+    assert "NO-GO" in report["verdict"]
+    assert any(
+        blocker["desc"] == "canonical promotion artifact 최신성 미충족"
+        for blocker in report["hard_blockers"]
+    )
 
 
 def test_build_current_blockers_report_prioritizes_shadow_from_daily_ops():
