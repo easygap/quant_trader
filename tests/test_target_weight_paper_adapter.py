@@ -2181,8 +2181,22 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
                 "operator_runbook": {
                     "primary_strategy": strategy,
                     "current_priority_action": {
+                        "strategy": strategy,
+                        "desc": "다음 KRX 영업일 fresh readiness 점검",
+                        "command": "# blocked: not before 2026-04-13; target_weight_future_as_of_date_blocked",
+                        "scheduled_command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate --as-of-date 2026-04-13 "
+                            "--daily-ops-summary"
+                        ),
                         "not_before_date": "2026-04-13",
                         "premature_run_guard": "target_weight_future_as_of_date_blocked",
+                        "verified_pilot_days": 1,
+                        "target_days": 60,
+                        "remaining_pilot_days": 59,
+                        "shadow_days": 3,
+                        "repaired_pilot_days": 0,
+                        "invalid_execution_days": 0,
                     },
                 },
             },
@@ -2200,6 +2214,16 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     assert "Not before date: 2026-04-13" in output
     assert "Premature run guard: target_weight_future_as_of_date_blocked" in output
     assert "Verified pilot days: 1/60" in output
+    assert "Current blockers priority: 다음 KRX 영업일 fresh readiness 점검" in output
+    assert (
+        "Priority evidence: verified=1/60 remaining=59 shadow=3 repaired=0 invalid=0"
+        in output
+    )
+    assert (
+        "Priority command: # blocked: not before 2026-04-13; "
+        "target_weight_future_as_of_date_blocked"
+    ) in output
+    assert "Scheduled priority command:" in output
     assert "Post-evidence diagnostics: 2" in output
     assert "Adapter execution: BLOCKED by daily ops" in output
     assert "pilot_paper evidence already recorded" in output
