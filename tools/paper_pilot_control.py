@@ -635,23 +635,75 @@ def _ready_to_execute_trade_day_is_current(payload: dict) -> bool:
     return trade_date == current
 
 
+def _target_weight_command_scope_issues(
+    payload: dict,
+    command: str,
+    *,
+    require_trade_day: bool,
+    required_flags: tuple[str, ...],
+) -> list[str]:
+    candidate_id = str(payload.get("candidate_id") or "").strip()
+    trade_day = str(payload.get("trade_day") or "").strip()
+    issues: list[str] = []
+    if not command.strip() or command.lstrip().startswith("# blocked:"):
+        issues.append(command.strip() or "missing command")
+        return issues
+    if candidate_id:
+        candidate_flags = (
+            f"--candidate-id {candidate_id}",
+            f"--strategy {candidate_id}",
+        )
+        if not any(flag in command for flag in candidate_flags):
+            issues.append(f"candidate_id mismatch expected={candidate_id}")
+    if require_trade_day and trade_day and f"--as-of-date {trade_day}" not in command:
+        issues.append(f"as_of_date mismatch expected={trade_day}")
+    for flag in required_flags:
+        if flag not in command:
+            issues.append(f"missing {flag}")
+    return issues
+
+
 def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | None:
     if not isinstance(payload, dict):
         return None
     sanitized = dict(payload)
     operator_commands = dict(sanitized.get("operator_commands") or {})
+    status = sanitized.get("status")
     enable_command = str(operator_commands.get("enable_suggested_caps") or "")
     enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
     if enable_blocker:
         operator_commands["enable_suggested_caps"] = enable_blocker
-    if (
-        sanitized.get("status") == "READY_TO_EXECUTE"
-        and not _ready_to_execute_trade_day_is_current(sanitized)
-    ):
+    elif status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
+        enable_issues = _target_weight_command_scope_issues(
+            sanitized,
+            enable_command,
+            require_trade_day=False,
+            required_flags=("--enable",),
+        )
+        if enable_issues:
+            operator_commands["enable_suggested_caps"] = (
+                "# blocked: daily_ops_enable_command_unavailable: "
+                + "; ".join(enable_issues)
+            )
+
+    execute_command = str(operator_commands.get("execute_capped_paper") or "")
+    if status == "READY_TO_EXECUTE" and not _ready_to_execute_trade_day_is_current(sanitized):
         operator_commands["execute_capped_paper"] = (
             "# blocked: daily_ops_summary.trade_day is stale; "
             "rerun daily ops summary for the current KRX business day"
         )
+    elif status == "READY_TO_EXECUTE":
+        execute_issues = _target_weight_command_scope_issues(
+            sanitized,
+            execute_command,
+            require_trade_day=True,
+            required_flags=("--execute", "--collect-evidence"),
+        )
+        if execute_issues:
+            operator_commands["execute_capped_paper"] = (
+                "# blocked: daily_ops_execute_command_unavailable: "
+                + "; ".join(execute_issues)
+            )
     sanitized["operator_commands"] = operator_commands
     return sanitized
 
