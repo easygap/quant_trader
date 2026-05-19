@@ -2073,6 +2073,52 @@ def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_
     )
 
 
+def test_load_current_blockers_from_artifacts_uses_posix_source_paths(tmp_path):
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "BLOCKED",
+        "evidence_progress": {"verified_pilot_days": 0, "shadow_days": 0},
+        "decision": {"blocking_reasons": ["launch_readiness: clean_final_days 0/3"]},
+        "operator_commands": {
+            "collect_shadow_days": (
+                f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy} "
+                "--shadow-days 3 --shadow-end-date 2026-05-18"
+            ),
+        },
+    }
+    (
+        paper_runtime / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    ).write_text(
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action_source = report["next_actions"][0]["source_path"]
+    runbook_source = report["operator_runbook"]["latest_daily_ops"]["source_path"]
+    assert "\\" not in action_source
+    assert "\\" not in runbook_source
+    assert action_source.endswith(
+        f"paper_runtime/target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    )
+    assert runbook_source == action_source
+
+
 def test_load_current_blockers_from_artifacts_prioritizes_daily_ops_failure_when_no_summary(
     tmp_path,
 ):
