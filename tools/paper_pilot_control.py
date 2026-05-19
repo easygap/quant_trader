@@ -401,6 +401,129 @@ def _target_weight_daily_ops_summary_paths(
     )
 
 
+def _target_weight_daily_ops_failure_paths(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> list[Path]:
+    base = Path(reports_dir)
+    prefix = f"target_weight_daily_ops_summary_failure_{strategy}_"
+    search_dirs = [base]
+    paper_runtime_dir = base / "paper_runtime"
+    if paper_runtime_dir != base:
+        search_dirs.append(paper_runtime_dir)
+    return sorted(
+        {
+            path
+            for search_dir in search_dirs
+            for path in search_dir.glob(f"{prefix}*.json")
+        },
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _target_weight_daily_ops_failure_sort_key(
+    payload: dict,
+    path: Path,
+) -> tuple[float, float]:
+    generated_at = str(payload.get("generated_at") or "").strip()
+    generated_ts = 0.0
+    if generated_at:
+        try:
+            generated_ts = datetime.fromisoformat(generated_at).timestamp()
+        except ValueError:
+            generated_ts = 0.0
+    return (generated_ts, path.stat().st_mtime)
+
+
+def _load_latest_target_weight_daily_ops_failure(
+    strategy: str,
+    *,
+    reports_dir: str | Path = REPORTS_DIR,
+) -> dict | None:
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in _target_weight_daily_ops_failure_paths(strategy, reports_dir=reports_dir):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        artifact_type = str(payload.get("artifact_type") or "")
+        mode = str(payload.get("mode") or "")
+        if artifact_type == "target_weight_no_order_operation_failure":
+            if mode != "daily_ops_summary":
+                continue
+        elif artifact_type != "target_weight_daily_ops_summary_failure":
+            continue
+        payload = dict(payload)
+        payload["source_path"] = str(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append(
+            (_target_weight_daily_ops_failure_sort_key(payload, path), payload)
+        )
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
+def _target_weight_daily_ops_failure_reason(payload: dict) -> str:
+    reason = str(payload.get("reason") or "").strip()
+    if reason:
+        return reason
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        if message:
+            return message
+    elif error:
+        return str(error)
+    blocking_reasons = payload.get("blocking_reasons")
+    if isinstance(blocking_reasons, list) and blocking_reasons:
+        return str(blocking_reasons[0])
+    return "unknown"
+
+
+def _target_weight_daily_ops_failure_error(payload: dict) -> str:
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return str(error or "").strip()
+    error_type = str(error.get("type") or "").strip()
+    message = str(error.get("message") or "").strip()
+    if error_type and message:
+        return f"{error_type}: {message}"
+    return error_type or message
+
+
+def _target_weight_daily_ops_failure_command(payload: dict, fallback: str) -> str:
+    commands = payload.get("operator_commands")
+    if isinstance(commands, dict):
+        command = str(commands.get("daily_ops_summary") or "").strip()
+        if command:
+            return command
+    return fallback
+
+
+def _daily_ops_failure_is_newer_than_summary(failure: dict | None, summary: dict) -> bool:
+    if not failure:
+        return False
+    summary_source = str(summary.get("source_path") or "").strip()
+    if not summary_source:
+        return False
+    try:
+        summary_mtime = Path(summary_source).stat().st_mtime
+    except OSError:
+        return False
+    try:
+        failure_mtime = float(failure.get("source_mtime") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return failure_mtime > summary_mtime
+
+
 def _target_weight_daily_ops_integrity_warnings(
     strategy: str,
     *,
@@ -783,6 +906,10 @@ def _print_target_weight_daily_ops_status(
     reports_dir: str | Path = REPORTS_DIR,
 ) -> None:
     summary = _load_latest_target_weight_daily_ops(strategy, reports_dir=reports_dir)
+    latest_failure = _load_latest_target_weight_daily_ops_failure(
+        strategy,
+        reports_dir=reports_dir,
+    )
     integrity_warnings = _target_weight_daily_ops_integrity_warnings(
         strategy,
         reports_dir=reports_dir,
@@ -792,10 +919,24 @@ def _print_target_weight_daily_ops_status(
         f"--candidate-id {strategy} --daily-ops-summary"
     )
     if summary is None:
-        status_label = "INVALID" if integrity_warnings else "MISSING"
+        status_label = (
+            "FAILED"
+            if latest_failure
+            else ("INVALID" if integrity_warnings else "MISSING")
+        )
         print(f"\n  Target-weight Daily Ops: {status_label}")
         for warning in integrity_warnings[:3]:
             print(f"  Integrity warning: {warning}")
+        if latest_failure:
+            print(f"  Failure source: {latest_failure.get('source_path')}")
+            print(
+                "  Failure reason: "
+                f"{_target_weight_daily_ops_failure_reason(latest_failure)}"
+            )
+            failure_error = _target_weight_daily_ops_failure_error(latest_failure)
+            if failure_error:
+                print(f"  Failure error: {failure_error}")
+            command = _target_weight_daily_ops_failure_command(latest_failure, command)
         print(f"  Run: {command}")
         return
 
@@ -836,6 +977,17 @@ def _print_target_weight_daily_ops_status(
     print("\n  Target-weight Daily Ops:")
     for warning in integrity_warnings[:3]:
         print(f"    Integrity warning: {warning}")
+    if _daily_ops_failure_is_newer_than_summary(latest_failure, summary):
+        print("    Failure warning: latest daily ops failure is newer than loaded summary")
+        print(f"    Failure source: {latest_failure.get('source_path')}")
+        print(
+            "    Failure reason: "
+            f"{_target_weight_daily_ops_failure_reason(latest_failure)}"
+        )
+        print(
+            "    Failure recovery command: "
+            f"{_target_weight_daily_ops_failure_command(latest_failure, command)}"
+        )
     print(f"    Status: {summary.get('status', 'unknown')}")
     print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
     if next_operator_trade_day:
