@@ -2296,6 +2296,89 @@ def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, mon
     assert str(summary_path) in output
 
 
+def test_paper_pilot_control_status_warns_on_stale_current_blockers_priority(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    )
+    summary_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "next_step": "다음 KRX 영업일 fresh readiness와 cap 재승인 점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {},
+                "operator_commands": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "commands": {
+                        "regenerate_current_blockers": (
+                            "python tools/evaluate_and_promote.py --current-blockers"
+                        ),
+                    },
+                    "current_priority_action": {
+                        "strategy": strategy,
+                        "source_path": (
+                            "reports/paper_runtime/"
+                            f"target_weight_daily_ops_summary_{strategy}_2026-04-09.json"
+                        ),
+                        "daily_ops_status": "READY_TO_EXECUTE",
+                        "daily_ops_trade_day": "2026-04-09",
+                        "desc": "READY_TO_EXECUTE 당일 capped paper 실행",
+                        "command": "python tools/target_weight_rotation_pilot.py --execute-capped-paper",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Current blockers warning: stale priority action" in output
+    assert (
+        "daily_ops_status priority=READY_TO_EXECUTE "
+        "latest=PILOT_EVIDENCE_RECORDED"
+    ) in output
+    assert (
+        "daily_ops_trade_day priority=2026-04-09 latest=2026-04-10"
+        in output
+    )
+    assert (
+        "source_path priority="
+        f"target_weight_daily_ops_summary_{strategy}_2026-04-09.json "
+        f"latest={summary_path.name}"
+    ) in output
+    assert (
+        "Regenerate current blockers command: "
+        "python tools/evaluate_and_promote.py --current-blockers"
+    ) in output
+    assert "Current blockers priority: READY_TO_EXECUTE 당일 capped paper 실행" in output
+
+
 def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_path, capsys):
     import tools.paper_pilot_control as ppc
 
