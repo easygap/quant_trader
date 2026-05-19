@@ -370,6 +370,7 @@ def _load_latest_target_weight_daily_ops(
         if not _daily_ops_trade_day_is_available(payload):
             continue
         payload["source_path"] = str(path)
+        payload["source_mtime"] = path.stat().st_mtime
         sanitized = _sanitize_target_weight_daily_ops_summary(payload)
         if sanitized is not None:
             valid_candidates.append((_daily_ops_trade_day_sort_key(payload, path), sanitized))
@@ -423,18 +424,43 @@ def _target_weight_daily_ops_failure_paths(
     )
 
 
+def _daily_ops_artifact_generated_timestamp(payload: dict) -> float:
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if not generated_at:
+        return 0.0
+    try:
+        return datetime.fromisoformat(generated_at.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _daily_ops_artifact_source_mtime(payload: dict) -> float:
+    try:
+        return float(payload.get("source_mtime") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _daily_ops_artifact_time_key(payload: dict) -> tuple[float, float]:
+    source_mtime = _daily_ops_artifact_source_mtime(payload)
+    source_path = str(payload.get("source_path") or "").strip()
+    if not source_mtime and source_path:
+        try:
+            source_mtime = Path(source_path).stat().st_mtime
+        except OSError:
+            source_mtime = 0.0
+    generated_ts = _daily_ops_artifact_generated_timestamp(payload)
+    return (generated_ts or source_mtime, source_mtime)
+
+
 def _target_weight_daily_ops_failure_sort_key(
     payload: dict,
     path: Path,
 ) -> tuple[float, float]:
-    generated_at = str(payload.get("generated_at") or "").strip()
-    generated_ts = 0.0
-    if generated_at:
-        try:
-            generated_ts = datetime.fromisoformat(generated_at).timestamp()
-        except ValueError:
-            generated_ts = 0.0
-    return (generated_ts, path.stat().st_mtime)
+    sortable = dict(payload)
+    sortable["source_path"] = str(path)
+    sortable["source_mtime"] = path.stat().st_mtime
+    return _daily_ops_artifact_time_key(sortable)
 
 
 def _load_latest_target_weight_daily_ops_failure(
@@ -510,18 +536,7 @@ def _target_weight_daily_ops_failure_command(payload: dict, fallback: str) -> st
 def _daily_ops_failure_is_newer_than_summary(failure: dict | None, summary: dict) -> bool:
     if not failure:
         return False
-    summary_source = str(summary.get("source_path") or "").strip()
-    if not summary_source:
-        return False
-    try:
-        summary_mtime = Path(summary_source).stat().st_mtime
-    except OSError:
-        return False
-    try:
-        failure_mtime = float(failure.get("source_mtime") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    return failure_mtime > summary_mtime
+    return _daily_ops_artifact_time_key(failure) > _daily_ops_artifact_time_key(summary)
 
 
 def _target_weight_daily_ops_integrity_warnings(
