@@ -2746,6 +2746,92 @@ def test_paper_pilot_control_skips_daily_ops_summary_hash_mismatch(tmp_path, mon
     assert loaded["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
+def test_paper_pilot_control_status_warns_on_daily_ops_summary_hash_mismatch(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    valid_summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "target_days": 60},
+        "decision": {},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    tampered_summary = {
+        **valid_summary,
+        "trade_day": "2026-04-11",
+        "status": "READY_TO_EXECUTE",
+    }
+    valid_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    tampered_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-11.json"
+    valid_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(valid_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    tampered_payload = _daily_ops_with_summary_hash(tampered_summary)
+    tampered_payload["next_step"] = "tampered after hash"
+    tampered_path.write_text(json.dumps(tampered_payload, ensure_ascii=False), encoding="utf-8")
+    os.utime(valid_path, (1_000, 1_000))
+    os.utime(tampered_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-11")
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops:" in output
+    assert "Integrity warning:" in output
+    assert "summary_hash mismatch or missing" in output
+    assert "Status: PILOT_EVIDENCE_RECORDED" in output
+
+
+def test_paper_pilot_control_status_marks_invalid_when_only_bad_daily_ops_exists(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "READY_TO_EXECUTE",
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_candidate --as-of-date 2026-04-10 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    payload = _daily_ops_with_summary_hash(summary)
+    payload["status"] = "READY_TO_ENABLE_CAPS"
+    (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    ).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops: INVALID" in output
+    assert "Integrity warning:" in output
+    assert "summary_hash mismatch or missing" in output
+    assert f"--candidate-id {strategy} --daily-ops-summary" in output
+
+
 def test_paper_pilot_control_blocks_loaded_ready_execute_scope_mismatch(tmp_path, monkeypatch):
     import tools.paper_pilot_control as ppc
 
