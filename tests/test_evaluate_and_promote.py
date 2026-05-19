@@ -2145,6 +2145,48 @@ def test_load_latest_target_weight_daily_ops_ignores_future_trade_day(tmp_path, 
     assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
+def test_load_latest_target_weight_daily_ops_prefers_latest_trade_day_over_mtime(tmp_path, monkeypatch):
+    import os
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    older_daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    newer_daily_ops = {
+        **older_daily_ops,
+        "generated_at": "2026-05-19T10:05:21",
+        "trade_day": "2026-05-19",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+    }
+    older_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json"
+    newer_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-19.json"
+    older_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(older_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    newer_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(newer_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(newer_path, (1_000, 1_000))
+    os.utime(older_path, (2_000, 2_000))
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-19")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    assert latest["trade_day"] == "2026-05-19"
+    assert latest["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+
+
 def test_load_latest_target_weight_daily_ops_skips_summary_hash_mismatch(tmp_path, monkeypatch):
     import os
     import tools.evaluate_and_promote as ep
@@ -2189,6 +2231,42 @@ def test_load_latest_target_weight_daily_ops_skips_summary_hash_mismatch(tmp_pat
 
     assert latest is not None
     assert latest["status"] == "PILOT_EVIDENCE_RECORDED"
+
+
+def test_validate_target_weight_daily_ops_artifacts_detects_summary_hash_mismatch(tmp_path):
+    from tools.evaluate_and_promote import validate_target_weight_daily_ops_artifacts
+
+    strategy = "target_weight_best"
+    valid_daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "schema_version": 1,
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:00:21",
+        "trade_day": "2026-05-18",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    tampered_daily_ops = _daily_ops_with_summary_hash(valid_daily_ops)
+    tampered_daily_ops["status"] = "READY_TO_EXECUTE"
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(tampered_daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    failure_artifact = {
+        "artifact_type": "target_weight_daily_ops_summary_failure",
+        "candidate_id": strategy,
+        "error": "operator failure artifact is not a summary",
+    }
+    (
+        tmp_path / f"target_weight_daily_ops_summary_failure_{strategy}_20260518100000.json"
+    ).write_text(json.dumps(failure_artifact, ensure_ascii=False), encoding="utf-8")
+
+    issues = validate_target_weight_daily_ops_artifacts(tmp_path)
+
+    assert len(issues) == 1
+    assert "summary_hash 불일치 또는 누락" in issues[0]
 
 
 def test_load_latest_target_weight_daily_ops_blocks_stale_ready_execute(tmp_path, monkeypatch):
@@ -2563,6 +2641,53 @@ def test_validate_promotion_operator_artifacts_detects_stale_current_blockers(tm
 
     assert any("current blockers 동기화 실패" in issue for issue in issues)
     assert any("go_live 불일치" in issue for issue in issues)
+
+
+def test_validate_promotion_operator_artifacts_detects_invalid_daily_ops_artifact(tmp_path):
+    from tools.evaluate_and_promote import (
+        load_current_blockers_from_artifacts,
+        validate_promotion_operator_artifacts,
+        write_current_blockers_report,
+    )
+
+    promotion_dir = tmp_path / "promotion"
+    strategy = "target_weight_candidate"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "schema_version": 1,
+        "candidate_id": strategy,
+        "generated_at": "2026-05-13T10:00:21",
+        "trade_day": "2026-05-13",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    tampered_daily_ops = _daily_ops_with_summary_hash(daily_ops)
+    tampered_daily_ops["next_step"] = "tampered after hash"
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-13.json").write_text(
+        json.dumps(tampered_daily_ops, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    current_path = tmp_path / "current_blockers.json"
+    write_current_blockers_report(
+        load_current_blockers_from_artifacts(promotion_dir),
+        current_path,
+    )
+
+    issues = validate_promotion_operator_artifacts(
+        promotion_dir,
+        current_path,
+        now=datetime(2026, 5, 13, 15, 0, 0),
+    )
+
+    assert any("target-weight daily ops artifact 무결성 실패" in issue for issue in issues)
+    assert any("summary_hash 불일치 또는 누락" in issue for issue in issues)
 
 
 def test_validate_paper_evidence_operator_artifacts_warns_invalid_package(tmp_path):
