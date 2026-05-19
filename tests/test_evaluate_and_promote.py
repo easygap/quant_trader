@@ -2349,6 +2349,50 @@ def test_load_latest_target_weight_daily_ops_prefers_latest_trade_day_over_mtime
     assert latest["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
 
 
+def test_load_latest_target_weight_daily_ops_prefers_latest_generated_same_trade_day(
+    tmp_path,
+    monkeypatch,
+):
+    import os
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    earlier_daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:00:00",
+        "trade_day": "2026-05-18",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "evidence_progress": {"verified_pilot_days": 1, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    later_daily_ops = {
+        **earlier_daily_ops,
+        "generated_at": "2026-05-18T10:10:00",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+    }
+    earlier_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_earlier.json"
+    later_path = tmp_path / f"target_weight_daily_ops_summary_{strategy}_later.json"
+    earlier_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(earlier_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    later_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(later_daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(later_path, (1_000, 1_000))
+    os.utime(earlier_path, (2_000, 2_000))
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    assert latest["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+    assert latest["generated_at"] == "2026-05-18T10:10:00"
+
+
 def test_load_latest_target_weight_daily_ops_skips_summary_hash_mismatch(tmp_path, monkeypatch):
     import os
     import tools.evaluate_and_promote as ep
