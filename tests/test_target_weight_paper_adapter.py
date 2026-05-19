@@ -2662,6 +2662,46 @@ def test_paper_pilot_control_ignores_future_daily_ops_summary(tmp_path, monkeypa
     assert summary["status"] == "PILOT_EVIDENCE_RECORDED"
 
 
+def test_paper_pilot_control_prefers_latest_trade_day_over_mtime(tmp_path, monkeypatch):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    older_summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "status": "PILOT_EVIDENCE_RECORDED",
+        "operator_commands": {"execute_capped_paper": "# blocked: already recorded"},
+    }
+    newer_summary = {
+        **older_summary,
+        "trade_day": "2026-04-13",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+    }
+    older_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    newer_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-13.json"
+    older_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(older_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    newer_path.write_text(
+        json.dumps(_daily_ops_with_summary_hash(newer_summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(newer_path, (1_000, 1_000))
+    os.utime(older_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-13")
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    assert loaded["trade_day"] == "2026-04-13"
+    assert loaded["status"] == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
+
+
 def test_paper_pilot_control_skips_daily_ops_summary_hash_mismatch(tmp_path, monkeypatch):
     import os
     import tools.paper_pilot_control as ppc
