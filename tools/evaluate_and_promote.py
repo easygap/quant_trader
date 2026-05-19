@@ -31,6 +31,16 @@ logger.add(sys.stderr, level="WARNING")
 
 KST = timezone(timedelta(hours=9))
 
+CANONICAL_EVAL_START = "2023-01-01"
+CANONICAL_EVAL_END = "2025-12-31"
+CANONICAL_UNIVERSE_LOOKBACK_START = "2022-10-01"
+CANONICAL_UNIVERSE_LOOKBACK_END = "2022-12-31"
+CANONICAL_TOP_N = 20
+CANONICAL_UNIVERSE_RULE = (
+    "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20"
+)
+CANONICAL_PROGRESS_PATH = Path("reports/promotion/canonical_progress.json")
+
 
 CANONICAL_TARGET_WEIGHT_CANDIDATE_IDS = (
     "target_weight_rotation_top5_60_120_floor0_hold3_risk60_35",
@@ -139,6 +149,86 @@ def build_data_snapshot_manifest(
     }
     manifest["data_snapshot_hash"] = stable_payload_hash(manifest)
     return manifest
+
+
+def _write_canonical_progress(
+    stage: str,
+    *,
+    progress_path: str | Path = CANONICAL_PROGRESS_PATH,
+    **payload,
+) -> None:
+    progress = {
+        "artifact_type": "canonical_promotion_progress",
+        "schema_version": 1,
+        "stage": stage,
+        "updated_at": datetime.now().isoformat(),
+        **payload,
+    }
+    path = Path(progress_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(progress, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _load_reusable_canonical_universe_snapshot(
+    metadata_path: str | Path,
+    *,
+    eval_start: str = CANONICAL_EVAL_START,
+    eval_end: str = CANONICAL_EVAL_END,
+    universe_rule: str = CANONICAL_UNIVERSE_RULE,
+    universe_lookback_start: str = CANONICAL_UNIVERSE_LOOKBACK_START,
+    universe_lookback_end: str = CANONICAL_UNIVERSE_LOOKBACK_END,
+    top_n: int = CANONICAL_TOP_N,
+) -> dict | None:
+    path = Path(metadata_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("artifact_type") != "canonical_promotion_bundle":
+        return None
+    if payload.get("eval_start") != eval_start or payload.get("eval_end") != eval_end:
+        return None
+    if payload.get("universe_rule") != universe_rule:
+        return None
+    manifest = payload.get("data_snapshot_manifest")
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("universe_lookback_start") != universe_lookback_start:
+        return None
+    if manifest.get("universe_lookback_end") != universe_lookback_end:
+        return None
+    universe = payload.get("universe") or manifest.get("universe")
+    if not isinstance(universe, list) or len(universe) != top_n:
+        return None
+    universe = [str(symbol).strip() for symbol in universe if str(symbol).strip()]
+    if len(universe) != top_n:
+        return None
+    liquidity_coverage = manifest.get("liquidity_coverage")
+    if not isinstance(liquidity_coverage, dict):
+        return None
+    fetch_errors = manifest.get("fetch_errors")
+    if not isinstance(fetch_errors, dict):
+        fetch_errors = {}
+    return {
+        "universe": universe,
+        "liquidity_coverage": liquidity_coverage,
+        "fetch_errors": {
+            key: value
+            for key, value in fetch_errors.items()
+            if str(key).startswith("liquidity:")
+        },
+        "source": path.as_posix(),
+        "source_generated_at": payload.get("generated_at"),
+        "source_data_snapshot_hash": payload.get("data_snapshot_hash")
+        or manifest.get("data_snapshot_hash"),
+    }
 
 
 def failed_canonical_metrics(exc: Exception, stage: str) -> dict:
@@ -2385,49 +2475,92 @@ def run_canonical():
     from core.data_collector import DataCollector
     import FinanceDataReader as fdr
 
-    EVAL_START = "2023-01-01"
-    EVAL_END = "2025-12-31"
-    UNIVERSE_LOOKBACK_START = "2022-10-01"
-    UNIVERSE_LOOKBACK_END = "2022-12-31"
+    EVAL_START = CANONICAL_EVAL_START
+    EVAL_END = CANONICAL_EVAL_END
+    UNIVERSE_LOOKBACK_START = CANONICAL_UNIVERSE_LOOKBACK_START
+    UNIVERSE_LOOKBACK_END = CANONICAL_UNIVERSE_LOOKBACK_END
     INITIAL_CAPITAL = 10_000_000
-    TOP_N = 20
-    UNIVERSE_RULE = "FDR KOSPI 보통주 시총 1000억+, 2022-10~12 거래대금 상위 20"
+    TOP_N = CANONICAL_TOP_N
+    UNIVERSE_RULE = CANONICAL_UNIVERSE_RULE
     ROTATION_DIV = {"max_positions": 2, "max_position_ratio": 0.45,
                     "max_investment_ratio": 0.85, "min_cash_ratio": 0.10}
     STRATEGIES = ["scoring", "breakout_volume", "relative_strength_rotation",
                   "mean_reversion", "trend_following"]
 
+    _write_canonical_progress("started")
+
     # ── Universe (거래대금 기반 ex-ante proxy) ──
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
-    stocks = fdr.StockListing('KOSPI')
-    common = stocks[~stocks['Code'].str.match(r'^\d{5}[5-9KL]$')]
-    if 'Marcap' in common.columns:
-        common = common[common['Marcap'] > 1e11]
-    candidates = common['Code'].tolist()
-
-    # 거래대금 순위
-    amounts = {}
-    liquidity_coverage = {}
+    reused_universe_snapshot = _load_reusable_canonical_universe_snapshot(
+        "reports/promotion/run_metadata.json",
+        eval_start=EVAL_START,
+        eval_end=EVAL_END,
+        universe_rule=UNIVERSE_RULE,
+        universe_lookback_start=UNIVERSE_LOOKBACK_START,
+        universe_lookback_end=UNIVERSE_LOOKBACK_END,
+        top_n=TOP_N,
+    )
     fetch_errors = {}
-    for sym in candidates[:100]:
-        try:
-            df = dc.fetch_korean_stock(sym, UNIVERSE_LOOKBACK_START, UNIVERSE_LOOKBACK_END)
-            if df is not None and not df.empty:
-                if "date" in df.columns:
-                    df = df.set_index("date")
-                amount = (df["close"].astype(float) * df["volume"].astype(float)).mean()
-                amounts[sym] = amount
-                coverage = summarize_ohlcv_frame(df)
-                coverage["mean_trading_value"] = round(float(amount), 2)
-                liquidity_coverage[sym] = coverage
-        except Exception as exc:
-            fetch_errors[f"liquidity:{sym}"] = {
-                "stage": "universe_liquidity",
-                "error_type": type(exc).__name__,
-                "error": str(exc)[:120],
-            }
-    universe = sorted(amounts, key=amounts.get, reverse=True)[:TOP_N]
+    universe_snapshot_reused = bool(reused_universe_snapshot)
+    if reused_universe_snapshot:
+        universe = reused_universe_snapshot["universe"]
+        liquidity_coverage = reused_universe_snapshot["liquidity_coverage"]
+        fetch_errors.update(reused_universe_snapshot["fetch_errors"])
+        print(
+            "Universe snapshot reused "
+            f"({reused_universe_snapshot['source']}, {len(universe)} symbols)",
+            flush=True,
+        )
+        _write_canonical_progress(
+            "universe_reused",
+            universe_size=len(universe),
+            source=reused_universe_snapshot["source"],
+            source_generated_at=reused_universe_snapshot.get("source_generated_at"),
+        )
+    else:
+        stocks = fdr.StockListing('KOSPI')
+        common = stocks[~stocks['Code'].str.match(r'^\d{5}[5-9KL]$')]
+        if 'Marcap' in common.columns:
+            common = common[common['Marcap'] > 1e11]
+        candidates = common['Code'].tolist()
+
+        # 거래대금 순위
+        amounts = {}
+        liquidity_coverage = {}
+        total_candidates = min(100, len(candidates))
+        for idx, sym in enumerate(candidates[:100], start=1):
+            if idx == 1 or idx % 10 == 0:
+                print(f"  liquidity universe scan {idx}/{total_candidates}...", flush=True)
+                _write_canonical_progress(
+                    "liquidity_universe_scan",
+                    scanned=idx,
+                    total=total_candidates,
+                    collected=len(amounts),
+                )
+            try:
+                df = dc.fetch_korean_stock(sym, UNIVERSE_LOOKBACK_START, UNIVERSE_LOOKBACK_END)
+                if df is not None and not df.empty:
+                    if "date" in df.columns:
+                        df = df.set_index("date")
+                    amount = (df["close"].astype(float) * df["volume"].astype(float)).mean()
+                    amounts[sym] = amount
+                    coverage = summarize_ohlcv_frame(df)
+                    coverage["mean_trading_value"] = round(float(amount), 2)
+                    liquidity_coverage[sym] = coverage
+            except Exception as exc:
+                fetch_errors[f"liquidity:{sym}"] = {
+                    "stage": "universe_liquidity",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:120],
+                }
+        universe = sorted(amounts, key=amounts.get, reverse=True)[:TOP_N]
+        _write_canonical_progress(
+            "universe_built",
+            universe_size=len(universe),
+            liquidity_coverage_count=len(liquidity_coverage),
+            fetch_error_count=len(fetch_errors),
+        )
 
     print(f"Universe ({len(universe)}): {universe}")
 
@@ -2435,7 +2568,14 @@ def run_canonical():
     per = INITIAL_CAPITAL / len(universe)
     parts = []
     benchmark_coverage = {}
-    for sym in universe:
+    for idx, sym in enumerate(universe, start=1):
+        if idx == 1 or idx % 5 == 0 or idx == len(universe):
+            _write_canonical_progress(
+                "benchmark_fetch",
+                processed=idx,
+                total=len(universe),
+                symbol=sym,
+            )
         try:
             df = dc.fetch_korean_stock(sym, EVAL_START, EVAL_END)
             if df is None or df.empty:
@@ -2522,7 +2662,13 @@ def run_canonical():
     evaluation_errors = {}
     walk_forward_errors = {}
 
-    for strat in STRATEGIES:
+    for idx, strat in enumerate(STRATEGIES, start=1):
+        _write_canonical_progress(
+            "strategy_full_period",
+            strategy=strat,
+            index=idx,
+            total=len(STRATEGIES),
+        )
         print(f"  {strat}...", end=" ", flush=True)
         div = ROTATION_DIV if strat == "relative_strength_rotation" else None
         try:
@@ -2543,7 +2689,15 @@ def run_canonical():
 
         # WF
         w_metrics = []
-        for ws, we in windows:
+        for window_idx, (ws, we) in enumerate(windows, start=1):
+            _write_canonical_progress(
+                "strategy_walk_forward",
+                strategy=strat,
+                window=window_idx,
+                total_windows=len(windows),
+                window_start=ws,
+                window_end=we,
+            )
             try:
                 wr = run_strat(strat, universe, INITIAL_CAPITAL, ws, we, div)
                 wm = calc(wr, INITIAL_CAPITAL)
@@ -2564,8 +2718,14 @@ def run_canonical():
         print(f"ret={m['total_return']}%")
 
     research_specs = build_canonical_research_candidate_specs()
-    for spec in research_specs:
+    for idx, spec in enumerate(research_specs, start=1):
         name = spec.candidate_id
+        _write_canonical_progress(
+            "research_full_period",
+            strategy=name,
+            index=idx,
+            total=len(research_specs),
+        )
         print(f"  {name}...", end=" ", flush=True)
         try:
             r = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, EVAL_START, EVAL_END)
@@ -2584,7 +2744,15 @@ def run_canonical():
             continue
 
         w_metrics = []
-        for ws, we in windows:
+        for window_idx, (ws, we) in enumerate(windows, start=1):
+            _write_canonical_progress(
+                "research_walk_forward",
+                strategy=name,
+                window=window_idx,
+                total_windows=len(windows),
+                window_start=ws,
+                window_end=we,
+            )
             try:
                 wr = run_canonical_research_candidate(spec, universe, INITIAL_CAPITAL, ws, we)
                 wm = calc(wr, INITIAL_CAPITAL)
@@ -2655,9 +2823,19 @@ def run_canonical():
         "config_yaml_hash": Config.get().yaml_hash,
         "config_resolved_hash": Config.get().resolved_hash,
         "generated_at": datetime.now().isoformat(),
+        "universe_snapshot_reused": universe_snapshot_reused,
     }
+    if reused_universe_snapshot:
+        metadata["universe_snapshot_source"] = reused_universe_snapshot["source"]
+        metadata["universe_snapshot_source_generated_at"] = reused_universe_snapshot.get(
+            "source_generated_at"
+        )
+        metadata["universe_snapshot_source_data_snapshot_hash"] = (
+            reused_universe_snapshot.get("source_data_snapshot_hash")
+        )
 
     # ── Promotion 계산 ──
+    _write_canonical_progress("promotion_building", strategy_count=len(metrics_all))
     promotions = build_promotion_results(
         metrics_all,
         strategy_specs=strategy_specs_metadata,
@@ -2692,6 +2870,12 @@ def run_canonical():
         "reports/current_blockers.json",
     )
     print(f"  → {current_blockers_path}")
+    _write_canonical_progress(
+        "completed",
+        output_dir=out_dir.as_posix(),
+        current_blockers_path=current_blockers_path,
+        strategy_count=len(metrics_all),
+    )
 
     # ── 상태 요약 출력 ──
     print("\n" + "=" * 80)
