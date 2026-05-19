@@ -367,6 +367,7 @@ def _load_latest_target_weight_daily_ops(
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    valid_candidates: list[tuple[tuple[str, float], dict]] = []
     for path in candidates:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -383,7 +384,11 @@ def _load_latest_target_weight_daily_ops(
         if not _daily_ops_trade_day_is_available(payload):
             continue
         payload["source_path"] = str(path)
-        return _sanitize_target_weight_daily_ops_summary(payload)
+        sanitized = _sanitize_target_weight_daily_ops_summary(payload)
+        if sanitized is not None:
+            valid_candidates.append((_daily_ops_trade_day_sort_key(payload, path), sanitized))
+    if valid_candidates:
+        return max(valid_candidates, key=lambda item: item[0])[1]
     return None
 
 
@@ -594,6 +599,10 @@ def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None
         return trade_date <= current
     except ValueError:
         return False
+
+
+def _daily_ops_trade_day_sort_key(payload: dict, path: Path) -> tuple[str, float]:
+    return (str(payload.get("trade_day") or ""), path.stat().st_mtime)
 
 
 def _stable_daily_ops_hash(payload: dict) -> str:
