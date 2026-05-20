@@ -4839,6 +4839,9 @@ def test_reconcile_plan_fills_flags_missing_trade_history_fill():
 
     reconciliation = reconcile_plan_fills(plan, fills)
 
+    assert reconciliation["source"] == "database.trade_history"
+    assert reconciliation["query"]["account_key"] == plan.candidate_id
+    assert reconciliation["query"]["mode"] == "paper"
     assert reconciliation["complete"] is False
     assert "target_weight_fill_reconciliation_mismatch" in reconciliation["reason"]
     assert reconciliation["mismatches"][0]["symbol"] == plan.orders[-1].symbol
@@ -5315,10 +5318,13 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert report["missing_required_fields"] == ["total_value", "daily_return"]
     assert report["source_record_status"]["fields_unusable"] == ["total_value"]
     readiness = report["snapshot_recovery_readiness"]
+    artifact_execution = report["artifact_execution_state"]
+    assert artifact_execution["fill_count"] == len(plan.orders)
     assert readiness["status"] == "blocked"
     assert readiness["safe_to_write_snapshot"] is False
     assert "portfolio_snapshot_history_missing" in readiness["blockers"]
     assert "db_execution_state_missing_for_account_key" in readiness["blockers"]
+    assert "artifact_fills_without_current_db_trades" in readiness["blockers"]
     assert report["no_order_safety"]["portfolio_snapshot_written"] is False
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
@@ -5405,6 +5411,7 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "portfolio_metrics_probe: missing_current_snapshot_after_trades" in output
     assert "portfolio_metrics_previous_snapshot_at: 2026-04-09T15:35:00" in output
     assert "database_state: checked=True snapshots=1 current_snapshot=False" in output
+    assert "artifact_execution_state: found=True complete=True fills=3" in output
     assert "snapshot_recovery_readiness: blocked" in output
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output
