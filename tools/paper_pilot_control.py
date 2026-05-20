@@ -877,13 +877,18 @@ def _target_weight_operator_next_action(
             f"WAIT until {not_before_date}: {guard}; "
             "do not run the scheduled command early"
         )
+    if (
+        priority_failure_reason
+        and "target_weight_requested_trade_day_unavailable" in priority_failure_reason
+    ):
+        recovery_command = priority_scheduled_command or priority_command
+        if recovery_command:
+            return (
+                "WAIT for requested trade-day market data, then rerun "
+                f"daily ops recovery command: {recovery_command}"
+            )
     if priority_command and not _command_is_blocked(priority_command):
         if priority_failure_reason:
-            if "target_weight_requested_trade_day_unavailable" in priority_failure_reason:
-                return (
-                    "WAIT for requested trade-day market data, then rerun "
-                    f"daily ops recovery command: {priority_command}"
-                )
             return (
                 "RESOLVE latest daily ops failure, then rerun current blockers "
                 f"priority command: {priority_command}"

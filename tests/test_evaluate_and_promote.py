@@ -2405,6 +2405,77 @@ def test_load_current_blockers_from_artifacts_prioritizes_daily_ops_failure_when
     assert report["next_actions"][1]["order_safety"] == "no_order"
 
 
+def test_current_blockers_blocks_requested_trade_day_unavailable_failure(
+    tmp_path,
+):
+    from tools.evaluate_and_promote import load_current_blockers_from_artifacts
+
+    strategy = "target_weight_best"
+    promotion_dir = tmp_path / "promotion"
+    _write_consistent_promotion_artifacts(
+        promotion_dir,
+        {strategy: _provisional_metrics()},
+        evidence_dir=tmp_path / "paper_evidence",
+    )
+    paper_runtime = tmp_path / "paper_runtime"
+    paper_runtime.mkdir()
+    command = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --as-of-date 2026-05-20 --daily-ops-summary"
+    )
+    follow_up = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --as-of-date 2026-05-20 --readiness-audit"
+    )
+    failure_path = (
+        paper_runtime
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260520090500.json"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-05-20T09:05:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-05-20",
+                "status": "BLOCKED",
+                "reason": (
+                    "target_weight_daily_ops_summary_blocked: "
+                    "target_weight_requested_trade_day_unavailable: "
+                    "readiness audit as_of_date=2026-05-20 resolved_trade_day=2026-05-19"
+                ),
+                "operator_commands": {
+                    "daily_ops_summary": command,
+                    "readiness_audit": follow_up,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = load_current_blockers_from_artifacts(promotion_dir)
+
+    action = report["next_actions"][0]
+    assert action["source"] == "latest_daily_ops_failure"
+    assert action["command"].startswith(
+        "# blocked: requested trade-day market data unavailable"
+    )
+    assert action["scheduled_command"] == command
+    assert action["follow_up"].startswith(
+        "# blocked: requested trade-day market data unavailable"
+    )
+    assert action["scheduled_follow_up"] == follow_up
+    assert action["market_data_guard"] == "target_weight_requested_trade_day_unavailable"
+    assert action["requires"] == "requested trade-day market data available"
+    runbook_action = report["operator_runbook"]["current_priority_action"]
+    assert runbook_action["command"] == action["command"]
+    assert runbook_action["scheduled_command"] == command
+    assert runbook_action["market_data_guard"] == action["market_data_guard"]
+
+
 def test_current_blockers_daily_ops_failure_payload_excludes_volatile_mtime(
     tmp_path,
 ):
