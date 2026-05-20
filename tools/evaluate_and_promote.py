@@ -1703,6 +1703,46 @@ def _load_target_weight_snapshot_diagnostics_report(
     return None
 
 
+def _load_target_weight_db_restore_verification_report(
+    strategy: str,
+    snapshot_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not snapshot_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base
+        / f"target_weight_db_restore_package_verification_{strategy}_{snapshot_date}.json",
+        base
+        / "paper_runtime"
+        / f"target_weight_db_restore_package_verification_{strategy}_{snapshot_date}.json",
+    ]
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_db_restore_package_verification":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("snapshot_date") != snapshot_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append((_artifact_time_key(payload), payload))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -1985,6 +2025,7 @@ def _target_weight_ops_priority_action(
     latest_daily_ops: dict | None,
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
+    latest_db_restore_verification: dict | None = None,
 ) -> dict | None:
     if not latest_daily_ops:
         return None
@@ -2480,6 +2521,71 @@ def _target_weight_ops_priority_action(
                         or ""
                     ),
                 })
+                if isinstance(latest_db_restore_verification, dict):
+                    verification_candidate = (
+                        latest_db_restore_verification.get("candidate_package") or {}
+                    )
+                    verification_authoritative = (
+                        latest_db_restore_verification.get("authoritative_evidence")
+                        or {}
+                    )
+                    verification_trade = (
+                        verification_authoritative.get("trade_history") or {}
+                    )
+                    verification_positions = (
+                        verification_authoritative.get("positions") or {}
+                    )
+                    verification_db = (
+                        latest_db_restore_verification.get("current_db_state") or {}
+                    )
+                    action.update({
+                        "snapshot_db_restore_verification_source": str(
+                            latest_db_restore_verification.get("source_path") or ""
+                        ),
+                        "snapshot_db_restore_verification_generated_at": str(
+                            latest_db_restore_verification.get("generated_at") or ""
+                        ),
+                        "snapshot_db_restore_verification_status": str(
+                            latest_db_restore_verification.get("status") or ""
+                        ),
+                        "snapshot_db_restore_verification_ready": bool(
+                            latest_db_restore_verification.get("restore_ready")
+                        ),
+                        "snapshot_db_restore_verification_blockers": (
+                            latest_db_restore_verification.get("blockers") or []
+                        ),
+                        "snapshot_db_restore_verification_warnings": (
+                            latest_db_restore_verification.get("warnings") or []
+                        ),
+                        "snapshot_db_restore_verification_trade_hash_ok": bool(
+                            (verification_candidate.get("trade_history") or {}).get(
+                                "hash_ok"
+                            )
+                        ),
+                        "snapshot_db_restore_verification_positions_hash_ok": bool(
+                            (verification_candidate.get("positions") or {}).get(
+                                "hash_ok"
+                            )
+                        ),
+                        "snapshot_db_restore_authoritative_trade_history_provided": bool(
+                            verification_trade.get("provided")
+                        ),
+                        "snapshot_db_restore_authoritative_trade_history_match": bool(
+                            verification_trade.get("match")
+                        ),
+                        "snapshot_db_restore_authoritative_positions_provided": bool(
+                            verification_positions.get("provided")
+                        ),
+                        "snapshot_db_restore_authoritative_positions_match": bool(
+                            verification_positions.get("match")
+                        ),
+                        "snapshot_db_restore_verification_db_trade_rows_on_date": _safe_int(
+                            verification_db.get("trade_count_on_date")
+                        ),
+                        "snapshot_db_restore_verification_db_positions": _safe_int(
+                            verification_db.get("position_count")
+                        ),
+                    })
                 if snapshot_recovery_guard:
                     blocked_finalize_command = (
                         "# blocked: portfolio snapshot recovery requires "
@@ -2683,6 +2789,7 @@ def _build_current_blockers_operator_runbook(
     latest_daily_ops_failure: dict | None = None,
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
+    latest_db_restore_verification: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
@@ -2728,6 +2835,7 @@ def _build_current_blockers_operator_runbook(
                 latest_daily_ops,
                 latest_finalize_report=latest_finalize_report,
                 latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+                latest_db_restore_verification=latest_db_restore_verification,
             )
         sequence = [
             {
@@ -2837,6 +2945,8 @@ def _build_current_blockers_operator_runbook(
             runbook["core_entry_check"] = core_entry_check
         if core_entry_action:
             runbook["core_entry_action"] = core_entry_action
+        if latest_db_restore_verification:
+            runbook["latest_db_restore_verification"] = latest_db_restore_verification
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
@@ -2883,6 +2993,7 @@ def build_current_blockers_report(
     latest_daily_ops_failure: dict | None = None,
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
+    latest_db_restore_verification: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -2947,6 +3058,7 @@ def build_current_blockers_report(
         latest_daily_ops_failure=latest_daily_ops_failure,
         latest_finalize_report=latest_finalize_report,
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
         promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
@@ -3109,12 +3221,22 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_db_restore_verification = (
+        _load_target_weight_db_restore_verification_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     return build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
         latest_finalize_report=latest_finalize_report,
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
         generated_at=generated_at,
     )
 
