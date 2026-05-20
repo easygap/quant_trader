@@ -5320,11 +5320,13 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     readiness = report["snapshot_recovery_readiness"]
     artifact_execution = report["artifact_execution_state"]
     assert artifact_execution["fill_count"] == len(plan.orders)
+    assert artifact_execution["db_persistence_complete"] is False
     assert readiness["status"] == "blocked"
     assert readiness["safe_to_write_snapshot"] is False
     assert "portfolio_snapshot_history_missing" in readiness["blockers"]
     assert "db_execution_state_missing_for_account_key" in readiness["blockers"]
     assert "artifact_fills_without_current_db_trades" in readiness["blockers"]
+    assert "source_record_db_persistence_incomplete" in readiness["blockers"]
     assert report["no_order_safety"]["portfolio_snapshot_written"] is False
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
@@ -5335,6 +5337,99 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
     assert "Target-weight Portfolio Snapshot Diagnostics" in report_md
     assert "Probe status: `missing_snapshot_history`" in report_md
+    assert "DB persistence complete: `False`" in report_md
+
+
+def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "missing_current_snapshot_after_trades",
+            "_portfolio_probe_reason": "current snapshot is missing after trades",
+            "_portfolio_probe_current_snapshot_found": False,
+            "_portfolio_probe_previous_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_at": "2026-04-09T15:35:00",
+            "_portfolio_probe_trades_today": len(plan.orders),
+            "_portfolio_probe_trades_since_previous": len(plan.orders),
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": plan.candidate_id,
+            "snapshot_date": plan.trade_day,
+            "snapshot_count": 1,
+            "current_snapshot_found": False,
+            "latest_snapshot_at": "2026-04-09T15:35:00",
+            "trade_count_total": len(plan.orders),
+            "trade_count_on_date": len(plan.orders),
+            "position_count": len(plan.orders),
+        },
+    )
+    record = _existing_pilot_evidence_record(plan)
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    execution["db_persistence_complete"] = True
+    execution["db_persistence_proof"] = {
+        "checked": True,
+        "complete": True,
+        "reason": "target-weight paper execution is persisted in DB",
+        "trade_history": {
+            "source": "database.trade_history",
+            "row_count": len(plan.orders),
+            "expected_row_count": len(plan.orders),
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+        },
+        "positions": {
+            "source": "database.positions",
+            "expected_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "actual_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "missing_or_mismatched_symbols": [],
+        },
+    }
+    execution["fill_reconciliation"]["source"] = "database.trade_history"
+    execution["position_reconciliation"]["source"] = "database.positions"
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = None
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    report = twp.diagnose_target_weight_portfolio_snapshot(
+        candidate_id=plan.candidate_id,
+        snapshot_date=plan.trade_day,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    artifact_execution = report["artifact_execution_state"]
+    readiness = report["snapshot_recovery_readiness"]
+    assert artifact_execution["db_persistence_checked"] is True
+    assert artifact_execution["db_persistence_complete"] is True
+    assert artifact_execution["db_trade_history_source"] == "database.trade_history"
+    assert artifact_execution["db_positions_source"] == "database.positions"
+    assert artifact_execution["db_trade_history_row_count"] == len(plan.orders)
+    assert "source_record_db_persistence_incomplete" not in readiness["blockers"]
+    assert "source_record_trade_history_not_database_backed" not in readiness["blockers"]
+    assert "source_record_positions_not_database_backed" not in readiness["blockers"]
+    assert readiness["authoritative_sources"]["artifact_db_persistence_complete"] is True
 
 
 def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
@@ -5412,9 +5507,12 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "portfolio_metrics_previous_snapshot_at: 2026-04-09T15:35:00" in output
     assert "database_state: checked=True snapshots=1 current_snapshot=False" in output
     assert "artifact_execution_state: found=True complete=True fills=3" in output
+    assert "db_persistence=False" in output
+    assert "artifact_db_persistence: checked=False complete=False" in output
     assert "snapshot_recovery_readiness: blocked" in output
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output
+    assert "source_record_db_persistence_incomplete" in output
     assert "recovery_hint: run end-of-day portfolio snapshot capture" in output
     assert "artifact:" in output
     assert "report:" in output
