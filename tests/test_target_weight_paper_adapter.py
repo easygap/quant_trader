@@ -2777,6 +2777,11 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "--candidate-id target_weight_candidate "
         "--finalize-pilot-evidence --finalize-date 2026-04-10"
     )
+    snapshot_diagnostics_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10"
+    )
     summary_dir = tmp_path / "paper_runtime"
     summary_dir.mkdir(parents=True)
     summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
@@ -2837,6 +2842,9 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "finalize_portfolio_metrics_recovery_hint": (
             "run end-of-day portfolio snapshot capture for the trade day"
         ),
+        "finalize_portfolio_snapshot_diagnostics_command": (
+            snapshot_diagnostics_command
+        ),
         "finalize_portfolio_metrics_current_snapshot_found": False,
         "finalize_portfolio_metrics_previous_snapshot_found": True,
         "finalize_portfolio_metrics_previous_snapshot_at": "2026-04-09T15:35:00",
@@ -2884,8 +2892,11 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     )
     assert "Scheduled priority command:" in output
     assert finalize_command in output
+    assert "Portfolio snapshot diagnostics command:" in output
+    assert snapshot_diagnostics_command in output
     assert (
-        "Operator next action: RUN portfolio snapshot capture before finalize:"
+        "Operator next action: RUN no-order portfolio snapshot diagnostics "
+        "before finalize:"
     ) in output
     assert "Performance evidence guard: waiting for total_value/daily_return" in output
     assert "Finalize report status: blocked" in output
@@ -3015,6 +3026,11 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "--candidate-id target_weight_candidate "
         "--finalize-pilot-evidence --finalize-date 2026-04-10"
     )
+    snapshot_diagnostics_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10"
+    )
     summary_dir = tmp_path / "paper_runtime"
     summary_dir.mkdir(parents=True)
     summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
@@ -3065,6 +3081,9 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "restore or create portfolio snapshot history for the target-weight "
             "account_key"
         ),
+        "finalize_portfolio_snapshot_diagnostics_command": (
+            snapshot_diagnostics_command
+        ),
         "finalize_portfolio_metrics_current_snapshot_found": False,
         "finalize_portfolio_metrics_previous_snapshot_found": False,
         "finalize_portfolio_metrics_trades_today": 0,
@@ -3092,9 +3111,12 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
     assert "Portfolio metrics probe: missing_snapshot_history" in output
     assert "Portfolio metrics recovery: restore or create portfolio snapshot history" in output
     assert (
-        "Operator next action: RESTORE portfolio snapshot history before finalize"
+        "Operator next action: RUN no-order portfolio snapshot diagnostics "
+        "before finalize"
         in output
     )
+    assert "Portfolio snapshot diagnostics command:" in output
+    assert snapshot_diagnostics_command in output
     assert finalize_command in output
     assert "WAIT for final portfolio performance evidence" not in output
 
@@ -5235,6 +5257,121 @@ def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_di
     assert "artifact:" in output
     assert "report:" in output
     assert "next: WAIT for final portfolio performance evidence" in output
+
+
+def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "missing_snapshot_history",
+            "_portfolio_probe_reason": "no portfolio snapshot exists for account_key",
+            "_portfolio_probe_current_snapshot_found": False,
+            "_portfolio_probe_previous_snapshot_found": False,
+            "_portfolio_probe_trades_today": 0,
+            "_portfolio_probe_trades_since_previous": 0,
+        },
+    )
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = 0
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    report = twp.diagnose_target_weight_portfolio_snapshot(
+        candidate_id=plan.candidate_id,
+        snapshot_date=plan.trade_day,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    assert report["status"] == "blocked_missing_snapshot_history"
+    assert report["portfolio_metrics_probe"]["status"] == "missing_snapshot_history"
+    assert report["missing_required_fields"] == ["total_value", "daily_return"]
+    assert report["source_record_status"]["fields_unusable"] == ["total_value"]
+    assert report["no_order_safety"]["portfolio_snapshot_written"] is False
+    assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
+        report["operator_commands"]["diagnose_portfolio_snapshot"]
+    )
+
+    report_path = Path(report["artifact_path"])
+    assert report_path.exists()
+    report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
+    assert "Target-weight Portfolio Snapshot Diagnostics" in report_md
+    assert "Probe status: `missing_snapshot_history`" in report_md
+
+
+def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    output_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "missing_current_snapshot_after_trades",
+            "_portfolio_probe_reason": (
+                "trades exist after previous snapshot but current snapshot is missing"
+            ),
+            "_portfolio_probe_current_snapshot_found": False,
+            "_portfolio_probe_previous_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_at": "2026-04-09T15:35:00",
+            "_portfolio_probe_trades_today": 1,
+            "_portfolio_probe_trades_since_previous": 1,
+        },
+    )
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = None
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--candidate-id",
+            plan.candidate_id,
+            "--diagnose-portfolio-snapshot",
+            "--snapshot-date",
+            plan.trade_day,
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "Target-weight portfolio snapshot diagnostics" in output
+    assert "status: blocked_missing_current_snapshot_after_trades" in output
+    assert "portfolio_metrics_probe: missing_current_snapshot_after_trades" in output
+    assert "portfolio_metrics_previous_snapshot_at: 2026-04-09T15:35:00" in output
+    assert "recovery_hint: run end-of-day portfolio snapshot capture" in output
+    assert "artifact:" in output
+    assert "report:" in output
 
 
 def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
