@@ -3189,6 +3189,14 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "--authoritative-trade-history-csv <reviewed_trade_history_csv> "
             "--authoritative-positions-csv <reviewed_positions_csv>"
         ),
+        "snapshot_db_restore_verification_status": "blocked",
+        "snapshot_db_restore_verification_ready": False,
+        "snapshot_db_restore_verification_blockers": [
+            "authoritative_trade_history_csv_required",
+            "authoritative_positions_csv_required",
+        ],
+        "snapshot_db_restore_authoritative_trade_history_match": False,
+        "snapshot_db_restore_authoritative_positions_match": False,
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
         ),
@@ -3259,6 +3267,15 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
     )
     assert "Snapshot DB restore verify command: python tools/target_weight_rotation_pilot.py" in output
     assert "--verify-db-restore-package" in output
+    assert "Snapshot DB restore verification: status=blocked ready=False" in output
+    assert (
+        "Snapshot DB restore verification blockers: "
+        "authoritative_trade_history_csv_required, authoritative_positions_csv_required"
+    ) in output
+    assert (
+        "Snapshot DB restore authoritative match: "
+        "trade_history=False positions=False"
+    ) in output
     assert (
         "Operator next action: RESTORE authoritative DB trade_history/positions "
         "proof before snapshot recovery"
