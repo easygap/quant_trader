@@ -269,6 +269,13 @@ def _read_all_evidence(jsonl_path: Path) -> list[dict]:
     return records
 
 
+def _has_target_weight_proof_shape(record: dict) -> bool:
+    caps = record.get("pilot_caps_snapshot") or {}
+    if not isinstance(caps, dict):
+        return False
+    return bool(caps.get("target_weight_plan") or caps.get("target_weight_execution"))
+
+
 def get_canonical_records(
     strategy: str,
     *,
@@ -277,7 +284,8 @@ def get_canonical_records(
     """
     Canonical view: 같은 date에 여러 record(provisional → final)가 있을 때 최신만 반환.
     JSONL은 append-only이므로 같은 date의 뒤쪽 record가 최신.
-    단, execution-backed real paper 기록은 shadow 기록으로 덮어쓰지 않는다.
+    단, 명시적인 promotable paper 기록은 legacy/backfill/shadow 기록으로
+    덮어쓰지 않는다.
     """
     jsonl_path = _evidence_path(strategy, evidence_dir=evidence_dir)
     all_records = _read_all_evidence(jsonl_path)
@@ -288,6 +296,21 @@ def get_canonical_records(
             continue
         prev = by_date.get(date)
         if prev is not None:
+            prev_promotable = _is_promotable_paper_evidence(prev)
+            curr_promotable = _is_promotable_paper_evidence(r)
+            if prev_promotable and not curr_promotable:
+                continue
+            if _has_target_weight_proof_shape(prev) or _has_target_weight_proof_shape(r):
+                prev_target_weight_valid, _ = _target_weight_record_proof_status(
+                    strategy,
+                    prev,
+                )
+                curr_target_weight_valid, _ = _target_weight_record_proof_status(
+                    strategy,
+                    r,
+                )
+                if prev_target_weight_valid and not curr_target_weight_valid:
+                    continue
             prev_exec = prev.get("execution_backed", True)
             curr_exec = r.get("execution_backed", True)
             if prev_exec and not curr_exec:
