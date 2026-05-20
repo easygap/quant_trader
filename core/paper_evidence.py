@@ -1723,6 +1723,153 @@ def build_promotion_source_records_summary(
     )
 
 
+def _promotion_headline_summary(
+    records: list[dict],
+    all_records: list[dict],
+    execution_records: list[dict],
+) -> dict:
+    """promotion package headline metrics recalculated from selected source records."""
+    total_days = len(records)
+    shadow_days = len(all_records) - len(execution_records)
+    daily_returns = [
+        r.get("daily_return") for r in records if r.get("daily_return") is not None
+    ]
+    avg_daily_return = sum(daily_returns) / len(daily_returns) if daily_returns else 0
+    paper_sharpe = _annualized_sharpe_from_daily_returns(daily_returns)
+    cumulative = records[-1].get("cumulative_return", 0) if records else 0
+    mdds = [
+        normalized
+        for r in records
+        if (normalized := _normalize_mdd_value(r.get("mdd"))) is not None
+    ]
+    max_mdd = min(mdds) if mdds else 0
+
+    win = sum(r.get("winning_trades", 0) for r in records)
+    lose = sum(r.get("losing_trades", 0) for r in records)
+    total_sells = win + lose
+    win_rate = (win / total_sells * 100) if total_sells > 0 else 0
+
+    same_excess = [
+        r.get("same_universe_excess")
+        for r in records
+        if r.get("same_universe_excess") is not None
+    ]
+    avg_same_excess = sum(same_excess) / len(same_excess) if same_excess else None
+    exp_excess = [
+        r.get("exposure_matched_excess")
+        for r in records
+        if r.get("exposure_matched_excess") is not None
+    ]
+    avg_exp_excess = sum(exp_excess) / len(exp_excess) if exp_excess else None
+    cash_excess = [
+        r.get("cash_adjusted_excess")
+        for r in records
+        if r.get("cash_adjusted_excess") is not None
+    ]
+    avg_cash_excess = sum(cash_excess) / len(cash_excess) if cash_excess else None
+
+    fill_rates = [
+        r.get("raw_fill_rate") for r in records if r.get("raw_fill_rate") is not None
+    ]
+    avg_fill = sum(fill_rates) / len(fill_rates) if fill_rates else None
+    anomaly_types: dict[str, int] = {}
+    for r in records:
+        for anomaly in r.get("anomalies", []):
+            anomaly_type = anomaly.get("type", "unknown")
+            anomaly_types[anomaly_type] = anomaly_types.get(anomaly_type, 0) + 1
+
+    benchmark_final_days = sum(
+        1 for r in records if r.get("benchmark_status") == "final"
+    )
+    benchmark_provisional_days = sum(
+        1 for r in records if r.get("benchmark_status") == "provisional"
+    )
+    benchmark_failed_days = sum(
+        1 for r in records if r.get("benchmark_status") == "failed"
+    )
+    benchmark_final_ratio = benchmark_final_days / total_days if total_days > 0 else 0
+    excess_non_null_days = sum(
+        1 for r in records if r.get("same_universe_excess") is not None
+    )
+    excess_non_null_ratio = excess_non_null_days / total_days if total_days > 0 else 0
+    sell_count = sum(r.get("sell_count", 0) for r in records)
+
+    return {
+        "total_days": total_days,
+        "avg_daily_return": round(avg_daily_return, 4),
+        "paper_sharpe": round(paper_sharpe, 4) if paper_sharpe is not None else None,
+        "cumulative_return": round(cumulative, 2) if cumulative else 0,
+        "max_mdd": round(max_mdd, 2),
+        "win_rate": round(win_rate, 1),
+        "total_trades": sum(r.get("total_trades", 0) for r in records),
+        "sell_count": sell_count,
+        "avg_same_universe_excess": (
+            round(avg_same_excess, 4) if avg_same_excess is not None else None
+        ),
+        "avg_exposure_matched_excess": (
+            round(avg_exp_excess, 4) if avg_exp_excess is not None else None
+        ),
+        "avg_cash_adjusted_excess": (
+            round(avg_cash_excess, 4) if avg_cash_excess is not None else None
+        ),
+        "avg_fill_rate": round(avg_fill, 4) if avg_fill is not None else None,
+        "total_rejects": sum(r.get("reject_count", 0) for r in records),
+        "total_duplicate_blocked": sum(
+            r.get("duplicate_blocked_count", 0) for r in records
+        ),
+        "degraded_days": sum(1 for r in records if r.get("status") == "degraded"),
+        "frozen_days": sum(1 for r in records if r.get("status") == "frozen"),
+        "anomaly_summary": anomaly_types,
+        "benchmark_final_days": benchmark_final_days,
+        "benchmark_provisional_days": benchmark_provisional_days,
+        "benchmark_failed_days": benchmark_failed_days,
+        "benchmark_final_ratio": round(benchmark_final_ratio, 4),
+        "excess_non_null_days": excess_non_null_days,
+        "excess_non_null_ratio": round(excess_non_null_ratio, 4),
+        "real_paper_days_total": total_days,
+        "pilot_real_paper_days": sum(
+            1
+            for r in all_records
+            if _is_promotable_paper_evidence(r)
+            and (
+                r.get("evidence_mode") == "pilot_paper"
+                or r.get("session_mode") == "pilot_paper"
+            )
+        ),
+        "non_pilot_real_paper_days": sum(
+            1
+            for r in all_records
+            if _is_promotable_paper_evidence(r)
+            and r.get("evidence_mode") != "pilot_paper"
+            and r.get("session_mode") != "pilot_paper"
+        ),
+        "non_promotable_evidence_days": shadow_days,
+        "shadow_days": shadow_days,
+        "real_paper_days": total_days,
+        "promotable_evidence_days": total_days,
+        "non_promotable_shadow_days": shadow_days,
+    }
+
+
+def build_promotion_headline_summary(
+    strategy: str,
+    *,
+    canonical_metadata: dict | None = None,
+    promotion_dir: str | Path = PROMOTION_DIR,
+    evidence_dir: str | Path | None = None,
+) -> dict:
+    """live gate가 package headline 수치를 원본 daily evidence로 재검증할 때 쓰는 요약."""
+    records, all_records, execution_records, _target_weight_required = (
+        _select_promotion_source_records(
+            strategy,
+            canonical_metadata=canonical_metadata,
+            promotion_dir=promotion_dir,
+            evidence_dir=evidence_dir,
+        )
+    )
+    return _promotion_headline_summary(records, all_records, execution_records)
+
+
 def compute_promotion_package_integrity_hash(package: dict) -> str:
     """package_integrity 필드를 제외한 promotion package payload hash."""
     material = dict(package or {})
