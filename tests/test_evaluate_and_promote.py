@@ -2469,12 +2469,43 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         },
         "source_path": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_best_2026-05-20.json",
     }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "generated_at": "2026-05-20T15:50:00",
+        "status": "blocked",
+        "restore_ready": False,
+        "blockers": [
+            "authoritative_trade_history_csv_required",
+            "authoritative_positions_csv_required",
+        ],
+        "warnings": [],
+        "candidate_package": {
+            "trade_history": {"hash_ok": True},
+            "positions": {"hash_ok": True},
+        },
+        "authoritative_evidence": {
+            "trade_history": {"provided": False, "match": False},
+            "positions": {"provided": False, "match": False},
+        },
+        "current_db_state": {
+            "checked": True,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+        "source_path": (
+            "reports/paper_runtime/"
+            "target_weight_db_restore_package_verification_target_weight_best_2026-05-20.json"
+        ),
+    }
 
     report = build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
         latest_finalize_report=latest_finalize_report,
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
     )
 
     action = report["next_actions"][0]
@@ -2563,6 +2594,24 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     )
     assert action["snapshot_db_restore_package_verify_command"].startswith(
         "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
+    )
+    assert action["snapshot_db_restore_verification_status"] == "blocked"
+    assert action["snapshot_db_restore_verification_ready"] is False
+    assert action["snapshot_db_restore_verification_blockers"] == [
+        "authoritative_trade_history_csv_required",
+        "authoritative_positions_csv_required",
+    ]
+    assert action["snapshot_db_restore_verification_trade_hash_ok"] is True
+    assert action["snapshot_db_restore_verification_positions_hash_ok"] is True
+    assert action["snapshot_db_restore_authoritative_trade_history_provided"] is False
+    assert action["snapshot_db_restore_authoritative_trade_history_match"] is False
+    assert action["snapshot_db_restore_authoritative_positions_provided"] is False
+    assert action["snapshot_db_restore_authoritative_positions_match"] is False
+    assert action["snapshot_db_restore_verification_db_trade_rows_on_date"] == 0
+    assert action["snapshot_db_restore_verification_db_positions"] == 0
+    assert (
+        report["operator_runbook"]["latest_db_restore_verification"]["status"]
+        == "blocked"
     )
 
 
