@@ -2316,6 +2316,53 @@ def test_paper_pilot_control_status_uses_repaired_summary_run_guard_without_bloc
     assert summary_path.as_posix() in output
 
 
+def test_paper_pilot_control_status_blocks_stale_ready_to_enable_caps(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-11")
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "READY_TO_ENABLE_CAPS",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                },
+                "decision": {"blocking_reasons": []},
+                "operator_commands": {
+                    "enable_suggested_caps": (
+                        "python tools/paper_pilot_control.py "
+                        "--strategy target_weight_candidate --enable "
+                        "--from 2026-04-10 --to 2026-07-03"
+                    ),
+                    "execute_capped_paper": "# blocked: cap approval required",
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Status: READY_TO_ENABLE_CAPS" in output
+    assert "Cap approval: BLOCKED by daily ops" in output
+    assert "Enable cap command: # blocked: daily_ops_summary.trade_day is stale" in output
+    assert "--enable --from 2026-04-10" not in output
+
+
 def test_paper_pilot_control_status_hides_elapsed_not_before_guard(tmp_path, monkeypatch, capsys):
     import tools.paper_pilot_control as ppc
 
@@ -2839,6 +2886,54 @@ def test_paper_pilot_control_status_prints_daily_ops_failure_when_no_summary(
     )
     assert "Failure error: ValueError: market data stale" in output
     assert "--as-of-date 2026-04-10 --daily-ops-summary" in output
+
+
+def test_paper_pilot_control_status_waits_when_only_failure_needs_market_data(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate --as-of-date 2026-04-10 "
+        "--daily-ops-summary"
+    )
+    failure_path = (
+        summary_dir
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260410100000.json"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-04-10T10:00:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-04-10",
+                "status": "BLOCKED",
+                "reason": (
+                    "target_weight_daily_ops_summary_blocked: "
+                    "target_weight_requested_trade_day_unavailable"
+                ),
+                "operator_commands": {"daily_ops_summary": command},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Target-weight Daily Ops: FAILED" in output
+    assert "Wait: requested trade-day market data unavailable" in output
+    assert f"Scheduled recovery command: {command}" in output
+    assert f"Run: {command}" not in output
 
 
 def test_paper_pilot_control_status_warns_when_daily_ops_failure_is_newer(
@@ -4725,6 +4820,8 @@ def test_recommend_pilot_caps_matches_target_weight_plan(monkeypatch):
     assert rec["valid_to"] == "2026-07-03"
     assert rec["target_pilot_days"] == 60
     assert "YYYY-MM-DD" not in rec["enable_command"]
+    assert "\n" not in rec["enable_command"]
+    assert "\\" not in rec["enable_command"]
     assert "--from 2026-04-10 --to 2026-07-03" in rec["enable_command"]
     assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]

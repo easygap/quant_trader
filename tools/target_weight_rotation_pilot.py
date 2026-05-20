@@ -698,17 +698,19 @@ def _format_enable_command(
     target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
 ) -> str:
     pilot_valid_to = valid_to or _pilot_valid_to(plan.trade_day, target_pilot_days)
-    return "\n".join([
-        f"python tools/paper_pilot_control.py --strategy {plan.candidate_id} --enable \\",
-        f"  --from {plan.trade_day} --to {pilot_valid_to} \\",
-        (
-            f"  --max-orders {caps['max_orders_per_day']} "
-            f"--max-positions {caps['max_concurrent_positions']} "
-            f"--max-notional {caps['max_notional_per_trade']} "
-            f"--max-exposure {caps['max_gross_exposure']} \\"
-        ),
-        '  --reason "target-weight shadow dry-run matched suggested pilot caps"',
-    ])
+    parts = [
+        "python tools/paper_pilot_control.py",
+        f"--strategy {plan.candidate_id}",
+        "--enable",
+        f"--from {plan.trade_day}",
+        f"--to {pilot_valid_to}",
+        f"--max-orders {caps['max_orders_per_day']}",
+        f"--max-positions {caps['max_concurrent_positions']}",
+        f"--max-notional {caps['max_notional_per_trade']}",
+        f"--max-exposure {caps['max_gross_exposure']}",
+        '--reason "target-weight shadow dry-run matched suggested pilot caps"',
+    ]
+    return " ".join(parts)
 
 
 def recommend_pilot_caps(

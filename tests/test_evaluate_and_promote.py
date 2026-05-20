@@ -1578,9 +1578,12 @@ def test_build_current_blockers_report_prioritizes_shadow_from_daily_ops():
     assert report["operator_runbook"]["sequence"][2]["command"] == action["command"]
 
 
-def test_build_current_blockers_report_prioritizes_cap_approval_when_ready_even_with_two_shadow_days():
+def test_build_current_blockers_report_prioritizes_cap_approval_when_ready_even_with_two_shadow_days(monkeypatch):
+    import tools.evaluate_and_promote as ep
+
     from tools.evaluate_and_promote import build_current_blockers_report
 
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-19")
     blocker_summary = {
         "artifact_type": "promotion_blocker_summary",
         "schema_version": 1,
@@ -2185,9 +2188,12 @@ def test_build_current_blockers_report_schedules_next_day_after_repaired_non_pro
     assert "--strategy target_weight_best --enable" not in sanitized_commands["enable_suggested_caps"]
 
 
-def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
+def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path, monkeypatch):
+    import tools.evaluate_and_promote as ep
+
     from tools.evaluate_and_promote import load_current_blockers_from_artifacts
 
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
     strategy = "target_weight_best"
     promotion_dir = tmp_path / "promotion"
     _write_consistent_promotion_artifacts(
@@ -2226,6 +2232,62 @@ def test_load_current_blockers_from_artifacts_uses_latest_daily_ops(tmp_path):
     assert "--enable" in action["command"]
     assert action["follow_up"].endswith("--readiness-audit")
     assert report["next_actions"][1]["command"].startswith("# blocked:")
+
+
+def test_current_blockers_blocks_stale_ready_to_enable_caps_command(monkeypatch):
+    import tools.evaluate_and_promote as ep
+
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-20")
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-19T14:07:37",
+        "source_artifact_hash": "d" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-19.json",
+        "candidate_id": "target_weight_best",
+        "trade_day": "2026-05-19",
+        "status": "READY_TO_ENABLE_CAPS",
+        "evidence_progress": {"verified_pilot_days": 0, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "enable_suggested_caps": (
+                "python tools/paper_pilot_control.py --strategy target_weight_best "
+                "--enable --from 2026-05-19 --to 2026-08-10"
+            ),
+            "rerun_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --readiness-audit"
+            ),
+        },
+    }
+
+    report = build_current_blockers_report(blocker_summary, latest_daily_ops=latest_daily_ops)
+
+    commands = report["operator_runbook"]["latest_daily_ops"]["operator_commands"]
+    assert commands["enable_suggested_caps"].startswith(
+        "# blocked: daily_ops_summary.trade_day is stale"
+    )
+    assert "--enable --from 2026-05-19" not in commands["enable_suggested_caps"]
+    action = report["next_actions"][0]
+    assert action["command"].startswith("# blocked:")
+    assert action["order_safety"] == "no_order"
 
 
 def test_load_current_blockers_from_artifacts_reads_paper_runtime_daily_ops(tmp_path):
@@ -2970,9 +3032,10 @@ def test_load_latest_target_weight_daily_ops_blocks_candidate_prefix_collision(
     assert "candidate_id mismatch" in command
 
 
-def test_load_latest_target_weight_daily_ops_blocks_ready_enable_scope_mismatch(tmp_path):
+def test_load_latest_target_weight_daily_ops_blocks_ready_enable_scope_mismatch(tmp_path, monkeypatch):
     import tools.evaluate_and_promote as ep
 
+    monkeypatch.setattr(ep, "_current_kst_date", lambda: "2026-05-18")
     strategy = "target_weight_best"
     daily_ops = {
         "artifact_type": "target_weight_daily_ops_summary",
