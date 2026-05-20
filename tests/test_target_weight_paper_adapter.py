@@ -4883,6 +4883,57 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
     assert "Missing fields after probe: `total_value, daily_return`" in report_md
 
 
+def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_diagnostics(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    output_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {"cash": 1_000_000.0})
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = None
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--candidate-id",
+            plan.candidate_id,
+            "--finalize-pilot-evidence",
+            "--finalize-date",
+            plan.trade_day,
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "Target-weight pilot evidence finalize" in output
+    assert "status: BLOCKED - target_weight_pilot_evidence_finalize_missing_performance" in output
+    assert "source_record_fields:" in output
+    assert "portfolio_metrics_checked: True" in output
+    assert "portfolio_metrics_fields: cash" in output
+    assert "missing_performance_fields: total_value, daily_return" in output
+    assert "artifact:" in output
+    assert "report:" in output
+    assert "next: WAIT for final portfolio performance evidence" in output
+
+
 def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import tools.target_weight_rotation_pilot as twp
