@@ -2520,6 +2520,110 @@ class TestShadowEvidenceNotPromotable:
         assert records[0]["execution_backed"] is True
         assert records[0]["daily_return"] == 0.2
 
+    def test_backfill_same_date_cannot_replace_pilot_paper_record(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        jsonl_path = evidence_dir / "daily_evidence_pilot_backfill_collision.jsonl"
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "pilot_backfill_collision",
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "daily_return": 0.2,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "pilot_backfill_collision",
+            "evidence_mode": "backfill",
+            "session_mode": "shadow_bootstrap",
+            "execution_backed": True,
+            "daily_return": 9.9,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+        records = get_canonical_records("pilot_backfill_collision")
+
+        assert len(records) == 1
+        assert records[0]["evidence_mode"] == "pilot_paper"
+        assert records[0]["session_mode"] == "pilot_paper"
+        assert records[0]["daily_return"] == 0.2
+
+    def test_pilot_paper_same_date_replaces_earlier_backfill_record(self, evidence_dir):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        jsonl_path = evidence_dir / "daily_evidence_backfill_pilot_upgrade.jsonl"
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "backfill_pilot_upgrade",
+            "evidence_mode": "backfill",
+            "session_mode": "shadow_bootstrap",
+            "execution_backed": True,
+            "daily_return": 9.9,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+        _append_jsonl(jsonl_path, {
+            "date": "2026-04-06",
+            "strategy": "backfill_pilot_upgrade",
+            "execution_backed": True,
+            "evidence_mode": "pilot_paper",
+            "session_mode": "pilot_paper",
+            "pilot_authorized": True,
+            "daily_return": 0.2,
+            "benchmark_status": "final",
+            "status": "normal",
+            "anomalies": [],
+        })
+
+        records = get_canonical_records("backfill_pilot_upgrade")
+
+        assert len(records) == 1
+        assert records[0]["evidence_mode"] == "pilot_paper"
+        assert records[0]["session_mode"] == "pilot_paper"
+        assert records[0]["daily_return"] == 0.2
+
+    def test_target_weight_repair_same_date_cannot_replace_verified_pilot_record(
+        self,
+        evidence_dir,
+    ):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        strategy = "target_weight_rotation_collision"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        verified = _target_weight_pilot_proof_record(
+            strategy,
+            record_date="2026-04-06",
+        )
+        verified["daily_return"] = 0.2
+        repaired = _target_weight_pilot_proof_record(
+            strategy,
+            record_date="2026-04-06",
+        )
+        repaired["daily_return"] = 9.9
+        repaired["performance_repair"] = True
+        repaired["promotion_eligible"] = False
+        repaired["promotion_exclusion_reason"] = (
+            "target_weight_repaired_performance_not_promotable"
+        )
+
+        _append_jsonl(jsonl_path, verified)
+        _append_jsonl(jsonl_path, repaired)
+
+        records = get_canonical_records(strategy)
+
+        assert len(records) == 1
+        assert records[0].get("promotion_eligible") is not False
+        assert records[0].get("performance_repair") is not True
+        assert records[0]["daily_return"] == 0.2
+
 
 class TestArtifactQuarantine:
     """운영 reports에 test artifact가 섞이지 않게 격리한다."""
