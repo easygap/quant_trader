@@ -1570,6 +1570,19 @@ def _target_weight_portfolio_metrics_recovery_hint(probe_status: str) -> str:
     return ""
 
 
+def _target_weight_portfolio_snapshot_diagnostics_command(
+    strategy: str,
+    snapshot_date: str | None,
+) -> str:
+    if not strategy or not snapshot_date:
+        return ""
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} "
+        f"--diagnose-portfolio-snapshot --snapshot-date {snapshot_date}"
+    )
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -1872,6 +1885,11 @@ def _target_weight_ops_priority_action(
             probe_recovery_hint = _target_weight_portfolio_metrics_recovery_hint(
                 probe_status
             )
+            snapshot_diagnostics_command = _target_weight_portfolio_snapshot_diagnostics_command(
+                strategy,
+                latest_finalize_report.get("finalize_date")
+                or latest_daily_ops.get("trade_day"),
+            )
             action.update({
                 "command": blocked,
                 "scheduled_command": command,
@@ -1922,6 +1940,9 @@ def _target_weight_ops_priority_action(
                     performance_status.get("missing_fields_after_probe") or []
                 ),
                 "finalize_portfolio_metrics_recovery_hint": probe_recovery_hint,
+                "finalize_portfolio_snapshot_diagnostics_command": (
+                    snapshot_diagnostics_command
+                ),
                 "finalize_report_diagnostics_status": (
                     "present" if diagnostics_present else "missing"
                 ),
