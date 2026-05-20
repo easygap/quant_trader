@@ -2366,6 +2366,18 @@ def _positive_float_from(*values: Any) -> float | None:
     return None
 
 
+def _target_weight_performance_field_usable(field: str, value: Any) -> bool:
+    if field == "total_value":
+        return _positive_float_from(value) is not None
+    if field == "position_count":
+        try:
+            int(value)
+        except (TypeError, ValueError):
+            return False
+        return True
+    return _coerce_float_or_none(value) is not None
+
+
 def _repairable_target_weight_execution_status(
     candidate_id: str,
     record: dict[str, Any],
@@ -2613,6 +2625,10 @@ def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]
             "## Performance Evidence Status",
             "- Source record fields present: "
             f"`{', '.join(performance_status.get('source_record_fields_present') or []) or 'none'}`",
+            "- Source record fields usable: "
+            f"`{', '.join(performance_status.get('source_record_fields_usable') or []) or 'none'}`",
+            "- Source record fields unusable: "
+            f"`{', '.join(performance_status.get('source_record_fields_unusable') or []) or 'none'}`",
             "- Portfolio metrics checked: "
             f"`{performance_status.get('portfolio_metrics_checked', False)}`",
             "- Portfolio metrics fields present: "
@@ -2686,10 +2702,20 @@ def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
     if isinstance(performance_status, dict) and performance_status:
         missing_fields = performance_status.get("missing_fields_after_probe") or []
         source_fields = performance_status.get("source_record_fields_present") or []
+        source_usable_fields = performance_status.get("source_record_fields_usable") or []
+        source_unusable_fields = performance_status.get("source_record_fields_unusable") or []
         probe_fields = performance_status.get("portfolio_metrics_fields_present") or []
         print(
             "  source_record_fields: "
             + (", ".join(str(field) for field in source_fields) or "none")
+        )
+        print(
+            "  source_record_usable_fields: "
+            + (", ".join(str(field) for field in source_usable_fields) or "none")
+        )
+        print(
+            "  source_record_unusable_fields: "
+            + (", ".join(str(field) for field in source_unusable_fields) or "none")
         )
         print(
             "  portfolio_metrics_checked: "
@@ -2818,9 +2844,21 @@ def finalize_target_weight_pilot_evidence(
         "mdd",
         "position_count",
     )
+    source_record_fields_present = [
+        field for field in performance_fields if latest.get(field) is not None
+    ]
+    source_record_fields_usable = [
+        field
+        for field in source_record_fields_present
+        if _target_weight_performance_field_usable(field, latest.get(field))
+    ]
     performance_status = {
-        "source_record_fields_present": [
-            field for field in performance_fields if latest.get(field) is not None
+        "source_record_fields_present": source_record_fields_present,
+        "source_record_fields_usable": source_record_fields_usable,
+        "source_record_fields_unusable": [
+            field
+            for field in source_record_fields_present
+            if field not in source_record_fields_usable
         ],
         "portfolio_metrics_checked": False,
         "portfolio_metrics_fields_present": [],
