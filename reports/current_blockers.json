@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T12:16:37.657768",
+  "generated_at": "2026-05-20T13:05:51.053203",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T12:16:37.657768",
-    "age_days": 0.79,
+    "checked_at": "2026-05-20T13:05:51.053203",
+    "age_days": 0.83,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -130,6 +130,7 @@
         "total_value",
         "daily_return"
       ],
+      "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
       "finalize_report_diagnostics_status": "present"
     },
     {
@@ -204,8 +205,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T12:16:37.657768",
-      "age_days": 0.79,
+      "checked_at": "2026-05-20T13:05:51.053203",
+      "age_days": 0.83,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -413,6 +414,7 @@
         "total_value",
         "daily_return"
       ],
+      "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
       "finalize_report_diagnostics_status": "present"
     }
   },

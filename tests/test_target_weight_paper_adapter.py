@@ -2834,6 +2834,9 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "finalize_portfolio_metrics_probe_reason": (
             "trades exist after previous snapshot but current snapshot is missing"
         ),
+        "finalize_portfolio_metrics_recovery_hint": (
+            "run end-of-day portfolio snapshot capture for the trade day"
+        ),
         "finalize_portfolio_metrics_current_snapshot_found": False,
         "finalize_portfolio_metrics_previous_snapshot_found": True,
         "finalize_portfolio_metrics_previous_snapshot_at": "2026-04-09T15:35:00",
@@ -2882,8 +2885,7 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     assert "Scheduled priority command:" in output
     assert finalize_command in output
     assert (
-        "Operator next action: WAIT for final portfolio performance evidence, "
-        "then rerun scheduled priority command:"
+        "Operator next action: RUN portfolio snapshot capture before finalize:"
     ) in output
     assert "Performance evidence guard: waiting for total_value/daily_return" in output
     assert "Finalize report status: blocked" in output
@@ -2895,6 +2897,10 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     assert (
         "Portfolio metrics probe reason: trades exist after previous snapshot "
         "but current snapshot is missing"
+    ) in output
+    assert (
+        "Portfolio metrics recovery: run end-of-day portfolio snapshot capture "
+        "for the trade day"
     ) in output
     assert "Portfolio metrics snapshot found: current=False previous=True" in output
     assert "Portfolio metrics previous snapshot at: 2026-04-09T15:35:00" in output
@@ -2994,6 +3000,102 @@ def test_paper_pilot_control_status_refreshes_legacy_finalize_diagnostics(
         "Operator next action: RUN no-order finalize diagnostics refresh"
         in output
     )
+    assert "WAIT for final portfolio performance evidence" not in output
+
+
+def test_paper_pilot_control_status_guides_missing_snapshot_history(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--finalize-pilot-evidence --finalize-date 2026-04-10"
+    )
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "invalid_execution_days": 1,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "finalize_pilot_evidence": finalize_command,
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action = {
+        "strategy": strategy,
+        "source_path": summary_path.as_posix(),
+        "daily_ops_status": "PILOT_EVIDENCE_INVALID",
+        "daily_ops_trade_day": "2026-04-10",
+        "desc": "portfolio snapshot 이력 복구 필요",
+        "command": (
+            "# blocked: final performance evidence unavailable; "
+            "target_weight_pilot_evidence_finalize_missing_performance: "
+            "total_value/daily_return unavailable"
+        ),
+        "scheduled_command": finalize_command,
+        "performance_evidence_guard": (
+            "target_weight_pilot_evidence_finalize_missing_performance"
+        ),
+        "finalize_report_diagnostics_status": "present",
+        "finalize_missing_performance_fields": ["total_value", "daily_return"],
+        "finalize_portfolio_metrics_checked": True,
+        "finalize_portfolio_metrics_probe_status": "missing_snapshot_history",
+        "finalize_portfolio_metrics_probe_reason": (
+            "no portfolio snapshot exists for account_key"
+        ),
+        "finalize_portfolio_metrics_recovery_hint": (
+            "restore or create portfolio snapshot history for the target-weight "
+            "account_key"
+        ),
+        "finalize_portfolio_metrics_current_snapshot_found": False,
+        "finalize_portfolio_metrics_previous_snapshot_found": False,
+        "finalize_portfolio_metrics_trades_today": 0,
+        "finalize_portfolio_metrics_trades_since_previous": 0,
+        "finalize_portfolio_metrics_fields_present": [],
+    }
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "commands": {},
+                    "current_priority_action": action,
+                },
+                "next_actions": [action],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Portfolio metrics probe: missing_snapshot_history" in output
+    assert "Portfolio metrics recovery: restore or create portfolio snapshot history" in output
+    assert (
+        "Operator next action: RESTORE portfolio snapshot history before finalize"
+        in output
+    )
+    assert finalize_command in output
     assert "WAIT for final portfolio performance evidence" not in output
 
 
