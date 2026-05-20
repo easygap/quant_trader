@@ -915,6 +915,8 @@ def _target_weight_operator_next_action(
     priority_failure_reason: str,
     priority_wait_guard: str,
     priority_diagnostics_status: str,
+    priority_probe_status: str,
+    priority_recovery_hint: str,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -943,6 +945,27 @@ def _target_weight_operator_next_action(
             return (
                 "RUN no-order finalize diagnostics refresh, then regenerate "
                 f"current blockers: {recovery_command}"
+            )
+        if priority_probe_status == "missing_snapshot_history" and recovery_command:
+            hint = (
+                priority_recovery_hint
+                or "restore or create portfolio snapshot history for the account_key"
+            )
+            return (
+                "RESTORE portfolio snapshot history before finalize: "
+                f"{hint}; then rerun scheduled priority command: {recovery_command}"
+            )
+        if (
+            priority_probe_status == "missing_current_snapshot_after_trades"
+            and recovery_command
+        ):
+            hint = (
+                priority_recovery_hint
+                or "run end-of-day portfolio snapshot capture for the trade day"
+            )
+            return (
+                "RUN portfolio snapshot capture before finalize: "
+                f"{hint}; then rerun scheduled priority command: {recovery_command}"
             )
         if recovery_command:
             return (
@@ -1400,6 +1423,12 @@ def _print_target_weight_daily_ops_status(
     priority_diagnostics_status = str(
         priority_action.get("finalize_report_diagnostics_status") or ""
     ).strip()
+    priority_probe_status = str(
+        priority_action.get("finalize_portfolio_metrics_probe_status") or ""
+    ).strip()
+    priority_recovery_hint = str(
+        priority_action.get("finalize_portfolio_metrics_recovery_hint") or ""
+    ).strip()
     if priority_desc or priority_command or priority_scheduled_command:
         print(f"    Current blockers priority: {priority_desc or 'N/A'}")
         priority_evidence = []
@@ -1488,6 +1517,8 @@ def _print_target_weight_daily_ops_status(
                     print(f"    Portfolio metrics probe: {probe_status}")
                 if probe_reason:
                     print(f"    Portfolio metrics probe reason: {probe_reason}")
+                if priority_recovery_hint:
+                    print(f"    Portfolio metrics recovery: {priority_recovery_hint}")
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
@@ -1528,6 +1559,8 @@ def _print_target_weight_daily_ops_status(
         else "",
         priority_wait_guard=priority_wait_guard,
         priority_diagnostics_status=priority_diagnostics_status,
+        priority_probe_status=priority_probe_status,
+        priority_recovery_hint=priority_recovery_hint,
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),
