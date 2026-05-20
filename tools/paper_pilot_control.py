@@ -1761,6 +1761,13 @@ def _print_target_weight_daily_ops_status(
                                 "    Snapshot DB restore safety: "
                                 "authoritative confirmation required before DB write"
                             )
+                        if priority_action.get(
+                            "snapshot_db_restore_package_verify_command"
+                        ):
+                            print(
+                                "    Snapshot DB restore verify command: "
+                                f"{priority_action.get('snapshot_db_restore_package_verify_command')}"
+                            )
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
