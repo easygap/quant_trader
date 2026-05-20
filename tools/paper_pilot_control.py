@@ -1433,6 +1433,7 @@ def _print_target_weight_daily_ops_status(
         priority_action.get("scheduled_follow_up") or priority_action.get("follow_up") or ""
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
+    priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
     priority_diagnostics_status = str(
         priority_action.get("finalize_report_diagnostics_status") or ""
     ).strip()
@@ -1476,6 +1477,18 @@ def _print_target_weight_daily_ops_status(
             priority_scheduled_command,
         }:
             print(f"    Priority follow-up: {priority_follow_up}")
+        if priority_db_guard == "target_weight_db_persistence_proof_required":
+            print("    DB persistence guard: trade_history/positions proof required")
+            if priority_action.get("blocked_finalize_command"):
+                print(
+                    "    Finalize command guard: "
+                    f"{priority_action.get('blocked_finalize_command')}"
+                )
+            if priority_action.get("blocked_repair_command"):
+                print(
+                    "    Repair command guard: "
+                    f"{priority_action.get('blocked_repair_command')}"
+                )
         if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
             print("    Performance evidence guard: waiting for total_value/daily_return")
             if priority_diagnostics_status:
