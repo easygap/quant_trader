@@ -914,6 +914,7 @@ def _target_weight_operator_next_action(
     priority_scheduled_command: str,
     priority_failure_reason: str,
     priority_wait_guard: str,
+    priority_diagnostics_status: str,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -938,6 +939,11 @@ def _target_weight_operator_next_action(
             )
     if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
         recovery_command = priority_scheduled_command or priority_command
+        if priority_diagnostics_status == "missing" and recovery_command:
+            return (
+                "RUN no-order finalize diagnostics refresh, then regenerate "
+                f"current blockers: {recovery_command}"
+            )
         if recovery_command:
             return (
                 "WAIT for final portfolio performance evidence, then rerun "
@@ -1391,6 +1397,9 @@ def _print_target_weight_daily_ops_status(
         priority_action.get("scheduled_follow_up") or priority_action.get("follow_up") or ""
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
+    priority_diagnostics_status = str(
+        priority_action.get("finalize_report_diagnostics_status") or ""
+    ).strip()
     if priority_desc or priority_command or priority_scheduled_command:
         print(f"    Current blockers priority: {priority_desc or 'N/A'}")
         priority_evidence = []
@@ -1424,6 +1433,16 @@ def _print_target_weight_daily_ops_status(
             print(f"    Priority follow-up: {priority_follow_up}")
         if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
             print("    Performance evidence guard: waiting for total_value/daily_return")
+            if priority_diagnostics_status:
+                print(
+                    "    Finalize diagnostics: "
+                    f"{priority_diagnostics_status}"
+                )
+            if priority_action.get("finalize_diagnostics_refresh_command"):
+                print(
+                    "    Diagnostics refresh command: "
+                    f"{priority_action.get('finalize_diagnostics_refresh_command')}"
+                )
             if priority_action.get("finalize_report_status"):
                 print(
                     "    Finalize report status: "
@@ -1464,6 +1483,7 @@ def _print_target_weight_daily_ops_status(
         if priority_action.get("source") == "latest_daily_ops_failure"
         else "",
         priority_wait_guard=priority_wait_guard,
+        priority_diagnostics_status=priority_diagnostics_status,
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),

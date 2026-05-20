@@ -2884,6 +2884,98 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     assert summary_path.as_posix() in output
 
 
+def test_paper_pilot_control_status_refreshes_legacy_finalize_diagnostics(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--finalize-pilot-evidence --finalize-date 2026-04-10"
+    )
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "shadow_days": 2,
+                    "invalid_execution_days": 1,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: evidence invalid",
+                    "finalize_pilot_evidence": finalize_command,
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action = {
+        "strategy": strategy,
+        "source_path": summary_path.as_posix(),
+        "daily_ops_status": "PILOT_EVIDENCE_INVALID",
+        "daily_ops_trade_day": "2026-04-10",
+        "desc": "구버전 finalize report 진단 보강",
+        "command": finalize_command,
+        "scheduled_command": finalize_command,
+        "performance_evidence_guard": (
+            "target_weight_pilot_evidence_finalize_missing_performance"
+        ),
+        "finalize_report_diagnostics_status": "missing",
+        "finalize_diagnostics_refresh_command": finalize_command,
+        "finalize_report_source": (
+            "reports/paper_runtime/"
+            "target_weight_pilot_evidence_finalize_target_weight_candidate_2026-04-10.json"
+        ),
+        "verified_pilot_days": 0,
+        "target_days": 60,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+    }
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "commands": {
+                        "regenerate_current_blockers": (
+                            "python tools/evaluate_and_promote.py --current-blockers"
+                        ),
+                    },
+                    "current_priority_action": action,
+                },
+                "next_actions": [action],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Finalize diagnostics: missing" in output
+    assert "Diagnostics refresh command:" in output
+    assert finalize_command in output
+    assert (
+        "Operator next action: RUN no-order finalize diagnostics refresh"
+        in output
+    )
+    assert "WAIT for final portfolio performance evidence" not in output
+
+
 def test_target_weight_effective_execution_status_labels_ready_and_blockers():
     import tools.paper_pilot_control as ppc
 

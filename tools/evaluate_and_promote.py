@@ -1543,6 +1543,23 @@ def _target_weight_finalize_waits_for_performance(report: dict | None) -> bool:
     return "target_weight_pilot_evidence_finalize_missing_performance" in reason
 
 
+def _target_weight_finalize_report_has_performance_diagnostics(report: dict | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    status = report.get("performance_evidence_status")
+    if not isinstance(status, dict):
+        return False
+    return any(
+        key in status
+        for key in (
+            "source_record_fields_present",
+            "portfolio_metrics_checked",
+            "portfolio_metrics_fields_present",
+            "missing_fields_after_probe",
+        )
+    )
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -1827,6 +1844,11 @@ def _target_weight_ops_priority_action(
         if finalize_first and _target_weight_finalize_waits_for_performance(latest_finalize_report):
             reason = str(latest_finalize_report.get("reason") or "").strip()
             blocked = f"# blocked: final performance evidence unavailable; {reason}"
+            diagnostics_present = (
+                _target_weight_finalize_report_has_performance_diagnostics(
+                    latest_finalize_report
+                )
+            )
             performance_status = (
                 latest_finalize_report.get("performance_evidence_status")
                 if isinstance(latest_finalize_report, dict)
@@ -1856,7 +1878,16 @@ def _target_weight_ops_priority_action(
                 "finalize_missing_performance_fields": (
                     performance_status.get("missing_fields_after_probe") or []
                 ),
+                "finalize_report_diagnostics_status": (
+                    "present" if diagnostics_present else "missing"
+                ),
             })
+            if not diagnostics_present:
+                action.update({
+                    "command": command,
+                    "requires": "finalize performance diagnostics refresh",
+                    "finalize_diagnostics_refresh_command": command,
+                })
         return action
 
     if status == "READY_TO_EXECUTE":
