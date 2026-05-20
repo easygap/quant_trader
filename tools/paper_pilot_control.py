@@ -1697,6 +1697,29 @@ def _print_target_weight_daily_ops_status(
                         "db_persistence="
                         f"{bool(priority_action.get('snapshot_artifact_db_persistence_complete'))}"
                     )
+                if priority_action.get("snapshot_db_restore_status"):
+                    print(
+                        "    Snapshot DB restore checklist: "
+                        f"status={priority_action.get('snapshot_db_restore_status')} "
+                        f"required={bool(priority_action.get('snapshot_db_restore_required'))} "
+                        "trade_rows="
+                        f"{priority_action.get('snapshot_db_restore_trade_rows_current', 0)}/"
+                        f"{priority_action.get('snapshot_db_restore_trade_rows_expected', 0)} "
+                        "positions="
+                        f"{priority_action.get('snapshot_db_restore_positions_current', 0)}/"
+                        f"{priority_action.get('snapshot_db_restore_position_symbols_expected', 0)}"
+                    )
+                    missing_symbols = (
+                        priority_action.get(
+                            "snapshot_db_restore_missing_or_unverified_symbols"
+                        )
+                        or []
+                    )
+                    if missing_symbols:
+                        print(
+                            "    Snapshot DB restore missing symbols: "
+                            + ", ".join(str(symbol) for symbol in missing_symbols)
+                        )
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
