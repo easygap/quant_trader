@@ -2820,6 +2820,15 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "performance_evidence_guard": (
             "target_weight_pilot_evidence_finalize_missing_performance"
         ),
+        "finalize_report_source": (
+            "reports/paper_runtime/"
+            "target_weight_pilot_evidence_finalize_target_weight_candidate_2026-04-10.json"
+        ),
+        "finalize_report_generated_at": "2026-04-10T15:40:00",
+        "finalize_report_status": "blocked",
+        "finalize_missing_performance_fields": ["total_value", "daily_return"],
+        "finalize_portfolio_metrics_checked": True,
+        "finalize_portfolio_metrics_fields_present": [],
         "verified_pilot_days": 0,
         "target_days": 60,
         "shadow_days": 2,
@@ -2865,6 +2874,12 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "Operator next action: WAIT for final portfolio performance evidence, "
         "then rerun scheduled priority command:"
     ) in output
+    assert "Performance evidence guard: waiting for total_value/daily_return" in output
+    assert "Finalize report status: blocked" in output
+    assert "Finalize report generated at: 2026-04-10T15:40:00" in output
+    assert "Missing performance fields: total_value, daily_return" in output
+    assert "Portfolio metrics probe fields: none" in output
+    assert "Finalize report source: reports/paper_runtime/" in output
     assert "RUN current blockers priority command" not in output
     assert summary_path.as_posix() in output
 
@@ -4822,6 +4837,52 @@ def test_finalize_target_weight_pilot_evidence_appends_promotable_record(monkeyp
     assert progress["latest_verified_pilot_date"] == plan.trade_day
 
 
+def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagnostics(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {"cash": 1_000_000.0})
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = None
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    with pytest.raises(ValueError, match="target_weight_pilot_evidence_finalize_missing_performance"):
+        twp.finalize_target_weight_pilot_evidence(
+            candidate_id=plan.candidate_id,
+            finalize_date=plan.trade_day,
+            output_dir=tmp_path / "paper_runtime",
+        )
+
+    report_path = next((tmp_path / "paper_runtime").glob("target_weight_pilot_evidence_finalize_*.json"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    performance_status = report["performance_evidence_status"]
+    assert report["status"] == "blocked"
+    assert report["finalized_fields"] == {"cash": 1_000_000.0}
+    assert performance_status["source_record_fields_present"]
+    assert "total_value" not in performance_status["source_record_fields_present"]
+    assert "daily_return" not in performance_status["source_record_fields_present"]
+    assert performance_status["portfolio_metrics_checked"] is True
+    assert performance_status["portfolio_metrics_fields_present"] == ["cash"]
+    assert performance_status["missing_fields_after_probe"] == [
+        "total_value",
+        "daily_return",
+    ]
+
+    report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
+    assert "## Performance Evidence Status" in report_md
+    assert "Missing fields after probe: `total_value, daily_return`" in report_md
+
+
 def test_repair_target_weight_pilot_evidence_rejects_incomplete_execution(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import tools.target_weight_rotation_pilot as twp
@@ -6360,6 +6421,77 @@ def test_build_target_weight_daily_ops_summary_stops_repair_loop_after_repaired_
     assert len(summary["decision"]["post_evidence_diagnostics"]) == 2
     assert f"Not before date: `{summary['next_operator_trade_day']}`" in report
     assert "Premature run guard: `target_weight_future_as_of_date_blocked`" in report
+
+
+def test_build_target_weight_daily_ops_summary_prefers_finalize_for_missing_performance():
+    from tools.target_weight_rotation_pilot import build_target_weight_daily_ops_summary
+
+    plan = _adapter_plan()
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "blocking_reasons": ["execution_idempotency: duplicate execution"],
+        "operator_commands": {
+            "finalize_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
+            ),
+            "repair_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--repair-pilot-evidence --repair-date {plan.trade_day}"
+            ),
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+        "invalid_reasons": {"target_weight_daily_return_missing": 1},
+        "non_promotable_days": 0,
+        "total_canonical_records": 3,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": None,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest={"manifest_hash": "m" * 64},
+        evidence_progress=progress,
+    )
+
+    assert summary["status"] == "PILOT_EVIDENCE_INVALID"
+    assert "final benchmark/portfolio evidence" in summary["next_step"]
+    assert summary["operator_commands"]["finalize_pilot_evidence"].endswith(
+        f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
+    )
+    assert summary["operator_commands"]["repair_pilot_evidence"].startswith(
+        "# fallback: use only if finalize cannot produce promotable proof"
+    )
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
