@@ -1476,6 +1476,34 @@ def _print_target_weight_daily_ops_status(
                     + ", ".join(str(field) for field in missing_fields)
                 )
             if priority_action.get("finalize_portfolio_metrics_checked"):
+                probe_status = str(
+                    priority_action.get("finalize_portfolio_metrics_probe_status")
+                    or ""
+                ).strip()
+                probe_reason = str(
+                    priority_action.get("finalize_portfolio_metrics_probe_reason")
+                    or ""
+                ).strip()
+                if probe_status:
+                    print(f"    Portfolio metrics probe: {probe_status}")
+                if probe_reason:
+                    print(f"    Portfolio metrics probe reason: {probe_reason}")
+                print(
+                    "    Portfolio metrics snapshot found: "
+                    f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
+                    f"previous={bool(priority_action.get('finalize_portfolio_metrics_previous_snapshot_found'))}"
+                )
+                if priority_action.get("finalize_portfolio_metrics_previous_snapshot_at"):
+                    print(
+                        "    Portfolio metrics previous snapshot at: "
+                        f"{priority_action.get('finalize_portfolio_metrics_previous_snapshot_at')}"
+                    )
+                print(
+                    "    Portfolio metrics trades: "
+                    f"today={priority_action.get('finalize_portfolio_metrics_trades_today') or 0} "
+                    "since_previous="
+                    f"{priority_action.get('finalize_portfolio_metrics_trades_since_previous') or 0}"
+                )
                 present_fields = (
                     priority_action.get("finalize_portfolio_metrics_fields_present")
                     or []

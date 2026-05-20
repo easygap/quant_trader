@@ -1537,15 +1537,20 @@ class TestCashOnlyPortfolioMetrics:
 
     def test_truly_missing_returns_empty(self, fresh_db):
         """snapshot이 한 번도 없으면 {} 반환 (진짜 데이터 부재)."""
-        from core.paper_evidence import _collect_portfolio_metrics
+        from core.paper_evidence import _collect_portfolio_metrics, _probe_portfolio_metrics
 
         result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
         assert result == {}
+        probe = _probe_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert probe["_portfolio_probe_status"] == "missing_snapshot_history"
+        assert probe["_portfolio_probe_current_snapshot_found"] is False
+        assert probe["_portfolio_probe_previous_snapshot_found"] is False
+        assert probe["_portfolio_probe_trades_today"] == 0
 
     def test_trades_exist_blocks_inference(self, fresh_db):
         """직전 snapshot 이후 거래가 있으면 추론하지 않음 → {} 반환."""
         from database.models import PortfolioSnapshot, TradeHistory, get_session
-        from core.paper_evidence import _collect_portfolio_metrics
+        from core.paper_evidence import _collect_portfolio_metrics, _probe_portfolio_metrics
 
         session = get_session()
         session.add(PortfolioSnapshot(
@@ -1570,6 +1575,12 @@ class TestCashOnlyPortfolioMetrics:
 
         result = _collect_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
         assert result == {}, "trades exist → should not infer"
+        probe = _probe_portfolio_metrics("scoring", datetime(2026, 4, 8, 15, 35))
+        assert probe["_portfolio_probe_status"] == "missing_current_snapshot_after_trades"
+        assert probe["_portfolio_probe_previous_snapshot_found"] is True
+        assert probe["_portfolio_probe_previous_snapshot_at"] == "2026-04-06T15:35:00"
+        assert probe["_portfolio_probe_trades_today"] == 0
+        assert probe["_portfolio_probe_trades_since_previous"] == 1
 
     def test_same_day_snapshot_takes_priority(self, fresh_db):
         """당일 snapshot이 있으면 fallback 안 쓰고 그대로 반환."""
