@@ -1720,6 +1720,47 @@ def _print_target_weight_daily_ops_status(
                             "    Snapshot DB restore missing symbols: "
                             + ", ".join(str(symbol) for symbol in missing_symbols)
                         )
+                    if priority_action.get("snapshot_db_restore_candidate_package_generated"):
+                        print(
+                            "    Snapshot DB restore candidate package: "
+                            "generated=True "
+                            "trade_rows="
+                            f"{priority_action.get('snapshot_db_restore_trade_history_candidate_rows', 0)} "
+                            "positions="
+                            f"{priority_action.get('snapshot_db_restore_position_candidate_rows', 0)}"
+                        )
+                        if priority_action.get("snapshot_db_restore_candidate_manifest"):
+                            print(
+                                "    Snapshot DB restore candidate manifest: "
+                                f"{priority_action.get('snapshot_db_restore_candidate_manifest')}"
+                            )
+                        if priority_action.get(
+                            "snapshot_db_restore_trade_history_candidate_csv"
+                        ):
+                            print(
+                                "    Snapshot DB restore trade history CSV: "
+                                f"{priority_action.get('snapshot_db_restore_trade_history_candidate_csv')}"
+                            )
+                        if priority_action.get("snapshot_db_restore_positions_candidate_csv"):
+                            print(
+                                "    Snapshot DB restore positions CSV: "
+                                f"{priority_action.get('snapshot_db_restore_positions_candidate_csv')}"
+                            )
+                        skipped_zero_positions = priority_action.get(
+                            "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols"
+                        ) or []
+                        if skipped_zero_positions:
+                            print(
+                                "    Snapshot DB restore skipped zero-quantity positions: "
+                                + ", ".join(str(symbol) for symbol in skipped_zero_positions)
+                            )
+                        if priority_action.get(
+                            "snapshot_db_restore_candidate_requires_authoritative_confirmation"
+                        ):
+                            print(
+                                "    Snapshot DB restore safety: "
+                                "authoritative confirmation required before DB write"
+                            )
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "

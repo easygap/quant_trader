@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -3164,6 +3165,201 @@ def _target_weight_db_restore_checklist(
     }
 
 
+def _write_csv_rows(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: row.get(column, "") for column in columns})
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _target_weight_db_restore_candidate_package(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """DB 쓰기 없이 authoritative 복구 대조용 후보 CSV 패키지를 만든다."""
+    restore = report.get("db_restore_checklist") or {}
+    if not isinstance(restore, dict) or not restore.get("checked"):
+        return {
+            "generated": False,
+            "reason": "db_restore_checklist unavailable",
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "candidate_only": True,
+            "requires_authoritative_confirmation": True,
+        }
+    if not bool(restore.get("restore_required")):
+        return {
+            "generated": False,
+            "reason": "db restore is not required",
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "candidate_only": True,
+            "requires_authoritative_confirmation": True,
+        }
+
+    candidate_id = str(report.get("candidate_id") or "target_weight")
+    snapshot_date = str(report.get("snapshot_date") or "unknown")
+    candidate = _safe_path_component(candidate_id)
+    date_part = _safe_path_component(snapshot_date)
+    stem = f"target_weight_db_restore_candidates_{candidate}_{date_part}"
+    trade_history_path = output_dir / f"{stem}_trade_history.csv"
+    positions_path = output_dir / f"{stem}_positions.csv"
+    manifest_path = output_dir / f"{stem}_manifest.json"
+
+    trade_history = restore.get("trade_history") or {}
+    positions = restore.get("positions") or {}
+    raw_trade_rows = [
+        row for row in (trade_history.get("rows") or []) if isinstance(row, dict)
+    ]
+    trade_rows: list[dict[str, Any]] = []
+    for row in raw_trade_rows:
+        trade_rows.append({
+            "account_key": row.get("account_key") or candidate_id,
+            "symbol": normalize_symbol(str(row.get("symbol") or "")),
+            "action": str(row.get("action") or "").upper(),
+            "price": row.get("price") or "",
+            "quantity": _coerce_int_or_zero(row.get("quantity")),
+            "total_amount": row.get("total_amount") or "",
+            "commission": row.get("commission") or 0,
+            "tax": row.get("tax") or 0,
+            "slippage": row.get("slippage") or 0,
+            "strategy": row.get("strategy") or candidate_id,
+            "mode": row.get("mode") or "paper",
+            "executed_at": row.get("executed_at") or snapshot_date,
+            "execution_session_id": row.get("execution_session_id") or "",
+            "order_id": row.get("order_id") or "",
+            "source": "artifact_candidate_requires_authoritative_confirmation",
+            "candidate_only": True,
+            "requires_authoritative_confirmation": True,
+        })
+
+    expected_quantities = positions.get("expected_quantities") or {}
+    if not isinstance(expected_quantities, dict):
+        expected_quantities = {}
+    price_by_symbol: dict[str, float] = {}
+    for row in trade_rows:
+        symbol = normalize_symbol(str(row.get("symbol") or ""))
+        if not symbol:
+            continue
+        try:
+            price = float(row.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if price > 0:
+            price_by_symbol[symbol] = price
+    position_rows: list[dict[str, Any]] = []
+    skipped_zero_quantity_symbols: list[str] = []
+    for symbol, raw_quantity in sorted(expected_quantities.items()):
+        normalized = normalize_symbol(str(symbol))
+        quantity = _coerce_int_or_zero(raw_quantity)
+        if not normalized:
+            continue
+        if quantity <= 0:
+            skipped_zero_quantity_symbols.append(normalized)
+            continue
+        avg_price = price_by_symbol.get(normalized, "")
+        total_invested = ""
+        if isinstance(avg_price, (int, float)):
+            total_invested = avg_price * quantity
+        position_rows.append({
+            "account_key": candidate_id,
+            "symbol": normalized,
+            "quantity": quantity,
+            "avg_price": avg_price,
+            "total_invested": total_invested,
+            "strategy": candidate_id,
+            "source": "artifact_candidate_requires_authoritative_confirmation",
+            "candidate_only": True,
+            "requires_authoritative_confirmation": True,
+        })
+
+    trade_columns = [
+        "account_key",
+        "symbol",
+        "action",
+        "price",
+        "quantity",
+        "total_amount",
+        "commission",
+        "tax",
+        "slippage",
+        "strategy",
+        "mode",
+        "executed_at",
+        "execution_session_id",
+        "order_id",
+        "source",
+        "candidate_only",
+        "requires_authoritative_confirmation",
+    ]
+    position_columns = [
+        "account_key",
+        "symbol",
+        "quantity",
+        "avg_price",
+        "total_invested",
+        "strategy",
+        "source",
+        "candidate_only",
+        "requires_authoritative_confirmation",
+    ]
+    _write_csv_rows(trade_history_path, trade_rows, trade_columns)
+    _write_csv_rows(positions_path, position_rows, position_columns)
+
+    manifest = {
+        "artifact_type": "target_weight_db_restore_candidate_package",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "status": restore.get("status") or "unknown",
+        "restore_required": bool(restore.get("restore_required")),
+        "execution_session_id": restore.get("execution_session_id") or "",
+        "trade_history_candidate_csv": trade_history_path.as_posix(),
+        "positions_candidate_csv": positions_path.as_posix(),
+        "trade_history_candidate_rows": len(trade_rows),
+        "position_candidate_rows": len(position_rows),
+        "position_candidate_skipped_zero_quantity_symbols": (
+            skipped_zero_quantity_symbols
+        ),
+        "trade_history_expected_rows": _coerce_int_or_zero(
+            trade_history.get("expected_row_count")
+        ),
+        "position_expected_symbols": _coerce_int_or_zero(
+            positions.get("expected_symbol_count")
+        ),
+        "db_write_enabled": False,
+        "portfolio_snapshot_write_enabled": False,
+        "candidate_only": True,
+        "requires_authoritative_confirmation": True,
+        "manifest_path": manifest_path.as_posix(),
+        "generated": True,
+        "safety_notice": (
+            "CSV rows are artifact-derived candidates for reconciliation only; "
+            "confirm against authoritative broker/DB evidence before any DB restore"
+        ),
+    }
+    manifest["trade_history_candidate_csv_sha256"] = _file_sha256(trade_history_path)
+    manifest["positions_candidate_csv_sha256"] = _file_sha256(positions_path)
+    manifest["manifest_hash"] = _stable_manifest_hash(manifest)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def _target_weight_snapshot_recovery_readiness(
     *,
     latest_record: dict | None,
@@ -3277,6 +3473,7 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
     restore = report.get("db_restore_checklist") or {}
     restore_trade_history = restore.get("trade_history") or {}
     restore_positions = restore.get("positions") or {}
+    restore_package = report.get("db_restore_candidate_package") or {}
     commands = report.get("operator_commands") or {}
     lines = [
         "# Target-weight Portfolio Snapshot Diagnostics",
@@ -3360,6 +3557,17 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         "- Missing or unverified position symbols: "
         f"`{', '.join(restore_positions.get('missing_or_unverified_symbols') or []) or 'none'}`",
         "- Safety: `db_write_enabled=False portfolio_snapshot_write_enabled=False artifact_only_snapshot_allowed=False`",
+        "",
+        "## DB Restore Candidate Package",
+        f"- Generated: `{restore_package.get('generated', False)}`",
+        f"- Manifest: `{restore_package.get('manifest_path') or 'none'}`",
+        f"- Trade history CSV: `{restore_package.get('trade_history_candidate_csv') or 'none'}`",
+        f"- Positions CSV: `{restore_package.get('positions_candidate_csv') or 'none'}`",
+        "- Position candidates skipped zero quantity: "
+        f"`{', '.join(restore_package.get('position_candidate_skipped_zero_quantity_symbols') or []) or 'none'}`",
+        f"- Candidate only: `{restore_package.get('candidate_only', True)}`",
+        f"- Requires authoritative confirmation: `{restore_package.get('requires_authoritative_confirmation', True)}`",
+        f"- Safety notice: {restore_package.get('safety_notice') or 'authoritative confirmation required before DB restore'}",
         "",
         "## Operator Commands",
     ]
@@ -3630,6 +3838,9 @@ def diagnose_target_weight_portfolio_snapshot(
             "existing_records_overwritten": False,
         },
     }
+    report["db_restore_candidate_package"] = (
+        _target_weight_db_restore_candidate_package(report, output_dir=output_dir)
+    )
     report["diagnostics_hash"] = _stable_manifest_hash(report)
     json_path, md_path = write_target_weight_portfolio_snapshot_diagnostics_report(
         report,
@@ -3649,6 +3860,7 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
     restore = report.get("db_restore_checklist") or {}
     restore_trade_history = restore.get("trade_history") or {}
     restore_positions = restore.get("positions") or {}
+    restore_package = report.get("db_restore_candidate_package") or {}
     print(
         "  source_record_fields: "
         + (", ".join(str(field) for field in source.get("fields_present") or []) or "none")
@@ -3760,6 +3972,25 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
             f"positions_expected={restore_positions.get('expected_symbol_count', 0)} "
             f"positions_current={restore_positions.get('current_db_position_count', 0)}"
         )
+    if restore_package:
+        print(
+            "  db_restore_candidate_package: "
+            f"generated={bool(restore_package.get('generated'))} "
+            f"trade_rows={restore_package.get('trade_history_candidate_rows', 0)} "
+            f"positions={restore_package.get('position_candidate_rows', 0)}"
+        )
+        if restore_package.get("manifest_path"):
+            print(f"  db_restore_candidate_manifest: {restore_package.get('manifest_path')}")
+        if restore_package.get("trade_history_candidate_csv"):
+            print(
+                "  db_restore_candidate_trade_history_csv: "
+                f"{restore_package.get('trade_history_candidate_csv')}"
+            )
+        if restore_package.get("positions_candidate_csv"):
+            print(
+                "  db_restore_candidate_positions_csv: "
+                f"{restore_package.get('positions_candidate_csv')}"
+            )
     if report.get("recovery_hint"):
         print(f"  recovery_hint: {report.get('recovery_hint')}")
     if report.get("recovery_guard"):
