@@ -407,6 +407,118 @@ def _validate_target_weight_evidence_summary(
     return issues
 
 
+def _validate_target_weight_source_records(
+    strategy_name: str,
+    evidence: dict[str, Any],
+    *,
+    promotion_base: Path,
+    evidence_base: Path,
+    canonical_params_hash: str | None,
+    canonical_metadata: dict[str, Any],
+) -> list[str]:
+    """live 직전에 target-weight 원본 pilot evidence proof를 다시 검증한다."""
+    if not _is_target_weight_strategy(strategy_name, canonical_metadata):
+        return []
+
+    try:
+        from core.paper_evidence import (
+            _select_promotion_source_records,
+            _split_target_weight_promotion_records,
+            _target_weight_record_params_hash,
+        )
+    except Exception as exc:
+        return [f"target-weight 원본 pilot evidence verifier 로드 실패: {exc}"]
+
+    try:
+        _selected_records, _all_records, execution_records, target_weight_required = (
+            _select_promotion_source_records(
+                strategy_name,
+                canonical_metadata=canonical_metadata,
+                promotion_dir=promotion_base,
+                evidence_dir=evidence_base,
+            )
+        )
+    except Exception as exc:
+        return [f"target-weight 원본 pilot evidence 재계산 실패: {exc}"]
+
+    if not target_weight_required:
+        return []
+
+    valid_records, invalid_records, invalid_reasons = _split_target_weight_promotion_records(
+        strategy_name,
+        execution_records,
+    )
+    issues: list[str] = []
+    valid_days = len(valid_records)
+    execution_days = len(execution_records)
+    package_summary = evidence.get("target_weight_evidence") or {}
+    package_valid_days = _as_int(package_summary.get("valid_pilot_days"))
+    package_invalid_days = _as_int(package_summary.get("invalid_days"))
+    package_top_level_valid_days = _as_int(evidence.get("target_weight_verified_pilot_days"))
+    package_top_level_invalid_days = _as_int(evidence.get("target_weight_invalid_days"))
+
+    if valid_days < 60:
+        issues.append(
+            "target-weight 원본 verified pilot_paper evidence 60영업일 미달 "
+            f"(valid={valid_days}, execution={execution_days})."
+        )
+    if invalid_records:
+        issues.append(
+            "target-weight 원본 invalid execution evidence 존재: "
+            f"{len(invalid_records)} days reasons={invalid_reasons}"
+        )
+    if package_valid_days is not None and package_valid_days != valid_days:
+        issues.append(
+            "target-weight package valid_pilot_days와 원본 proof 재계산 불일치: "
+            f"package={package_valid_days}, source={valid_days}."
+        )
+    if (
+        package_top_level_valid_days is not None
+        and package_top_level_valid_days != valid_days
+    ):
+        issues.append(
+            "target-weight package target_weight_verified_pilot_days와 "
+            "원본 proof 재계산 불일치: "
+            f"package={package_top_level_valid_days}, source={valid_days}."
+        )
+    if package_invalid_days is not None and package_invalid_days != len(invalid_records):
+        issues.append(
+            "target-weight package invalid_days와 원본 proof 재계산 불일치: "
+            f"package={package_invalid_days}, source={len(invalid_records)}."
+        )
+    if (
+        package_top_level_invalid_days is not None
+        and package_top_level_invalid_days != len(invalid_records)
+    ):
+        issues.append(
+            "target-weight package target_weight_invalid_days와 "
+            "원본 proof 재계산 불일치: "
+            f"package={package_top_level_invalid_days}, source={len(invalid_records)}."
+        )
+
+    source_params_hashes = sorted({
+        params_hash
+        for record in valid_records
+        if (params_hash := _target_weight_record_params_hash(record))
+    })
+    if not source_params_hashes:
+        issues.append("target-weight 원본 pilot evidence params_hash 누락.")
+    elif len(source_params_hashes) != 1:
+        issues.append(
+            "target-weight 원본 pilot evidence params_hash가 일관되지 않음: "
+            f"{source_params_hashes}."
+        )
+    elif not canonical_params_hash:
+        issues.append("target-weight canonical params_hash 누락.")
+    elif source_params_hashes[0] != canonical_params_hash:
+        issues.append(
+            "target-weight 원본 pilot evidence canonical params_hash 불일치: "
+            f"source={source_params_hashes[0]}, canonical={canonical_params_hash}."
+        )
+
+    return issues
+
+
 def _validate_paper_evidence_package_integrity(
     strategy_name: str,
     evidence: dict[str, Any],
@@ -1032,6 +1144,16 @@ def validate_live_readiness(
                 evidence,
                 canonical_params_hash=_canonical_target_weight_params_hash(metadata, strategy_name),
                 metadata=metadata,
+            )
+        )
+        issues.extend(
+            _validate_target_weight_source_records(
+                strategy_name,
+                evidence,
+                promotion_base=promotion_base,
+                evidence_base=evidence_base,
+                canonical_params_hash=_canonical_target_weight_params_hash(metadata, strategy_name),
+                canonical_metadata=metadata,
             )
         )
 
