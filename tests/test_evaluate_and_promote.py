@@ -3034,6 +3034,47 @@ def test_load_latest_target_weight_daily_ops_blocks_stale_ready_execute(tmp_path
     )
 
 
+def test_load_latest_target_weight_daily_ops_blocks_stale_generated_ready_execute(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --as-of-date 2026-05-18 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ep,
+        "_current_kst_datetime",
+        lambda: datetime(2026, 5, 18, 10, 36, tzinfo=ep.KST),
+    )
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    command = latest["operator_commands"]["execute_capped_paper"]
+    assert command.startswith("# blocked: daily_ops_summary.generated_at is stale")
+    assert "rerun daily ops summary before action" in command
+
+
 def test_load_latest_target_weight_daily_ops_blocks_ready_execute_scope_mismatch(tmp_path, monkeypatch):
     import tools.evaluate_and_promote as ep
 
@@ -3104,6 +3145,45 @@ def test_load_latest_target_weight_daily_ops_blocks_candidate_prefix_collision(
     command = latest["operator_commands"]["execute_capped_paper"]
     assert command.startswith("# blocked: daily_ops_execute_command_unavailable")
     assert "candidate_id mismatch" in command
+
+
+def test_load_latest_target_weight_daily_ops_blocks_stale_generated_ready_enable(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.evaluate_and_promote as ep
+
+    strategy = "target_weight_best"
+    daily_ops = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-05-18T10:05:21",
+        "trade_day": "2026-05-18",
+        "status": "READY_TO_ENABLE_CAPS",
+        "evidence_progress": {"verified_pilot_days": 12, "shadow_days": 3},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "enable_suggested_caps": (
+                "python tools/paper_pilot_control.py "
+                f"--strategy {strategy} --enable --from 2026-05-18 --to 2026-08-10"
+            ),
+        },
+    }
+    (tmp_path / f"target_weight_daily_ops_summary_{strategy}_2026-05-18.json").write_text(
+        json.dumps(_daily_ops_with_summary_hash(daily_ops), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ep,
+        "_current_kst_datetime",
+        lambda: datetime(2026, 5, 18, 10, 36, tzinfo=ep.KST),
+    )
+
+    latest = ep._load_latest_target_weight_daily_ops(strategy, tmp_path)
+
+    assert latest is not None
+    command = latest["operator_commands"]["enable_suggested_caps"]
+    assert command.startswith("# blocked: daily_ops_summary.generated_at is stale")
 
 
 def test_load_latest_target_weight_daily_ops_blocks_ready_enable_scope_mismatch(tmp_path, monkeypatch):
