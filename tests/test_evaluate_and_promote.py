@@ -2364,6 +2364,72 @@ def test_current_blockers_prioritizes_finalize_for_performance_missing_reason():
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
+def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    diagnose_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
+    )
+    repair_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--repair-pilot-evidence --repair-date 2026-05-20"
+    )
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-20.json",
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+            "diagnose_portfolio_snapshot": diagnose_command,
+            "repair_pilot_evidence": repair_command,
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+    )
+
+    action = report["next_actions"][0]
+    assert action["command"] == diagnose_command
+    assert action["command"] != repair_command
+    assert action["order_safety"] == "no_order"
+    assert action["requires"] == "database trade/position persistence proof"
+    assert action["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
+    assert "cannot be repaired from artifact" in action["blocked_repair_command"]
+    assert action["follow_up"].endswith("--daily-ops-summary")
+
+
 def test_build_current_blockers_report_schedules_next_day_after_repaired_non_promotable_daily_ops(monkeypatch):
     from tools.evaluate_and_promote import build_current_blockers_report
 
