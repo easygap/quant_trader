@@ -1420,6 +1420,8 @@ def reconcile_plan_positions(plan: TargetWeightPlan, positions: dict[str, Any] |
 
     return {
         "checked": True,
+        "source": "database.positions",
+        "query": {"account_key": plan.candidate_id},
         "complete": complete,
         "reason": reason,
         "expected_quantities": expected,
@@ -1482,6 +1484,8 @@ def reconcile_plan_starting_positions(
 
     return {
         "checked": True,
+        "source": "database.positions",
+        "query": {"account_key": plan.candidate_id},
         "complete": complete,
         "reason": reason,
         "expected_quantities": expected,
@@ -1495,6 +1499,8 @@ def failed_position_reconciliation(plan: TargetWeightPlan, error: Exception) -> 
     expected = _expected_position_quantities(plan)
     return {
         "checked": True,
+        "source": "database.positions",
+        "query": {"account_key": plan.candidate_id},
         "complete": False,
         "reason": f"target_weight_position_reconciliation_failed: {error}",
         "expected_quantities": expected,
@@ -1515,6 +1521,8 @@ def failed_starting_position_reconciliation(plan: TargetWeightPlan, error: Excep
     expected = _starting_position_quantities(plan)
     return {
         "checked": True,
+        "source": "database.positions",
+        "query": {"account_key": plan.candidate_id},
         "complete": False,
         "reason": f"target_weight_pre_execution_reconciliation_failed: {error}",
         "expected_quantities": expected,
@@ -1979,9 +1987,15 @@ def reconcile_plan_fills(
         key = _fill_key(symbol, action)
         actual[key] = actual.get(key, 0) + quantity
         fill_rows.append({
+            "trade_id": getattr(trade, "id", None),
             "symbol": symbol,
             "action": action,
             "quantity": quantity,
+            "price": getattr(trade, "price", None),
+            "total_amount": getattr(trade, "total_amount", None),
+            "commission": getattr(trade, "commission", None),
+            "tax": getattr(trade, "tax", None),
+            "slippage": getattr(trade, "slippage", None),
             "strategy": getattr(trade, "strategy", None),
             "mode": getattr(trade, "mode", None),
             "account_key": getattr(trade, "account_key", None),
@@ -2095,6 +2109,72 @@ def failed_fill_reconciliation(
     }
 
 
+def build_execution_db_persistence_proof(
+    plan: TargetWeightPlan,
+    *,
+    fill_reconciliation: dict[str, Any],
+    position_reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    """실행 증거가 현재 DB 영속성 확인을 통과했는지 요약한다."""
+    fill_source = str(fill_reconciliation.get("source") or "")
+    position_source = str(position_reconciliation.get("source") or "")
+    fill_count = _coerce_int_or_zero(
+        fill_reconciliation.get("fill_count")
+        or len(fill_reconciliation.get("fills") or [])
+    )
+    expected_positions = _expected_position_quantities(plan)
+    actual_positions = position_reconciliation.get("actual_quantities") or {}
+    blockers: list[str] = []
+    if fill_source != "database.trade_history":
+        blockers.append("fill_source_not_database_trade_history")
+    if position_source != "database.positions":
+        blockers.append("position_source_not_database_positions")
+    if fill_reconciliation.get("complete") is not True:
+        blockers.append("fill_reconciliation_incomplete")
+    if position_reconciliation.get("complete") is not True:
+        blockers.append("position_reconciliation_incomplete")
+    if fill_count != len(plan.orders):
+        blockers.append("trade_history_fill_count_mismatch")
+    missing_position_symbols = [
+        symbol
+        for symbol, expected_qty in expected_positions.items()
+        if _coerce_int_or_zero(actual_positions.get(symbol)) != expected_qty
+    ]
+    if missing_position_symbols:
+        blockers.append("position_quantity_mismatch")
+
+    blockers = list(dict.fromkeys(blockers))
+    return {
+        "checked": True,
+        "complete": not blockers,
+        "reason": (
+            "paper execution persisted to DB trade_history and positions"
+            if not blockers
+            else "paper execution DB persistence proof incomplete"
+        ),
+        "blockers": blockers,
+        "trade_history": {
+            "source": fill_source,
+            "query": fill_reconciliation.get("query") or {},
+            "row_count": fill_count,
+            "expected_row_count": len(plan.orders),
+            "execution_session_id": fill_reconciliation.get("execution_session_id") or "",
+            "trade_ids": [
+                row.get("trade_id")
+                for row in fill_reconciliation.get("fills") or []
+                if isinstance(row, dict) and row.get("trade_id") is not None
+            ],
+        },
+        "positions": {
+            "source": position_source,
+            "query": position_reconciliation.get("query") or {},
+            "expected_quantities": expected_positions,
+            "actual_quantities": actual_positions,
+            "missing_or_mismatched_symbols": missing_position_symbols,
+        },
+    }
+
+
 def summarize_execution_for_evidence(
     plan: TargetWeightPlan,
     execution: dict[str, Any],
@@ -2204,6 +2284,12 @@ def summarize_execution_for_evidence(
     pre_trade_risk_complete = bool(pre_trade_risk.get("complete", False))
     fill_complete = bool(fill_reconciliation.get("complete", False))
     position_complete = bool(reconciliation.get("complete", False))
+    db_persistence_proof = build_execution_db_persistence_proof(
+        plan,
+        fill_reconciliation=fill_reconciliation,
+        position_reconciliation=reconciliation,
+    )
+    db_persistence_complete = bool(db_persistence_proof.get("complete", False))
     complete = (
         idempotency_allowed
         and execution_trade_day_allowed
@@ -2216,6 +2302,7 @@ def summarize_execution_for_evidence(
         and order_complete
         and fill_complete
         and position_complete
+        and db_persistence_complete
     )
     reason = "all planned target-weight orders executed"
     if not idempotency_allowed:
@@ -2251,6 +2338,11 @@ def summarize_execution_for_evidence(
         reason = fill_reconciliation.get("reason", "target_weight_fill_reconciliation_mismatch")
     elif not position_complete:
         reason = reconciliation.get("reason", "target_weight_position_mismatch")
+    elif not db_persistence_complete:
+        reason = db_persistence_proof.get(
+            "reason",
+            "target_weight_db_persistence_proof_incomplete",
+        )
 
     return {
         "complete": complete,
@@ -2267,6 +2359,7 @@ def summarize_execution_for_evidence(
         "order_count_complete": order_count_complete,
         "order_result_complete": order_result_complete,
         "fill_complete": fill_complete,
+        "db_persistence_complete": db_persistence_complete,
         "planned_orders": planned,
         "executed_orders": executed,
         "failed_orders": failed,
@@ -2289,6 +2382,7 @@ def summarize_execution_for_evidence(
         "order_result_reconciliation": order_result_reconciliation,
         "fill_reconciliation": fill_reconciliation,
         "position_reconciliation": reconciliation,
+        "db_persistence_proof": db_persistence_proof,
         "params_hash": plan.params_hash,
         "target_symbols": list(plan.targets),
         "target_exposure": plan.target_exposure,
