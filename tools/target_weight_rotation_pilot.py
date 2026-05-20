@@ -6646,7 +6646,11 @@ def main() -> None:
         print(f"  experiment manifest: {result['experiment_manifest_path']}")
         print(f"  summary artifact: {result['daily_ops_summary_path']}")
         print(f"  summary report: {result['daily_ops_summary_report_path']}")
-        if summary["status"] in {"BLOCKED", "WAITING_FOR_MARKET_SESSION"}:
+        if summary["status"] in {
+            "BLOCKED",
+            "WAITING_FOR_MARKET_SESSION",
+            "PILOT_EVIDENCE_INVALID",
+        }:
             raise SystemExit(1)
         return
 
