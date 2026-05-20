@@ -2922,6 +2922,115 @@ def test_paper_pilot_control_status_warns_when_daily_ops_failure_is_newer(
     assert "Status: PILOT_EVIDENCE_RECORDED" in output
 
 
+def test_paper_pilot_control_status_accepts_current_failure_priority(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import os
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    failure_path = (
+        summary_dir
+        / f"target_weight_daily_ops_summary_failure_{strategy}_20260410100500.json"
+    )
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_RECORDED",
+                "evidence_progress": {
+                    "verified_pilot_days": 1,
+                    "target_days": 60,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: already recorded",
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate --as-of-date 2026-04-10 "
+        "--daily-ops-summary"
+    )
+    failure_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "target_weight_no_order_operation_failure",
+                "schema_version": 1,
+                "generated_at": "2026-04-10T10:05:00",
+                "mode": "daily_ops_summary",
+                "candidate_id": strategy,
+                "as_of_date": "2026-04-10",
+                "status": "BLOCKED",
+                "reason": (
+                    "target_weight_daily_ops_summary_blocked: "
+                    "target_weight_requested_trade_day_unavailable"
+                ),
+                "operator_commands": {"daily_ops_summary": command},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action = {
+        "strategy": strategy,
+        "source": "latest_daily_ops_failure",
+        "source_path": failure_path.as_posix(),
+        "daily_ops_status": "FAILED",
+        "failure_reason": (
+            "target_weight_daily_ops_summary_blocked: "
+            "target_weight_requested_trade_day_unavailable"
+        ),
+        "desc": "daily ops summary 실패 원인 해소 후 summary 재생성",
+        "command": command,
+        "order_safety": "no_order",
+    }
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "current_priority_action": action,
+                    "commands": {
+                        "regenerate_current_blockers": (
+                            "python tools/evaluate_and_promote.py --current-blockers"
+                        ),
+                    },
+                },
+                "next_actions": [action],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    os.utime(summary_path, (1_000, 1_000))
+    os.utime(failure_path, (2_000, 2_000))
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Failure warning: latest daily ops failure is newer than loaded summary" in output
+    assert "Current blockers priority: daily ops summary 실패 원인 해소 후 summary 재생성" in output
+    assert (
+        "Operator next action: WAIT for requested trade-day market data, then rerun "
+        "daily ops recovery command:"
+        in output
+    )
+    assert "stale priority action" not in output
+
+
 def test_paper_pilot_control_status_uses_generated_at_for_daily_ops_failure_order(
     tmp_path,
     monkeypatch,
@@ -3419,6 +3528,56 @@ def test_paper_pilot_control_blocks_loaded_ready_execute_candidate_prefix_collis
     command = loaded["operator_commands"]["execute_capped_paper"]
     assert command.startswith("# blocked: daily_ops_execute_command_unavailable")
     assert "candidate_id mismatch" in command
+
+
+def test_paper_pilot_control_repairs_next_check_command_scope_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "trade_day": "2026-04-10",
+        "next_operator_trade_day": "2026-04-13",
+        "status": "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+        "operator_commands": {
+            "next_daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id wrong_candidate --as-of-date 2026-04-12 "
+                "--readiness-audit"
+            ),
+            "next_readiness_audit": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {strategy}_shadow --as-of-date 2026-04-13 "
+                "--daily-ops-summary"
+            ),
+        },
+    }
+    (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    ).write_text(
+        json.dumps(_daily_ops_with_summary_hash(summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-10")
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    commands = loaded["operator_commands"]
+    assert commands["next_daily_ops_summary"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --as-of-date 2026-04-13 --daily-ops-summary"
+    )
+    assert commands["next_readiness_audit"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {strategy} --as-of-date 2026-04-13 --readiness-audit"
+    )
 
 
 def test_shadow_batch_cli_exits_nonzero_when_target_unmet(monkeypatch, tmp_path, capsys):
