@@ -1028,6 +1028,7 @@ def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
         "readiness_audit": f"{base} --readiness-audit",
         "collect_shadow_days": f"{base} --shadow-days 3 --shadow-end-date YYYY-MM-DD",
         "pilot_status": f"python tools/paper_pilot_control.py --strategy {strategy} --status",
+        "preflight_recheck": _target_weight_preflight_recheck_command(strategy),
         "finalize_pilot_evidence": f"{base} --finalize-pilot-evidence --finalize-date YYYY-MM-DD",
         "repair_pilot_evidence": f"{base} --repair-pilot-evidence --repair-date YYYY-MM-DD",
         "execute_capped_paper_after_ready": f"{base} --execute --collect-evidence",
@@ -1789,15 +1790,19 @@ def _paper_execute_order_safety(command: str | None) -> str:
     return "no_order" if _blocked_command(command) else "paper_order_only"
 
 
+def _target_weight_preflight_recheck_command(strategy: str) -> str:
+    return (
+        "python tools/paper_preflight.py "
+        f"--strategy {strategy} --with-pilot-check --send-test-notification"
+    )
+
+
 def _target_weight_discord_action(
     strategy: str,
     base_action: dict,
     blockers: list[str],
 ) -> dict:
-    command = (
-        "python tools/paper_preflight.py "
-        f"--strategy {strategy} --with-pilot-check --send-test-notification"
-    )
+    command = _target_weight_preflight_recheck_command(strategy)
     if _reason_contains(blockers, "미설정", "not configured", "unconfigured"):
         return {
             **base_action,
@@ -1815,6 +1820,110 @@ def _target_weight_discord_action(
         "setup_required": False,
         "command": command,
         "order_safety": "no_order",
+    }
+
+
+def _target_weight_core_entry_needs_preflight_recheck(reason: str | None) -> bool:
+    text = str(reason or "").lower()
+    return (
+        "--send-test-notification" in text
+        or "notifier" in text
+        or "discord" in text
+    )
+
+
+def _target_weight_core_entry_as_of_date(checked_at: str | None) -> str | None:
+    parsed = _parse_iso_datetime(str(checked_at or "").strip())
+    if parsed is None:
+        return None
+    return parsed.date().isoformat()
+
+
+def _stable_target_weight_core_entry_reason(reason: str) -> str:
+    stale_marker = "Discord webhook test stale ("
+    start = reason.find(stale_marker)
+    if start < 0:
+        return reason
+    end = reason.find(")", start + len(stale_marker))
+    if end < 0:
+        return reason
+    return (
+        reason[:start]
+        + "Discord webhook test stale"
+        + reason[end + 1:]
+    ).strip()
+
+
+def _target_weight_core_entry_check_snapshot(
+    strategy: str,
+    *,
+    checked_at: str | None = None,
+) -> dict | None:
+    """현재 active pilot의 entry gate를 current blockers에 노출한다."""
+    as_of_date = _target_weight_core_entry_as_of_date(checked_at)
+    try:
+        from core.paper_pilot import check_pilot_entry, get_active_pilot
+
+        if get_active_pilot(strategy, as_of_date) is None:
+            return None
+        check = check_pilot_entry(strategy, as_of_date=as_of_date)
+    except Exception as exc:
+        return {
+            "label": "Core Entry Check",
+            "strategy": strategy,
+            "status": "UNKNOWN",
+            "allowed": False,
+            "reason": f"core entry check failed: {exc.__class__.__name__}: {exc}",
+            "checked_at": checked_at,
+            "check_command": f"python tools/paper_pilot_control.py --strategy {strategy} --status",
+            "order_safety": "no_order",
+        }
+
+    reason = _stable_target_weight_core_entry_reason(str(check.reason or "").strip())
+    snapshot = {
+        "label": "Core Entry Check",
+        "strategy": strategy,
+        "status": "ALLOWED" if check.allowed else "BLOCKED",
+        "allowed": bool(check.allowed),
+        "reason": reason,
+        "checked_at": checked_at,
+        "check_command": f"python tools/paper_pilot_control.py --strategy {strategy} --status",
+        "order_safety": "no_order",
+    }
+    if check.remaining_orders is not None:
+        snapshot["remaining_orders"] = check.remaining_orders
+    if check.remaining_exposure is not None:
+        snapshot["remaining_exposure"] = check.remaining_exposure
+    if check.caps_snapshot is not None:
+        caps_snapshot = dict(check.caps_snapshot)
+        caps_snapshot.pop("target_weight_plan_snapshot", None)
+        snapshot["caps_snapshot"] = caps_snapshot
+    if not check.allowed and _target_weight_core_entry_needs_preflight_recheck(reason):
+        snapshot.update({
+            "recovery_command": _target_weight_preflight_recheck_command(strategy),
+            "requires": "recent verified notifier health",
+            "recovery_source": "paper_preflight_test_notification",
+        })
+    return snapshot
+
+
+def _target_weight_core_entry_action(core_entry_check: dict | None) -> dict | None:
+    if not isinstance(core_entry_check, dict):
+        return None
+    recovery_command = str(core_entry_check.get("recovery_command") or "").strip()
+    if not recovery_command:
+        return None
+    reason = str(core_entry_check.get("reason") or "").strip()
+    return {
+        "strategy": core_entry_check.get("strategy"),
+        "source": "core_entry_check",
+        "desc": "핵심 진입 점검 알림 도달성 사전점검 재실행",
+        "command": recovery_command,
+        "order_safety": "no_order",
+        "requires": core_entry_check.get("requires") or "recent verified notifier health",
+        "core_entry_status": core_entry_check.get("status"),
+        "core_entry_reason": reason,
+        "check_command": core_entry_check.get("check_command"),
     }
 
 
@@ -2533,6 +2642,14 @@ def _build_current_blockers_operator_runbook(
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
     if primary_strategy:
         commands = _target_weight_operator_commands(primary_strategy)
+        checked_at = None
+        if isinstance(promotion_artifact_freshness, dict):
+            checked_at = promotion_artifact_freshness.get("checked_at")
+        core_entry_check = _target_weight_core_entry_check_snapshot(
+            primary_strategy,
+            checked_at=str(checked_at or "") or None,
+        )
+        core_entry_action = _target_weight_core_entry_action(core_entry_check)
         active_failure = (
             latest_daily_ops_failure
             if _daily_ops_failure_is_active(latest_daily_ops_failure, latest_daily_ops)
@@ -2631,6 +2748,26 @@ def _build_current_blockers_operator_runbook(
                         break
             for index, item in enumerate(sequence, start=1):
                 item["step"] = index
+        if core_entry_action:
+            duplicate_priority = (
+                ops_priority_action
+                and str(ops_priority_action.get("command") or "").strip()
+                == str(core_entry_action.get("command") or "").strip()
+            )
+            if not duplicate_priority:
+                sequence.insert(
+                    3 if ops_priority_action else 2,
+                    {
+                        "step": 0,
+                        "desc": core_entry_action["desc"],
+                        "command": core_entry_action["command"],
+                        "order_safety": core_entry_action["order_safety"],
+                        "requires": core_entry_action["requires"],
+                        "check_command": core_entry_action.get("check_command"),
+                    },
+                )
+                for index, item in enumerate(sequence, start=1):
+                    item["step"] = index
         runbook = {
             "primary_strategy": primary_strategy,
             "mode": "target_weight_capped_paper_pilot",
@@ -2650,6 +2787,10 @@ def _build_current_blockers_operator_runbook(
             runbook["latest_daily_ops_failure"] = _public_target_weight_daily_ops_failure(
                 active_failure
             )
+        if core_entry_check:
+            runbook["core_entry_check"] = core_entry_check
+        if core_entry_action:
+            runbook["core_entry_action"] = core_entry_action
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
@@ -2764,6 +2905,7 @@ def build_current_blockers_report(
     )
     runbook_commands = operator_runbook.get("commands") or {}
     ops_priority_action = operator_runbook.get("current_priority_action")
+    core_entry_action = operator_runbook.get("core_entry_action")
     if provisional_candidates:
         next_priority = 1
         if ops_priority_action:
@@ -2772,6 +2914,16 @@ def build_current_blockers_report(
                 **ops_priority_action,
             })
             next_priority += 1
+            if (
+                core_entry_action
+                and str(core_entry_action.get("command") or "").strip()
+                != str(ops_priority_action.get("command") or "").strip()
+            ):
+                next_actions.append({
+                    "priority": next_priority,
+                    **core_entry_action,
+                })
+                next_priority += 1
         else:
             next_actions.append({
                 "priority": next_priority,
@@ -2790,6 +2942,12 @@ def build_current_blockers_report(
                 "order_safety": "no_order",
             })
             next_priority += 1
+            if core_entry_action:
+                next_actions.append({
+                    "priority": next_priority,
+                    **core_entry_action,
+                })
+                next_priority += 1
         next_actions.append({
             "priority": next_priority,
             "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
