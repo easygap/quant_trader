@@ -2458,6 +2458,15 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
             "position_candidate_skipped_zero_quantity_symbols": ["ZZZ"],
             "requires_authoritative_confirmation": True,
         },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/"
+                "target_weight_db_restore_candidates_target_weight_best_2026-05-20_manifest.json "
+                "--authoritative-trade-history-csv <reviewed_trade_history_csv> "
+                "--authoritative-positions-csv <reviewed_positions_csv>"
+            )
+        },
         "source_path": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_best_2026-05-20.json",
     }
 
@@ -2551,6 +2560,9 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     assert (
         action["snapshot_db_restore_candidate_requires_authoritative_confirmation"]
         is True
+    )
+    assert action["snapshot_db_restore_package_verify_command"].startswith(
+        "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
     )
 
 

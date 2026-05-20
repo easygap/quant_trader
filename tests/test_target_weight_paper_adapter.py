@@ -3182,6 +3182,13 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "ZZZ"
         ],
         "snapshot_db_restore_candidate_requires_authoritative_confirmation": True,
+        "snapshot_db_restore_package_verify_command": (
+            "python tools/target_weight_rotation_pilot.py "
+            "--verify-db-restore-package --restore-manifest reports/paper_runtime/"
+            "target_weight_db_restore_candidates_target_weight_candidate_2026-04-10_manifest.json "
+            "--authoritative-trade-history-csv <reviewed_trade_history_csv> "
+            "--authoritative-positions-csv <reviewed_positions_csv>"
+        ),
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
         ),
@@ -3250,6 +3257,8 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "Snapshot DB restore safety: authoritative confirmation required before DB write"
         in output
     )
+    assert "Snapshot DB restore verify command: python tools/target_weight_rotation_pilot.py" in output
+    assert "--verify-db-restore-package" in output
     assert (
         "Operator next action: RESTORE authoritative DB trade_history/positions "
         "proof before snapshot recovery"
@@ -5690,6 +5699,12 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert "--finalize-pilot-evidence" not in (
         report["operator_commands"]["finalize_pilot_evidence"]
     )
+    assert report["operator_commands"]["verify_db_restore_package"].startswith(
+        "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
+    )
+    assert package["manifest_path"] in report["operator_commands"][
+        "verify_db_restore_package"
+    ]
 
     report_path = Path(report["artifact_path"])
     assert report_path.exists()
@@ -5706,6 +5721,7 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert "## DB Restore Candidate Package" in report_md
     assert package["trade_history_candidate_csv"] in report_md
     assert "Requires authoritative confirmation: `True`" in report_md
+    assert "verify_db_restore_package:" in report_md
     assert "### Expected Trade History Rows" in report_md
     assert (
         "finalize_pilot_evidence: `# blocked: restore authoritative DB "
@@ -5801,6 +5817,103 @@ def test_target_weight_db_restore_candidate_package_is_reconciliation_only(
     assert no_restore_package["candidate_only"] is True
     assert no_restore_package["requires_authoritative_confirmation"] is True
     assert not no_restore_dir.exists()
+
+
+def test_verify_target_weight_db_restore_package_requires_authoritative_match(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    report = {
+        "candidate_id": "target_weight_candidate",
+        "snapshot_date": "2026-04-10",
+        "db_restore_checklist": {
+            "checked": True,
+            "status": "restore_required",
+            "restore_required": True,
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "trade_history": {
+                "expected_row_count": 1,
+                "rows": [
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "005930",
+                        "action": "BUY",
+                        "price": 70000,
+                        "quantity": 10,
+                        "total_amount": 700000,
+                        "commission": 100,
+                        "tax": 0,
+                        "slippage": 0,
+                        "strategy": "target_weight_candidate",
+                        "mode": "paper",
+                        "executed_at": "2026-04-10 09:00:00",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                        "order_id": "ORD-TW-001",
+                    },
+                ],
+            },
+            "positions": {
+                "expected_symbol_count": 1,
+                "expected_quantities": {"005930": 10},
+            },
+        },
+    }
+    package = twp._target_weight_db_restore_candidate_package(
+        report,
+        output_dir=tmp_path / "paper_runtime",
+    )
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": kwargs["account_key"],
+            "snapshot_date": kwargs["snapshot_date"],
+            "snapshot_count": 0,
+            "current_snapshot_found": False,
+            "trade_count_total": 0,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+    )
+
+    blocked = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        output_dir=tmp_path / "verification_blocked",
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["restore_ready"] is False
+    assert "authoritative_trade_history_csv_required" in blocked["blockers"]
+    assert "authoritative_positions_csv_required" in blocked["blockers"]
+    assert blocked["no_write_safety"]["restore_applied"] is False
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=package["trade_history_candidate_csv"],
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_ready",
+    )
+
+    assert verified["status"] == "ready_for_authoritative_db_restore"
+    assert verified["restore_ready"] is True
+    assert verified["blockers"] == []
+    assert verified["candidate_package"]["trade_history"]["hash_ok"] is True
+    assert verified["candidate_package"]["positions"]["hash_ok"] is True
+    assert verified["candidate_package"]["db_write_enabled"] is False
+    assert verified["candidate_package"]["portfolio_snapshot_write_enabled"] is False
+    assert verified["authoritative_evidence"]["trade_history"]["match"] is True
+    assert verified["authoritative_evidence"]["positions"]["match"] is True
+    assert verified["current_db_state"]["trade_count_on_date"] == 0
+    assert verified["current_db_state"]["position_count"] == 0
+    assert Path(verified["artifact_path"]).exists()
+    assert Path(verified["report_path"]).exists()
+    report_md = Path(verified["report_path"]).read_text(encoding="utf-8")
+    assert "Target-weight DB Restore Package Verification" in report_md
+    assert "Restore ready: `True`" in report_md
+    assert "DB write enabled: `False`" in report_md
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
@@ -5985,6 +6098,8 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "db_restore_candidate_manifest:" in output
     assert "db_restore_candidate_trade_history_csv:" in output
     assert "db_restore_candidate_positions_csv:" in output
+    assert "db_restore_verify_command:" in output
+    assert "--verify-db-restore-package" in output
     assert "snapshot_recovery_readiness: blocked" in output
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output

@@ -2288,6 +2288,11 @@ def _target_weight_ops_priority_action(
                 )
                 if not isinstance(snapshot_db_restore_package, dict):
                     snapshot_db_restore_package = {}
+                snapshot_operator_commands = (
+                    latest_snapshot_diagnostics.get("operator_commands") or {}
+                )
+                if not isinstance(snapshot_operator_commands, dict):
+                    snapshot_operator_commands = {}
                 snapshot_recovery_blockers = snapshot_recovery.get("blockers") or []
                 snapshot_recovery_guard = (
                     latest_snapshot_diagnostics.get("recovery_guard")
@@ -2469,6 +2474,10 @@ def _target_weight_ops_priority_action(
                         snapshot_db_restore_package.get(
                             "requires_authoritative_confirmation"
                         )
+                    ),
+                    "snapshot_db_restore_package_verify_command": str(
+                        snapshot_operator_commands.get("verify_db_restore_package")
+                        or ""
                     ),
                 })
                 if snapshot_recovery_guard:
