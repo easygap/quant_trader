@@ -2108,6 +2108,80 @@ def test_build_current_blockers_report_prioritizes_invalid_pilot_evidence_from_d
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
+def test_current_blockers_waits_when_finalize_missing_performance():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--finalize-pilot-evidence --finalize-date 2026-05-20"
+    )
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-20.json",
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_benchmark_status_not_final": 1},
+        },
+        "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+            "finalize_pilot_evidence": finalize_command,
+        },
+    }
+    latest_finalize_report = {
+        "artifact_type": "target_weight_pilot_evidence_finalize",
+        "candidate_id": "target_weight_best",
+        "finalize_date": "2026-05-20",
+        "status": "blocked",
+        "reason": (
+            "target_weight_pilot_evidence_finalize_missing_performance: "
+            "total_value/daily_return unavailable"
+        ),
+        "source_path": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_best_2026-05-20.json",
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_finalize_report=latest_finalize_report,
+    )
+
+    action = report["next_actions"][0]
+    assert action["command"].startswith(
+        "# blocked: final performance evidence unavailable"
+    )
+    assert action["scheduled_command"] == finalize_command
+    assert action["performance_evidence_guard"] == (
+        "target_weight_pilot_evidence_finalize_missing_performance"
+    )
+    assert action["requires"] == "final portfolio performance evidence available"
+
+
 def test_build_current_blockers_report_schedules_next_day_after_repaired_non_promotable_daily_ops(monkeypatch):
     from tools.evaluate_and_promote import build_current_blockers_report
 
