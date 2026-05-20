@@ -2252,6 +2252,7 @@ def _target_weight_ops_priority_action(
             snapshot_db_restore = {}
             snapshot_db_restore_trade_history = {}
             snapshot_db_restore_positions = {}
+            snapshot_db_restore_package = {}
             if isinstance(latest_snapshot_diagnostics, dict):
                 snapshot_recovery = (
                     latest_snapshot_diagnostics.get("snapshot_recovery_readiness")
@@ -2281,6 +2282,12 @@ def _target_weight_ops_priority_action(
                 snapshot_db_restore_positions = snapshot_db_restore.get("positions") or {}
                 if not isinstance(snapshot_db_restore_positions, dict):
                     snapshot_db_restore_positions = {}
+                snapshot_db_restore_package = (
+                    latest_snapshot_diagnostics.get("db_restore_candidate_package")
+                    or {}
+                )
+                if not isinstance(snapshot_db_restore_package, dict):
+                    snapshot_db_restore_package = {}
                 snapshot_recovery_blockers = snapshot_recovery.get("blockers") or []
                 snapshot_recovery_guard = (
                     latest_snapshot_diagnostics.get("recovery_guard")
@@ -2432,6 +2439,36 @@ def _target_weight_ops_priority_action(
                             "missing_or_unverified_symbols"
                         )
                         or []
+                    ),
+                    "snapshot_db_restore_candidate_package_generated": bool(
+                        snapshot_db_restore_package.get("generated")
+                    ),
+                    "snapshot_db_restore_candidate_manifest": str(
+                        snapshot_db_restore_package.get("manifest_path") or ""
+                    ),
+                    "snapshot_db_restore_trade_history_candidate_csv": str(
+                        snapshot_db_restore_package.get("trade_history_candidate_csv")
+                        or ""
+                    ),
+                    "snapshot_db_restore_positions_candidate_csv": str(
+                        snapshot_db_restore_package.get("positions_candidate_csv") or ""
+                    ),
+                    "snapshot_db_restore_trade_history_candidate_rows": _safe_int(
+                        snapshot_db_restore_package.get("trade_history_candidate_rows")
+                    ),
+                    "snapshot_db_restore_position_candidate_rows": _safe_int(
+                        snapshot_db_restore_package.get("position_candidate_rows")
+                    ),
+                    "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols": (
+                        snapshot_db_restore_package.get(
+                            "position_candidate_skipped_zero_quantity_symbols"
+                        )
+                        or []
+                    ),
+                    "snapshot_db_restore_candidate_requires_authoritative_confirmation": bool(
+                        snapshot_db_restore_package.get(
+                            "requires_authoritative_confirmation"
+                        )
                     ),
                 })
                 if snapshot_recovery_guard:

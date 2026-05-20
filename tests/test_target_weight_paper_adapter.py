@@ -1,5 +1,6 @@
 import json
 import hashlib
+import csv
 import subprocess
 import sys
 from copy import deepcopy
@@ -3162,6 +3163,25 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "CCC",
             "DDD",
         ],
+        "snapshot_db_restore_candidate_package_generated": True,
+        "snapshot_db_restore_candidate_manifest": (
+            "reports/paper_runtime/"
+            "target_weight_db_restore_candidates_target_weight_candidate_2026-04-10_manifest.json"
+        ),
+        "snapshot_db_restore_trade_history_candidate_csv": (
+            "reports/paper_runtime/"
+            "target_weight_db_restore_candidates_target_weight_candidate_2026-04-10_trade_history.csv"
+        ),
+        "snapshot_db_restore_positions_candidate_csv": (
+            "reports/paper_runtime/"
+            "target_weight_db_restore_candidates_target_weight_candidate_2026-04-10_positions.csv"
+        ),
+        "snapshot_db_restore_trade_history_candidate_rows": 4,
+        "snapshot_db_restore_position_candidate_rows": 4,
+        "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols": [
+            "ZZZ"
+        ],
+        "snapshot_db_restore_candidate_requires_authoritative_confirmation": True,
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
         ),
@@ -3218,6 +3238,18 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "trade_rows=0/4 positions=0/4"
     ) in output
     assert "Snapshot DB restore missing symbols: AAA, BBB, CCC, DDD" in output
+    assert (
+        "Snapshot DB restore candidate package: generated=True "
+        "trade_rows=4 positions=4"
+    ) in output
+    assert "Snapshot DB restore candidate manifest:" in output
+    assert "Snapshot DB restore trade history CSV:" in output
+    assert "Snapshot DB restore positions CSV:" in output
+    assert "Snapshot DB restore skipped zero-quantity positions: ZZZ" in output
+    assert (
+        "Snapshot DB restore safety: authoritative confirmation required before DB write"
+        in output
+    )
     assert (
         "Operator next action: RESTORE authoritative DB trade_history/positions "
         "proof before snapshot recovery"
@@ -5618,6 +5650,37 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     }
     assert restore["safety"]["db_write_enabled"] is False
     assert restore["safety"]["artifact_only_snapshot_allowed"] is False
+    package = report["db_restore_candidate_package"]
+    assert package["generated"] is True
+    assert package["candidate_only"] is True
+    assert package["requires_authoritative_confirmation"] is True
+    assert package["db_write_enabled"] is False
+    assert package["portfolio_snapshot_write_enabled"] is False
+    assert package["trade_history_candidate_rows"] == len(plan.orders)
+    assert package["position_candidate_rows"] == len(plan.orders)
+    assert package["position_candidate_skipped_zero_quantity_symbols"] == []
+    assert package["trade_history_candidate_csv_sha256"]
+    trade_csv = Path(package["trade_history_candidate_csv"])
+    positions_csv = Path(package["positions_candidate_csv"])
+    manifest_path = Path(package["manifest_path"])
+    assert trade_csv.exists()
+    assert positions_csv.exists()
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["generated"] is True
+    assert manifest["manifest_path"] == package["manifest_path"]
+    assert manifest["candidate_only"] is True
+    assert manifest["db_write_enabled"] is False
+    assert manifest["portfolio_snapshot_write_enabled"] is False
+    trade_rows = list(csv.DictReader(trade_csv.open(encoding="utf-8-sig")))
+    position_rows = list(csv.DictReader(positions_csv.open(encoding="utf-8-sig")))
+    assert len(trade_rows) == len(plan.orders)
+    assert len(position_rows) == len(plan.orders)
+    assert trade_rows[0]["candidate_only"] == "True"
+    assert trade_rows[0]["requires_authoritative_confirmation"] == "True"
+    assert position_rows[0]["source"] == (
+        "artifact_candidate_requires_authoritative_confirmation"
+    )
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
     )
@@ -5640,11 +5703,104 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     )
     assert "## DB Restore Checklist" in report_md
     assert "Trade history rows: `expected=3 current=0 missing_or_unverified=3`" in report_md
+    assert "## DB Restore Candidate Package" in report_md
+    assert package["trade_history_candidate_csv"] in report_md
+    assert "Requires authoritative confirmation: `True`" in report_md
     assert "### Expected Trade History Rows" in report_md
     assert (
         "finalize_pilot_evidence: `# blocked: restore authoritative DB "
         "trade_history/positions proof before finalize"
     ) in report_md
+
+
+def test_target_weight_db_restore_candidate_package_is_reconciliation_only(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    restore_required_report = {
+        "candidate_id": "target_weight_candidate",
+        "snapshot_date": "2026-04-10",
+        "db_restore_checklist": {
+            "checked": True,
+            "status": "restore_required",
+            "restore_required": True,
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "trade_history": {
+                "expected_row_count": 2,
+                "rows": [
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "005930",
+                        "action": "BUY",
+                        "price": 70000,
+                        "quantity": 10,
+                        "strategy": "target_weight_candidate",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                    },
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "000660",
+                        "action": "SELL",
+                        "price": 160000,
+                        "quantity": 3,
+                        "strategy": "target_weight_candidate",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                    },
+                ],
+            },
+            "positions": {
+                "expected_symbol_count": 2,
+                "expected_quantities": {"005930": 10, "000660": 0},
+            },
+        },
+    }
+
+    package = twp._target_weight_db_restore_candidate_package(
+        restore_required_report,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    assert package["generated"] is True
+    assert package["db_write_enabled"] is False
+    assert package["portfolio_snapshot_write_enabled"] is False
+    assert package["candidate_only"] is True
+    assert package["requires_authoritative_confirmation"] is True
+    assert package["trade_history_candidate_rows"] == 2
+    assert package["position_candidate_rows"] == 1
+    assert package["position_candidate_skipped_zero_quantity_symbols"] == ["000660"]
+    position_rows = list(
+        csv.DictReader(
+            Path(package["positions_candidate_csv"]).open(encoding="utf-8-sig")
+        )
+    )
+    assert [row["symbol"] for row in position_rows] == ["005930"]
+    manifest = json.loads(Path(package["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["position_candidate_skipped_zero_quantity_symbols"] == ["000660"]
+    assert manifest["db_write_enabled"] is False
+    assert manifest["portfolio_snapshot_write_enabled"] is False
+
+    no_restore_dir = tmp_path / "no_restore_runtime"
+    no_restore_package = twp._target_weight_db_restore_candidate_package(
+        {
+            "candidate_id": "target_weight_candidate",
+            "snapshot_date": "2026-04-10",
+            "db_restore_checklist": {
+                "checked": True,
+                "status": "db_evidence_present",
+                "restore_required": False,
+            },
+        },
+        output_dir=no_restore_dir,
+    )
+
+    assert no_restore_package["generated"] is False
+    assert no_restore_package["reason"] == "db restore is not required"
+    assert no_restore_package["db_write_enabled"] is False
+    assert no_restore_package["portfolio_snapshot_write_enabled"] is False
+    assert no_restore_package["candidate_only"] is True
+    assert no_restore_package["requires_authoritative_confirmation"] is True
+    assert not no_restore_dir.exists()
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
@@ -5825,6 +5981,10 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
         "trade_rows_expected=3 trade_rows_current=1 positions_expected=3 positions_current=4"
         in output
     )
+    assert "db_restore_candidate_package: generated=True trade_rows=3 positions=3" in output
+    assert "db_restore_candidate_manifest:" in output
+    assert "db_restore_candidate_trade_history_csv:" in output
+    assert "db_restore_candidate_positions_csv:" in output
     assert "snapshot_recovery_readiness: blocked" in output
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output
