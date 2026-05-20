@@ -67,6 +67,9 @@ DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS = {
     "target_weight_db_trade_history_row_count_missing",
     "target_weight_db_trade_history_row_count_mismatch",
     "target_weight_db_trade_history_row_count_invalid",
+    "target_weight_db_trade_history_ids_missing",
+    "target_weight_db_trade_history_id_invalid",
+    "target_weight_db_trade_history_id_duplicate",
     "target_weight_db_position_quantity_mismatch",
 }
 
@@ -2148,6 +2151,16 @@ def build_execution_db_persistence_proof(
         blockers.append("position_reconciliation_incomplete")
     if fill_count != len(plan.orders):
         blockers.append("trade_history_fill_count_mismatch")
+    trade_ids = [
+        row.get("trade_id")
+        for row in fill_reconciliation.get("fills") or []
+        if isinstance(row, dict) and row.get("trade_id") is not None
+    ]
+    if fill_source == "database.trade_history":
+        if len(trade_ids) != fill_count:
+            blockers.append("trade_history_row_id_missing")
+        elif len({str(trade_id) for trade_id in trade_ids}) != len(trade_ids):
+            blockers.append("trade_history_row_id_duplicate")
     missing_position_symbols = [
         symbol
         for symbol, expected_qty in expected_positions.items()
@@ -2171,12 +2184,9 @@ def build_execution_db_persistence_proof(
             "query": fill_reconciliation.get("query") or {},
             "row_count": fill_count,
             "expected_row_count": len(plan.orders),
+            "row_id_count": len(trade_ids),
             "execution_session_id": fill_reconciliation.get("execution_session_id") or "",
-            "trade_ids": [
-                row.get("trade_id")
-                for row in fill_reconciliation.get("fills") or []
-                if isinstance(row, dict) and row.get("trade_id") is not None
-            ],
+            "trade_ids": trade_ids,
         },
         "positions": {
             "source": position_source,
@@ -4377,6 +4387,8 @@ def write_session_artifact(
     execution_lock_release: dict[str, Any] | None = None,
     preflight_refresh: dict[str, Any] | None = None,
     fill_reconciliation: dict[str, Any] | None = None,
+    position_reconciliation: dict[str, Any] | None = None,
+    execution_evidence: dict[str, Any] | None = None,
     shadow_evidence: dict[str, Any] | None = None,
     evidence_collection: dict[str, Any] | None = None,
     launch_artifacts: dict[str, Any] | None = None,
@@ -4413,6 +4425,8 @@ def write_session_artifact(
         "execution_lock_release": execution_lock_release or {"checked": False},
         "preflight_refresh": preflight_refresh or {"checked": False},
         "fill_reconciliation": fill_reconciliation or {"checked": False},
+        "position_reconciliation": position_reconciliation or {"checked": False},
+        "execution_evidence": execution_evidence or {"checked": False},
         "shadow_evidence": shadow_evidence or {"attempted": False, "recorded": False},
         "evidence_collection": evidence_collection or {"attempted": False, "recorded": False},
         "launch_artifacts": launch_artifacts or {"attempted": False},
@@ -7463,6 +7477,8 @@ def run_pilot(
         execution_lock_release=execution_lock_release,
         preflight_refresh=preflight_refresh,
         fill_reconciliation=fill_reconciliation,
+        position_reconciliation=position_reconciliation,
+        execution_evidence=execution_evidence,
         shadow_evidence=shadow_evidence_summary,
         evidence_collection=evidence_collection,
         launch_artifacts=launch_artifacts,
