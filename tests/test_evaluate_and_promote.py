@@ -2439,6 +2439,25 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
                 "missing_or_unverified_symbols": ["AAA", "BBB", "CCC", "DDD"],
             },
         },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": (
+                "reports/paper_runtime/"
+                "target_weight_db_restore_candidates_target_weight_best_2026-05-20_manifest.json"
+            ),
+            "trade_history_candidate_csv": (
+                "reports/paper_runtime/"
+                "target_weight_db_restore_candidates_target_weight_best_2026-05-20_trade_history.csv"
+            ),
+            "positions_candidate_csv": (
+                "reports/paper_runtime/"
+                "target_weight_db_restore_candidates_target_weight_best_2026-05-20_positions.csv"
+            ),
+            "trade_history_candidate_rows": 4,
+            "position_candidate_rows": 4,
+            "position_candidate_skipped_zero_quantity_symbols": ["ZZZ"],
+            "requires_authoritative_confirmation": True,
+        },
         "source_path": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_best_2026-05-20.json",
     }
 
@@ -2513,6 +2532,26 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         "CCC",
         "DDD",
     ]
+    assert action["snapshot_db_restore_candidate_package_generated"] is True
+    assert action["snapshot_db_restore_candidate_manifest"].endswith("_manifest.json")
+    assert action["snapshot_db_restore_trade_history_candidate_csv"].endswith(
+        "_trade_history.csv"
+    )
+    assert action["snapshot_db_restore_positions_candidate_csv"].endswith(
+        "_positions.csv"
+    )
+    assert action["snapshot_db_restore_trade_history_candidate_rows"] == 4
+    assert action["snapshot_db_restore_position_candidate_rows"] == 4
+    assert (
+        action[
+            "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols"
+        ]
+        == ["ZZZ"]
+    )
+    assert (
+        action["snapshot_db_restore_candidate_requires_authoritative_confirmation"]
+        is True
+    )
 
 
 def test_current_blockers_refreshes_legacy_finalize_report_without_diagnostics():
