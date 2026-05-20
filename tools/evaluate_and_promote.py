@@ -1556,6 +1556,20 @@ def _target_weight_finalize_waits_for_performance(report: dict | None) -> bool:
     return "target_weight_pilot_evidence_finalize_missing_performance" in reason
 
 
+def _target_weight_finalize_blocks_on_db_persistence(report: dict | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    reasons = [
+        str(report.get("reason") or "").strip(),
+        str((report.get("proof_status_before") or {}).get("reason") or "").strip(),
+        str((report.get("proof_status_after") or {}).get("reason") or "").strip(),
+    ]
+    return any(
+        db_reason and any(db_reason in reason for reason in reasons)
+        for db_reason in TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS
+    )
+
+
 def _target_weight_finalize_report_has_performance_diagnostics(report: dict | None) -> bool:
     if not isinstance(report, dict):
         return False
@@ -1847,7 +1861,7 @@ def _target_weight_ops_priority_action(
         db_persistence_blocked = any(
             reason in TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS
             for reason in invalid_reasons
-        )
+        ) or _target_weight_finalize_blocks_on_db_persistence(latest_finalize_report)
         if db_persistence_blocked:
             diagnose_command = (
                 ops_commands.get("diagnose_portfolio_snapshot")
@@ -1880,6 +1894,26 @@ def _target_weight_ops_priority_action(
                     "# blocked: DB persistence proof cannot be repaired from artifact"
                 ),
                 "follow_up": follow_up,
+                "finalize_report_source": (
+                    latest_finalize_report.get("source_path")
+                    if isinstance(latest_finalize_report, dict)
+                    else None
+                ),
+                "finalize_report_generated_at": (
+                    latest_finalize_report.get("generated_at")
+                    if isinstance(latest_finalize_report, dict)
+                    else None
+                ),
+                "finalize_report_status": (
+                    latest_finalize_report.get("status")
+                    if isinstance(latest_finalize_report, dict)
+                    else None
+                ),
+                "finalize_report_reason": (
+                    latest_finalize_report.get("reason")
+                    if isinstance(latest_finalize_report, dict)
+                    else None
+                ),
             }
         finalize_first = any(
             reason in TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS
