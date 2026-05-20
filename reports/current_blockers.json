@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T11:31:35.095330",
+  "generated_at": "2026-05-20T11:53:58.913211",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T11:31:35.095330",
-    "age_days": 0.76,
+    "checked_at": "2026-05-20T11:53:58.913211",
+    "age_days": 0.78,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -94,9 +94,9 @@
         "target_weight_benchmark_status_not_final": 1
       },
       "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
-      "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "order_safety": "no_order",
-      "requires": "final portfolio performance evidence available",
+      "requires": "finalize performance diagnostics refresh",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
@@ -106,7 +106,9 @@
       "finalize_source_record_fields_present": [],
       "finalize_portfolio_metrics_checked": false,
       "finalize_portfolio_metrics_fields_present": [],
-      "finalize_missing_performance_fields": []
+      "finalize_missing_performance_fields": [],
+      "finalize_report_diagnostics_status": "missing",
+      "finalize_diagnostics_refresh_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20"
     },
     {
       "priority": 2,
@@ -153,9 +155,9 @@
       {
         "step": 3,
         "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
-        "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
         "order_safety": "no_order",
-        "requires": "final portfolio performance evidence available",
+        "requires": "finalize performance diagnostics refresh",
         "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
         "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20"
       },
@@ -180,8 +182,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T11:31:35.095330",
-      "age_days": 0.76,
+      "checked_at": "2026-05-20T11:53:58.913211",
+      "age_days": 0.78,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -353,9 +355,9 @@
         "target_weight_benchmark_status_not_final": 1
       },
       "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
-      "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "order_safety": "no_order",
-      "requires": "final portfolio performance evidence available",
+      "requires": "finalize performance diagnostics refresh",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
@@ -365,7 +367,9 @@
       "finalize_source_record_fields_present": [],
       "finalize_portfolio_metrics_checked": false,
       "finalize_portfolio_metrics_fields_present": [],
-      "finalize_missing_performance_fields": []
+      "finalize_missing_performance_fields": [],
+      "finalize_report_diagnostics_status": "missing",
+      "finalize_diagnostics_refresh_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20"
     }
   },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
