@@ -503,6 +503,7 @@ def _target_weight_execution_proof(params_hash: str) -> dict:
         "fill_complete": True,
         "fill_reconciliation": {
             "complete": True,
+            "source": "database.trade_history",
             "execution_session_id": execution_session_id,
             "fills": [
                 {
@@ -514,7 +515,29 @@ def _target_weight_execution_proof(params_hash: str) -> dict:
                 }
             ],
         },
-        "position_reconciliation": {"complete": True},
+        "position_reconciliation": {
+            "complete": True,
+            "source": "database.positions",
+        },
+        "db_persistence_complete": True,
+        "db_persistence_proof": {
+            "checked": True,
+            "complete": True,
+            "reason": "target-weight paper execution is persisted in DB",
+            "trade_history": {
+                "source": "database.trade_history",
+                "row_count": 1,
+                "expected_row_count": 1,
+                "execution_session_id": execution_session_id,
+                "trade_ids": [1],
+            },
+            "positions": {
+                "source": "database.positions",
+                "expected_quantities": {"005930": 1},
+                "actual_quantities": {"005930": 1},
+                "missing_or_mismatched_symbols": [],
+            },
+        },
     }
 
 
@@ -2161,6 +2184,28 @@ class TestShadowEvidenceNotPromotable:
                 "fill_order_id",
                 lambda execution: execution["fill_reconciliation"]["fills"][0].pop("order_id"),
                 "target_weight_fill_order_id_missing",
+            ),
+            (
+                "db_persistence_complete",
+                lambda execution: execution.pop("db_persistence_complete"),
+                "target_weight_db_persistence_complete_false",
+            ),
+            (
+                "db_persistence_proof_complete",
+                lambda execution: execution["db_persistence_proof"].update({"complete": False}),
+                "target_weight_db_persistence_proof_incomplete",
+            ),
+            (
+                "db_trade_history_source",
+                lambda execution: execution["db_persistence_proof"]["trade_history"].update(
+                    {"source": "artifact.target_weight_execution"}
+                ),
+                "target_weight_trade_history_source_not_database",
+            ),
+            (
+                "db_trade_history_row_count",
+                lambda execution: execution["db_persistence_proof"]["trade_history"].update({"row_count": 0}),
+                "target_weight_db_trade_history_row_count_mismatch",
             ),
         ]
         for _name, mutate, expected_reason in cases:

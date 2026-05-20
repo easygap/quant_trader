@@ -4072,6 +4072,9 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
     position_reconciliation = target_execution.get("position_reconciliation") or {}
     order_result_reconciliation = target_execution.get("order_result_reconciliation") or {}
     fill_reconciliation = target_execution.get("fill_reconciliation") or {}
+    db_persistence_proof = target_execution.get("db_persistence_proof") or {}
+    db_trade_history = db_persistence_proof.get("trade_history") or {}
+    db_positions = db_persistence_proof.get("positions") or {}
     expected_target_plan = _target_weight_plan_evidence_snapshot(plan)
 
     result["record_summary"] = {
@@ -4089,6 +4092,10 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         "cash_adjusted_excess": record.get("cash_adjusted_excess"),
         "daily_return": record.get("daily_return"),
         "total_value": record.get("total_value"),
+        "db_persistence_complete": target_execution.get("db_persistence_complete"),
+        "db_persistence_proof_complete": db_persistence_proof.get("complete"),
+        "db_trade_history_source": db_trade_history.get("source"),
+        "db_positions_source": db_positions.get("source"),
     }
 
     checks = [
@@ -4155,6 +4162,19 @@ def verify_existing_pilot_evidence_record(plan: TargetWeightPlan) -> dict[str, A
         ("target_weight_execution.fill_complete", target_execution.get("fill_complete"), True),
         ("target_weight_execution.fill_reconciliation.complete", fill_reconciliation.get("complete"), True),
         ("target_weight_execution.position_reconciliation.complete", position_reconciliation.get("complete"), True),
+        ("target_weight_execution.db_persistence_complete", target_execution.get("db_persistence_complete"), True),
+        ("target_weight_execution.db_persistence_proof.checked", db_persistence_proof.get("checked"), True),
+        ("target_weight_execution.db_persistence_proof.complete", db_persistence_proof.get("complete"), True),
+        (
+            "target_weight_execution.db_persistence_proof.trade_history.source",
+            db_trade_history.get("source"),
+            "database.trade_history",
+        ),
+        (
+            "target_weight_execution.db_persistence_proof.positions.source",
+            db_positions.get("source"),
+            "database.positions",
+        ),
     ]
     if "portfolio_drawdown_guard" in expected_target_plan or "portfolio_drawdown_guard" in target_plan:
         checks.append((
@@ -5450,6 +5470,10 @@ def build_target_weight_experiment_manifest(
                 "fill_complete": True,
                 "fill_reconciliation_complete": True,
                 "position_reconciliation_complete": True,
+                "db_persistence_complete": True,
+                "db_persistence_proof_complete": True,
+                "db_trade_history_source": "database.trade_history",
+                "db_positions_source": "database.positions",
             },
             "blocked_evidence": [
                 "shadow_bootstrap",
@@ -5457,6 +5481,7 @@ def build_target_weight_experiment_manifest(
                 "partial or halted execution",
                 "duplicate completed execution rerun",
                 "position drift before or after execution",
+                "execution evidence without DB persistence proof",
             ],
         },
         "risk_controls": {
