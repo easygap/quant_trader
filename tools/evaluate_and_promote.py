@@ -25,7 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import numpy as np
 from loguru import logger
-from core.target_weight_commands import command_scope_issues as target_weight_command_scope_issues
+from core.target_weight_commands import (
+    command_scope_issues as target_weight_command_scope_issues,
+    next_check_command_or_default as target_weight_next_check_command_or_default,
+)
 
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
@@ -1162,6 +1165,22 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
             )
             operator_commands["execute_capped_paper"] = f"# blocked: {reason}"
 
+    if status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}:
+        operator_commands["next_daily_ops_summary"] = (
+            target_weight_next_check_command_or_default(
+                sanitized,
+                operator_commands.get("next_daily_ops_summary"),
+                "--daily-ops-summary",
+            )
+        )
+        operator_commands["next_readiness_audit"] = (
+            target_weight_next_check_command_or_default(
+                sanitized,
+                operator_commands.get("next_readiness_audit"),
+                "--readiness-audit",
+            )
+        )
+
     sanitized["decision"] = decision
     sanitized["operator_commands"] = operator_commands
     return sanitized
@@ -1568,12 +1587,20 @@ def _target_weight_ops_priority_action(
         else:
             desc = "오늘 target-weight pilot_paper 증거 기록 완료, 다음 KRX 영업일 fresh readiness와 cap 재승인 점검"
         scheduled_command = (
-            ops_commands.get("next_daily_ops_summary")
+            target_weight_next_check_command_or_default(
+                latest_daily_ops,
+                ops_commands.get("next_daily_ops_summary"),
+                "--daily-ops-summary",
+            )
             or ops_commands.get("daily_ops_summary")
             or commands.get("daily_ops_summary")
         )
         scheduled_follow_up = (
-            ops_commands.get("next_readiness_audit")
+            target_weight_next_check_command_or_default(
+                latest_daily_ops,
+                ops_commands.get("next_readiness_audit"),
+                "--readiness-audit",
+            )
             or ops_commands.get("rerun_readiness_audit")
             or commands.get("readiness_audit")
         )

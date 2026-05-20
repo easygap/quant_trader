@@ -44,3 +44,35 @@ def command_scope_issues(
         if flag not in tokens:
             issues.append(f"missing {flag}")
     return issues
+
+
+def build_no_order_command(
+    candidate_id: str,
+    flag: str,
+    *,
+    as_of_date: str | None = None,
+) -> str:
+    command = f"python tools/target_weight_rotation_pilot.py --candidate-id {candidate_id}"
+    if as_of_date:
+        command += f" --as-of-date {as_of_date}"
+    return f"{command} {flag}"
+
+
+def next_check_command_or_default(
+    payload: dict[str, Any],
+    command: object,
+    flag: str,
+) -> str:
+    candidate_id = str(payload.get("candidate_id") or "").strip()
+    next_trade_day = str(payload.get("next_operator_trade_day") or "").strip()
+    command_text = str(command or "").strip()
+    if not candidate_id or not next_trade_day:
+        return command_text
+    fallback = build_no_order_command(candidate_id, flag, as_of_date=next_trade_day)
+    issues = command_scope_issues(
+        {"candidate_id": candidate_id, "trade_day": next_trade_day},
+        command_text,
+        require_trade_day=True,
+        required_flags=(flag,),
+    )
+    return fallback if issues else command_text
