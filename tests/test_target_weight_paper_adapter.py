@@ -5443,6 +5443,15 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert "db_execution_state_missing_for_account_key" in readiness["blockers"]
     assert "artifact_fills_without_current_db_trades" in readiness["blockers"]
     assert "source_record_db_persistence_incomplete" in readiness["blockers"]
+    assert report["recovery_guard"] == (
+        "target_weight_db_persistence_proof_required_before_snapshot"
+    )
+    assert "restore target-weight DB trade_history/positions persistence proof" in (
+        report["recovery_hint"]
+    )
+    assert "do not create a portfolio snapshot from artifact-only fills" in (
+        report["next_action"]
+    )
     assert report["no_order_safety"]["portfolio_snapshot_written"] is False
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
@@ -5454,6 +5463,10 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert "Target-weight Portfolio Snapshot Diagnostics" in report_md
     assert "Probe status: `missing_snapshot_history`" in report_md
     assert "DB persistence complete: `False`" in report_md
+    assert (
+        "Recovery guard: `target_weight_db_persistence_proof_required_before_snapshot`"
+        in report_md
+    )
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
@@ -5546,6 +5559,7 @@ def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
     assert "source_record_trade_history_not_database_backed" not in readiness["blockers"]
     assert "source_record_positions_not_database_backed" not in readiness["blockers"]
     assert readiness["authoritative_sources"]["artifact_db_persistence_complete"] is True
+    assert report["recovery_guard"] == "target_weight_current_portfolio_snapshot_required"
 
 
 def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
@@ -5632,7 +5646,9 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output
     assert "source_record_db_persistence_incomplete" in output
-    assert "recovery_hint: run end-of-day portfolio snapshot capture" in output
+    assert "recovery_guard: target_weight_db_persistence_proof_required_before_snapshot" in output
+    assert "recovery_hint: restore target-weight DB trade_history/positions persistence proof" in output
+    assert "do not create a portfolio snapshot from artifact-only fills" in output
     assert "artifact:" in output
     assert "report:" in output
 

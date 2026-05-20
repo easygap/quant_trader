@@ -2824,6 +2824,42 @@ def _target_weight_portfolio_snapshot_recovery_hint(probe_status: str) -> str:
     return ""
 
 
+def _target_weight_snapshot_recovery_hint_from_blockers(
+    blockers: list[str],
+    fallback: str,
+) -> str:
+    blocker_set = {str(blocker) for blocker in blockers}
+    if (
+        "source_record_db_persistence_incomplete" in blocker_set
+        or "artifact_fills_without_current_db_trades" in blocker_set
+    ):
+        return (
+            "restore target-weight DB trade_history/positions persistence proof "
+            "before creating a portfolio snapshot"
+        )
+    if "db_execution_state_missing_for_account_key" in blocker_set:
+        return (
+            "restore target-weight paper DB execution state for the account_key "
+            "before snapshot recovery"
+        )
+    return fallback
+
+
+def _target_weight_snapshot_recovery_guard(blockers: list[str]) -> str:
+    blocker_set = {str(blocker) for blocker in blockers}
+    if (
+        "source_record_db_persistence_incomplete" in blocker_set
+        or "artifact_fills_without_current_db_trades" in blocker_set
+        or "db_execution_state_missing_for_account_key" in blocker_set
+    ):
+        return "target_weight_db_persistence_proof_required_before_snapshot"
+    if "current_portfolio_snapshot_missing_after_trades" in blocker_set:
+        return "target_weight_current_portfolio_snapshot_required"
+    if "portfolio_snapshot_history_missing" in blocker_set:
+        return "target_weight_portfolio_snapshot_history_required"
+    return ""
+
+
 def _target_weight_snapshot_diagnostics_command(candidate_id: str, snapshot_date: str) -> str:
     return (
         "python tools/target_weight_rotation_pilot.py "
@@ -3095,6 +3131,7 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         f"- Status: **{report['status']}**",
         f"- Reason: {report['reason']}",
         f"- Recovery hint: {report.get('recovery_hint') or 'N/A'}",
+        f"- Recovery guard: `{report.get('recovery_guard') or 'none'}`",
         "",
         "## Source Record",
         f"- Evidence path: `{report.get('evidence_path') or 'N/A'}`",
@@ -3331,6 +3368,12 @@ def diagnose_target_weight_portfolio_snapshot(
         artifact_execution_state=artifact_execution_state,
         missing_required_fields=missing_required_fields,
     )
+    recovery_blockers = list(recovery_readiness.get("blockers") or [])
+    recovery_hint = _target_weight_snapshot_recovery_hint_from_blockers(
+        recovery_blockers,
+        recovery_hint,
+    )
+    recovery_guard = _target_weight_snapshot_recovery_guard(recovery_blockers)
 
     commands = {
         "diagnose_portfolio_snapshot": _target_weight_snapshot_diagnostics_command(
@@ -3352,6 +3395,12 @@ def diagnose_target_weight_portfolio_snapshot(
             f"{commands['diagnose_portfolio_snapshot']}"
         )
     )
+    if recovery_guard == "target_weight_db_persistence_proof_required_before_snapshot":
+        next_action = (
+            f"{recovery_hint}; then rerun diagnostics: "
+            f"{commands['diagnose_portfolio_snapshot']}; "
+            "do not create a portfolio snapshot from artifact-only fills"
+        )
     report = {
         "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
         "schema_version": 1,
@@ -3362,6 +3411,7 @@ def diagnose_target_weight_portfolio_snapshot(
         "status": status,
         "reason": reason,
         "recovery_hint": recovery_hint,
+        "recovery_guard": recovery_guard,
         "next_action": next_action,
         "source_record_status": source_record_status,
         "portfolio_metrics_probe": probe_summary,
@@ -3498,6 +3548,8 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
             )
     if report.get("recovery_hint"):
         print(f"  recovery_hint: {report.get('recovery_hint')}")
+    if report.get("recovery_guard"):
+        print(f"  recovery_guard: {report.get('recovery_guard')}")
     if report.get("next_action"):
         print(f"  next_action: {report.get('next_action')}")
     if report.get("artifact_path"):
