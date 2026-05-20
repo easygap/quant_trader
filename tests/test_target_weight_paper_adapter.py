@@ -5280,6 +5280,21 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
             "_portfolio_probe_trades_since_previous": 0,
         },
     )
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": plan.candidate_id,
+            "snapshot_date": plan.trade_day,
+            "snapshot_count": 0,
+            "current_snapshot_found": False,
+            "latest_snapshot_at": None,
+            "trade_count_total": 0,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+    )
     record = _existing_pilot_evidence_record(plan)
     record["benchmark_status"] = "failed"
     record["same_universe_excess"] = None
@@ -5299,6 +5314,11 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert report["portfolio_metrics_probe"]["status"] == "missing_snapshot_history"
     assert report["missing_required_fields"] == ["total_value", "daily_return"]
     assert report["source_record_status"]["fields_unusable"] == ["total_value"]
+    readiness = report["snapshot_recovery_readiness"]
+    assert readiness["status"] == "blocked"
+    assert readiness["safe_to_write_snapshot"] is False
+    assert "portfolio_snapshot_history_missing" in readiness["blockers"]
+    assert "db_execution_state_missing_for_account_key" in readiness["blockers"]
     assert report["no_order_safety"]["portfolio_snapshot_written"] is False
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
@@ -5337,6 +5357,21 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
             "_portfolio_probe_trades_since_previous": 1,
         },
     )
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": plan.candidate_id,
+            "snapshot_date": plan.trade_day,
+            "snapshot_count": 1,
+            "current_snapshot_found": False,
+            "latest_snapshot_at": "2026-04-09T15:35:00",
+            "trade_count_total": 1,
+            "trade_count_on_date": 1,
+            "position_count": 4,
+        },
+    )
     record = _existing_pilot_evidence_record(plan)
     record["benchmark_status"] = "failed"
     record["same_universe_excess"] = None
@@ -5369,6 +5404,10 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "status: blocked_missing_current_snapshot_after_trades" in output
     assert "portfolio_metrics_probe: missing_current_snapshot_after_trades" in output
     assert "portfolio_metrics_previous_snapshot_at: 2026-04-09T15:35:00" in output
+    assert "database_state: checked=True snapshots=1 current_snapshot=False" in output
+    assert "snapshot_recovery_readiness: blocked" in output
+    assert "snapshot_safe_to_write: False" in output
+    assert "current_portfolio_snapshot_missing_after_trades" in output
     assert "recovery_hint: run end-of-day portfolio snapshot capture" in output
     assert "artifact:" in output
     assert "report:" in output
