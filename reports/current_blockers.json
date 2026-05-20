@@ -1,13 +1,13 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T17:49:11.359509",
+  "generated_at": "2026-05-20T17:54:32.077508",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T17:49:11.359509",
+    "checked_at": "2026-05-20T17:54:32.077508",
     "age_days": 1.03,
     "max_age_days": 7,
     "status": "FRESH",
@@ -199,18 +199,6 @@
     },
     {
       "priority": 2,
-      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
-      "source": "core_entry_check",
-      "desc": "핵심 진입 점검 알림 도달성 사전점검 재실행",
-      "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
-      "order_safety": "no_order",
-      "requires": "recent verified notifier health",
-      "core_entry_status": "BLOCKED",
-      "core_entry_reason": "notifier stale — rerun preflight with --send-test-notification: Discord webhook test stale",
-      "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status"
-    },
-    {
-      "priority": 3,
       "desc": "live 검토 전 60영업일 execution-backed pilot_paper 증거 누적",
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "command": "# blocked: pilot_paper evidence invalid for 2026-05-20; finalize benchmark/portfolio evidence before counting the day",
@@ -218,7 +206,7 @@
       "requires": "daily_ops_summary.status == READY_TO_EXECUTE"
     },
     {
-      "priority": 4,
+      "priority": 3,
       "desc": "current_blockers.go_live=true 및 live gate 통과 전까지 live 모드 차단 유지",
       "command": "python tools/evaluate_and_promote.py --check-only",
       "order_safety": "no_order"
@@ -264,20 +252,12 @@
       },
       {
         "step": 4,
-        "desc": "핵심 진입 점검 알림 도달성 사전점검 재실행",
-        "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
-        "order_safety": "no_order",
-        "requires": "recent verified notifier health",
-        "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status"
-      },
-      {
-        "step": 5,
         "desc": "readiness audit 실행 후 artifact의 추천 cap만 승인",
         "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --readiness-audit",
         "order_safety": "no_order"
       },
       {
-        "step": 6,
+        "step": 5,
         "desc": "READY_TO_EXECUTE가 나온 정규장 당일에만 capped paper 실행 및 pilot_paper 증거 수집",
         "command": "# blocked: pilot_paper evidence invalid for 2026-05-20; finalize benchmark/portfolio evidence before counting the day",
         "order_safety": "no_order",
@@ -291,7 +271,7 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T17:49:11.359509",
+      "checked_at": "2026-05-20T17:54:32.077508",
       "age_days": 1.03,
       "max_age_days": 7,
       "status": "FRESH",
@@ -447,32 +427,20 @@
     "core_entry_check": {
       "label": "Core Entry Check",
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
-      "status": "BLOCKED",
-      "allowed": false,
-      "reason": "notifier stale — rerun preflight with --send-test-notification: Discord webhook test stale",
-      "checked_at": "2026-05-20T17:49:11.359509",
+      "status": "ALLOWED",
+      "allowed": true,
+      "reason": "pilot authorized",
+      "checked_at": "2026-05-20T17:54:32.077508",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
+      "remaining_orders": 4,
+      "remaining_exposure": 5000000,
       "caps_snapshot": {
         "max_orders_per_day": 4,
         "max_concurrent_positions": 4,
         "max_notional_per_trade": 1510000,
         "max_gross_exposure": 5000000
-      },
-      "recovery_command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
-      "requires": "recent verified notifier health",
-      "recovery_source": "paper_preflight_test_notification"
-    },
-    "core_entry_action": {
-      "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
-      "source": "core_entry_check",
-      "desc": "핵심 진입 점검 알림 도달성 사전점검 재실행",
-      "command": "python tools/paper_preflight.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --with-pilot-check --send-test-notification",
-      "order_safety": "no_order",
-      "requires": "recent verified notifier health",
-      "core_entry_status": "BLOCKED",
-      "core_entry_reason": "notifier stale — rerun preflight with --send-test-notification: Discord webhook test stale",
-      "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status"
+      }
     },
     "current_priority_action": {
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
