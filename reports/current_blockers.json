@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T13:19:43.317333",
+  "generated_at": "2026-05-20T16:00:08.104683",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T13:19:43.317333",
-    "age_days": 0.84,
+    "checked_at": "2026-05-20T16:00:08.104683",
+    "age_days": 0.95,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -96,7 +96,7 @@
       "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
       "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "order_safety": "no_order",
-      "requires": "final portfolio performance evidence available",
+      "requires": "authoritative DB snapshot/trade/position evidence",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
@@ -130,9 +130,38 @@
         "total_value",
         "daily_return"
       ],
-      "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
+      "finalize_portfolio_metrics_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "finalize_report_diagnostics_status": "present"
+      "finalize_report_diagnostics_status": "present",
+      "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "snapshot_diagnostics_generated_at": "2026-05-20T13:47:54.922759",
+      "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
+      "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
+      "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
+      "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
+      "snapshot_recovery_next_action": "restore or create portfolio snapshot history for the target-weight account_key; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+      "snapshot_recovery_status": "blocked",
+      "snapshot_recovery_safe_to_write": false,
+      "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
+      "snapshot_recovery_blockers": [
+        "portfolio_snapshot_history_missing",
+        "portfolio_metrics_required_fields_missing",
+        "db_execution_state_missing_for_account_key",
+        "artifact_fills_without_current_db_trades"
+      ],
+      "snapshot_recovery_warnings": [
+        "source_record_proof_before_finalize=target_weight_benchmark_status_not_final"
+      ],
+      "snapshot_db_snapshot_count": 0,
+      "snapshot_db_current_snapshot_found": false,
+      "snapshot_db_trade_count_total": 0,
+      "snapshot_db_trade_count_on_date": 0,
+      "snapshot_db_position_count": 0,
+      "snapshot_artifact_fill_count": 4,
+      "snapshot_artifact_execution_session_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_20260520101654_df83e6e3",
+      "snapshot_artifact_db_persistence_complete": false,
+      "snapshot_artifact_db_trade_history_source": "",
+      "snapshot_artifact_db_positions_source": ""
     },
     {
       "priority": 2,
@@ -181,7 +210,7 @@
         "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
         "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
         "order_safety": "no_order",
-        "requires": "final portfolio performance evidence available",
+        "requires": "authoritative DB snapshot/trade/position evidence",
         "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
         "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20"
       },
@@ -206,8 +235,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T13:19:43.317333",
-      "age_days": 0.84,
+      "checked_at": "2026-05-20T16:00:08.104683",
+      "age_days": 0.95,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -381,7 +410,7 @@
       "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
       "command": "# blocked: final performance evidence unavailable; target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "order_safety": "no_order",
-      "requires": "final portfolio performance evidence available",
+      "requires": "authoritative DB snapshot/trade/position evidence",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
@@ -415,9 +444,38 @@
         "total_value",
         "daily_return"
       ],
-      "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
+      "finalize_portfolio_metrics_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "finalize_report_diagnostics_status": "present"
+      "finalize_report_diagnostics_status": "present",
+      "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "snapshot_diagnostics_generated_at": "2026-05-20T13:47:54.922759",
+      "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
+      "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
+      "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
+      "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
+      "snapshot_recovery_next_action": "restore or create portfolio snapshot history for the target-weight account_key; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+      "snapshot_recovery_status": "blocked",
+      "snapshot_recovery_safe_to_write": false,
+      "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
+      "snapshot_recovery_blockers": [
+        "portfolio_snapshot_history_missing",
+        "portfolio_metrics_required_fields_missing",
+        "db_execution_state_missing_for_account_key",
+        "artifact_fills_without_current_db_trades"
+      ],
+      "snapshot_recovery_warnings": [
+        "source_record_proof_before_finalize=target_weight_benchmark_status_not_final"
+      ],
+      "snapshot_db_snapshot_count": 0,
+      "snapshot_db_current_snapshot_found": false,
+      "snapshot_db_trade_count_total": 0,
+      "snapshot_db_trade_count_on_date": 0,
+      "snapshot_db_position_count": 0,
+      "snapshot_artifact_fill_count": 4,
+      "snapshot_artifact_execution_session_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_20260520101654_df83e6e3",
+      "snapshot_artifact_db_persistence_complete": false,
+      "snapshot_artifact_db_trade_history_source": "",
+      "snapshot_artifact_db_positions_source": ""
     }
   },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
