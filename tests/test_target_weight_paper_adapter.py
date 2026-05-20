@@ -10089,8 +10089,16 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert caps["target_weight_execution"]["order_result_complete"] is True
     assert caps["target_weight_execution"]["order_result_reconciliation"]["complete"] is True
     assert caps["target_weight_execution"]["fill_complete"] is True
+    assert caps["target_weight_execution"]["db_persistence_complete"] is True
     assert caps["target_weight_execution"]["fill_reconciliation"]["complete"] is True
+    assert caps["target_weight_execution"]["fill_reconciliation"]["source"] == "database.trade_history"
     assert caps["target_weight_execution"]["position_reconciliation"]["complete"] is True
+    assert caps["target_weight_execution"]["position_reconciliation"]["source"] == "database.positions"
+    assert caps["target_weight_execution"]["db_persistence_proof"]["complete"] is True
+    assert (
+        caps["target_weight_execution"]["db_persistence_proof"]["trade_history"]["row_count"]
+        == len(plan.orders)
+    )
     assert caps["target_weight_execution"]["planned_orders"] == len(plan.orders)
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
     assert caps["target_weight_plan"]["position_quantities_before"] == {}
