@@ -1512,6 +1512,15 @@ def _target_weight_db_persistence_status(execution: dict) -> tuple[bool, str]:
     except (TypeError, ValueError):
         return False, "target_weight_db_trade_history_row_count_invalid"
 
+    trade_ids = trade_history.get("trade_ids")
+    if not isinstance(trade_ids, list) or len(trade_ids) != int(expected_row_count):
+        return False, "target_weight_db_trade_history_ids_missing"
+    normalized_trade_ids = [str(trade_id).strip() for trade_id in trade_ids]
+    if any(not trade_id for trade_id in normalized_trade_ids):
+        return False, "target_weight_db_trade_history_id_invalid"
+    if len(set(normalized_trade_ids)) != len(normalized_trade_ids):
+        return False, "target_weight_db_trade_history_id_duplicate"
+
     mismatched_symbols = positions.get("missing_or_mismatched_symbols")
     if mismatched_symbols:
         return False, "target_weight_db_position_quantity_mismatch"

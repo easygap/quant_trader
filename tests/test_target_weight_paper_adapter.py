@@ -300,6 +300,7 @@ def _complete_execution(plan, execution_session_id=TEST_EXECUTION_SESSION_ID):
 def _complete_fills(plan, execution_session_id=TEST_EXECUTION_SESSION_ID):
     return [
         SimpleNamespace(
+            id=index + 1,
             symbol=order.symbol,
             action=order.action,
             quantity=order.quantity,
@@ -4939,6 +4940,38 @@ def test_reconcile_plan_fills_rejects_same_day_unlinked_trade_history_fill():
     assert reconciliation["mismatches"][0]["actual_quantity"] == 0
 
 
+def test_db_persistence_proof_requires_trade_history_row_ids():
+    from tools.target_weight_rotation_pilot import (
+        build_execution_db_persistence_proof,
+        reconcile_plan_fills,
+        reconcile_plan_positions,
+    )
+
+    plan = _adapter_plan()
+    fills = _complete_fills(plan)
+    fills[0].id = None
+
+    proof = build_execution_db_persistence_proof(
+        plan,
+        fill_reconciliation=reconcile_plan_fills(
+            plan,
+            fills,
+            execution_session_id=TEST_EXECUTION_SESSION_ID,
+        ),
+        position_reconciliation=reconcile_plan_positions(
+            plan,
+            {
+                order.symbol: SimpleNamespace(quantity=order.target_quantity)
+                for order in plan.orders
+            },
+        ),
+    )
+
+    assert proof["complete"] is False
+    assert "trade_history_row_id_missing" in proof["blockers"]
+    assert proof["trade_history"]["row_id_count"] == len(plan.orders) - 1
+
+
 def test_verify_existing_pilot_evidence_accepts_complete_record(monkeypatch):
     import core.paper_evidence as pe
     from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
@@ -4993,6 +5026,25 @@ def test_verify_existing_pilot_evidence_rejects_missing_db_persistence_proof(mon
     fields = {item["field"] for item in verification["mismatches"]}
     assert "target_weight_execution.db_persistence_complete" in fields
     assert "target_weight_execution.db_persistence_proof.complete" in fields
+
+
+def test_verify_existing_pilot_evidence_rejects_missing_db_trade_ids(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    proof = record["pilot_caps_snapshot"]["target_weight_execution"]["db_persistence_proof"]
+    proof["trade_history"]["trade_ids"] = []
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    assert verification["mismatches"][0]["actual"] == (
+        "target_weight_db_trade_history_ids_missing"
+    )
 
 
 def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch, tmp_path):
@@ -10441,6 +10493,14 @@ def test_run_pilot_records_evidence_after_complete_execution(monkeypatch, tmp_pa
     assert caps["target_weight_plan"]["params_hash"] == plan.params_hash
     assert caps["target_weight_plan"]["position_quantities_before"] == {}
     assert saved_sessions[0]["execution_complete"] is True
+    session_artifact = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
+    assert session_artifact["execution_evidence"]["complete"] is True
+    assert session_artifact["execution_evidence"]["db_persistence_complete"] is True
+    assert session_artifact["position_reconciliation"]["source"] == "database.positions"
+    assert (
+        session_artifact["execution_evidence"]["db_persistence_proof"]["trade_history"]["row_id_count"]
+        == len(plan.orders)
+    )
 
 
 def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monkeypatch, tmp_path):
