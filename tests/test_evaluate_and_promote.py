@@ -2168,6 +2168,15 @@ def test_current_blockers_waits_when_finalize_missing_performance():
             "source_record_fields_usable": ["cash"],
             "source_record_fields_unusable": [],
             "portfolio_metrics_checked": True,
+            "portfolio_metrics_probe_status": "missing_current_snapshot_after_trades",
+            "portfolio_metrics_probe_reason": (
+                "trades exist after previous snapshot but current snapshot is missing"
+            ),
+            "portfolio_metrics_current_snapshot_found": False,
+            "portfolio_metrics_previous_snapshot_found": True,
+            "portfolio_metrics_previous_snapshot_at": "2026-05-19T15:35:00",
+            "portfolio_metrics_trades_today": 1,
+            "portfolio_metrics_trades_since_previous": 1,
             "portfolio_metrics_fields_present": [],
             "missing_fields_after_probe": ["total_value", "daily_return"],
         },
@@ -2195,6 +2204,16 @@ def test_current_blockers_waits_when_finalize_missing_performance():
     assert action["finalize_source_record_fields_usable"] == ["cash"]
     assert action["finalize_source_record_fields_unusable"] == []
     assert action["finalize_portfolio_metrics_checked"] is True
+    assert action["finalize_portfolio_metrics_probe_status"] == (
+        "missing_current_snapshot_after_trades"
+    )
+    assert action["finalize_portfolio_metrics_current_snapshot_found"] is False
+    assert action["finalize_portfolio_metrics_previous_snapshot_found"] is True
+    assert action["finalize_portfolio_metrics_previous_snapshot_at"] == (
+        "2026-05-19T15:35:00"
+    )
+    assert action["finalize_portfolio_metrics_trades_today"] == 1
+    assert action["finalize_portfolio_metrics_trades_since_previous"] == 1
     assert action["finalize_portfolio_metrics_fields_present"] == []
     assert action["finalize_missing_performance_fields"] == [
         "total_value",
