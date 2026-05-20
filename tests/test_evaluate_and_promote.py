@@ -2211,6 +2211,10 @@ def test_current_blockers_waits_when_finalize_missing_performance():
         "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
         "--finalize-pilot-evidence --finalize-date 2026-05-20"
     )
+    snapshot_diagnostics_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
+    )
     latest_daily_ops = {
         "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-20.json",
         "trade_day": "2026-05-20",
@@ -2328,6 +2332,10 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
         "--finalize-pilot-evidence --finalize-date 2026-05-20"
     )
+    snapshot_diagnostics_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
+    )
     latest_daily_ops = {
         "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-20.json",
         "trade_day": "2026-05-20",
@@ -2429,8 +2437,20 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
 
     action = report["next_actions"][0]
     assert action["requires"] == "authoritative DB snapshot/trade/position evidence"
+    assert action["command"] == (
+        "# blocked: restore authoritative DB trade_history/positions proof "
+        "before target-weight snapshot recovery"
+    )
+    assert action["scheduled_command"] == snapshot_diagnostics_command
+    assert action["scheduled_follow_up"] == finalize_command
+    assert action["blocked_finalize_command"].startswith(
+        "# blocked: portfolio snapshot recovery requires"
+    )
     assert action["finalize_portfolio_metrics_recovery_hint"].startswith(
         "restore target-weight DB trade_history/positions persistence proof"
+    )
+    assert action["finalize_portfolio_snapshot_diagnostics_command"] == (
+        snapshot_diagnostics_command
     )
     assert action["snapshot_diagnostics_status"] == "blocked_missing_snapshot_history"
     assert action["snapshot_recovery_guard"] == (
