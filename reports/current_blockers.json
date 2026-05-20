@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T17:54:32.077508",
+  "generated_at": "2026-05-21T08:52:47.042766",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T17:54:32.077508",
-    "age_days": 1.03,
+    "checked_at": "2026-05-21T08:52:47.042766",
+    "age_days": 1.65,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -188,6 +188,23 @@
       ],
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
+      "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "snapshot_db_restore_verification_generated_at": "2026-05-20T17:49:12.419402",
+      "snapshot_db_restore_verification_status": "blocked",
+      "snapshot_db_restore_verification_ready": false,
+      "snapshot_db_restore_verification_blockers": [
+        "authoritative_trade_history_csv_required",
+        "authoritative_positions_csv_required"
+      ],
+      "snapshot_db_restore_verification_warnings": [],
+      "snapshot_db_restore_verification_trade_hash_ok": true,
+      "snapshot_db_restore_verification_positions_hash_ok": true,
+      "snapshot_db_restore_authoritative_trade_history_provided": false,
+      "snapshot_db_restore_authoritative_trade_history_match": false,
+      "snapshot_db_restore_authoritative_positions_provided": false,
+      "snapshot_db_restore_authoritative_positions_match": false,
+      "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
+      "snapshot_db_restore_verification_db_positions": 0,
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
@@ -271,8 +288,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T17:54:32.077508",
-      "age_days": 1.03,
+      "checked_at": "2026-05-21T08:52:47.042766",
+      "age_days": 1.65,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -430,7 +447,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-20T17:54:32.077508",
+      "checked_at": "2026-05-21T08:52:47.042766",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -441,6 +458,101 @@
         "max_notional_per_trade": 1510000,
         "max_gross_exposure": 5000000
       }
+    },
+    "latest_db_restore_verification": {
+      "artifact_type": "target_weight_db_restore_package_verification",
+      "schema_version": 1,
+      "generated_at": "2026-05-20T17:49:12.419402",
+      "status": "blocked",
+      "restore_ready": false,
+      "blockers": [
+        "authoritative_trade_history_csv_required",
+        "authoritative_positions_csv_required"
+      ],
+      "warnings": [],
+      "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+      "snapshot_date": "2026-05-20",
+      "manifest_path": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
+      "manifest_hash": "be3c3aacf3e9bb3e7dcf535923ba57cca366eab3e58cf0b5a4fc7a3dd571bf8b",
+      "candidate_manifest_hash": "9d3880a1a4c78f5961dd2d0c67587473418dd243152bbfc760474798adc5985a",
+      "candidate_package": {
+        "candidate_only": true,
+        "db_write_enabled": false,
+        "portfolio_snapshot_write_enabled": false,
+        "requires_authoritative_confirmation": true,
+        "trade_history": {
+          "kind": "trade_history",
+          "path": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_trade_history.csv",
+          "exists": true,
+          "hash_ok": true,
+          "row_count": 4,
+          "expected_rows": 4,
+          "candidate_only_rows": 4,
+          "requires_authoritative_confirmation_rows": 4,
+          "hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
+          "expected_hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
+          "zero_quantity_symbols": []
+        },
+        "positions": {
+          "kind": "positions",
+          "path": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_positions.csv",
+          "exists": true,
+          "hash_ok": true,
+          "row_count": 4,
+          "expected_rows": 4,
+          "candidate_only_rows": 4,
+          "requires_authoritative_confirmation_rows": 4,
+          "hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
+          "expected_hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
+          "zero_quantity_symbols": []
+        },
+        "position_candidate_skipped_zero_quantity_symbols": [
+          "000660"
+        ]
+      },
+      "authoritative_evidence": {
+        "trade_history": {
+          "kind": "trade_history",
+          "path": "",
+          "provided": false,
+          "exists": false,
+          "match": false
+        },
+        "positions": {
+          "kind": "positions",
+          "path": "",
+          "provided": false,
+          "exists": false,
+          "match": false
+        }
+      },
+      "current_db_state": {
+        "checked": true,
+        "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+        "snapshot_date": "2026-05-20",
+        "snapshot_count": 0,
+        "current_snapshot_found": false,
+        "current_snapshot_total_value": null,
+        "latest_snapshot_at": null,
+        "latest_snapshot_total_value": null,
+        "trade_count_total": 0,
+        "trade_count_on_date": 0,
+        "position_count": 0
+      },
+      "no_write_safety": {
+        "db_write_enabled": false,
+        "portfolio_snapshot_write_enabled": false,
+        "restore_applied": false,
+        "dry_run_only": true
+      },
+      "operator_commands": {
+        "rerun_snapshot_diagnostics_after_manual_restore": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+        "manual_restore_guard": "# manual step required: restore only after authoritative broker/DB evidence has been reviewed and matched"
+      },
+      "artifact_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "report_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
+      "source_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "source_mtime": 1779266952.4194021
     },
     "current_priority_action": {
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
@@ -556,6 +668,23 @@
       ],
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
+      "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
+      "snapshot_db_restore_verification_generated_at": "2026-05-20T17:49:12.419402",
+      "snapshot_db_restore_verification_status": "blocked",
+      "snapshot_db_restore_verification_ready": false,
+      "snapshot_db_restore_verification_blockers": [
+        "authoritative_trade_history_csv_required",
+        "authoritative_positions_csv_required"
+      ],
+      "snapshot_db_restore_verification_warnings": [],
+      "snapshot_db_restore_verification_trade_hash_ok": true,
+      "snapshot_db_restore_verification_positions_hash_ok": true,
+      "snapshot_db_restore_authoritative_trade_history_provided": false,
+      "snapshot_db_restore_authoritative_trade_history_match": false,
+      "snapshot_db_restore_authoritative_positions_provided": false,
+      "snapshot_db_restore_authoritative_positions_match": false,
+      "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
+      "snapshot_db_restore_verification_db_positions": 0,
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
