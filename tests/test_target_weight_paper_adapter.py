@@ -1181,6 +1181,73 @@ def test_target_weight_daily_ops_cli_marks_not_checked_gates(monkeypatch, tmp_pa
     assert "market session: N/A (PASS)" not in output
 
 
+def test_target_weight_daily_ops_cli_exits_nonzero_on_invalid_evidence(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+
+    def fake_run_daily_ops_summary(**kwargs):
+        return {
+            "daily_ops_summary": {
+                "candidate_id": "target_weight_rotation_test",
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "next_step": "final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+                "decision": {
+                    "blocking_reasons": [
+                        "execution_idempotency: target_weight_duplicate_execution_attempt"
+                    ],
+                    "warning_reasons": [],
+                    "execution_trade_day_check": {**pass_check, "execution_day": "2026-04-10"},
+                    "execution_market_session_check": {**pass_check, "execution_time": "10:00:00"},
+                    "pilot_authorization_snapshot_check": pass_check,
+                },
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "remaining_pilot_days": 60,
+                    "shadow_days": 2,
+                    "repaired_pilot_days": 0,
+                    "invalid_execution_days": 1,
+                },
+            },
+            "artifact_path": tmp_path / "readiness.json",
+            "experiment_manifest_path": tmp_path / "manifest.json",
+            "daily_ops_summary_path": tmp_path / "summary.json",
+            "daily_ops_summary_report_path": tmp_path / "summary.md",
+        }
+
+    monkeypatch.setattr(twp, "run_daily_ops_summary", fake_run_daily_ops_summary)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--daily-ops-summary",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "status: PILOT_EVIDENCE_INVALID" in output
+    assert "final benchmark/portfolio evidence" in output
+    assert "blocker: execution_idempotency" in output
+
+
 def test_target_weight_daily_ops_cli_writes_failure_artifact(monkeypatch, tmp_path, capsys):
     import tools.target_weight_rotation_pilot as twp
 
