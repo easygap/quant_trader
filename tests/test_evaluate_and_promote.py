@@ -2207,6 +2207,9 @@ def test_current_blockers_waits_when_finalize_missing_performance():
     assert action["finalize_portfolio_metrics_probe_status"] == (
         "missing_current_snapshot_after_trades"
     )
+    assert action["finalize_portfolio_metrics_recovery_hint"] == (
+        "run end-of-day portfolio snapshot capture for the trade day"
+    )
     assert action["finalize_portfolio_metrics_current_snapshot_found"] is False
     assert action["finalize_portfolio_metrics_previous_snapshot_found"] is True
     assert action["finalize_portfolio_metrics_previous_snapshot_at"] == (
