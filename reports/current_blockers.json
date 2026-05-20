@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T16:07:06.636375",
+  "generated_at": "2026-05-20T16:15:30.529053",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T16:07:06.636375",
-    "age_days": 0.95,
+    "checked_at": "2026-05-20T16:15:30.529053",
+    "age_days": 0.96,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -93,7 +93,7 @@
         "target_weight_repaired_performance_not_promotable": 2,
         "target_weight_benchmark_status_not_final": 1
       },
-      "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+      "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
       "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
       "order_safety": "no_order",
       "requires": "authoritative DB snapshot/trade/position evidence",
@@ -163,6 +163,11 @@
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
       "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
+      "snapshot_recovery_order": [
+        "restore_authoritative_db_trade_history_positions_proof",
+        "rerun_portfolio_snapshot_diagnostics",
+        "rerun_finalize_pilot_evidence"
+      ],
       "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence first"
     },
     {
@@ -209,7 +214,7 @@
       },
       {
         "step": 3,
-        "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+        "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
         "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
         "order_safety": "no_order",
         "requires": "authoritative DB snapshot/trade/position evidence",
@@ -238,8 +243,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T16:07:06.636375",
-      "age_days": 0.95,
+      "checked_at": "2026-05-20T16:15:30.529053",
+      "age_days": 0.96,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -410,7 +415,7 @@
         "target_weight_repaired_performance_not_promotable": 2,
         "target_weight_benchmark_status_not_final": 1
       },
-      "desc": "오늘 target-weight pilot_paper 증거 품질 미확정, final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+      "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
       "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
       "order_safety": "no_order",
       "requires": "authoritative DB snapshot/trade/position evidence",
@@ -480,6 +485,11 @@
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
       "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
+      "snapshot_recovery_order": [
+        "restore_authoritative_db_trade_history_positions_proof",
+        "rerun_portfolio_snapshot_diagnostics",
+        "rerun_finalize_pilot_evidence"
+      ],
       "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence first"
     }
   },
