@@ -2830,6 +2830,15 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         "finalize_source_record_fields_unusable": ["total_value"],
         "finalize_missing_performance_fields": ["total_value", "daily_return"],
         "finalize_portfolio_metrics_checked": True,
+        "finalize_portfolio_metrics_probe_status": "missing_current_snapshot_after_trades",
+        "finalize_portfolio_metrics_probe_reason": (
+            "trades exist after previous snapshot but current snapshot is missing"
+        ),
+        "finalize_portfolio_metrics_current_snapshot_found": False,
+        "finalize_portfolio_metrics_previous_snapshot_found": True,
+        "finalize_portfolio_metrics_previous_snapshot_at": "2026-04-09T15:35:00",
+        "finalize_portfolio_metrics_trades_today": 1,
+        "finalize_portfolio_metrics_trades_since_previous": 1,
         "finalize_portfolio_metrics_fields_present": [],
         "verified_pilot_days": 0,
         "target_days": 60,
@@ -2882,6 +2891,14 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     assert "Source record usable fields: cash" in output
     assert "Source record unusable fields: total_value" in output
     assert "Missing performance fields: total_value, daily_return" in output
+    assert "Portfolio metrics probe: missing_current_snapshot_after_trades" in output
+    assert (
+        "Portfolio metrics probe reason: trades exist after previous snapshot "
+        "but current snapshot is missing"
+    ) in output
+    assert "Portfolio metrics snapshot found: current=False previous=True" in output
+    assert "Portfolio metrics previous snapshot at: 2026-04-09T15:35:00" in output
+    assert "Portfolio metrics trades: today=1 since_previous=1" in output
     assert "Portfolio metrics probe fields: none" in output
     assert "Finalize report source: reports/paper_runtime/" in output
     assert "RUN current blockers priority command" not in output
@@ -4942,7 +4959,20 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
 
     plan = _adapter_plan()
     monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
-    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {"cash": 1_000_000.0})
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "current_snapshot",
+            "_portfolio_probe_reason": "test snapshot",
+            "_portfolio_probe_current_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_at": date.isoformat(),
+            "_portfolio_probe_trades_today": 0,
+            "_portfolio_probe_trades_since_previous": 0,
+            "cash": 1_000_000.0,
+        },
+    )
     record = _existing_pilot_evidence_record(plan)
     record["benchmark_status"] = "failed"
     record["same_universe_excess"] = None
@@ -4970,6 +5000,9 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
     assert "cash" in performance_status["source_record_fields_usable"]
     assert performance_status["source_record_fields_unusable"] == []
     assert performance_status["portfolio_metrics_checked"] is True
+    assert performance_status["portfolio_metrics_probe_status"] == "current_snapshot"
+    assert performance_status["portfolio_metrics_probe_reason"] == "test snapshot"
+    assert performance_status["portfolio_metrics_current_snapshot_found"] is True
     assert performance_status["portfolio_metrics_fields_present"] == ["cash"]
     assert performance_status["missing_fields_after_probe"] == [
         "total_value",
@@ -4979,6 +5012,7 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
     report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
     assert "## Performance Evidence Status" in report_md
     assert "Source record fields usable:" in report_md
+    assert "Portfolio metrics probe: `current_snapshot`" in report_md
     assert "Missing fields after probe: `total_value, daily_return`" in report_md
 
 
@@ -4991,7 +5025,18 @@ def test_finalize_target_weight_pilot_evidence_marks_zero_total_value_unusable(
 
     plan = _adapter_plan()
     monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
-    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {})
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "missing_snapshot_history",
+            "_portfolio_probe_reason": "no portfolio snapshot exists for account_key",
+            "_portfolio_probe_current_snapshot_found": False,
+            "_portfolio_probe_previous_snapshot_found": False,
+            "_portfolio_probe_trades_today": 0,
+            "_portfolio_probe_trades_since_previous": 0,
+        },
+    )
     record = _existing_pilot_evidence_record(plan)
     record["benchmark_status"] = "failed"
     record["same_universe_excess"] = None
@@ -5014,6 +5059,7 @@ def test_finalize_target_weight_pilot_evidence_marks_zero_total_value_unusable(
     assert "total_value" in performance_status["source_record_fields_present"]
     assert "total_value" not in performance_status["source_record_fields_usable"]
     assert "total_value" in performance_status["source_record_fields_unusable"]
+    assert performance_status["portfolio_metrics_probe_status"] == "missing_snapshot_history"
     assert performance_status["missing_fields_after_probe"] == [
         "total_value",
         "daily_return",
@@ -5031,7 +5077,20 @@ def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_di
     plan = _adapter_plan()
     output_dir = tmp_path / "paper_runtime"
     monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
-    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {"cash": 1_000_000.0})
+    monkeypatch.setattr(
+        pe,
+        "_probe_portfolio_metrics",
+        lambda account_key, date: {
+            "_portfolio_probe_status": "current_snapshot",
+            "_portfolio_probe_reason": "test snapshot",
+            "_portfolio_probe_current_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_found": True,
+            "_portfolio_probe_previous_snapshot_at": date.isoformat(),
+            "_portfolio_probe_trades_today": 0,
+            "_portfolio_probe_trades_since_previous": 0,
+            "cash": 1_000_000.0,
+        },
+    )
     record = _existing_pilot_evidence_record(plan)
     record["benchmark_status"] = "failed"
     record["same_universe_excess"] = None
@@ -5066,6 +5125,9 @@ def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_di
     assert "source_record_usable_fields:" in output
     assert "source_record_unusable_fields: none" in output
     assert "portfolio_metrics_checked: True" in output
+    assert "portfolio_metrics_probe: current_snapshot" in output
+    assert "portfolio_metrics_probe_reason: test snapshot" in output
+    assert "portfolio_metrics_current_snapshot_found: True" in output
     assert "portfolio_metrics_fields: cash" in output
     assert "missing_performance_fields: total_value, daily_return" in output
     assert "artifact:" in output
