@@ -2693,6 +2693,105 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
     assert summary_path.as_posix() in output
 
 
+def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
+    tmp_path,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--finalize-pilot-evidence --finalize-date 2026-04-10"
+    )
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "next_step": "final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "shadow_days": 2,
+                    "repaired_pilot_days": 2,
+                    "invalid_execution_days": 3,
+                },
+                "decision": {},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: daily order cap already reached",
+                    "finalize_pilot_evidence": finalize_command,
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action = {
+        "strategy": strategy,
+        "source_path": summary_path.as_posix(),
+        "daily_ops_status": "PILOT_EVIDENCE_INVALID",
+        "daily_ops_trade_day": "2026-04-10",
+        "desc": "확정되지 않은 pilot evidence 정리",
+        "command": (
+            "# blocked: final performance evidence unavailable; "
+            "target_weight_pilot_evidence_finalize_missing_performance: "
+            "total_value/daily_return unavailable"
+        ),
+        "scheduled_command": finalize_command,
+        "performance_evidence_guard": (
+            "target_weight_pilot_evidence_finalize_missing_performance"
+        ),
+        "verified_pilot_days": 0,
+        "target_days": 60,
+        "shadow_days": 2,
+        "repaired_pilot_days": 2,
+        "invalid_execution_days": 3,
+    }
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "commands": {
+                        "regenerate_current_blockers": (
+                            "python tools/evaluate_and_promote.py --current-blockers"
+                        ),
+                    },
+                    "current_priority_action": action,
+                },
+                "next_actions": [action],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Status: PILOT_EVIDENCE_INVALID" in output
+    assert "Current blockers priority: 확정되지 않은 pilot evidence 정리" in output
+    assert (
+        "Priority command: # blocked: final performance evidence unavailable"
+        in output
+    )
+    assert "Scheduled priority command:" in output
+    assert finalize_command in output
+    assert (
+        "Operator next action: WAIT for final portfolio performance evidence, "
+        "then rerun scheduled priority command:"
+    ) in output
+    assert "RUN current blockers priority command" not in output
+    assert summary_path.as_posix() in output
+
+
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
     import core.paper_pilot as paper_pilot
     import tools.paper_pilot_control as ppc
