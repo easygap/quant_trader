@@ -1390,6 +1390,7 @@ def _print_target_weight_daily_ops_status(
     priority_follow_up = str(
         priority_action.get("scheduled_follow_up") or priority_action.get("follow_up") or ""
     ).strip()
+    priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
     if priority_desc or priority_command or priority_scheduled_command:
         print(f"    Current blockers priority: {priority_desc or 'N/A'}")
         priority_evidence = []
@@ -1421,6 +1422,38 @@ def _print_target_weight_daily_ops_status(
             priority_scheduled_command,
         }:
             print(f"    Priority follow-up: {priority_follow_up}")
+        if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
+            print("    Performance evidence guard: waiting for total_value/daily_return")
+            if priority_action.get("finalize_report_status"):
+                print(
+                    "    Finalize report status: "
+                    f"{priority_action.get('finalize_report_status')}"
+                )
+            if priority_action.get("finalize_report_generated_at"):
+                print(
+                    "    Finalize report generated at: "
+                    f"{priority_action.get('finalize_report_generated_at')}"
+                )
+            missing_fields = priority_action.get("finalize_missing_performance_fields") or []
+            if missing_fields:
+                print(
+                    "    Missing performance fields: "
+                    + ", ".join(str(field) for field in missing_fields)
+                )
+            if priority_action.get("finalize_portfolio_metrics_checked"):
+                present_fields = (
+                    priority_action.get("finalize_portfolio_metrics_fields_present")
+                    or []
+                )
+                print(
+                    "    Portfolio metrics probe fields: "
+                    + (", ".join(str(field) for field in present_fields) or "none")
+                )
+            if priority_action.get("finalize_report_source"):
+                print(
+                    "    Finalize report source: "
+                    f"{priority_action.get('finalize_report_source')}"
+                )
     operator_next_action = _target_weight_operator_next_action(
         summary,
         not_before_date=not_before_date,
@@ -1430,7 +1463,7 @@ def _print_target_weight_daily_ops_status(
         priority_failure_reason=str(priority_action.get("failure_reason") or "")
         if priority_action.get("source") == "latest_daily_ops_failure"
         else "",
-        priority_wait_guard=str(priority_action.get("performance_evidence_guard") or ""),
+        priority_wait_guard=priority_wait_guard,
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),

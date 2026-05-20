@@ -2606,6 +2606,22 @@ def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]
         lines.extend([f"- {key}: `{value}`" for key, value in sorted(finalized_fields.items())])
     else:
         lines.append("- none")
+    performance_status = report.get("performance_evidence_status") or {}
+    if performance_status:
+        lines.extend([
+            "",
+            "## Performance Evidence Status",
+            "- Source record fields present: "
+            f"`{', '.join(performance_status.get('source_record_fields_present') or []) or 'none'}`",
+            "- Portfolio metrics checked: "
+            f"`{performance_status.get('portfolio_metrics_checked', False)}`",
+            "- Portfolio metrics fields present: "
+            f"`{', '.join(performance_status.get('portfolio_metrics_fields_present') or []) or 'none'}`",
+            "- Missing fields after probe: "
+            f"`{', '.join(performance_status.get('missing_fields_after_probe') or []) or 'none'}`",
+        ])
+        if performance_status.get("portfolio_metrics_inferred_from_previous"):
+            lines.append("- Portfolio metrics source: `previous snapshot carry-forward`")
     lines.extend([
         "",
         "## No-order Safety",
@@ -2669,6 +2685,7 @@ def finalize_target_weight_pilot_evidence(
         "source_record_version": None,
         "appended_record_version": None,
         "finalized_fields": {},
+        "performance_evidence_status": {},
         "proof_status_before": {},
         "proof_status_after": {},
         "no_order_safety": {
@@ -2724,21 +2741,38 @@ def finalize_target_weight_pilot_evidence(
 
     updated = deepcopy(latest)
     finalized_fields: dict[str, Any] = {}
+    performance_fields = (
+        "total_value",
+        "cash",
+        "invested",
+        "daily_return",
+        "cumulative_return",
+        "mdd",
+        "position_count",
+    )
+    performance_status = {
+        "source_record_fields_present": [
+            field for field in performance_fields if latest.get(field) is not None
+        ],
+        "portfolio_metrics_checked": False,
+        "portfolio_metrics_fields_present": [],
+        "portfolio_metrics_inferred_from_previous": False,
+        "missing_fields_after_probe": [],
+    }
     total_value = _positive_float_from(updated.get("total_value"))
     cash = _coerce_float_or_none(updated.get("cash"))
     daily_return = _coerce_float_or_none(updated.get("daily_return"))
     portfolio: dict[str, Any] = {}
     if total_value is None or daily_return is None:
         portfolio = _collect_portfolio_metrics(candidate_id, parsed_date)
-        for field in (
-            "total_value",
-            "cash",
-            "invested",
-            "daily_return",
-            "cumulative_return",
-            "mdd",
-            "position_count",
-        ):
+        performance_status["portfolio_metrics_checked"] = True
+        performance_status["portfolio_metrics_fields_present"] = [
+            field for field in performance_fields if portfolio.get(field) is not None
+        ]
+        performance_status["portfolio_metrics_inferred_from_previous"] = bool(
+            portfolio.get("_inferred_from_previous")
+        )
+        for field in performance_fields:
             value = portfolio.get(field)
             if value is not None:
                 updated[field] = value
@@ -2746,10 +2780,19 @@ def finalize_target_weight_pilot_evidence(
         total_value = _positive_float_from(updated.get("total_value"))
         cash = _coerce_float_or_none(updated.get("cash"))
         daily_return = _coerce_float_or_none(updated.get("daily_return"))
+    performance_status["missing_fields_after_probe"] = [
+        field
+        for field, parsed_value in (
+            ("total_value", _positive_float_from(updated.get("total_value"))),
+            ("daily_return", _coerce_float_or_none(updated.get("daily_return"))),
+        )
+        if parsed_value is None
+    ]
 
     if total_value is None or total_value <= 0 or daily_return is None:
         report["reason"] = "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable"
         report["finalized_fields"] = finalized_fields
+        report["performance_evidence_status"] = performance_status
         return finish(report, fail=True)
 
     cash_ratio = (cash or 0.0) / total_value if total_value > 0 else 1.0
@@ -2765,6 +2808,7 @@ def finalize_target_weight_pilot_evidence(
             "status": "waiting_for_final_benchmark",
             "reason": f"target_weight_pilot_evidence_finalize_waiting: benchmark_status={benchmark_status}",
             "finalized_fields": finalized_fields,
+            "performance_evidence_status": performance_status,
             "benchmark_status": benchmark_status,
         })
         return finish(report)
@@ -2786,6 +2830,7 @@ def finalize_target_weight_pilot_evidence(
     if not after_valid:
         report["reason"] = f"target_weight_pilot_evidence_finalize_still_invalid: {after_reason}"
         report["finalized_fields"] = finalized_fields
+        report["performance_evidence_status"] = performance_status
         report["proof_status_after"] = {"valid": after_valid, "reason": after_reason}
         return finish(report, fail=True)
 
@@ -2796,6 +2841,7 @@ def finalize_target_weight_pilot_evidence(
         "finalized": True,
         "appended_record_version": updated["record_version"],
         "finalized_fields": finalized_fields,
+        "performance_evidence_status": performance_status,
         "proof_status_after": {"valid": after_valid, "reason": after_reason},
         "benchmark_status": benchmark_status,
     })
@@ -4069,6 +4115,12 @@ def _first_text(items: Any) -> str | None:
     return None
 
 
+def _target_weight_finalize_first_invalid_reasons(invalid_reasons: Any) -> bool:
+    if not isinstance(invalid_reasons, dict):
+        return False
+    return any(reason in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS for reason in invalid_reasons)
+
+
 def _readiness_execute_block_reason(
     *,
     ready_for_capped_pilot: bool,
@@ -4680,7 +4732,7 @@ def build_target_weight_daily_ops_summary(
     elif pilot_evidence_invalid_today:
         status = "PILOT_EVIDENCE_INVALID"
         invalid_reasons = evidence_progress.get("invalid_reasons") or {}
-        if "target_weight_benchmark_status_not_final" in invalid_reasons:
+        if _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             next_step = "오늘 pilot_paper 증거 품질 미확정; final benchmark/portfolio evidence 확정 후 daily ops 재점검"
         else:
             next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
@@ -4776,7 +4828,7 @@ def build_target_weight_daily_ops_summary(
     )
     if pilot_evidence_invalid_today:
         invalid_reasons = evidence_progress.get("invalid_reasons") or {}
-        if "target_weight_benchmark_status_not_final" in invalid_reasons:
+        if _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             operator_commands["repair_pilot_evidence"] = (
                 "# fallback: use only if finalize cannot produce promotable proof; "
                 + operator_commands["repair_pilot_evidence"]
