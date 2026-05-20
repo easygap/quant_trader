@@ -917,6 +917,7 @@ def _target_weight_operator_next_action(
     priority_diagnostics_status: str,
     priority_probe_status: str,
     priority_recovery_hint: str,
+    priority_snapshot_diagnostics_command: str,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -951,6 +952,12 @@ def _target_weight_operator_next_action(
                 priority_recovery_hint
                 or "restore or create portfolio snapshot history for the account_key"
             )
+            if priority_snapshot_diagnostics_command:
+                return (
+                    "RUN no-order portfolio snapshot diagnostics before finalize: "
+                    f"{priority_snapshot_diagnostics_command}; {hint}; "
+                    f"then rerun scheduled priority command: {recovery_command}"
+                )
             return (
                 "RESTORE portfolio snapshot history before finalize: "
                 f"{hint}; then rerun scheduled priority command: {recovery_command}"
@@ -963,6 +970,12 @@ def _target_weight_operator_next_action(
                 priority_recovery_hint
                 or "run end-of-day portfolio snapshot capture for the trade day"
             )
+            if priority_snapshot_diagnostics_command:
+                return (
+                    "RUN no-order portfolio snapshot diagnostics before finalize: "
+                    f"{priority_snapshot_diagnostics_command}; {hint}; "
+                    f"then rerun scheduled priority command: {recovery_command}"
+                )
             return (
                 "RUN portfolio snapshot capture before finalize: "
                 f"{hint}; then rerun scheduled priority command: {recovery_command}"
@@ -1429,6 +1442,9 @@ def _print_target_weight_daily_ops_status(
     priority_recovery_hint = str(
         priority_action.get("finalize_portfolio_metrics_recovery_hint") or ""
     ).strip()
+    priority_snapshot_diagnostics_command = str(
+        priority_action.get("finalize_portfolio_snapshot_diagnostics_command") or ""
+    ).strip()
     if priority_desc or priority_command or priority_scheduled_command:
         print(f"    Current blockers priority: {priority_desc or 'N/A'}")
         priority_evidence = []
@@ -1471,6 +1487,11 @@ def _print_target_weight_daily_ops_status(
                 print(
                     "    Diagnostics refresh command: "
                     f"{priority_action.get('finalize_diagnostics_refresh_command')}"
+                )
+            if priority_snapshot_diagnostics_command:
+                print(
+                    "    Portfolio snapshot diagnostics command: "
+                    f"{priority_snapshot_diagnostics_command}"
                 )
             if priority_action.get("finalize_report_status"):
                 print(
@@ -1561,6 +1582,7 @@ def _print_target_weight_daily_ops_status(
         priority_diagnostics_status=priority_diagnostics_status,
         priority_probe_status=priority_probe_status,
         priority_recovery_hint=priority_recovery_hint,
+        priority_snapshot_diagnostics_command=priority_snapshot_diagnostics_command,
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),
