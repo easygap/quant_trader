@@ -2737,6 +2737,7 @@ def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]
         f"- Reason: {report['reason']}",
         f"- Source record version: {report.get('source_record_version', 'N/A')}",
         f"- Appended record version: {report.get('appended_record_version', 'N/A')}",
+        f"- Proof before finalize: {report.get('proof_status_before', {}).get('reason', 'N/A')}",
         f"- Proof after finalize: {report.get('proof_status_after', {}).get('reason', 'N/A')}",
         "",
         "## Finalized Fields",
@@ -2780,6 +2781,14 @@ def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]
         ])
         if performance_status.get("portfolio_metrics_inferred_from_previous"):
             lines.append("- Portfolio metrics source: `previous snapshot carry-forward`")
+    operator_commands = report.get("operator_commands") or {}
+    if operator_commands:
+        lines.extend([
+            "",
+            "## Operator Commands",
+        ])
+        for key, value in sorted(operator_commands.items()):
+            lines.append(f"- {key}: `{value}`")
     lines.extend([
         "",
         "## No-order Safety",
@@ -3532,6 +3541,12 @@ def _load_target_weight_finalize_report_for_cli(
 
 
 def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
+    proof_before = report.get("proof_status_before") or {}
+    if proof_before:
+        print(
+            "  proof_before_finalize: "
+            f"{proof_before.get('reason') or 'none'}"
+        )
     performance_status = report.get("performance_evidence_status") or {}
     if isinstance(performance_status, dict) and performance_status:
         missing_fields = performance_status.get("missing_fields_after_probe") or []
@@ -3601,6 +3616,21 @@ def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
             "  next: WAIT for final portfolio performance evidence, "
             "then rerun this finalize command"
         )
+    elif _target_weight_db_persistence_reason(reason) or _target_weight_db_persistence_reason(
+        str(proof_before.get("reason") or "")
+    ):
+        command = (
+            (report.get("operator_commands") or {}).get("diagnose_portfolio_snapshot")
+            or _target_weight_snapshot_diagnostics_command(
+                str(report.get("candidate_id") or ""),
+                str(report.get("finalize_date") or ""),
+            )
+        )
+        print(
+            "  next: RUN no-order portfolio snapshot diagnostics before finalize"
+        )
+        if command:
+            print(f"  diagnostics_command: {command}")
 
 
 def finalize_target_weight_pilot_evidence(
@@ -3644,6 +3674,16 @@ def finalize_target_weight_pilot_evidence(
         "performance_evidence_status": {},
         "proof_status_before": {},
         "proof_status_after": {},
+        "operator_commands": {
+            "diagnose_portfolio_snapshot": _target_weight_snapshot_diagnostics_command(
+                candidate_id,
+                finalize_date,
+            ),
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {candidate_id} --daily-ops-summary"
+            ),
+        },
         "no_order_safety": {
             "orders_submitted": False,
             "order_executor_called": False,
@@ -3693,6 +3733,11 @@ def finalize_target_weight_pilot_evidence(
         return finish(report)
     if before_reason not in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS:
         report["reason"] = f"target_weight_pilot_evidence_finalize_not_allowed: {before_reason}"
+        if _target_weight_db_persistence_reason(before_reason):
+            report["db_persistence_guard"] = "target_weight_db_persistence_proof_required"
+            report["next_action"] = (
+                "run no-order portfolio snapshot diagnostics before finalize"
+            )
         return finish(report, fail=True)
 
     updated = deepcopy(latest)
@@ -5152,6 +5197,14 @@ def _target_weight_db_persistence_invalid_reasons(invalid_reasons: Any) -> bool:
     return any(
         reason in DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS
         for reason in invalid_reasons
+    )
+
+
+def _target_weight_db_persistence_reason(reason: str | None) -> bool:
+    text = str(reason or "")
+    return any(
+        db_reason in text
+        for db_reason in DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS
     )
 
 
