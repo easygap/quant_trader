@@ -5317,6 +5317,64 @@ def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_di
     assert "next: WAIT for final portfolio performance evidence" in output
 
 
+def test_finalize_target_weight_pilot_evidence_cli_prints_db_proof_diagnostics(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    output_dir = tmp_path / "paper_runtime"
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    execution.pop("db_persistence_complete")
+    execution.pop("db_persistence_proof")
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--candidate-id",
+            plan.candidate_id,
+            "--finalize-pilot-evidence",
+            "--finalize-date",
+            plan.trade_day,
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        twp.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "Target-weight pilot evidence finalize" in output
+    assert "target_weight_db_persistence_complete_false" in output
+    assert "proof_before_finalize: target_weight_db_persistence_complete_false" in output
+    assert "next: RUN no-order portfolio snapshot diagnostics before finalize" in output
+    assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in output
+
+    report_path = next(output_dir.glob("target_weight_pilot_evidence_finalize_*.json"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
+    assert report["next_action"] == "run no-order portfolio snapshot diagnostics before finalize"
+    assert report["operator_commands"]["diagnose_portfolio_snapshot"].endswith(
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10"
+    )
+    report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
+    assert "Proof before finalize: target_weight_db_persistence_complete_false" in report_md
+    assert "## Operator Commands" in report_md
+
+
 def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     monkeypatch,
     tmp_path,
