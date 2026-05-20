@@ -1878,6 +1878,27 @@ def _target_weight_ops_priority_action(
                 "finalize_portfolio_metrics_checked": bool(
                     performance_status.get("portfolio_metrics_checked")
                 ),
+                "finalize_portfolio_metrics_probe_status": (
+                    performance_status.get("portfolio_metrics_probe_status") or ""
+                ),
+                "finalize_portfolio_metrics_probe_reason": (
+                    performance_status.get("portfolio_metrics_probe_reason") or ""
+                ),
+                "finalize_portfolio_metrics_current_snapshot_found": bool(
+                    performance_status.get("portfolio_metrics_current_snapshot_found")
+                ),
+                "finalize_portfolio_metrics_previous_snapshot_found": bool(
+                    performance_status.get("portfolio_metrics_previous_snapshot_found")
+                ),
+                "finalize_portfolio_metrics_previous_snapshot_at": (
+                    performance_status.get("portfolio_metrics_previous_snapshot_at")
+                ),
+                "finalize_portfolio_metrics_trades_today": (
+                    performance_status.get("portfolio_metrics_trades_today") or 0
+                ),
+                "finalize_portfolio_metrics_trades_since_previous": (
+                    performance_status.get("portfolio_metrics_trades_since_previous") or 0
+                ),
                 "finalize_portfolio_metrics_fields_present": (
                     performance_status.get("portfolio_metrics_fields_present") or []
                 ),

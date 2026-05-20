@@ -2631,6 +2631,20 @@ def render_target_weight_pilot_evidence_finalize_markdown(report: dict[str, Any]
             f"`{', '.join(performance_status.get('source_record_fields_unusable') or []) or 'none'}`",
             "- Portfolio metrics checked: "
             f"`{performance_status.get('portfolio_metrics_checked', False)}`",
+            "- Portfolio metrics probe: "
+            f"`{performance_status.get('portfolio_metrics_probe_status') or 'not_checked'}`",
+            "- Portfolio metrics probe reason: "
+            f"`{performance_status.get('portfolio_metrics_probe_reason') or 'none'}`",
+            "- Portfolio metrics current snapshot found: "
+            f"`{performance_status.get('portfolio_metrics_current_snapshot_found', False)}`",
+            "- Portfolio metrics previous snapshot found: "
+            f"`{performance_status.get('portfolio_metrics_previous_snapshot_found', False)}`",
+            "- Portfolio metrics previous snapshot at: "
+            f"`{performance_status.get('portfolio_metrics_previous_snapshot_at') or 'none'}`",
+            "- Portfolio metrics trades today: "
+            f"`{performance_status.get('portfolio_metrics_trades_today', 0)}`",
+            "- Portfolio metrics trades since previous: "
+            f"`{performance_status.get('portfolio_metrics_trades_since_previous', 0)}`",
             "- Portfolio metrics fields present: "
             f"`{', '.join(performance_status.get('portfolio_metrics_fields_present') or []) or 'none'}`",
             "- Missing fields after probe: "
@@ -2705,6 +2719,8 @@ def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
         source_usable_fields = performance_status.get("source_record_fields_usable") or []
         source_unusable_fields = performance_status.get("source_record_fields_unusable") or []
         probe_fields = performance_status.get("portfolio_metrics_fields_present") or []
+        probe_status = str(performance_status.get("portfolio_metrics_probe_status") or "")
+        probe_reason = str(performance_status.get("portfolio_metrics_probe_reason") or "")
         print(
             "  source_record_fields: "
             + (", ".join(str(field) for field in source_fields) or "none")
@@ -2721,6 +2737,32 @@ def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
             "  portfolio_metrics_checked: "
             f"{bool(performance_status.get('portfolio_metrics_checked'))}"
         )
+        if probe_status:
+            print("  portfolio_metrics_probe: " + probe_status)
+        if probe_reason:
+            print("  portfolio_metrics_probe_reason: " + probe_reason)
+        if performance_status.get("portfolio_metrics_checked"):
+            print(
+                "  portfolio_metrics_current_snapshot_found: "
+                f"{bool(performance_status.get('portfolio_metrics_current_snapshot_found'))}"
+            )
+            print(
+                "  portfolio_metrics_previous_snapshot_found: "
+                f"{bool(performance_status.get('portfolio_metrics_previous_snapshot_found'))}"
+            )
+            if performance_status.get("portfolio_metrics_previous_snapshot_at"):
+                print(
+                    "  portfolio_metrics_previous_snapshot_at: "
+                    f"{performance_status.get('portfolio_metrics_previous_snapshot_at')}"
+                )
+            print(
+                "  portfolio_metrics_trades_today: "
+                f"{_coerce_int_or_zero(performance_status.get('portfolio_metrics_trades_today'))}"
+            )
+            print(
+                "  portfolio_metrics_trades_since_previous: "
+                f"{_coerce_int_or_zero(performance_status.get('portfolio_metrics_trades_since_previous'))}"
+            )
         print(
             "  portfolio_metrics_fields: "
             + (", ".join(str(field) for field in probe_fields) or "none")
@@ -2750,9 +2792,9 @@ def finalize_target_weight_pilot_evidence(
     """기존 execution-backed pilot evidence를 주문 없이 final benchmark 성과 record로 확정한다."""
     from core.paper_evidence import (
         _append_jsonl,
-        _collect_portfolio_metrics,
         _compute_benchmark_excess,
         _evidence_path,
+        _probe_portfolio_metrics,
         _read_all_evidence,
         _target_weight_record_proof_status,
     )
@@ -2863,6 +2905,15 @@ def finalize_target_weight_pilot_evidence(
         "portfolio_metrics_checked": False,
         "portfolio_metrics_fields_present": [],
         "portfolio_metrics_inferred_from_previous": False,
+        "portfolio_metrics_probe_status": "",
+        "portfolio_metrics_probe_reason": "",
+        "portfolio_metrics_probe_account_key": candidate_id,
+        "portfolio_metrics_probe_date": finalize_date,
+        "portfolio_metrics_current_snapshot_found": False,
+        "portfolio_metrics_previous_snapshot_found": False,
+        "portfolio_metrics_previous_snapshot_at": None,
+        "portfolio_metrics_trades_today": 0,
+        "portfolio_metrics_trades_since_previous": 0,
         "missing_fields_after_probe": [],
     }
     total_value = _positive_float_from(updated.get("total_value"))
@@ -2870,8 +2921,35 @@ def finalize_target_weight_pilot_evidence(
     daily_return = _coerce_float_or_none(updated.get("daily_return"))
     portfolio: dict[str, Any] = {}
     if total_value is None or daily_return is None:
-        portfolio = _collect_portfolio_metrics(candidate_id, parsed_date)
+        portfolio = _probe_portfolio_metrics(candidate_id, parsed_date)
         performance_status["portfolio_metrics_checked"] = True
+        performance_status["portfolio_metrics_probe_status"] = str(
+            portfolio.get("_portfolio_probe_status") or ""
+        )
+        performance_status["portfolio_metrics_probe_reason"] = str(
+            portfolio.get("_portfolio_probe_reason") or ""
+        )
+        performance_status["portfolio_metrics_probe_account_key"] = str(
+            portfolio.get("_portfolio_probe_account_key") or candidate_id
+        )
+        performance_status["portfolio_metrics_probe_date"] = str(
+            portfolio.get("_portfolio_probe_date") or finalize_date
+        )
+        performance_status["portfolio_metrics_current_snapshot_found"] = bool(
+            portfolio.get("_portfolio_probe_current_snapshot_found")
+        )
+        performance_status["portfolio_metrics_previous_snapshot_found"] = bool(
+            portfolio.get("_portfolio_probe_previous_snapshot_found")
+        )
+        performance_status["portfolio_metrics_previous_snapshot_at"] = (
+            portfolio.get("_portfolio_probe_previous_snapshot_at")
+        )
+        performance_status["portfolio_metrics_trades_today"] = _coerce_int_or_zero(
+            portfolio.get("_portfolio_probe_trades_today")
+        )
+        performance_status["portfolio_metrics_trades_since_previous"] = (
+            _coerce_int_or_zero(portfolio.get("_portfolio_probe_trades_since_previous"))
+        )
         performance_status["portfolio_metrics_fields_present"] = [
             field for field in performance_fields if portfolio.get(field) is not None
         ]
