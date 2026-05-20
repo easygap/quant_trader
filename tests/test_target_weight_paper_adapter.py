@@ -3794,6 +3794,93 @@ def test_paper_pilot_control_blocks_loaded_ready_execute_scope_mismatch(tmp_path
     assert "as_of_date mismatch" in command
 
 
+def test_paper_pilot_control_blocks_stale_generated_ready_execute(tmp_path, monkeypatch):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-04-10T10:00:00",
+        "trade_day": "2026-04-10",
+        "status": "READY_TO_EXECUTE",
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {strategy} --as-of-date 2026-04-10 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    ).write_text(
+        json.dumps(_daily_ops_with_summary_hash(summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ppc,
+        "_current_kst_datetime",
+        lambda: datetime(2026, 4, 10, 10, 31, tzinfo=ppc.KST),
+    )
+
+    loaded = ppc._load_latest_target_weight_daily_ops(strategy, reports_dir=tmp_path)
+
+    assert loaded is not None
+    command = loaded["operator_commands"]["execute_capped_paper"]
+    assert command.startswith("# blocked: daily_ops_summary.generated_at is stale")
+    assert "rerun daily ops summary before action" in command
+
+
+def test_paper_pilot_control_status_warns_stale_ready_execute_generated_at(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary = {
+        "artifact_type": "target_weight_daily_ops_summary",
+        "candidate_id": strategy,
+        "generated_at": "2026-04-10T10:00:00",
+        "trade_day": "2026-04-10",
+        "status": "READY_TO_EXECUTE",
+        "evidence_progress": {"verified_pilot_days": 12, "target_days": 60},
+        "decision": {"blocking_reasons": []},
+        "operator_commands": {
+            "execute_capped_paper": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {strategy} --as-of-date 2026-04-10 "
+                "--execute --collect-evidence"
+            ),
+        },
+    }
+    (
+        summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    ).write_text(
+        json.dumps(_daily_ops_with_summary_hash(summary), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ppc,
+        "_current_kst_datetime",
+        lambda: datetime(2026, 4, 10, 10, 31, tzinfo=ppc.KST),
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "Generated at: 2026-04-10T10:00:00" in output
+    assert "Freshness warning: daily_ops_summary.generated_at is stale" in output
+    assert "Effective target-weight execution: BLOCKED" in output
+    assert "Adapter execution: BLOCKED by daily ops" in output
+
+
 def test_paper_pilot_control_blocks_loaded_ready_execute_candidate_prefix_collision(
     tmp_path,
     monkeypatch,
