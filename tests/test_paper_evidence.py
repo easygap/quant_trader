@@ -2207,6 +2207,23 @@ class TestShadowEvidenceNotPromotable:
                 lambda execution: execution["db_persistence_proof"]["trade_history"].update({"row_count": 0}),
                 "target_weight_db_trade_history_row_count_mismatch",
             ),
+            (
+                "db_trade_history_ids_missing",
+                lambda execution: execution["db_persistence_proof"]["trade_history"].update({"trade_ids": []}),
+                "target_weight_db_trade_history_ids_missing",
+            ),
+            (
+                "db_trade_history_id_invalid",
+                lambda execution: execution["db_persistence_proof"]["trade_history"].update({"trade_ids": [""]}),
+                "target_weight_db_trade_history_id_invalid",
+            ),
+            (
+                "db_trade_history_id_duplicate",
+                lambda execution: execution["db_persistence_proof"]["trade_history"].update(
+                    {"row_count": 2, "expected_row_count": 2, "trade_ids": [1, 1]}
+                ),
+                "target_weight_db_trade_history_id_duplicate",
+            ),
         ]
         for _name, mutate, expected_reason in cases:
             record = _target_weight_pilot_proof_record()
