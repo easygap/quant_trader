@@ -3385,16 +3385,29 @@ def diagnose_target_weight_portfolio_snapshot(
     )
     recovery_guard = _target_weight_snapshot_recovery_guard(recovery_blockers)
 
+    diagnostics_command = _target_weight_snapshot_diagnostics_command(
+        candidate_id,
+        snapshot_date,
+    )
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {candidate_id} "
+        f"--finalize-pilot-evidence --finalize-date {snapshot_date}"
+    )
+    if status != "ready_for_finalize":
+        if recovery_guard == "target_weight_db_persistence_proof_required_before_snapshot":
+            finalize_command = (
+                "# blocked: restore authoritative DB trade_history/positions proof "
+                f"before finalize; rerun diagnostics: {diagnostics_command}"
+            )
+        else:
+            finalize_command = (
+                f"# blocked: portfolio snapshot diagnostics status={status}; "
+                f"rerun diagnostics before finalize: {diagnostics_command}"
+            )
     commands = {
-        "diagnose_portfolio_snapshot": _target_weight_snapshot_diagnostics_command(
-            candidate_id,
-            snapshot_date,
-        ),
-        "finalize_pilot_evidence": (
-            "python tools/target_weight_rotation_pilot.py "
-            f"--candidate-id {candidate_id} "
-            f"--finalize-pilot-evidence --finalize-date {snapshot_date}"
-        ),
+        "diagnose_portfolio_snapshot": diagnostics_command,
+        "finalize_pilot_evidence": finalize_command,
         "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers",
     }
     next_action = (
