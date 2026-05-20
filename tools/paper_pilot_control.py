@@ -869,6 +869,7 @@ def _target_weight_operator_next_action(
     priority_command: str,
     priority_scheduled_command: str,
     priority_failure_reason: str,
+    priority_wait_guard: str,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -890,6 +891,13 @@ def _target_weight_operator_next_action(
             return (
                 "WAIT for requested trade-day market data, then rerun "
                 f"daily ops recovery command: {recovery_command}"
+            )
+    if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
+        recovery_command = priority_scheduled_command or priority_command
+        if recovery_command:
+            return (
+                "WAIT for final portfolio performance evidence, then rerun "
+                f"scheduled priority command: {recovery_command}"
             )
     if priority_command and not _command_is_blocked(priority_command):
         if priority_failure_reason:
@@ -1291,6 +1299,7 @@ def _print_target_weight_daily_ops_status(
         priority_failure_reason=str(priority_action.get("failure_reason") or "")
         if priority_action.get("source") == "latest_daily_ops_failure"
         else "",
+        priority_wait_guard=str(priority_action.get("performance_evidence_guard") or ""),
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),
