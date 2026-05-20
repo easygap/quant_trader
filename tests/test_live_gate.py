@@ -135,6 +135,7 @@ def _write_bundle(
 
 
 def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
+    override_keys = set(overrides)
     payload = {
         "strategy": strategy,
         "period": "2026-02-01 ~ 2026-04-29",
@@ -177,6 +178,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
         rows = []
         for idx in range(count):
             day = start_dt + timedelta(days=idx)
+            daily_return = 0.12 if idx % 2 == 0 else 0.08
             record = {
                 "date": day.strftime("%Y-%m-%d"),
                 "day_number": idx + 1,
@@ -185,7 +187,7 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
                 "evidence_mode": "pilot_paper" if use_pilot else "real_paper",
                 "session_mode": "pilot_paper" if use_pilot else "normal_paper",
                 "pilot_authorized": use_pilot,
-                "daily_return": 0.1,
+                "daily_return": daily_return,
                 "cumulative_return": payload.get("cumulative_return", 3.2),
                 "mdd": -2.0,
                 "total_trades": 2,
@@ -263,6 +265,16 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
                 }
             rows.append(json.dumps(record, ensure_ascii=False))
         jsonl_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        from core.paper_evidence import build_promotion_headline_summary
+
+        headline = build_promotion_headline_summary(
+            strategy,
+            promotion_dir=evidence_dir.parent / "promotion",
+            evidence_dir=evidence_dir,
+        )
+        for key, value in headline.items():
+            if key not in override_keys:
+                payload[key] = value
     if with_integrity:
         from core.paper_evidence import (
             build_promotion_source_records_summary,
@@ -655,6 +667,51 @@ def test_paper_evidence_headline_summary_must_match_source_records(tmp_path):
     )
     assert any(
         "earliest_evidence_date와 source_records first_date 불일치" in issue
+        for issue in issues
+    )
+
+
+def test_paper_evidence_headline_metrics_must_match_daily_records(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+    evidence_path = evidence_dir / "promotion_evidence_scoring.json"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    payload["paper_sharpe"] = 9.99
+    payload["avg_cash_adjusted_excess"] = 9.99
+    payload["cumulative_return"] = 99.99
+    payload["win_rate"] = 99.9
+    from core.paper_evidence import compute_promotion_package_integrity_hash
+
+    payload["package_integrity"]["payload_hash"] = compute_promotion_package_integrity_hash(
+        payload
+    )
+    _write_json(evidence_path, payload)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any(
+        "paper evidence headline 원본 불일치: paper_sharpe" in issue
+        for issue in issues
+    )
+    assert any(
+        "paper evidence headline 원본 불일치: avg_cash_adjusted_excess" in issue
+        for issue in issues
+    )
+    assert any(
+        "paper evidence headline 원본 불일치: cumulative_return" in issue
+        for issue in issues
+    )
+    assert any(
+        "paper evidence headline 원본 불일치: win_rate" in issue
         for issue in issues
     )
 
