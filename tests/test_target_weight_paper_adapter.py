@@ -3171,6 +3171,20 @@ def test_target_weight_effective_execution_status_labels_ready_and_blockers():
         {"status": "PILOT_EVIDENCE_INVALID"},
         execute_command="# blocked: pilot_paper evidence invalid",
     )
+    fresh_invalid_status, fresh_invalid_reason = ppc._target_weight_effective_execution_status(
+        {
+            "status": "PILOT_EVIDENCE_INVALID",
+            "next_operator_trade_day": "2026-04-13",
+            "next_step": (
+                "오늘 pilot_paper 실행 증거가 승격 불가능; "
+                "다음 KRX 영업일 fresh READY_TO_EXECUTE 증거 재수집"
+            ),
+        },
+        execute_command=(
+            "# blocked: pilot_paper evidence is not repairable; "
+            "collect fresh READY_TO_EXECUTE evidence"
+        ),
+    )
     cap_status, cap_reason = ppc._target_weight_effective_execution_status(
         {"status": "READY_TO_ENABLE_CAPS"},
         execute_command="# blocked: cap approval required",
@@ -3180,6 +3194,10 @@ def test_target_weight_effective_execution_status_labels_ready_and_blockers():
     assert ready_reason == "daily ops READY_TO_EXECUTE command available"
     assert invalid_status == "BLOCKED"
     assert invalid_reason == "daily ops requires evidence finalize or repair first"
+    assert fresh_invalid_status == "BLOCKED"
+    assert fresh_invalid_reason == (
+        "daily ops requires fresh READY_TO_EXECUTE evidence on next KRX business day"
+    )
     assert cap_status == "BLOCKED"
     assert cap_reason == "daily ops requires cap approval before execution"
 
@@ -7419,6 +7437,106 @@ def test_build_target_weight_daily_ops_summary_routes_db_proof_gap_to_diagnostic
     assert "DB persistence proof incomplete" in summary["operator_commands"]["finalize_pilot_evidence"]
     assert "cannot be repaired from artifact" in summary["operator_commands"]["repair_pilot_evidence"]
     assert diagnose_command in summary["operator_commands"]["finalize_pilot_evidence"]
+
+
+def test_build_target_weight_daily_ops_summary_routes_non_repairable_invalid_to_next_trade_day():
+    from tools.target_weight_rotation_pilot import (
+        build_target_weight_daily_ops_summary,
+        render_target_weight_daily_ops_markdown,
+    )
+
+    plan = _adapter_plan()
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "blocking_reasons": ["execution_idempotency: duplicate execution"],
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} --daily-ops-summary"
+            ),
+            "finalize_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
+            ),
+            "repair_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--repair-pilot-evidence --repair-date {plan.trade_day}"
+            ),
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+        "invalid_reasons": {"target_weight_trade_day_mismatch": 1},
+        "non_promotable_days": 0,
+        "total_canonical_records": 3,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": None,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest={"manifest_hash": "m" * 64},
+        evidence_progress=progress,
+    )
+    report = render_target_weight_daily_ops_markdown(summary)
+
+    assert summary["status"] == "PILOT_EVIDENCE_INVALID"
+    assert summary["next_operator_trade_day"] == "2026-04-13"
+    assert summary["not_before_date"] == "2026-04-13"
+    assert summary["premature_run_guard"] == "target_weight_future_as_of_date_blocked"
+    assert "fresh READY_TO_EXECUTE" in summary["next_step"]
+    assert summary["operator_commands"]["finalize_pilot_evidence"].startswith(
+        "# blocked: pilot_paper execution proof is not repairable"
+    )
+    assert summary["operator_commands"]["repair_pilot_evidence"].startswith(
+        "# blocked: pilot_paper execution proof is not repairable"
+    )
+    assert "fresh READY_TO_EXECUTE" in summary["operator_commands"]["execute_capped_paper"]
+    assert summary["operator_commands"]["enable_suggested_caps"].startswith(
+        "# blocked: pilot_paper evidence for 2026-04-10 is not repairable"
+    )
+    assert (
+        "--as-of-date 2026-04-13 --daily-ops-summary"
+        in summary["operator_commands"]["next_daily_ops_summary"]
+    )
+    assert (
+        "--as-of-date 2026-04-13 --readiness-audit"
+        in summary["operator_commands"]["next_readiness_audit"]
+    )
+    assert summary["decision"]["blocking_reasons"] == []
+    assert summary["decision"]["post_evidence_diagnostics"] == [
+        "execution_idempotency: duplicate execution"
+    ]
+    assert "Next Daily Ops Summary" in report
+    assert "Not before date: `2026-04-13`" in report
 
 
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):

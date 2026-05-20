@@ -871,6 +871,24 @@ def _command_is_blocked(command: object) -> bool:
     return str(command or "").lstrip().startswith("# blocked:")
 
 
+def _target_weight_invalid_requires_fresh_evidence(payload: dict) -> bool:
+    if str(payload.get("status") or "").strip() != "PILOT_EVIDENCE_INVALID":
+        return False
+    commands = payload.get("operator_commands") or {}
+    command_text = " ".join(str(value) for value in commands.values())
+    text = " ".join((
+        str(payload.get("next_step") or ""),
+        command_text,
+    )).lower()
+    return (
+        "fresh ready_to_execute" in text
+        or (
+            "not repairable" in text
+            and bool(str(payload.get("next_operator_trade_day") or "").strip())
+        )
+    )
+
+
 def _target_weight_effective_execution_status(
     summary: dict,
     *,
@@ -895,6 +913,11 @@ def _target_weight_effective_execution_status(
     if status == "WAITING_FOR_MARKET_SESSION":
         return "BLOCKED", "daily ops is waiting for the market session"
     if status == "PILOT_EVIDENCE_INVALID":
+        if _target_weight_invalid_requires_fresh_evidence(summary):
+            return (
+                "BLOCKED",
+                "daily ops requires fresh READY_TO_EXECUTE evidence on next KRX business day",
+            )
         return "BLOCKED", "daily ops requires evidence finalize or repair first"
     if status == "PILOT_EVIDENCE_RECORDED":
         return "BLOCKED", "pilot evidence already recorded for this trade day"
@@ -1069,6 +1092,11 @@ def _target_weight_enable_blocker(payload: dict, command: str | None = None) -> 
             f"rerun readiness audit for {next_hint}"
         )
     if status == "PILOT_EVIDENCE_INVALID":
+        if _target_weight_invalid_requires_fresh_evidence(payload):
+            return (
+                f"# blocked: pilot_paper evidence for {trade_day} is not repairable; "
+                f"rerun readiness audit for {next_hint}"
+            )
         return (
             f"# blocked: pilot_paper evidence invalid for {trade_day}; "
             "finalize or repair evidence before changing pilot caps"
@@ -1232,7 +1260,10 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
                 "# blocked: daily_ops_execute_command_unavailable: "
                 + "; ".join(execute_issues)
             )
-    if status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}:
+    if (
+        status in {"PILOT_EVIDENCE_RECORDED", "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"}
+        or _target_weight_invalid_requires_fresh_evidence(sanitized)
+    ):
         operator_commands["next_daily_ops_summary"] = (
             target_weight_next_check_command_or_default(
                 sanitized,
@@ -1325,11 +1356,14 @@ def _print_target_weight_daily_ops_status(
         or (
             next_operator_trade_day
             if (
-                summary.get("status")
-                in {
-                    "PILOT_EVIDENCE_RECORDED",
-                    "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
-                }
+                (
+                    summary.get("status")
+                    in {
+                        "PILOT_EVIDENCE_RECORDED",
+                        "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+                    }
+                    or _target_weight_invalid_requires_fresh_evidence(summary)
+                )
                 and _not_before_date_pending(next_operator_trade_day)
             )
             else None
@@ -1341,11 +1375,14 @@ def _print_target_weight_daily_ops_status(
     if (
         not premature_run_guard
         and not_before_date
-        and summary.get("status")
-        in {
-            "PILOT_EVIDENCE_RECORDED",
-            "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
-        }
+        and (
+            summary.get("status")
+            in {
+                "PILOT_EVIDENCE_RECORDED",
+                "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE",
+            }
+            or _target_weight_invalid_requires_fresh_evidence(summary)
+        )
     ):
         premature_run_guard = "target_weight_future_as_of_date_blocked"
     print("\n  Target-weight Daily Ops:")
@@ -1434,6 +1471,9 @@ def _print_target_weight_daily_ops_status(
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
     priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
+    priority_non_repairable_guard = str(
+        priority_action.get("non_repairable_guard") or ""
+    ).strip()
     priority_diagnostics_status = str(
         priority_action.get("finalize_report_diagnostics_status") or ""
     ).strip()
@@ -1479,6 +1519,21 @@ def _print_target_weight_daily_ops_status(
             print(f"    Priority follow-up: {priority_follow_up}")
         if priority_db_guard == "target_weight_db_persistence_proof_required":
             print("    DB persistence guard: trade_history/positions proof required")
+            if priority_action.get("blocked_finalize_command"):
+                print(
+                    "    Finalize command guard: "
+                    f"{priority_action.get('blocked_finalize_command')}"
+                )
+            if priority_action.get("blocked_repair_command"):
+                print(
+                    "    Repair command guard: "
+                    f"{priority_action.get('blocked_repair_command')}"
+                )
+        if priority_non_repairable_guard:
+            print(
+                "    Non-repairable evidence guard: "
+                f"{priority_non_repairable_guard}"
+            )
             if priority_action.get("blocked_finalize_command"):
                 print(
                     "    Finalize command guard: "
