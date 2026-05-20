@@ -2647,6 +2647,74 @@ def write_target_weight_pilot_evidence_finalize_report(
     return json_path, md_path
 
 
+def _target_weight_finalize_report_path(
+    *,
+    candidate_id: str,
+    finalize_date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    stem = f"target_weight_pilot_evidence_finalize_{candidate_id}_{finalize_date}"
+    return output_dir / f"{stem}.json"
+
+
+def _load_target_weight_finalize_report_for_cli(
+    *,
+    candidate_id: str,
+    finalize_date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any] | None:
+    path = _target_weight_finalize_report_path(
+        candidate_id=candidate_id,
+        finalize_date=finalize_date,
+        output_dir=output_dir,
+    )
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload.setdefault("artifact_path", str(path))
+    payload.setdefault("report_path", str(path.with_suffix(".md")))
+    return payload
+
+
+def _print_target_weight_finalize_diagnostics(report: dict[str, Any]) -> None:
+    performance_status = report.get("performance_evidence_status") or {}
+    if isinstance(performance_status, dict) and performance_status:
+        missing_fields = performance_status.get("missing_fields_after_probe") or []
+        source_fields = performance_status.get("source_record_fields_present") or []
+        probe_fields = performance_status.get("portfolio_metrics_fields_present") or []
+        print(
+            "  source_record_fields: "
+            + (", ".join(str(field) for field in source_fields) or "none")
+        )
+        print(
+            "  portfolio_metrics_checked: "
+            f"{bool(performance_status.get('portfolio_metrics_checked'))}"
+        )
+        print(
+            "  portfolio_metrics_fields: "
+            + (", ".join(str(field) for field in probe_fields) or "none")
+        )
+        print(
+            "  missing_performance_fields: "
+            + (", ".join(str(field) for field in missing_fields) or "none")
+        )
+    if report.get("artifact_path"):
+        print(f"  artifact: {report['artifact_path']}")
+    if report.get("report_path"):
+        print(f"  report: {report['report_path']}")
+    reason = str(report.get("reason") or "")
+    if "target_weight_pilot_evidence_finalize_missing_performance" in reason:
+        print(
+            "  next: WAIT for final portfolio performance evidence, "
+            "then rerun this finalize command"
+        )
+
+
 def finalize_target_weight_pilot_evidence(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -6579,17 +6647,25 @@ def main() -> None:
         return
 
     if args.finalize_pilot_evidence:
+        output_dir = Path(args.output_dir)
         try:
             result = finalize_target_weight_pilot_evidence(
                 candidate_id=args.candidate_id,
                 finalize_date=args.finalize_date,
-                output_dir=Path(args.output_dir),
+                output_dir=output_dir,
             )
         except ValueError as exc:
             print("\nTarget-weight pilot evidence finalize")
             print(f"  candidate: {args.candidate_id}")
             print(f"  finalize_date: {args.finalize_date}")
             print(f"  status: BLOCKED - {exc}")
+            report = _load_target_weight_finalize_report_for_cli(
+                candidate_id=args.candidate_id,
+                finalize_date=args.finalize_date,
+                output_dir=output_dir,
+            )
+            if report is not None:
+                _print_target_weight_finalize_diagnostics(report)
             raise SystemExit(1)
 
         print("\nTarget-weight pilot evidence finalize")
@@ -6600,8 +6676,7 @@ def main() -> None:
         if result.get("finalized"):
             print(f"  appended_record_version: {result['appended_record_version']}")
             print(f"  proof: {result['proof_status_after'].get('reason')}")
-        print(f"  artifact: {result['artifact_path']}")
-        print(f"  report: {result['report_path']}")
+        _print_target_weight_finalize_diagnostics(result)
         if result["status"] == "waiting_for_final_benchmark":
             raise SystemExit(1)
         return
