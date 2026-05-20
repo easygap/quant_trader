@@ -1499,6 +1499,12 @@ def _print_target_weight_daily_ops_status(
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
     priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
+    priority_blocked_finalize_command = str(
+        priority_action.get("blocked_finalize_command") or ""
+    ).strip()
+    priority_blocked_repair_command = str(
+        priority_action.get("blocked_repair_command") or ""
+    ).strip()
     priority_non_repairable_guard = str(
         priority_action.get("non_repairable_guard") or ""
     ).strip()
@@ -1551,33 +1557,38 @@ def _print_target_weight_daily_ops_status(
             priority_command,
             priority_scheduled_command,
         }:
-            print(f"    Priority follow-up: {priority_follow_up}")
+            if priority_snapshot_recovery_guard and _command_is_blocked(priority_follow_up):
+                print(f"    Priority follow-up guard: {priority_follow_up}")
+            elif priority_snapshot_recovery_guard:
+                print(f"    Priority follow-up after recovery: {priority_follow_up}")
+            else:
+                print(f"    Priority follow-up: {priority_follow_up}")
         if priority_db_guard == "target_weight_db_persistence_proof_required":
             print("    DB persistence guard: trade_history/positions proof required")
-            if priority_action.get("blocked_finalize_command"):
+            if priority_blocked_finalize_command:
                 print(
                     "    Finalize command guard: "
-                    f"{priority_action.get('blocked_finalize_command')}"
+                    f"{priority_blocked_finalize_command}"
                 )
-            if priority_action.get("blocked_repair_command"):
+            if priority_blocked_repair_command:
                 print(
                     "    Repair command guard: "
-                    f"{priority_action.get('blocked_repair_command')}"
+                    f"{priority_blocked_repair_command}"
                 )
         if priority_non_repairable_guard:
             print(
                 "    Non-repairable evidence guard: "
                 f"{priority_non_repairable_guard}"
             )
-            if priority_action.get("blocked_finalize_command"):
+            if priority_blocked_finalize_command:
                 print(
                     "    Finalize command guard: "
-                    f"{priority_action.get('blocked_finalize_command')}"
+                    f"{priority_blocked_finalize_command}"
                 )
-            if priority_action.get("blocked_repair_command"):
+            if priority_blocked_repair_command:
                 print(
                     "    Repair command guard: "
-                    f"{priority_action.get('blocked_repair_command')}"
+                    f"{priority_blocked_repair_command}"
                 )
         if priority_wait_guard == "target_weight_pilot_evidence_finalize_missing_performance":
             print("    Performance evidence guard: waiting for total_value/daily_return")
@@ -1752,6 +1763,20 @@ def _print_target_weight_daily_ops_status(
         else:
             print("    Adapter execution: follow daily ops READY_TO_EXECUTE command only")
         print(f"    Execute command: {execute_command}")
+    if (
+        priority_snapshot_recovery_guard
+        == "target_weight_db_persistence_proof_required_before_snapshot"
+    ):
+        if finalize_command:
+            finalize_command = (
+                priority_blocked_finalize_command
+                or "# blocked: restore authoritative DB trade_history/positions proof before finalize"
+            )
+        if repair_command:
+            repair_command = (
+                priority_blocked_repair_command
+                or "# blocked: restore authoritative DB trade_history/positions proof before repair"
+            )
     if finalize_command:
         print(f"    Finalize evidence command: {finalize_command}")
     if repair_command:
