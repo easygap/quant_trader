@@ -48,12 +48,13 @@
 ### Target-weight pilot 전용
 
 - [ ] `python tools/target_weight_rotation_pilot.py --daily-ops-summary` 실행
-- [ ] Summary status 확인: BLOCKED / READY_TO_ENABLE_CAPS / READY_TO_EXECUTE
+- [ ] Summary status 확인: BLOCKED / WAITING_FOR_MARKET_SESSION / READY_TO_ENABLE_CAPS / READY_TO_EXECUTE / PILOT_EVIDENCE_RECORDED / PILOT_EVIDENCE_INVALID
 - [ ] Verified pilot days 확인: ____ / 60
 - [ ] Invalid execution days가 0인지 확인
+- [ ] `PILOT_EVIDENCE_INVALID`이고 status가 final portfolio performance evidence 대기를 안내하면, `total_value`/`daily_return`이 들어올 때까지 기다린 뒤 scheduled finalize 명령을 재실행
 - [ ] Liquidity / Pre-trade risk가 PASS인지 확인
 - [ ] capped paper 실행 전 `plan.trade_day`와 KST 기준 실행일이 같은지 확인
-- [ ] 다음 명령이 cap 승인인지, capped paper 실행인지 기록
+- [ ] 다음 명령이 cap 승인인지, capped paper 실행인지, evidence finalize인지 기록
 
 ### 기록
 
