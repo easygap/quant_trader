@@ -2908,6 +2908,13 @@ def _target_weight_artifact_execution_state(record: dict | None) -> dict[str, An
         "fill_count": 0,
         "fill_complete": False,
         "position_complete": False,
+        "db_persistence_checked": False,
+        "db_persistence_complete": False,
+        "db_persistence_reason": "",
+        "db_trade_history_source": "",
+        "db_trade_history_row_count": 0,
+        "db_trade_history_expected_row_count": 0,
+        "db_positions_source": "",
     }
     if not isinstance(record, dict):
         return state
@@ -2917,6 +2924,9 @@ def _target_weight_artifact_execution_state(record: dict | None) -> dict[str, An
         return state
     fill_reconciliation = execution.get("fill_reconciliation") or {}
     position_reconciliation = execution.get("position_reconciliation") or {}
+    db_persistence_proof = execution.get("db_persistence_proof") or {}
+    trade_history_proof = db_persistence_proof.get("trade_history") or {}
+    positions_proof = db_persistence_proof.get("positions") or {}
     state.update({
         "execution_found": True,
         "execution_complete": bool(execution.get("complete")),
@@ -2928,6 +2938,18 @@ def _target_weight_artifact_execution_state(record: dict | None) -> dict[str, An
         ),
         "fill_complete": bool(fill_reconciliation.get("complete")),
         "position_complete": bool(position_reconciliation.get("complete")),
+        "db_persistence_checked": bool(db_persistence_proof.get("checked")),
+        "db_persistence_complete": bool(execution.get("db_persistence_complete"))
+        and bool(db_persistence_proof.get("complete")),
+        "db_persistence_reason": str(db_persistence_proof.get("reason") or ""),
+        "db_trade_history_source": str(trade_history_proof.get("source") or ""),
+        "db_trade_history_row_count": _coerce_int_or_zero(
+            trade_history_proof.get("row_count")
+        ),
+        "db_trade_history_expected_row_count": _coerce_int_or_zero(
+            trade_history_proof.get("expected_row_count")
+        ),
+        "db_positions_source": str(positions_proof.get("source") or ""),
     })
     return state
 
@@ -2967,6 +2989,23 @@ def _target_weight_snapshot_recovery_readiness(
         and _coerce_int_or_zero(database_state.get("trade_count_on_date")) == 0
     ):
         blockers.append("artifact_fills_without_current_db_trades")
+    if (
+        artifact_execution_state.get("execution_found")
+        and not artifact_execution_state.get("db_persistence_complete")
+    ):
+        blockers.append("source_record_db_persistence_incomplete")
+    if (
+        artifact_execution_state.get("db_persistence_checked")
+        and artifact_execution_state.get("db_trade_history_source")
+        and artifact_execution_state.get("db_trade_history_source") != "database.trade_history"
+    ):
+        blockers.append("source_record_trade_history_not_database_backed")
+    if (
+        artifact_execution_state.get("db_persistence_checked")
+        and artifact_execution_state.get("db_positions_source")
+        and artifact_execution_state.get("db_positions_source") != "database.positions"
+    ):
+        blockers.append("source_record_positions_not_database_backed")
     if _target_weight_record_uses_non_authoritative_performance(latest_record):
         blockers.append("source_record_performance_non_authoritative")
     proof_reason = str(
@@ -3003,6 +3042,15 @@ def _target_weight_snapshot_recovery_readiness(
             ),
             "artifact_execution_session_id": str(
                 artifact_execution_state.get("execution_session_id") or ""
+            ),
+            "artifact_db_persistence_complete": bool(
+                artifact_execution_state.get("db_persistence_complete")
+            ),
+            "artifact_db_trade_history_source": str(
+                artifact_execution_state.get("db_trade_history_source") or ""
+            ),
+            "artifact_db_positions_source": str(
+                artifact_execution_state.get("db_positions_source") or ""
             ),
         },
     }
@@ -3067,6 +3115,12 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         f"- Fill count: `{artifact_execution.get('fill_count', 0)}`",
         f"- Fill complete: `{artifact_execution.get('fill_complete', False)}`",
         f"- Position complete: `{artifact_execution.get('position_complete', False)}`",
+        f"- DB persistence checked: `{artifact_execution.get('db_persistence_checked', False)}`",
+        f"- DB persistence complete: `{artifact_execution.get('db_persistence_complete', False)}`",
+        f"- DB persistence reason: `{artifact_execution.get('db_persistence_reason') or 'none'}`",
+        f"- DB trade history source: `{artifact_execution.get('db_trade_history_source') or 'unknown'}`",
+        f"- DB trade history rows: `{artifact_execution.get('db_trade_history_row_count', 0)}` / `{artifact_execution.get('db_trade_history_expected_row_count', 0)}`",
+        f"- DB positions source: `{artifact_execution.get('db_positions_source') or 'unknown'}`",
         "",
         "## Snapshot Recovery Readiness",
         f"- Status: `{readiness.get('status') or 'unknown'}`",
@@ -3381,7 +3435,22 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
             f"complete={bool(artifact_execution.get('execution_complete'))} "
             f"fills={_coerce_int_or_zero(artifact_execution.get('fill_count'))} "
             f"fill_source={artifact_execution.get('fill_source') or 'unknown'} "
-            f"positions_complete={bool(artifact_execution.get('position_complete'))}"
+            f"positions_complete={bool(artifact_execution.get('position_complete'))} "
+            f"db_persistence={bool(artifact_execution.get('db_persistence_complete'))}"
+        )
+        print(
+            "  artifact_db_persistence: "
+            f"checked={bool(artifact_execution.get('db_persistence_checked'))} "
+            f"complete={bool(artifact_execution.get('db_persistence_complete'))} "
+            f"reason={artifact_execution.get('db_persistence_reason') or 'none'}"
+        )
+        print(
+            "  artifact_db_sources: "
+            f"trade_history={artifact_execution.get('db_trade_history_source') or 'unknown'} "
+            f"positions={artifact_execution.get('db_positions_source') or 'unknown'} "
+            "trade_rows="
+            f"{_coerce_int_or_zero(artifact_execution.get('db_trade_history_row_count'))}/"
+            f"{_coerce_int_or_zero(artifact_execution.get('db_trade_history_expected_row_count'))}"
         )
         if artifact_execution.get("execution_session_id"):
             print(
