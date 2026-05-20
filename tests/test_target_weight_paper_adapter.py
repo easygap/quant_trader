@@ -7220,6 +7220,81 @@ def test_build_target_weight_daily_ops_summary_prefers_finalize_for_missing_perf
     )
 
 
+def test_build_target_weight_daily_ops_summary_routes_db_proof_gap_to_diagnostics():
+    from tools.target_weight_rotation_pilot import build_target_weight_daily_ops_summary
+
+    plan = _adapter_plan()
+    pass_check = {
+        "checked": True,
+        "allowed": True,
+        "complete": True,
+        "reason": "ok",
+    }
+    diagnose_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {plan.candidate_id} "
+        f"--diagnose-portfolio-snapshot --snapshot-date {plan.trade_day}"
+    )
+    audit = {
+        "candidate_id": plan.candidate_id,
+        "trade_day": plan.trade_day,
+        "ready_for_cap_approval": False,
+        "ready_for_capped_pilot": False,
+        "blocking_reasons": ["execution_idempotency: duplicate execution"],
+        "operator_commands": {
+            "diagnose_portfolio_snapshot": diagnose_command,
+            "finalize_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--finalize-pilot-evidence --finalize-date {plan.trade_day}"
+            ),
+            "repair_pilot_evidence": (
+                "python tools/target_weight_rotation_pilot.py "
+                f"--candidate-id {plan.candidate_id} "
+                f"--repair-pilot-evidence --repair-date {plan.trade_day}"
+            ),
+        },
+        "plan_summary": {
+            "order_count": 3,
+            "target_position_count": 3,
+            "max_order_notional": 1_200_000.0,
+            "gross_exposure_after": 3_200_000.0,
+        },
+        "data_quality_check": pass_check,
+        "liquidity_check": {"complete": True, "reason": "target_weight_liquidity_preflight_passed"},
+        "pre_trade_risk_check": {"complete": True, "reason": "target_weight_pre_trade_risk_passed"},
+    }
+    progress = {
+        "candidate_id": plan.candidate_id,
+        "target_days": 60,
+        "verified_pilot_days": 0,
+        "remaining_pilot_days": 60,
+        "progress_ratio": 0.0,
+        "shadow_days": 2,
+        "invalid_execution_days": 1,
+        "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        "non_promotable_days": 0,
+        "total_canonical_records": 3,
+        "latest_record_date": plan.trade_day,
+        "latest_verified_pilot_date": None,
+        "latest_shadow_date": "2026-04-09",
+        "ready_for_promotion_day_count": False,
+    }
+
+    summary = build_target_weight_daily_ops_summary(
+        audit=audit,
+        experiment_manifest={"manifest_hash": "m" * 64},
+        evidence_progress=progress,
+    )
+
+    assert summary["status"] == "PILOT_EVIDENCE_INVALID"
+    assert "DB 저장 증거 불완전" in summary["next_step"]
+    assert summary["operator_commands"]["diagnose_portfolio_snapshot"] == diagnose_command
+    assert "DB persistence proof incomplete" in summary["operator_commands"]["finalize_pilot_evidence"]
+    assert "cannot be repaired from artifact" in summary["operator_commands"]["repair_pilot_evidence"]
+    assert diagnose_command in summary["operator_commands"]["finalize_pilot_evidence"]
+
+
 def test_build_target_weight_daily_ops_summary_blocks_stale_execution_day(tmp_path):
     from tools.target_weight_rotation_pilot import (
         build_target_weight_daily_ops_summary,

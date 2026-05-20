@@ -56,6 +56,19 @@ REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS = {
     "target_weight_daily_return_missing",
     "target_weight_portfolio_value_missing",
 }
+DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS = {
+    "target_weight_db_persistence_complete_false",
+    "target_weight_db_persistence_proof_missing",
+    "target_weight_db_persistence_proof_not_checked",
+    "target_weight_db_persistence_proof_incomplete",
+    "target_weight_trade_history_source_not_database",
+    "target_weight_positions_source_not_database",
+    "target_weight_db_persistence_session_id_mismatch",
+    "target_weight_db_trade_history_row_count_missing",
+    "target_weight_db_trade_history_row_count_mismatch",
+    "target_weight_db_trade_history_row_count_invalid",
+    "target_weight_db_position_quantity_mismatch",
+}
 
 
 def _stable_manifest_hash(payload: dict[str, Any]) -> str:
@@ -5113,6 +5126,7 @@ def _build_readiness_operator_commands(
         "execute_capped_paper": execute_command,
         "finalize_pilot_evidence": f"{repair_base} --finalize-pilot-evidence --finalize-date {plan.trade_day}",
         "repair_pilot_evidence": f"{repair_base} --repair-pilot-evidence --repair-date {plan.trade_day}",
+        "diagnose_portfolio_snapshot": f"{repair_base} --diagnose-portfolio-snapshot --snapshot-date {plan.trade_day}",
     }
 
 
@@ -5130,6 +5144,15 @@ def _target_weight_finalize_first_invalid_reasons(invalid_reasons: Any) -> bool:
     if not isinstance(invalid_reasons, dict):
         return False
     return any(reason in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS for reason in invalid_reasons)
+
+
+def _target_weight_db_persistence_invalid_reasons(invalid_reasons: Any) -> bool:
+    if not isinstance(invalid_reasons, dict):
+        return False
+    return any(
+        reason in DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS
+        for reason in invalid_reasons
+    )
 
 
 def _readiness_execute_block_reason(
@@ -5748,7 +5771,9 @@ def build_target_weight_daily_ops_summary(
     elif pilot_evidence_invalid_today:
         status = "PILOT_EVIDENCE_INVALID"
         invalid_reasons = evidence_progress.get("invalid_reasons") or {}
-        if _target_weight_finalize_first_invalid_reasons(invalid_reasons):
+        if _target_weight_db_persistence_invalid_reasons(invalid_reasons):
+            next_step = "오늘 pilot_paper DB 저장 증거 불완전; portfolio snapshot/DB 진단 후 새 실행 증거 확보"
+        elif _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             next_step = "오늘 pilot_paper 증거 품질 미확정; final benchmark/portfolio evidence 확정 후 daily ops 재점검"
         else:
             next_step = "오늘 pilot_paper 증거 품질 실패; benchmark/portfolio evidence 복구 후 daily ops 재점검"
@@ -5842,9 +5867,29 @@ def build_target_weight_daily_ops_summary(
             f"--repair-pilot-evidence --repair-date {audit['trade_day']}"
         ),
     )
+    operator_commands.setdefault(
+        "diagnose_portfolio_snapshot",
+        (
+            "python tools/target_weight_rotation_pilot.py "
+            f"--candidate-id {audit['candidate_id']} "
+            f"--diagnose-portfolio-snapshot --snapshot-date {audit['trade_day']}"
+        ),
+    )
     if pilot_evidence_invalid_today:
         invalid_reasons = evidence_progress.get("invalid_reasons") or {}
-        if _target_weight_finalize_first_invalid_reasons(invalid_reasons):
+        if _target_weight_db_persistence_invalid_reasons(invalid_reasons):
+            diagnose_command = str(
+                operator_commands.get("diagnose_portfolio_snapshot") or ""
+            ).strip()
+            operator_commands["finalize_pilot_evidence"] = (
+                "# blocked: pilot_paper DB persistence proof incomplete; "
+                f"run diagnostics first: {diagnose_command}"
+            )
+            operator_commands["repair_pilot_evidence"] = (
+                "# blocked: DB persistence proof cannot be repaired from artifact; "
+                f"run diagnostics first: {diagnose_command}"
+            )
+        elif _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             operator_commands["repair_pilot_evidence"] = (
                 "# fallback: use only if finalize cannot produce promotable proof; "
                 + operator_commands["repair_pilot_evidence"]
