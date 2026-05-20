@@ -2685,6 +2685,11 @@ def test_paper_pilot_control_status_prints_evidence_maintenance_commands(tmp_pat
 
     output = capsys.readouterr().out
     assert "Status: PILOT_EVIDENCE_INVALID" in output
+    assert "Effective target-weight execution: BLOCKED" in output
+    assert (
+        "Effective reason: daily ops requires evidence finalize or repair first"
+        in output
+    )
     assert "Evidence breakdown: shadow=3 repaired=1 invalid=2" in output
     assert "Finalize evidence command:" in output
     assert "--finalize-pilot-evidence --finalize-date 2026-04-10" in output
@@ -2777,6 +2782,11 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
 
     output = capsys.readouterr().out
     assert "Status: PILOT_EVIDENCE_INVALID" in output
+    assert "Effective target-weight execution: BLOCKED" in output
+    assert (
+        "Effective reason: daily ops requires evidence finalize or repair first"
+        in output
+    )
     assert "Current blockers priority: 확정되지 않은 pilot evidence 정리" in output
     assert (
         "Priority command: # blocked: final performance evidence unavailable"
@@ -2790,6 +2800,33 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     ) in output
     assert "RUN current blockers priority command" not in output
     assert summary_path.as_posix() in output
+
+
+def test_target_weight_effective_execution_status_labels_ready_and_blockers():
+    import tools.paper_pilot_control as ppc
+
+    ready_status, ready_reason = ppc._target_weight_effective_execution_status(
+        {"status": "READY_TO_EXECUTE"},
+        execute_command=(
+            "python tools/target_weight_rotation_pilot.py "
+            "--execute --collect-evidence"
+        ),
+    )
+    invalid_status, invalid_reason = ppc._target_weight_effective_execution_status(
+        {"status": "PILOT_EVIDENCE_INVALID"},
+        execute_command="# blocked: pilot_paper evidence invalid",
+    )
+    cap_status, cap_reason = ppc._target_weight_effective_execution_status(
+        {"status": "READY_TO_ENABLE_CAPS"},
+        execute_command="# blocked: cap approval required",
+    )
+
+    assert ready_status == "READY"
+    assert ready_reason == "daily ops READY_TO_EXECUTE command available"
+    assert invalid_status == "BLOCKED"
+    assert invalid_reason == "daily ops requires evidence finalize or repair first"
+    assert cap_status == "BLOCKED"
+    assert cap_reason == "daily ops requires cap approval before execution"
 
 
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):

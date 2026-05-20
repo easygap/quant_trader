@@ -861,6 +861,33 @@ def _command_is_blocked(command: object) -> bool:
     return str(command or "").lstrip().startswith("# blocked:")
 
 
+def _target_weight_effective_execution_status(
+    summary: dict,
+    *,
+    execute_command: str,
+) -> tuple[str, str]:
+    status = str(summary.get("status") or "").strip()
+    if (
+        status == "READY_TO_EXECUTE"
+        and execute_command
+        and not _command_is_blocked(execute_command)
+    ):
+        return "READY", "daily ops READY_TO_EXECUTE command available"
+    if status == "READY_TO_ENABLE_CAPS":
+        return "BLOCKED", "daily ops requires cap approval before execution"
+    if status == "WAITING_FOR_MARKET_SESSION":
+        return "BLOCKED", "daily ops is waiting for the market session"
+    if status == "PILOT_EVIDENCE_INVALID":
+        return "BLOCKED", "daily ops requires evidence finalize or repair first"
+    if status == "PILOT_EVIDENCE_RECORDED":
+        return "BLOCKED", "pilot evidence already recorded for this trade day"
+    if status == "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE":
+        return "BLOCKED", "only non-promotable repaired evidence is available"
+    if status:
+        return "BLOCKED", f"daily ops status={status}"
+    return "BLOCKED", "daily ops summary status unavailable"
+
+
 def _target_weight_operator_next_action(
     summary: dict,
     *,
@@ -1206,6 +1233,12 @@ def _print_target_weight_daily_ops_status(
         )
     print(f"    Status: {summary.get('status', 'unknown')}")
     print(f"    Trade day: {summary.get('trade_day', 'N/A')}")
+    effective_status, effective_reason = _target_weight_effective_execution_status(
+        summary,
+        execute_command=str(execute_command),
+    )
+    print(f"    Effective target-weight execution: {effective_status}")
+    print(f"    Effective reason: {effective_reason}")
     if next_operator_trade_day:
         print(f"    Next operator trade day: {next_operator_trade_day}")
     if not_before_date:
