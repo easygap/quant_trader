@@ -46,6 +46,19 @@ TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS = frozenset({
     "target_weight_daily_return_missing",
     "target_weight_portfolio_value_missing",
 })
+TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS = frozenset({
+    "target_weight_db_persistence_complete_false",
+    "target_weight_db_persistence_proof_missing",
+    "target_weight_db_persistence_proof_not_checked",
+    "target_weight_db_persistence_proof_incomplete",
+    "target_weight_trade_history_source_not_database",
+    "target_weight_positions_source_not_database",
+    "target_weight_db_persistence_session_id_mismatch",
+    "target_weight_db_trade_history_row_count_missing",
+    "target_weight_db_trade_history_row_count_mismatch",
+    "target_weight_db_trade_history_row_count_invalid",
+    "target_weight_db_position_quantity_mismatch",
+})
 
 CANONICAL_EVAL_START = "2023-01-01"
 CANONICAL_EVAL_END = "2025-12-31"
@@ -1831,6 +1844,43 @@ def _target_weight_ops_priority_action(
 
     if status == "PILOT_EVIDENCE_INVALID":
         invalid_reasons = progress.get("invalid_reasons") or {}
+        db_persistence_blocked = any(
+            reason in TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS
+            for reason in invalid_reasons
+        )
+        if db_persistence_blocked:
+            diagnose_command = (
+                ops_commands.get("diagnose_portfolio_snapshot")
+                or _target_weight_portfolio_snapshot_diagnostics_command(
+                    strategy,
+                    latest_daily_ops.get("trade_day"),
+                )
+            )
+            follow_up = (
+                ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary")
+            )
+            return {
+                **base_action,
+                "invalid_execution_days": _safe_int(
+                    progress.get("invalid_execution_days")
+                ),
+                "invalid_reasons": invalid_reasons,
+                "desc": (
+                    "오늘 target-weight pilot_paper DB 저장 증거 불완전, "
+                    "portfolio snapshot/DB 진단 후 새 실행 증거 확보"
+                ),
+                "command": diagnose_command,
+                "order_safety": "no_order",
+                "requires": "database trade/position persistence proof",
+                "db_persistence_guard": "target_weight_db_persistence_proof_required",
+                "blocked_finalize_command": (
+                    "# blocked: DB persistence proof incomplete; run diagnostics first"
+                ),
+                "blocked_repair_command": (
+                    "# blocked: DB persistence proof cannot be repaired from artifact"
+                ),
+                "follow_up": follow_up,
+            }
         finalize_first = any(
             reason in TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS
             for reason in invalid_reasons
