@@ -2157,11 +2157,18 @@ def test_current_blockers_waits_when_finalize_missing_performance():
         "artifact_type": "target_weight_pilot_evidence_finalize",
         "candidate_id": "target_weight_best",
         "finalize_date": "2026-05-20",
+        "generated_at": "2026-05-20T15:40:00",
         "status": "blocked",
         "reason": (
             "target_weight_pilot_evidence_finalize_missing_performance: "
             "total_value/daily_return unavailable"
         ),
+        "performance_evidence_status": {
+            "source_record_fields_present": ["cash"],
+            "portfolio_metrics_checked": True,
+            "portfolio_metrics_fields_present": [],
+            "missing_fields_after_probe": ["total_value", "daily_return"],
+        },
         "source_path": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_best_2026-05-20.json",
     }
 
@@ -2180,6 +2187,78 @@ def test_current_blockers_waits_when_finalize_missing_performance():
         "target_weight_pilot_evidence_finalize_missing_performance"
     )
     assert action["requires"] == "final portfolio performance evidence available"
+    assert action["finalize_report_status"] == "blocked"
+    assert action["finalize_report_generated_at"] == "2026-05-20T15:40:00"
+    assert action["finalize_source_record_fields_present"] == ["cash"]
+    assert action["finalize_portfolio_metrics_checked"] is True
+    assert action["finalize_portfolio_metrics_fields_present"] == []
+    assert action["finalize_missing_performance_fields"] == [
+        "total_value",
+        "daily_return",
+    ]
+
+
+def test_current_blockers_prioritizes_finalize_for_performance_missing_reason():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    finalize_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--finalize-pilot-evidence --finalize-date 2026-05-20"
+    )
+    repair_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--repair-pilot-evidence --repair-date 2026-05-20"
+    )
+    latest_daily_ops = {
+        "source_path": "reports/target_weight_daily_ops_summary_target_weight_best_2026-05-20.json",
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_daily_return_missing": 1},
+        },
+        "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+            "finalize_pilot_evidence": finalize_command,
+            "repair_pilot_evidence": repair_command,
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+    )
+
+    action = report["next_actions"][0]
+    assert action["command"] == finalize_command
+    assert action["command"] != repair_command
+    assert action["requires"] == "benchmark/portfolio evidence finalization"
+    assert action["follow_up"].endswith("--daily-ops-summary")
 
 
 def test_build_current_blockers_report_schedules_next_day_after_repaired_non_promotable_daily_ops(monkeypatch):
