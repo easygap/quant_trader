@@ -3165,6 +3165,10 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
     ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
 
     output = capsys.readouterr().out
+    assert (
+        "Effective reason: current blockers requires DB trade_history/positions "
+        "proof before snapshot recovery"
+    ) in output
     assert "Portfolio metrics probe: missing_snapshot_history" in output
     assert "Portfolio metrics recovery: restore target-weight DB trade_history" in output
     assert "Snapshot diagnostics status: blocked_missing_snapshot_history" in output

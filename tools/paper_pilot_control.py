@@ -1366,6 +1366,9 @@ def _print_target_weight_daily_ops_status(
         strategy,
         reports_dir=reports_dir,
     )
+    priority_snapshot_recovery_guard = str(
+        priority_action.get("snapshot_recovery_guard") or ""
+    ).strip()
     not_before_date = (
         run_guard.get("not_before_date")
         or summary.get("not_before_date")
@@ -1430,6 +1433,15 @@ def _print_target_weight_daily_ops_status(
         summary,
         execute_command=str(execute_command),
     )
+    if (
+        priority_snapshot_recovery_guard
+        == "target_weight_db_persistence_proof_required_before_snapshot"
+    ):
+        effective_status = "BLOCKED"
+        effective_reason = (
+            "current blockers requires DB trade_history/positions proof before "
+            "snapshot recovery"
+        )
     print(f"    Effective target-weight execution: {effective_status}")
     print(f"    Effective reason: {effective_reason}")
     if next_operator_trade_day:
@@ -1503,9 +1515,6 @@ def _print_target_weight_daily_ops_status(
         priority_recovery_hint = str(priority_action.get("snapshot_recovery_hint") or "").strip()
     priority_snapshot_diagnostics_command = str(
         priority_action.get("finalize_portfolio_snapshot_diagnostics_command") or ""
-    ).strip()
-    priority_snapshot_recovery_guard = str(
-        priority_action.get("snapshot_recovery_guard") or ""
     ).strip()
     priority_snapshot_recovery_blockers = (
         priority_action.get("snapshot_recovery_blockers") or []

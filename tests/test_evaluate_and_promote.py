@@ -2436,6 +2436,10 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     )
 
     action = report["next_actions"][0]
+    assert action["desc"] == (
+        "target-weight snapshot 복구 전 DB trade_history/positions "
+        "증거 복구 후 진단 재점검"
+    )
     assert action["requires"] == "authoritative DB snapshot/trade/position evidence"
     assert action["command"] == (
         "# blocked: restore authoritative DB trade_history/positions proof "
@@ -2443,6 +2447,11 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     )
     assert action["scheduled_command"] == snapshot_diagnostics_command
     assert action["scheduled_follow_up"] == finalize_command
+    assert action["snapshot_recovery_order"] == [
+        "restore_authoritative_db_trade_history_positions_proof",
+        "rerun_portfolio_snapshot_diagnostics",
+        "rerun_finalize_pilot_evidence",
+    ]
     assert action["blocked_finalize_command"].startswith(
         "# blocked: portfolio snapshot recovery requires"
     )

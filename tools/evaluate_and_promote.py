@@ -2282,12 +2282,21 @@ def _target_weight_ops_priority_action(
                 })
                 if snapshot_recovery_guard:
                     original_finalize_command = command
+                    action["desc"] = (
+                        "target-weight snapshot 복구 전 DB trade_history/positions "
+                        "증거 복구 후 진단 재점검"
+                    )
                     action["requires"] = "authoritative DB snapshot/trade/position evidence"
                     action["command"] = _target_weight_snapshot_recovery_blocked_command(
                         snapshot_recovery_guard
                     )
                     action["scheduled_command"] = snapshot_diagnostics_command
                     action["scheduled_follow_up"] = original_finalize_command
+                    action["snapshot_recovery_order"] = [
+                        "restore_authoritative_db_trade_history_positions_proof",
+                        "rerun_portfolio_snapshot_diagnostics",
+                        "rerun_finalize_pilot_evidence",
+                    ]
                     action["blocked_finalize_command"] = (
                         "# blocked: portfolio snapshot recovery requires "
                         "authoritative DB/snapshot evidence first"
