@@ -49,6 +49,7 @@
 
 - [ ] `python tools/target_weight_rotation_pilot.py --daily-ops-summary` 실행
 - [ ] Summary status 확인: BLOCKED / WAITING_FOR_MARKET_SESSION / READY_TO_ENABLE_CAPS / READY_TO_EXECUTE / PILOT_EVIDENCE_RECORDED / PILOT_EVIDENCE_INVALID
+- [ ] READY_TO_EXECUTE / READY_TO_ENABLE_CAPS 계열이면 `generated_at`이 KST 기준 30분 이내인지 확인. 오래됐거나 누락되면 daily ops summary를 다시 생성
 - [ ] Verified pilot days 확인: ____ / 60
 - [ ] Invalid execution days가 0인지 확인
 - [ ] `PILOT_EVIDENCE_INVALID`이고 status가 final portfolio performance evidence 대기를 안내하면, `total_value`/`daily_return`이 들어올 때까지 기다린 뒤 scheduled finalize 명령을 재실행

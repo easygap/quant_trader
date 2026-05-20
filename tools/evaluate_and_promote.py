@@ -34,6 +34,12 @@ logger.remove()
 logger.add(sys.stderr, level="WARNING")
 
 KST = timezone(timedelta(hours=9))
+TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_STATUSES = frozenset({
+    "READY_TO_EXECUTE",
+    "READY_TO_ENABLE_CAPS",
+    "WAITING_FOR_MARKET_SESSION",
+})
+TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES = 30
 
 CANONICAL_EVAL_START = "2023-01-01"
 CANONICAL_EVAL_END = "2025-12-31"
@@ -1004,8 +1010,12 @@ def _target_weight_operator_commands(strategy: str) -> dict[str, str]:
     }
 
 
+def _current_kst_datetime() -> datetime:
+    return datetime.now(KST)
+
+
 def _current_kst_date() -> str:
-    return datetime.now(KST).date().isoformat()
+    return _current_kst_datetime().date().isoformat()
 
 
 def _artifact_source_path(path: Path) -> str:
@@ -1098,6 +1108,69 @@ def _ready_to_execute_trade_day_is_current(payload: dict) -> bool:
     return trade_date == current
 
 
+def _parse_target_weight_daily_ops_generated_at(payload: dict) -> datetime | None:
+    generated_at = str(payload.get("generated_at") or "").strip()
+    if not generated_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=KST)
+    return parsed.astimezone(KST)
+
+
+def _target_weight_actionable_daily_ops_freshness_blocker(payload: dict) -> str | None:
+    status = str(payload.get("status") or "").strip()
+    if status not in TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_STATUSES:
+        return None
+    if not _ready_to_execute_trade_day_is_current(payload):
+        return None
+
+    now = _current_kst_datetime()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=KST)
+    else:
+        now = now.astimezone(KST)
+    current_date = _current_kst_date()
+    if now.date().isoformat() != current_date:
+        return None
+
+    generated_at_raw = str(payload.get("generated_at") or "").strip()
+    if not generated_at_raw:
+        return (
+            "# blocked: daily_ops_summary.generated_at missing; "
+            "rerun daily ops summary before action"
+        )
+    generated_at = _parse_target_weight_daily_ops_generated_at(payload)
+    if generated_at is None:
+        return (
+            "# blocked: daily_ops_summary.generated_at invalid; "
+            "rerun daily ops summary before action"
+        )
+    if generated_at.date().isoformat() != current_date:
+        return (
+            "# blocked: daily_ops_summary.generated_at is stale; "
+            "rerun daily ops summary for the current KRX business day"
+        )
+
+    age_seconds = (now - generated_at).total_seconds()
+    if age_seconds < -60:
+        return (
+            "# blocked: daily_ops_summary.generated_at is in the future; "
+            "rerun daily ops summary before action"
+        )
+    max_age_seconds = TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES * 60
+    if age_seconds > max_age_seconds:
+        return (
+            "# blocked: daily_ops_summary.generated_at is stale "
+            f"(>{TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES}m); "
+            "rerun daily ops summary before action"
+        )
+    return None
+
+
 def _target_weight_command_scope_issues(
     payload: dict,
     command: str,
@@ -1120,6 +1193,9 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
     status = sanitized.get("status")
     decision = sanitized.get("decision") or {}
     operator_commands = dict(sanitized.get("operator_commands") or {})
+    actionable_freshness_blocker = (
+        _target_weight_actionable_daily_ops_freshness_blocker(sanitized)
+    )
 
     enable_command = str(operator_commands.get("enable_suggested_caps") or "")
     enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
@@ -1133,6 +1209,11 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
             "# blocked: daily_ops_summary.trade_day is stale; "
             "rerun daily ops summary for the current KRX business day"
         )
+    elif (
+        status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}
+        and actionable_freshness_blocker
+    ):
+        operator_commands["enable_suggested_caps"] = actionable_freshness_blocker
     elif status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
         enable_issues = _target_weight_command_scope_issues(
             sanitized,
@@ -1152,6 +1233,8 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
             "# blocked: daily_ops_summary.trade_day is stale; "
             "rerun daily ops summary for the current KRX business day"
         )
+    elif status == "READY_TO_EXECUTE" and actionable_freshness_blocker:
+        operator_commands["execute_capped_paper"] = actionable_freshness_blocker
     elif status == "READY_TO_EXECUTE":
         execute_issues = _target_weight_command_scope_issues(
             sanitized,
