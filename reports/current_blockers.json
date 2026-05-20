@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T16:28:34.128400",
+  "generated_at": "2026-05-20T16:41:17.527910",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T16:28:34.128400",
-    "age_days": 0.97,
+    "checked_at": "2026-05-20T16:41:17.527910",
+    "age_days": 0.98,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -134,12 +134,12 @@
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T13:47:54.922759",
+      "snapshot_diagnostics_generated_at": "2026-05-20T16:41:05.707467",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
       "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
       "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "snapshot_recovery_next_action": "restore or create portfolio snapshot history for the target-weight account_key; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+      "snapshot_recovery_next_action": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20; do not create a portfolio snapshot from artifact-only fills",
       "snapshot_recovery_status": "blocked",
       "snapshot_recovery_safe_to_write": false,
       "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
@@ -147,10 +147,11 @@
         "portfolio_snapshot_history_missing",
         "portfolio_metrics_required_fields_missing",
         "db_execution_state_missing_for_account_key",
-        "artifact_fills_without_current_db_trades"
+        "artifact_fills_without_current_db_trades",
+        "source_record_db_persistence_incomplete"
       ],
       "snapshot_recovery_warnings": [
-        "source_record_proof_before_finalize=target_weight_benchmark_status_not_final"
+        "source_record_proof_before_finalize=target_weight_db_persistence_complete_false"
       ],
       "snapshot_db_snapshot_count": 0,
       "snapshot_db_current_snapshot_found": false,
@@ -162,6 +163,20 @@
       "snapshot_artifact_db_persistence_complete": false,
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
+      "snapshot_db_restore_status": "restore_required",
+      "snapshot_db_restore_required": true,
+      "snapshot_db_restore_trade_rows_expected": 4,
+      "snapshot_db_restore_trade_rows_current": 0,
+      "snapshot_db_restore_trade_rows_missing_or_unverified": 4,
+      "snapshot_db_restore_position_symbols_expected": 5,
+      "snapshot_db_restore_positions_current": 0,
+      "snapshot_db_restore_missing_or_unverified_symbols": [
+        "000660",
+        "005930",
+        "005935",
+        "009150",
+        "402340"
+      ],
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
@@ -244,8 +259,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T16:28:34.128400",
-      "age_days": 0.97,
+      "checked_at": "2026-05-20T16:41:17.527910",
+      "age_days": 0.98,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -457,12 +472,12 @@
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T13:47:54.922759",
+      "snapshot_diagnostics_generated_at": "2026-05-20T16:41:05.707467",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
       "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
       "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "snapshot_recovery_next_action": "restore or create portfolio snapshot history for the target-weight account_key; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+      "snapshot_recovery_next_action": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20; do not create a portfolio snapshot from artifact-only fills",
       "snapshot_recovery_status": "blocked",
       "snapshot_recovery_safe_to_write": false,
       "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
@@ -470,10 +485,11 @@
         "portfolio_snapshot_history_missing",
         "portfolio_metrics_required_fields_missing",
         "db_execution_state_missing_for_account_key",
-        "artifact_fills_without_current_db_trades"
+        "artifact_fills_without_current_db_trades",
+        "source_record_db_persistence_incomplete"
       ],
       "snapshot_recovery_warnings": [
-        "source_record_proof_before_finalize=target_weight_benchmark_status_not_final"
+        "source_record_proof_before_finalize=target_weight_db_persistence_complete_false"
       ],
       "snapshot_db_snapshot_count": 0,
       "snapshot_db_current_snapshot_found": false,
@@ -485,6 +501,20 @@
       "snapshot_artifact_db_persistence_complete": false,
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
+      "snapshot_db_restore_status": "restore_required",
+      "snapshot_db_restore_required": true,
+      "snapshot_db_restore_trade_rows_expected": 4,
+      "snapshot_db_restore_trade_rows_current": 0,
+      "snapshot_db_restore_trade_rows_missing_or_unverified": 4,
+      "snapshot_db_restore_position_symbols_expected": 5,
+      "snapshot_db_restore_positions_current": 0,
+      "snapshot_db_restore_missing_or_unverified_symbols": [
+        "000660",
+        "005930",
+        "005935",
+        "009150",
+        "402340"
+      ],
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",

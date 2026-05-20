@@ -2425,6 +2425,20 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
             "db_trade_history_source": "",
             "db_positions_source": "",
         },
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+            "trade_history": {
+                "expected_row_count": 4,
+                "current_db_rows_on_date": 0,
+                "missing_or_unverified_row_count": 4,
+            },
+            "positions": {
+                "expected_symbol_count": 4,
+                "current_db_position_count": 0,
+                "missing_or_unverified_symbols": ["AAA", "BBB", "CCC", "DDD"],
+            },
+        },
         "source_path": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_best_2026-05-20.json",
     }
 
@@ -2486,6 +2500,19 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         "target_weight_best_2026-05-20_session"
     )
     assert action["snapshot_artifact_db_persistence_complete"] is False
+    assert action["snapshot_db_restore_status"] == "restore_required"
+    assert action["snapshot_db_restore_required"] is True
+    assert action["snapshot_db_restore_trade_rows_expected"] == 4
+    assert action["snapshot_db_restore_trade_rows_current"] == 0
+    assert action["snapshot_db_restore_trade_rows_missing_or_unverified"] == 4
+    assert action["snapshot_db_restore_position_symbols_expected"] == 4
+    assert action["snapshot_db_restore_positions_current"] == 0
+    assert action["snapshot_db_restore_missing_or_unverified_symbols"] == [
+        "AAA",
+        "BBB",
+        "CCC",
+        "DDD",
+    ]
 
 
 def test_current_blockers_refreshes_legacy_finalize_report_without_diagnostics():
