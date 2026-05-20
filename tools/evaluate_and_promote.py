@@ -40,6 +40,12 @@ TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_STATUSES = frozenset({
     "WAITING_FOR_MARKET_SESSION",
 })
 TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES = 30
+TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS = frozenset({
+    "target_weight_benchmark_status_not_final",
+    "target_weight_excess_metrics_missing",
+    "target_weight_daily_return_missing",
+    "target_weight_portfolio_value_missing",
+})
 
 CANONICAL_EVAL_START = "2023-01-01"
 CANONICAL_EVAL_END = "2025-12-31"
@@ -1785,7 +1791,10 @@ def _target_weight_ops_priority_action(
 
     if status == "PILOT_EVIDENCE_INVALID":
         invalid_reasons = progress.get("invalid_reasons") or {}
-        finalize_first = "target_weight_benchmark_status_not_final" in invalid_reasons
+        finalize_first = any(
+            reason in TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS
+            for reason in invalid_reasons
+        )
         command = (
             ops_commands.get("finalize_pilot_evidence")
             if finalize_first
@@ -1818,6 +1827,13 @@ def _target_weight_ops_priority_action(
         if finalize_first and _target_weight_finalize_waits_for_performance(latest_finalize_report):
             reason = str(latest_finalize_report.get("reason") or "").strip()
             blocked = f"# blocked: final performance evidence unavailable; {reason}"
+            performance_status = (
+                latest_finalize_report.get("performance_evidence_status")
+                if isinstance(latest_finalize_report, dict)
+                else {}
+            )
+            if not isinstance(performance_status, dict):
+                performance_status = {}
             action.update({
                 "command": blocked,
                 "scheduled_command": command,
@@ -1826,6 +1842,20 @@ def _target_weight_ops_priority_action(
                     "target_weight_pilot_evidence_finalize_missing_performance"
                 ),
                 "finalize_report_source": latest_finalize_report.get("source_path"),
+                "finalize_report_generated_at": latest_finalize_report.get("generated_at"),
+                "finalize_report_status": latest_finalize_report.get("status"),
+                "finalize_source_record_fields_present": (
+                    performance_status.get("source_record_fields_present") or []
+                ),
+                "finalize_portfolio_metrics_checked": bool(
+                    performance_status.get("portfolio_metrics_checked")
+                ),
+                "finalize_portfolio_metrics_fields_present": (
+                    performance_status.get("portfolio_metrics_fields_present") or []
+                ),
+                "finalize_missing_performance_fields": (
+                    performance_status.get("missing_fields_after_probe") or []
+                ),
             })
         return action
 
