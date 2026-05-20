@@ -2720,6 +2720,121 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
+def test_current_blockers_keeps_db_restore_first_and_adds_core_entry_recheck(
+    monkeypatch,
+):
+    import tools.evaluate_and_promote as ep
+
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    strategy = "target_weight_best"
+    monkeypatch.setattr(
+        ep,
+        "_target_weight_core_entry_check_snapshot",
+        lambda candidate, checked_at=None: {
+            "label": "Core Entry Check",
+            "strategy": candidate,
+            "status": "BLOCKED",
+            "allowed": False,
+            "reason": "notifier stale — rerun preflight with --send-test-notification",
+            "checked_at": checked_at,
+            "recovery_command": (
+                f"python tools/paper_preflight.py --strategy {candidate} "
+                "--with-pilot-check --send-test-notification"
+            ),
+            "requires": "recent verified notifier health",
+            "check_command": (
+                f"python tools/paper_pilot_control.py --strategy {candidate} --status"
+            ),
+            "order_safety": "no_order",
+        },
+    )
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            strategy: {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+                "metrics": {"benchmark_excess_return": 48.7},
+            },
+        },
+    }
+    diagnose_command = (
+        f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy} "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
+    )
+    latest_daily_ops = {
+        "source_path": (
+            f"reports/target_weight_daily_ops_summary_{strategy}_2026-05-20.json"
+        ),
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "decision": {"blocking_reasons": ["execution_idempotency: duplicate"]},
+        "operator_commands": {
+            "daily_ops_summary": (
+                f"python tools/target_weight_rotation_pilot.py --candidate-id {strategy} "
+                "--daily-ops-summary"
+            ),
+            "diagnose_portfolio_snapshot": diagnose_command,
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        generated_at="2026-05-20T12:00:00",
+    )
+
+    assert report["next_actions"][0]["command"] == diagnose_command
+    assert (
+        report["next_actions"][0]["db_persistence_guard"]
+        == "target_weight_db_persistence_proof_required"
+    )
+    core_action = report["next_actions"][1]
+    assert core_action["source"] == "core_entry_check"
+    assert core_action["command"] == (
+        f"python tools/paper_preflight.py --strategy {strategy} "
+        "--with-pilot-check --send-test-notification"
+    )
+    assert core_action["order_safety"] == "no_order"
+    runbook = report["operator_runbook"]
+    assert runbook["core_entry_check"]["status"] == "BLOCKED"
+    assert "notifier stale" in runbook["core_entry_check"]["reason"]
+    assert runbook["core_entry_action"]["command"] == core_action["command"]
+    assert runbook["sequence"][2]["command"] == diagnose_command
+    assert runbook["sequence"][3]["command"] == core_action["command"]
+    assert runbook["sequence"][3]["check_command"].endswith("--status")
+
+
+def test_core_entry_reason_strips_volatile_notifier_stale_age():
+    import tools.evaluate_and_promote as ep
+
+    reason = (
+        "notifier stale — rerun preflight with --send-test-notification: "
+        "Discord webhook test stale (26.2h)"
+    )
+
+    assert ep._stable_target_weight_core_entry_reason(reason) == (
+        "notifier stale — rerun preflight with --send-test-notification: "
+        "Discord webhook test stale"
+    )
+
+
 def test_current_blockers_reads_db_persistence_gap_from_finalize_report():
     from tools.evaluate_and_promote import build_current_blockers_report
 
