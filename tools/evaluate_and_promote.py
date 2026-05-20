@@ -1384,12 +1384,23 @@ def _target_weight_daily_ops_failure_follow_up(
     return commands.get("readiness_audit") or ""
 
 
+def _target_weight_daily_ops_failure_waits_for_market_data(reason: str) -> bool:
+    return "target_weight_requested_trade_day_unavailable" in str(reason or "")
+
+
+def _target_weight_daily_ops_market_data_blocked_command(reason: str) -> str:
+    reason_text = str(reason or "requested trade-day market data unavailable").strip()
+    return f"# blocked: requested trade-day market data unavailable; {reason_text}"
+
+
 def _target_weight_daily_ops_failure_action(
     strategy: str,
     commands: dict[str, str],
     failure: dict,
 ) -> dict:
     reason = _target_weight_daily_ops_failure_reason(failure)
+    command = _target_weight_daily_ops_failure_command(failure, commands)
+    follow_up = _target_weight_daily_ops_failure_follow_up(failure, commands)
     action = {
         "strategy": strategy,
         "source": "latest_daily_ops_failure",
@@ -1400,11 +1411,22 @@ def _target_weight_daily_ops_failure_action(
         "generated_at": failure.get("generated_at"),
         "as_of_date": failure.get("as_of_date"),
         "desc": "daily ops summary 실패 원인 해소 후 summary 재생성",
-        "command": _target_weight_daily_ops_failure_command(failure, commands),
+        "command": command,
         "order_safety": "no_order",
         "requires": "daily ops failure resolved",
-        "follow_up": _target_weight_daily_ops_failure_follow_up(failure, commands),
+        "follow_up": follow_up,
     }
+    if _target_weight_daily_ops_failure_waits_for_market_data(reason):
+        action.update({
+            "desc": "요청 거래일 시장 데이터 확인 후 daily ops summary 재생성",
+            "command": _target_weight_daily_ops_market_data_blocked_command(reason),
+            "scheduled_command": command,
+            "requires": "requested trade-day market data available",
+            "market_data_guard": "target_weight_requested_trade_day_unavailable",
+        })
+        if follow_up:
+            action["follow_up"] = _target_weight_daily_ops_market_data_blocked_command(reason)
+            action["scheduled_follow_up"] = follow_up
     failure_error = _target_weight_daily_ops_failure_error(failure)
     if failure_error:
         action["failure_error"] = failure_error
