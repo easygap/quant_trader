@@ -3149,6 +3149,19 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "snapshot_db_position_count": 0,
         "snapshot_artifact_fill_count": 4,
         "snapshot_artifact_db_persistence_complete": False,
+        "snapshot_db_restore_status": "restore_required",
+        "snapshot_db_restore_required": True,
+        "snapshot_db_restore_trade_rows_expected": 4,
+        "snapshot_db_restore_trade_rows_current": 0,
+        "snapshot_db_restore_trade_rows_missing_or_unverified": 4,
+        "snapshot_db_restore_position_symbols_expected": 4,
+        "snapshot_db_restore_positions_current": 0,
+        "snapshot_db_restore_missing_or_unverified_symbols": [
+            "AAA",
+            "BBB",
+            "CCC",
+            "DDD",
+        ],
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
         ),
@@ -3200,6 +3213,11 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
     assert "Snapshot recovery blockers: portfolio_snapshot_history_missing" in output
     assert "Snapshot DB state: snapshots=0 trades_total=0 trades_on_date=0 positions=0" in output
     assert "Snapshot artifact state: fills=4 db_persistence=False" in output
+    assert (
+        "Snapshot DB restore checklist: status=restore_required required=True "
+        "trade_rows=0/4 positions=0/4"
+    ) in output
+    assert "Snapshot DB restore missing symbols: AAA, BBB, CCC, DDD" in output
     assert (
         "Operator next action: RESTORE authoritative DB trade_history/positions "
         "proof before snapshot recovery"
@@ -5587,6 +5605,19 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
         report["next_action"]
     )
     assert report["no_order_safety"]["portfolio_snapshot_written"] is False
+    restore = report["db_restore_checklist"]
+    assert restore["status"] == "restore_required"
+    assert restore["restore_required"] is True
+    assert restore["trade_history"]["expected_row_count"] == len(plan.orders)
+    assert restore["trade_history"]["current_db_rows_on_date"] == 0
+    assert restore["trade_history"]["missing_or_unverified_row_count"] == len(plan.orders)
+    assert restore["positions"]["expected_symbol_count"] == len(plan.orders)
+    assert restore["positions"]["current_db_position_count"] == 0
+    assert set(restore["positions"]["missing_or_unverified_symbols"]) == {
+        order.symbol for order in plan.orders
+    }
+    assert restore["safety"]["db_write_enabled"] is False
+    assert restore["safety"]["artifact_only_snapshot_allowed"] is False
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
     )
@@ -5607,6 +5638,9 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
         "Recovery guard: `target_weight_db_persistence_proof_required_before_snapshot`"
         in report_md
     )
+    assert "## DB Restore Checklist" in report_md
+    assert "Trade history rows: `expected=3 current=0 missing_or_unverified=3`" in report_md
+    assert "### Expected Trade History Rows" in report_md
     assert (
         "finalize_pilot_evidence: `# blocked: restore authoritative DB "
         "trade_history/positions proof before finalize"
@@ -5786,6 +5820,11 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     assert "artifact_execution_state: found=True complete=True fills=3" in output
     assert "db_persistence=False" in output
     assert "artifact_db_persistence: checked=False complete=False" in output
+    assert (
+        "db_restore_checklist: status=restore_required "
+        "trade_rows_expected=3 trade_rows_current=1 positions_expected=3 positions_current=4"
+        in output
+    )
     assert "snapshot_recovery_readiness: blocked" in output
     assert "snapshot_safe_to_write: False" in output
     assert "current_portfolio_snapshot_missing_after_trades" in output
