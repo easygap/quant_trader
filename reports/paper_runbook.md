@@ -49,7 +49,9 @@ python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-packag
 
 `--finalize`는 날짜를 명시해야 실행된다. 날짜 없이 `--finalize --generate-package`를 주면 finalize가 누락된 승격 패키지를 만들 수 있으므로 CLI가 실패로 처리한다.
 
-수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다.
+수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다. 같은 날짜에 backfill/shadow/비승격 repair record가 뒤에 추가되어도 canonical view는 검증된 paper/pilot evidence를 우선 보존한다.
+
+Target-weight pilot evidence finalize가 `total_value` 또는 `daily_return` 미확정으로 막힌 경우에는 같은 finalize 명령을 즉시 반복하지 않는다. `tools/paper_pilot_control.py --status`의 `Operator next action`이 final portfolio performance evidence 대기를 안내하면, 성과 snapshot이 들어온 뒤 표시된 scheduled priority command를 다시 실행한다.
 
 생성된 promotion evidence package는 package payload hash와 source record hash를 포함한다. live gate는 이 값을 원본 `daily_evidence_{strategy}.jsonl`에서 재계산해 비교하므로, 패키지 요약값이나 원본 JSONL을 따로 수정했다면 package를 다시 생성해야 한다.
 
