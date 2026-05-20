@@ -2695,11 +2695,165 @@ def _target_weight_snapshot_diagnostics_command(candidate_id: str, snapshot_date
     )
 
 
+def _target_weight_snapshot_database_state(
+    *,
+    account_key: str,
+    snapshot_date: str,
+) -> dict[str, Any]:
+    from database.models import PortfolioSnapshot, Position, TradeHistory, get_session
+
+    session = get_session()
+    try:
+        ak = account_key or ""
+        day_start = datetime.strptime(snapshot_date, "%Y-%m-%d")
+        day_end = day_start + timedelta(days=1)
+        snapshots = (
+            session.query(PortfolioSnapshot)
+            .filter(PortfolioSnapshot.account_key == ak)
+            .order_by(PortfolioSnapshot.date.desc())
+            .all()
+        )
+        current_snapshot = next(
+            (
+                snapshot
+                for snapshot in snapshots
+                if day_start <= snapshot.date < day_end
+            ),
+            None,
+        )
+        latest_snapshot = snapshots[0] if snapshots else None
+        trades_total = (
+            session.query(TradeHistory)
+            .filter(TradeHistory.account_key == ak)
+            .count()
+        )
+        trades_on_date = (
+            session.query(TradeHistory)
+            .filter(
+                TradeHistory.account_key == ak,
+                TradeHistory.executed_at >= day_start,
+                TradeHistory.executed_at < day_end,
+            )
+            .count()
+        )
+        positions_total = (
+            session.query(Position)
+            .filter(Position.account_key == ak)
+            .count()
+        )
+        return {
+            "checked": True,
+            "account_key": ak,
+            "snapshot_date": snapshot_date,
+            "snapshot_count": len(snapshots),
+            "current_snapshot_found": current_snapshot is not None,
+            "current_snapshot_total_value": (
+                current_snapshot.total_value if current_snapshot else None
+            ),
+            "latest_snapshot_at": latest_snapshot.date.isoformat()
+            if latest_snapshot
+            else None,
+            "latest_snapshot_total_value": latest_snapshot.total_value
+            if latest_snapshot
+            else None,
+            "trade_count_total": trades_total,
+            "trade_count_on_date": trades_on_date,
+            "position_count": positions_total,
+        }
+    except Exception as exc:
+        return {
+            "checked": False,
+            "account_key": account_key or "",
+            "snapshot_date": snapshot_date,
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        session.close()
+
+
+def _target_weight_record_uses_non_authoritative_performance(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    benchmark_meta = record.get("benchmark_meta") or {}
+    if isinstance(benchmark_meta, dict) and benchmark_meta.get("performance_repair") is True:
+        return True
+    if record.get("performance_repair") is True:
+        return True
+    performance_source = str(record.get("performance_source") or "")
+    return performance_source.startswith("target_weight_execution.")
+
+
+def _target_weight_snapshot_recovery_readiness(
+    *,
+    latest_record: dict | None,
+    source_record_status: dict[str, Any],
+    portfolio_probe: dict[str, Any],
+    database_state: dict[str, Any],
+    missing_required_fields: list[str],
+) -> dict[str, Any]:
+    probe_status = str(portfolio_probe.get("status") or "").strip()
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if latest_record is None:
+        blockers.append("missing_source_record")
+    if database_state.get("checked") is not True:
+        blockers.append("database_state_unavailable")
+    if not database_state.get("current_snapshot_found"):
+        if probe_status == "missing_snapshot_history":
+            blockers.append("portfolio_snapshot_history_missing")
+        elif probe_status == "missing_current_snapshot_after_trades":
+            blockers.append("current_portfolio_snapshot_missing_after_trades")
+        else:
+            blockers.append("current_portfolio_snapshot_missing")
+    if missing_required_fields:
+        blockers.append("portfolio_metrics_required_fields_missing")
+    if (
+        _coerce_int_or_zero(database_state.get("trade_count_total")) == 0
+        and _coerce_int_or_zero(database_state.get("position_count")) == 0
+    ):
+        blockers.append("db_execution_state_missing_for_account_key")
+    if _target_weight_record_uses_non_authoritative_performance(latest_record):
+        blockers.append("source_record_performance_non_authoritative")
+    proof_reason = str(
+        (source_record_status.get("proof_status") or {}).get("reason") or ""
+    )
+    if proof_reason and proof_reason != "verified_target_weight_pilot_evidence":
+        warnings.append(f"source_record_proof_before_finalize={proof_reason}")
+
+    blockers = list(dict.fromkeys(blockers))
+    warnings = list(dict.fromkeys(warnings))
+    if blockers:
+        status = "blocked"
+        reason = "snapshot recovery requires authoritative DB snapshot/trade/position evidence"
+    elif database_state.get("current_snapshot_found"):
+        status = "ready_for_finalize"
+        reason = "current portfolio snapshot already exists; rerun finalize"
+    else:
+        status = "manual_review_required"
+        reason = "no automatic snapshot write is enabled without explicit authoritative source review"
+    return {
+        "status": status,
+        "safe_to_write_snapshot": False,
+        "reason": reason,
+        "blockers": blockers,
+        "warnings": warnings,
+        "authoritative_sources": {
+            "current_snapshot_found": bool(database_state.get("current_snapshot_found")),
+            "snapshot_count": _coerce_int_or_zero(database_state.get("snapshot_count")),
+            "trade_count_total": _coerce_int_or_zero(database_state.get("trade_count_total")),
+            "trade_count_on_date": _coerce_int_or_zero(database_state.get("trade_count_on_date")),
+            "position_count": _coerce_int_or_zero(database_state.get("position_count")),
+        },
+    }
+
+
 def render_target_weight_portfolio_snapshot_diagnostics_markdown(
     report: dict[str, Any],
 ) -> str:
     probe = report.get("portfolio_metrics_probe") or {}
     source = report.get("source_record_status") or {}
+    database = report.get("database_state") or {}
+    readiness = report.get("snapshot_recovery_readiness") or {}
     commands = report.get("operator_commands") or {}
     lines = [
         "# Target-weight Portfolio Snapshot Diagnostics",
@@ -2733,6 +2887,24 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         f"`{', '.join(probe.get('fields_present') or []) or 'none'}`",
         "- Missing required fields: "
         f"`{', '.join(report.get('missing_required_fields') or []) or 'none'}`",
+        "",
+        "## Database State",
+        f"- Checked: `{database.get('checked', False)}`",
+        f"- Snapshot count: `{database.get('snapshot_count', 0)}`",
+        f"- Current snapshot found: `{database.get('current_snapshot_found', False)}`",
+        f"- Latest snapshot at: `{database.get('latest_snapshot_at') or 'none'}`",
+        f"- Trades total: `{database.get('trade_count_total', 0)}`",
+        f"- Trades on date: `{database.get('trade_count_on_date', 0)}`",
+        f"- Positions: `{database.get('position_count', 0)}`",
+        "",
+        "## Snapshot Recovery Readiness",
+        f"- Status: `{readiness.get('status') or 'unknown'}`",
+        f"- Safe to write snapshot: `{readiness.get('safe_to_write_snapshot', False)}`",
+        f"- Reason: `{readiness.get('reason') or 'none'}`",
+        "- Blockers: "
+        f"`{', '.join(readiness.get('blockers') or []) or 'none'}`",
+        "- Warnings: "
+        f"`{', '.join(readiness.get('warnings') or []) or 'none'}`",
         "",
         "## Operator Commands",
     ]
@@ -2850,6 +3022,10 @@ def diagnose_target_weight_portfolio_snapshot(
         )
         if parsed_value is None
     ]
+    database_state = _target_weight_snapshot_database_state(
+        account_key=candidate_id,
+        snapshot_date=snapshot_date,
+    )
 
     recovery_hint = _target_weight_portfolio_snapshot_recovery_hint(probe_status)
     if latest is None:
@@ -2875,6 +3051,37 @@ def diagnose_target_weight_portfolio_snapshot(
         reason = "target_weight_portfolio_snapshot_metrics_unavailable"
         if not recovery_hint:
             recovery_hint = "restore portfolio metrics, then rerun finalize"
+
+    probe_summary = {
+        "status": probe_status,
+        "reason": probe_reason,
+        "account_key": str(
+            portfolio.get("_portfolio_probe_account_key") or candidate_id
+        ),
+        "date": str(portfolio.get("_portfolio_probe_date") or snapshot_date),
+        "current_snapshot_found": bool(
+            portfolio.get("_portfolio_probe_current_snapshot_found")
+        ),
+        "previous_snapshot_found": bool(
+            portfolio.get("_portfolio_probe_previous_snapshot_found")
+        ),
+        "previous_snapshot_at": portfolio.get("_portfolio_probe_previous_snapshot_at"),
+        "trades_today": _coerce_int_or_zero(
+            portfolio.get("_portfolio_probe_trades_today")
+        ),
+        "trades_since_previous": _coerce_int_or_zero(
+            portfolio.get("_portfolio_probe_trades_since_previous")
+        ),
+        "fields_present": probe_fields_present,
+        "inferred_from_previous": bool(portfolio.get("_inferred_from_previous")),
+    }
+    recovery_readiness = _target_weight_snapshot_recovery_readiness(
+        latest_record=latest,
+        source_record_status=source_record_status,
+        portfolio_probe=probe_summary,
+        database_state=database_state,
+        missing_required_fields=missing_required_fields,
+    )
 
     commands = {
         "diagnose_portfolio_snapshot": _target_weight_snapshot_diagnostics_command(
@@ -2908,29 +3115,9 @@ def diagnose_target_weight_portfolio_snapshot(
         "recovery_hint": recovery_hint,
         "next_action": next_action,
         "source_record_status": source_record_status,
-        "portfolio_metrics_probe": {
-            "status": probe_status,
-            "reason": probe_reason,
-            "account_key": str(
-                portfolio.get("_portfolio_probe_account_key") or candidate_id
-            ),
-            "date": str(portfolio.get("_portfolio_probe_date") or snapshot_date),
-            "current_snapshot_found": bool(
-                portfolio.get("_portfolio_probe_current_snapshot_found")
-            ),
-            "previous_snapshot_found": bool(
-                portfolio.get("_portfolio_probe_previous_snapshot_found")
-            ),
-            "previous_snapshot_at": portfolio.get("_portfolio_probe_previous_snapshot_at"),
-            "trades_today": _coerce_int_or_zero(
-                portfolio.get("_portfolio_probe_trades_today")
-            ),
-            "trades_since_previous": _coerce_int_or_zero(
-                portfolio.get("_portfolio_probe_trades_since_previous")
-            ),
-            "fields_present": probe_fields_present,
-            "inferred_from_previous": bool(portfolio.get("_inferred_from_previous")),
-        },
+        "portfolio_metrics_probe": probe_summary,
+        "database_state": database_state,
+        "snapshot_recovery_readiness": recovery_readiness,
         "missing_required_fields": missing_required_fields,
         "operator_commands": commands,
         "no_order_safety": {
@@ -2954,6 +3141,8 @@ def diagnose_target_weight_portfolio_snapshot(
 def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) -> None:
     source = report.get("source_record_status") or {}
     probe = report.get("portfolio_metrics_probe") or {}
+    database = report.get("database_state") or {}
+    readiness = report.get("snapshot_recovery_readiness") or {}
     print(
         "  source_record_fields: "
         + (", ".join(str(field) for field in source.get("fields_present") or []) or "none")
@@ -2998,6 +3187,35 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
         "  missing_required_fields: "
         + (", ".join(str(field) for field in report.get("missing_required_fields") or []) or "none")
     )
+    if database:
+        print(
+            "  database_state: "
+            f"checked={bool(database.get('checked'))} "
+            f"snapshots={_coerce_int_or_zero(database.get('snapshot_count'))} "
+            f"current_snapshot={bool(database.get('current_snapshot_found'))} "
+            f"trades_total={_coerce_int_or_zero(database.get('trade_count_total'))} "
+            f"trades_on_date={_coerce_int_or_zero(database.get('trade_count_on_date'))} "
+            f"positions={_coerce_int_or_zero(database.get('position_count'))}"
+        )
+        if database.get("latest_snapshot_at"):
+            print(f"  database_latest_snapshot_at: {database.get('latest_snapshot_at')}")
+    if readiness:
+        print(f"  snapshot_recovery_readiness: {readiness.get('status')}")
+        print(
+            "  snapshot_safe_to_write: "
+            f"{bool(readiness.get('safe_to_write_snapshot'))}"
+        )
+        blockers = readiness.get("blockers") or []
+        warnings = readiness.get("warnings") or []
+        print(
+            "  snapshot_recovery_blockers: "
+            + (", ".join(str(item) for item in blockers) or "none")
+        )
+        if warnings:
+            print(
+                "  snapshot_recovery_warnings: "
+                + ", ".join(str(item) for item in warnings)
+            )
     if report.get("recovery_hint"):
         print(f"  recovery_hint: {report.get('recovery_hint')}")
     if report.get("next_action"):
