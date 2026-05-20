@@ -1937,6 +1937,15 @@ def reconcile_plan_fills(
     trades: list[Any] | None,
     execution_session_id: str | None = None,
 ) -> dict[str, Any]:
+    trade_day = datetime.strptime(plan.trade_day, "%Y-%m-%d")
+    query = {
+        "mode": "paper",
+        "account_key": plan.candidate_id,
+        "strategy": plan.candidate_id,
+        "execution_session_id": execution_session_id or "",
+        "start_date": trade_day.isoformat(),
+        "end_date": (trade_day + timedelta(days=1)).isoformat(),
+    }
     expected: dict[str, int] = {}
     for order in plan.orders:
         key = _fill_key(order.symbol, order.action)
@@ -2029,6 +2038,8 @@ def reconcile_plan_fills(
 
     return {
         "checked": True,
+        "source": "database.trade_history",
+        "query": query,
         "complete": complete,
         "reason": reason,
         "execution_session_id": execution_session_id or "",
@@ -2047,12 +2058,22 @@ def failed_fill_reconciliation(
     error: Exception,
     execution_session_id: str | None = None,
 ) -> dict[str, Any]:
+    trade_day = datetime.strptime(plan.trade_day, "%Y-%m-%d")
     expected: dict[str, int] = {}
     for order in plan.orders:
         key = _fill_key(order.symbol, order.action)
         expected[key] = expected.get(key, 0) + int(order.quantity)
     return {
         "checked": True,
+        "source": "database.trade_history",
+        "query": {
+            "mode": "paper",
+            "account_key": plan.candidate_id,
+            "strategy": plan.candidate_id,
+            "execution_session_id": execution_session_id or "",
+            "start_date": trade_day.isoformat(),
+            "end_date": (trade_day + timedelta(days=1)).isoformat(),
+        },
         "complete": False,
         "reason": f"target_weight_fill_reconciliation_failed: {error}",
         "execution_session_id": execution_session_id or "",
@@ -2783,12 +2804,47 @@ def _target_weight_record_uses_non_authoritative_performance(record: dict | None
     return performance_source.startswith("target_weight_execution.")
 
 
+def _target_weight_artifact_execution_state(record: dict | None) -> dict[str, Any]:
+    state = {
+        "checked": isinstance(record, dict),
+        "execution_found": False,
+        "execution_complete": False,
+        "execution_session_id": "",
+        "fill_source": "",
+        "fill_count": 0,
+        "fill_complete": False,
+        "position_complete": False,
+    }
+    if not isinstance(record, dict):
+        return state
+    caps = record.get("pilot_caps_snapshot") or {}
+    execution = caps.get("target_weight_execution") or {}
+    if not isinstance(execution, dict):
+        return state
+    fill_reconciliation = execution.get("fill_reconciliation") or {}
+    position_reconciliation = execution.get("position_reconciliation") or {}
+    state.update({
+        "execution_found": True,
+        "execution_complete": bool(execution.get("complete")),
+        "execution_session_id": str(execution.get("execution_session_id") or ""),
+        "fill_source": str(fill_reconciliation.get("source") or ""),
+        "fill_count": _coerce_int_or_zero(
+            fill_reconciliation.get("fill_count")
+            or len(fill_reconciliation.get("fills") or [])
+        ),
+        "fill_complete": bool(fill_reconciliation.get("complete")),
+        "position_complete": bool(position_reconciliation.get("complete")),
+    })
+    return state
+
+
 def _target_weight_snapshot_recovery_readiness(
     *,
     latest_record: dict | None,
     source_record_status: dict[str, Any],
     portfolio_probe: dict[str, Any],
     database_state: dict[str, Any],
+    artifact_execution_state: dict[str, Any],
     missing_required_fields: list[str],
 ) -> dict[str, Any]:
     probe_status = str(portfolio_probe.get("status") or "").strip()
@@ -2812,6 +2868,11 @@ def _target_weight_snapshot_recovery_readiness(
         and _coerce_int_or_zero(database_state.get("position_count")) == 0
     ):
         blockers.append("db_execution_state_missing_for_account_key")
+    if (
+        _coerce_int_or_zero(artifact_execution_state.get("fill_count")) > 0
+        and _coerce_int_or_zero(database_state.get("trade_count_on_date")) == 0
+    ):
+        blockers.append("artifact_fills_without_current_db_trades")
     if _target_weight_record_uses_non_authoritative_performance(latest_record):
         blockers.append("source_record_performance_non_authoritative")
     proof_reason = str(
@@ -2843,6 +2904,12 @@ def _target_weight_snapshot_recovery_readiness(
             "trade_count_total": _coerce_int_or_zero(database_state.get("trade_count_total")),
             "trade_count_on_date": _coerce_int_or_zero(database_state.get("trade_count_on_date")),
             "position_count": _coerce_int_or_zero(database_state.get("position_count")),
+            "artifact_fill_count": _coerce_int_or_zero(
+                artifact_execution_state.get("fill_count")
+            ),
+            "artifact_execution_session_id": str(
+                artifact_execution_state.get("execution_session_id") or ""
+            ),
         },
     }
 
@@ -2853,6 +2920,7 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
     probe = report.get("portfolio_metrics_probe") or {}
     source = report.get("source_record_status") or {}
     database = report.get("database_state") or {}
+    artifact_execution = report.get("artifact_execution_state") or {}
     readiness = report.get("snapshot_recovery_readiness") or {}
     commands = report.get("operator_commands") or {}
     lines = [
@@ -2896,6 +2964,15 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         f"- Trades total: `{database.get('trade_count_total', 0)}`",
         f"- Trades on date: `{database.get('trade_count_on_date', 0)}`",
         f"- Positions: `{database.get('position_count', 0)}`",
+        "",
+        "## Artifact Execution State",
+        f"- Execution found: `{artifact_execution.get('execution_found', False)}`",
+        f"- Execution complete: `{artifact_execution.get('execution_complete', False)}`",
+        f"- Execution session id: `{artifact_execution.get('execution_session_id') or 'none'}`",
+        f"- Fill source: `{artifact_execution.get('fill_source') or 'unknown'}`",
+        f"- Fill count: `{artifact_execution.get('fill_count', 0)}`",
+        f"- Fill complete: `{artifact_execution.get('fill_complete', False)}`",
+        f"- Position complete: `{artifact_execution.get('position_complete', False)}`",
         "",
         "## Snapshot Recovery Readiness",
         f"- Status: `{readiness.get('status') or 'unknown'}`",
@@ -3026,6 +3103,7 @@ def diagnose_target_weight_portfolio_snapshot(
         account_key=candidate_id,
         snapshot_date=snapshot_date,
     )
+    artifact_execution_state = _target_weight_artifact_execution_state(latest)
 
     recovery_hint = _target_weight_portfolio_snapshot_recovery_hint(probe_status)
     if latest is None:
@@ -3080,6 +3158,7 @@ def diagnose_target_weight_portfolio_snapshot(
         source_record_status=source_record_status,
         portfolio_probe=probe_summary,
         database_state=database_state,
+        artifact_execution_state=artifact_execution_state,
         missing_required_fields=missing_required_fields,
     )
 
@@ -3117,6 +3196,7 @@ def diagnose_target_weight_portfolio_snapshot(
         "source_record_status": source_record_status,
         "portfolio_metrics_probe": probe_summary,
         "database_state": database_state,
+        "artifact_execution_state": artifact_execution_state,
         "snapshot_recovery_readiness": recovery_readiness,
         "missing_required_fields": missing_required_fields,
         "operator_commands": commands,
@@ -3142,6 +3222,7 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
     source = report.get("source_record_status") or {}
     probe = report.get("portfolio_metrics_probe") or {}
     database = report.get("database_state") or {}
+    artifact_execution = report.get("artifact_execution_state") or {}
     readiness = report.get("snapshot_recovery_readiness") or {}
     print(
         "  source_record_fields: "
@@ -3199,6 +3280,20 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
         )
         if database.get("latest_snapshot_at"):
             print(f"  database_latest_snapshot_at: {database.get('latest_snapshot_at')}")
+    if artifact_execution:
+        print(
+            "  artifact_execution_state: "
+            f"found={bool(artifact_execution.get('execution_found'))} "
+            f"complete={bool(artifact_execution.get('execution_complete'))} "
+            f"fills={_coerce_int_or_zero(artifact_execution.get('fill_count'))} "
+            f"fill_source={artifact_execution.get('fill_source') or 'unknown'} "
+            f"positions_complete={bool(artifact_execution.get('position_complete'))}"
+        )
+        if artifact_execution.get("execution_session_id"):
+            print(
+                "  artifact_execution_session_id: "
+                f"{artifact_execution.get('execution_session_id')}"
+            )
     if readiness:
         print(f"  snapshot_recovery_readiness: {readiness.get('status')}")
         print(
