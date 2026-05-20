@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T13:05:51.053203",
+  "generated_at": "2026-05-20T13:19:43.317333",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T13:05:51.053203",
-    "age_days": 0.83,
+    "checked_at": "2026-05-20T13:19:43.317333",
+    "age_days": 0.84,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -131,6 +131,7 @@
         "daily_return"
       ],
       "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
+      "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present"
     },
     {
@@ -205,8 +206,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T13:05:51.053203",
-      "age_days": 0.83,
+      "checked_at": "2026-05-20T13:19:43.317333",
+      "age_days": 0.84,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -415,6 +416,7 @@
         "daily_return"
       ],
       "finalize_portfolio_metrics_recovery_hint": "restore or create portfolio snapshot history for the target-weight account_key",
+      "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present"
     }
   },
