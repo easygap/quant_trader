@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T16:15:30.529053",
+  "generated_at": "2026-05-20T16:28:34.128400",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T16:15:30.529053",
-    "age_days": 0.96,
+    "checked_at": "2026-05-20T16:28:34.128400",
+    "age_days": 0.97,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -162,13 +162,14 @@
       "snapshot_artifact_db_persistence_complete": false,
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
-      "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
+      "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
         "rerun_portfolio_snapshot_diagnostics",
         "rerun_finalize_pilot_evidence"
       ],
-      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence first"
+      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
+      "blocked_repair_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before repair"
     },
     {
       "priority": 2,
@@ -220,7 +221,7 @@
         "requires": "authoritative DB snapshot/trade/position evidence",
         "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
         "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-        "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20"
+        "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize"
       },
       {
         "step": 4,
@@ -243,8 +244,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T16:15:30.529053",
-      "age_days": 0.96,
+      "checked_at": "2026-05-20T16:28:34.128400",
+      "age_days": 0.97,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -484,13 +485,14 @@
       "snapshot_artifact_db_persistence_complete": false,
       "snapshot_artifact_db_trade_history_source": "",
       "snapshot_artifact_db_positions_source": "",
-      "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
+      "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
         "rerun_portfolio_snapshot_diagnostics",
         "rerun_finalize_pilot_evidence"
       ],
-      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence first"
+      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
+      "blocked_repair_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before repair"
     }
   },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
