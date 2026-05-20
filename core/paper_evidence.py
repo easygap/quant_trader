@@ -1474,6 +1474,51 @@ def _target_weight_execution_linkage_status(execution: dict) -> tuple[bool, str]
     return True, "target_weight_execution_linkage_verified"
 
 
+def _target_weight_db_persistence_status(execution: dict) -> tuple[bool, str]:
+    if execution.get("db_persistence_complete") is not True:
+        return False, "target_weight_db_persistence_complete_false"
+
+    proof = execution.get("db_persistence_proof")
+    if not isinstance(proof, dict) or not proof:
+        return False, "target_weight_db_persistence_proof_missing"
+    if proof.get("checked") is not True:
+        return False, "target_weight_db_persistence_proof_not_checked"
+    if proof.get("complete") is not True:
+        return False, "target_weight_db_persistence_proof_incomplete"
+
+    execution_session_id = str(execution.get("execution_session_id") or "").strip()
+    trade_history = proof.get("trade_history") or {}
+    positions = proof.get("positions") or {}
+    if trade_history.get("source") != "database.trade_history":
+        return False, "target_weight_trade_history_source_not_database"
+    if positions.get("source") != "database.positions":
+        return False, "target_weight_positions_source_not_database"
+
+    proof_session_id = str(trade_history.get("execution_session_id") or "").strip()
+    if (
+        execution_session_id
+        and proof_session_id
+        and proof_session_id != execution_session_id
+    ):
+        return False, "target_weight_db_persistence_session_id_mismatch"
+
+    row_count = trade_history.get("row_count")
+    expected_row_count = trade_history.get("expected_row_count")
+    if row_count is None or expected_row_count is None:
+        return False, "target_weight_db_trade_history_row_count_missing"
+    try:
+        if int(row_count) != int(expected_row_count):
+            return False, "target_weight_db_trade_history_row_count_mismatch"
+    except (TypeError, ValueError):
+        return False, "target_weight_db_trade_history_row_count_invalid"
+
+    mismatched_symbols = positions.get("missing_or_mismatched_symbols")
+    if mismatched_symbols:
+        return False, "target_weight_db_position_quantity_mismatch"
+
+    return True, "target_weight_db_persistence_verified"
+
+
 def _target_weight_record_proof_status(
     strategy: str,
     record: dict,
@@ -1543,6 +1588,11 @@ def _target_weight_record_proof_status(
     linkage_valid, linkage_reason = _target_weight_execution_linkage_status(execution)
     if not linkage_valid:
         return False, linkage_reason
+    db_persistence_valid, db_persistence_reason = _target_weight_db_persistence_status(
+        execution
+    )
+    if not db_persistence_valid:
+        return False, db_persistence_reason
 
     position_reconciliation = execution.get("position_reconciliation") or {}
     if position_reconciliation.get("complete") is not True:
