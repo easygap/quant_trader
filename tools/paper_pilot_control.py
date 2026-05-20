@@ -545,6 +545,10 @@ def _target_weight_daily_ops_failure_error(payload: dict) -> str:
     return error_type or message
 
 
+def _target_weight_daily_ops_failure_waits_for_market_data(reason: str) -> bool:
+    return "target_weight_requested_trade_day_unavailable" in str(reason or "")
+
+
 def _target_weight_daily_ops_failure_command(payload: dict, fallback: str) -> str:
     commands = payload.get("operator_commands")
     if isinstance(commands, dict):
@@ -1022,6 +1026,14 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
     enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
     if enable_blocker:
         operator_commands["enable_suggested_caps"] = enable_blocker
+    elif (
+        status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}
+        and not _ready_to_execute_trade_day_is_current(sanitized)
+    ):
+        operator_commands["enable_suggested_caps"] = (
+            "# blocked: daily_ops_summary.trade_day is stale; "
+            "rerun daily ops summary for the current KRX business day"
+        )
     elif status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
         enable_issues = _target_weight_command_scope_issues(
             sanitized,
@@ -1105,14 +1117,19 @@ def _print_target_weight_daily_ops_status(
             print(f"  Integrity warning: {warning}")
         if latest_failure:
             print(f"  Failure source: {latest_failure.get('source_path')}")
+            failure_reason = _target_weight_daily_ops_failure_reason(latest_failure)
             print(
                 "  Failure reason: "
-                f"{_target_weight_daily_ops_failure_reason(latest_failure)}"
+                f"{failure_reason}"
             )
             failure_error = _target_weight_daily_ops_failure_error(latest_failure)
             if failure_error:
                 print(f"  Failure error: {failure_error}")
             command = _target_weight_daily_ops_failure_command(latest_failure, command)
+            if _target_weight_daily_ops_failure_waits_for_market_data(failure_reason):
+                print("  Wait: requested trade-day market data unavailable")
+                print(f"  Scheduled recovery command: {command}")
+                return
         print(f"  Run: {command}")
         return
 
