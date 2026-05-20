@@ -2697,6 +2697,92 @@ class TestShadowEvidenceNotPromotable:
         assert records[0].get("performance_repair") is not True
         assert records[0]["daily_return"] == 0.2
 
+    def test_target_weight_later_invalid_same_date_replaces_verified_pilot_record(
+        self,
+        evidence_dir,
+    ):
+        from core.paper_evidence import _append_jsonl, get_canonical_records
+
+        strategy = "target_weight_rotation_same_day_invalid"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        verified = _target_weight_pilot_proof_record(
+            strategy,
+            record_date="2026-04-06",
+        )
+        verified["daily_return"] = 0.2
+        invalid = _target_weight_pilot_proof_record(
+            strategy,
+            record_date="2026-04-06",
+        )
+        invalid["daily_return"] = 9.9
+        invalid["benchmark_status"] = "failed"
+        invalid["same_universe_excess"] = None
+        invalid["exposure_matched_excess"] = None
+        invalid["cash_adjusted_excess"] = None
+        invalid["total_value"] = 0
+
+        _append_jsonl(jsonl_path, verified)
+        _append_jsonl(jsonl_path, invalid)
+
+        records = get_canonical_records(strategy)
+
+        assert len(records) == 1
+        assert records[0]["benchmark_status"] == "failed"
+        assert records[0]["daily_return"] == 9.9
+
+    def test_target_weight_promotion_blocks_later_invalid_same_day_pilot_record(
+        self,
+        evidence_dir,
+        fresh_db,
+    ):
+        from core.paper_evidence import _append_jsonl, generate_promotion_package
+
+        strategy = "target_weight_rotation_same_day_invalid_package"
+        jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+        start = datetime(2026, 1, 5)
+        invalid_date = (start + timedelta(days=59)).strftime("%Y-%m-%d")
+        for i in range(60):
+            record_date = (start + timedelta(days=i)).strftime("%Y-%m-%d")
+            record = _target_weight_pilot_proof_record(
+                strategy,
+                record_date=record_date,
+            )
+            record["day_number"] = i + 1
+            record["cumulative_return"] = 6.0
+            _append_jsonl(jsonl_path, record)
+
+        invalid = _target_weight_pilot_proof_record(
+            strategy,
+            record_date=invalid_date,
+        )
+        invalid["day_number"] = 61
+        invalid["benchmark_status"] = "failed"
+        invalid["same_universe_excess"] = None
+        invalid["exposure_matched_excess"] = None
+        invalid["cash_adjusted_excess"] = None
+        invalid["total_value"] = 0
+        _append_jsonl(jsonl_path, invalid)
+        _seed_paper_trades_for_evidence(
+            strategy,
+            start=start,
+            day_count=59,
+            trades_per_day=2,
+        )
+
+        pkg_path, _ = generate_promotion_package(strategy)
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+
+        assert pkg["recommendation"] == "BLOCKED"
+        assert pkg["promotable_evidence_days"] == 59
+        assert pkg["source_records"]["canonical_record_count"] == 60
+        assert pkg["target_weight_verified_pilot_days"] == 59
+        assert pkg["target_weight_invalid_days"] == 1
+        assert pkg["target_weight_evidence"]["invalid_reasons"] == {
+            "target_weight_benchmark_status_not_final": 1
+        }
+        assert "target_weight_invalid_execution_evidence=1" in pkg["block_reasons"]
+        assert "insufficient_days=59/60" in pkg["block_reasons"]
+
 
 class TestArtifactQuarantine:
     """운영 reports에 test artifact가 섞이지 않게 격리한다."""
