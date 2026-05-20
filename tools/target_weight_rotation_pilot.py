@@ -2677,6 +2677,337 @@ def write_target_weight_pilot_evidence_finalize_report(
     return json_path, md_path
 
 
+def _target_weight_portfolio_snapshot_recovery_hint(probe_status: str) -> str:
+    if probe_status == "missing_snapshot_history":
+        return (
+            "restore or create portfolio snapshot history for the target-weight account_key"
+        )
+    if probe_status == "missing_current_snapshot_after_trades":
+        return "run end-of-day portfolio snapshot capture for the trade day"
+    return ""
+
+
+def _target_weight_snapshot_diagnostics_command(candidate_id: str, snapshot_date: str) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {candidate_id} "
+        f"--diagnose-portfolio-snapshot --snapshot-date {snapshot_date}"
+    )
+
+
+def render_target_weight_portfolio_snapshot_diagnostics_markdown(
+    report: dict[str, Any],
+) -> str:
+    probe = report.get("portfolio_metrics_probe") or {}
+    source = report.get("source_record_status") or {}
+    commands = report.get("operator_commands") or {}
+    lines = [
+        "# Target-weight Portfolio Snapshot Diagnostics",
+        "",
+        f"- Candidate: `{report['candidate_id']}`",
+        f"- Snapshot date: `{report['snapshot_date']}`",
+        f"- Status: **{report['status']}**",
+        f"- Reason: {report['reason']}",
+        f"- Recovery hint: {report.get('recovery_hint') or 'N/A'}",
+        "",
+        "## Source Record",
+        f"- Evidence path: `{report.get('evidence_path') or 'N/A'}`",
+        f"- Source record version: `{source.get('source_record_version') or 'N/A'}`",
+        f"- Proof before finalize: `{source.get('proof_status', {}).get('reason', 'N/A')}`",
+        "- Fields present: "
+        f"`{', '.join(source.get('fields_present') or []) or 'none'}`",
+        "- Fields usable: "
+        f"`{', '.join(source.get('fields_usable') or []) or 'none'}`",
+        "- Fields unusable: "
+        f"`{', '.join(source.get('fields_unusable') or []) or 'none'}`",
+        "",
+        "## Portfolio Probe",
+        f"- Probe status: `{probe.get('status') or 'unknown'}`",
+        f"- Probe reason: `{probe.get('reason') or 'none'}`",
+        f"- Current snapshot found: `{probe.get('current_snapshot_found', False)}`",
+        f"- Previous snapshot found: `{probe.get('previous_snapshot_found', False)}`",
+        f"- Previous snapshot at: `{probe.get('previous_snapshot_at') or 'none'}`",
+        f"- Trades today: `{probe.get('trades_today', 0)}`",
+        f"- Trades since previous: `{probe.get('trades_since_previous', 0)}`",
+        "- Fields present: "
+        f"`{', '.join(probe.get('fields_present') or []) or 'none'}`",
+        "- Missing required fields: "
+        f"`{', '.join(report.get('missing_required_fields') or []) or 'none'}`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted(commands.items()):
+        lines.append(f"- {key}: `{value}`")
+    lines.extend([
+        "",
+        "## No-order Safety",
+    ])
+    for key, value in (report.get("no_order_safety") or {}).items():
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_portfolio_snapshot_diagnostics_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_portfolio_snapshot_diagnostics_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(
+        render_target_weight_portfolio_snapshot_diagnostics_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def diagnose_target_weight_portfolio_snapshot(
+    *,
+    candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
+    snapshot_date: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """주문/DB 쓰기 없이 finalize에 필요한 portfolio snapshot 상태를 진단한다."""
+    from core.paper_evidence import (
+        _evidence_path,
+        _probe_portfolio_metrics,
+        _read_all_evidence,
+        _target_weight_record_proof_status,
+    )
+
+    parsed_date = datetime.strptime(snapshot_date, "%Y-%m-%d")
+    jsonl_path = _evidence_path(candidate_id)
+    records = _read_all_evidence(jsonl_path)
+    latest = None
+    for record in reversed(records):
+        if record.get("date") == snapshot_date:
+            latest = record
+            break
+
+    performance_fields = (
+        "total_value",
+        "cash",
+        "invested",
+        "daily_return",
+        "cumulative_return",
+        "mdd",
+        "position_count",
+    )
+    source_record_status: dict[str, Any] = {
+        "found": latest is not None,
+        "source_record_version": None,
+        "proof_status": {"valid": False, "reason": "missing_source_record"},
+        "fields_present": [],
+        "fields_usable": [],
+        "fields_unusable": [],
+    }
+    if latest is not None:
+        before_valid, before_reason = _target_weight_record_proof_status(
+            candidate_id,
+            latest,
+        )
+        source_fields_present = [
+            field for field in performance_fields if latest.get(field) is not None
+        ]
+        source_fields_usable = [
+            field
+            for field in source_fields_present
+            if _target_weight_performance_field_usable(field, latest.get(field))
+        ]
+        source_record_status = {
+            "found": True,
+            "source_record_version": _coerce_int_or_zero(
+                latest.get("record_version") or 1
+            ),
+            "proof_status": {"valid": before_valid, "reason": before_reason},
+            "fields_present": source_fields_present,
+            "fields_usable": source_fields_usable,
+            "fields_unusable": [
+                field
+                for field in source_fields_present
+                if field not in source_fields_usable
+            ],
+        }
+
+    portfolio = _probe_portfolio_metrics(candidate_id, parsed_date)
+    probe_status = str(portfolio.get("_portfolio_probe_status") or "").strip()
+    probe_reason = str(portfolio.get("_portfolio_probe_reason") or "").strip()
+    probe_fields_present = [
+        field for field in performance_fields if portfolio.get(field) is not None
+    ]
+    total_value = _positive_float_from(portfolio.get("total_value"))
+    daily_return = _coerce_float_or_none(portfolio.get("daily_return"))
+    missing_required_fields = [
+        field
+        for field, parsed_value in (
+            ("total_value", total_value),
+            ("daily_return", daily_return),
+        )
+        if parsed_value is None
+    ]
+
+    recovery_hint = _target_weight_portfolio_snapshot_recovery_hint(probe_status)
+    if latest is None:
+        status = "blocked_missing_evidence"
+        reason = (
+            "target_weight_portfolio_snapshot_diagnostics_missing_evidence: "
+            f"no evidence for {candidate_id} {snapshot_date}"
+        )
+        recovery_hint = (
+            "collect or restore target-weight pilot_paper evidence before snapshot diagnostics"
+        )
+    elif not missing_required_fields:
+        status = "ready_for_finalize"
+        reason = "target_weight_portfolio_snapshot_metrics_available"
+    elif probe_status == "missing_snapshot_history":
+        status = "blocked_missing_snapshot_history"
+        reason = "target_weight_portfolio_snapshot_history_missing"
+    elif probe_status == "missing_current_snapshot_after_trades":
+        status = "blocked_missing_current_snapshot_after_trades"
+        reason = "target_weight_portfolio_snapshot_current_missing_after_trades"
+    else:
+        status = "blocked_missing_portfolio_metrics"
+        reason = "target_weight_portfolio_snapshot_metrics_unavailable"
+        if not recovery_hint:
+            recovery_hint = "restore portfolio metrics, then rerun finalize"
+
+    commands = {
+        "diagnose_portfolio_snapshot": _target_weight_snapshot_diagnostics_command(
+            candidate_id,
+            snapshot_date,
+        ),
+        "finalize_pilot_evidence": (
+            "python tools/target_weight_rotation_pilot.py "
+            f"--candidate-id {candidate_id} "
+            f"--finalize-pilot-evidence --finalize-date {snapshot_date}"
+        ),
+        "regenerate_current_blockers": "python tools/evaluate_and_promote.py --current-blockers",
+    }
+    next_action = (
+        f"rerun finalize: {commands['finalize_pilot_evidence']}"
+        if status == "ready_for_finalize"
+        else (
+            f"{recovery_hint}; then rerun diagnostics: "
+            f"{commands['diagnose_portfolio_snapshot']}"
+        )
+    )
+    report = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "evidence_path": str(jsonl_path),
+        "status": status,
+        "reason": reason,
+        "recovery_hint": recovery_hint,
+        "next_action": next_action,
+        "source_record_status": source_record_status,
+        "portfolio_metrics_probe": {
+            "status": probe_status,
+            "reason": probe_reason,
+            "account_key": str(
+                portfolio.get("_portfolio_probe_account_key") or candidate_id
+            ),
+            "date": str(portfolio.get("_portfolio_probe_date") or snapshot_date),
+            "current_snapshot_found": bool(
+                portfolio.get("_portfolio_probe_current_snapshot_found")
+            ),
+            "previous_snapshot_found": bool(
+                portfolio.get("_portfolio_probe_previous_snapshot_found")
+            ),
+            "previous_snapshot_at": portfolio.get("_portfolio_probe_previous_snapshot_at"),
+            "trades_today": _coerce_int_or_zero(
+                portfolio.get("_portfolio_probe_trades_today")
+            ),
+            "trades_since_previous": _coerce_int_or_zero(
+                portfolio.get("_portfolio_probe_trades_since_previous")
+            ),
+            "fields_present": probe_fields_present,
+            "inferred_from_previous": bool(portfolio.get("_inferred_from_previous")),
+        },
+        "missing_required_fields": missing_required_fields,
+        "operator_commands": commands,
+        "no_order_safety": {
+            "orders_submitted": False,
+            "order_executor_called": False,
+            "portfolio_snapshot_written": False,
+            "pilot_evidence_appended": False,
+            "existing_records_overwritten": False,
+        },
+    }
+    report["diagnostics_hash"] = _stable_manifest_hash(report)
+    json_path, md_path = write_target_weight_portfolio_snapshot_diagnostics_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = str(json_path)
+    report["report_path"] = str(md_path)
+    return report
+
+
+def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) -> None:
+    source = report.get("source_record_status") or {}
+    probe = report.get("portfolio_metrics_probe") or {}
+    print(
+        "  source_record_fields: "
+        + (", ".join(str(field) for field in source.get("fields_present") or []) or "none")
+    )
+    print(
+        "  source_record_usable_fields: "
+        + (", ".join(str(field) for field in source.get("fields_usable") or []) or "none")
+    )
+    print(
+        "  source_record_unusable_fields: "
+        + (", ".join(str(field) for field in source.get("fields_unusable") or []) or "none")
+    )
+    if source.get("proof_status"):
+        print(
+            "  proof_before_finalize: "
+            f"{source.get('proof_status', {}).get('reason')}"
+        )
+    if probe.get("status"):
+        print(f"  portfolio_metrics_probe: {probe.get('status')}")
+    if probe.get("reason"):
+        print(f"  portfolio_metrics_probe_reason: {probe.get('reason')}")
+    print(
+        "  portfolio_metrics_current_snapshot_found: "
+        f"{bool(probe.get('current_snapshot_found'))}"
+    )
+    print(
+        "  portfolio_metrics_previous_snapshot_found: "
+        f"{bool(probe.get('previous_snapshot_found'))}"
+    )
+    if probe.get("previous_snapshot_at"):
+        print(f"  portfolio_metrics_previous_snapshot_at: {probe.get('previous_snapshot_at')}")
+    print(f"  portfolio_metrics_trades_today: {_coerce_int_or_zero(probe.get('trades_today'))}")
+    print(
+        "  portfolio_metrics_trades_since_previous: "
+        f"{_coerce_int_or_zero(probe.get('trades_since_previous'))}"
+    )
+    print(
+        "  portfolio_metrics_fields: "
+        + (", ".join(str(field) for field in probe.get("fields_present") or []) or "none")
+    )
+    print(
+        "  missing_required_fields: "
+        + (", ".join(str(field) for field in report.get("missing_required_fields") or []) or "none")
+    )
+    if report.get("recovery_hint"):
+        print(f"  recovery_hint: {report.get('recovery_hint')}")
+    if report.get("next_action"):
+        print(f"  next_action: {report.get('next_action')}")
+    if report.get("artifact_path"):
+        print(f"  artifact: {report['artifact_path']}")
+    if report.get("report_path"):
+        print(f"  report: {report['report_path']}")
+
+
 def _target_weight_finalize_report_path(
     *,
     candidate_id: str,
@@ -6544,6 +6875,12 @@ def main() -> None:
     )
     parser.add_argument("--finalize-date", help="YYYY-MM-DD evidence date to finalize with --finalize-pilot-evidence.")
     parser.add_argument(
+        "--diagnose-portfolio-snapshot",
+        action="store_true",
+        help="Write a no-order portfolio snapshot diagnostics artifact for target-weight finalize recovery.",
+    )
+    parser.add_argument("--snapshot-date", help="YYYY-MM-DD date to inspect with --diagnose-portfolio-snapshot.")
+    parser.add_argument(
         "--record-shadow-evidence",
         action="store_true",
         help="On dry-run, append non-promotable shadow_bootstrap evidence for launch readiness.",
@@ -6609,6 +6946,8 @@ def main() -> None:
             cash_blocked_modes.append("--repair-pilot-evidence")
         if args.finalize_pilot_evidence:
             cash_blocked_modes.append("--finalize-pilot-evidence")
+        if args.diagnose_portfolio_snapshot:
+            cash_blocked_modes.append("--diagnose-portfolio-snapshot")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -6616,10 +6955,21 @@ def main() -> None:
             )
     if args.collect_evidence and not args.execute:
         parser.error("--collect-evidence requires --execute; evidence must be tied to a completed paper execution")
-    evidence_maintenance_modes = [args.repair_pilot_evidence, args.finalize_pilot_evidence]
+    evidence_maintenance_modes = [
+        args.repair_pilot_evidence,
+        args.finalize_pilot_evidence,
+        args.diagnose_portfolio_snapshot,
+    ]
     if sum(1 for enabled in evidence_maintenance_modes if enabled) > 1:
-        parser.error("--repair-pilot-evidence and --finalize-pilot-evidence are mutually exclusive")
-    if (args.repair_pilot_evidence or args.finalize_pilot_evidence) and (
+        parser.error(
+            "--repair-pilot-evidence, --finalize-pilot-evidence, and "
+            "--diagnose-portfolio-snapshot are mutually exclusive"
+        )
+    if (
+        args.repair_pilot_evidence
+        or args.finalize_pilot_evidence
+        or args.diagnose_portfolio_snapshot
+    ) and (
         args.readiness_audit
         or args.daily_ops_summary
         or args.execute
@@ -6645,6 +6995,12 @@ def main() -> None:
         parser.error("--finalize-date is only used with --finalize-pilot-evidence")
     if args.finalize_pilot_evidence and args.as_of_date:
         parser.error("--as-of-date is not used with --finalize-pilot-evidence; use --finalize-date")
+    if args.diagnose_portfolio_snapshot and not args.snapshot_date:
+        parser.error("--snapshot-date is required with --diagnose-portfolio-snapshot")
+    if args.snapshot_date and not args.diagnose_portfolio_snapshot:
+        parser.error("--snapshot-date is only used with --diagnose-portfolio-snapshot")
+    if args.diagnose_portfolio_snapshot and args.as_of_date:
+        parser.error("--as-of-date is not used with --diagnose-portfolio-snapshot; use --snapshot-date")
 
     from database.models import init_database
 
@@ -6794,6 +7150,30 @@ def main() -> None:
             print(f"  proof: {result['proof_status_after'].get('reason')}")
         _print_target_weight_finalize_diagnostics(result)
         if result["status"] == "waiting_for_final_benchmark":
+            raise SystemExit(1)
+        return
+
+    if args.diagnose_portfolio_snapshot:
+        try:
+            result = diagnose_target_weight_portfolio_snapshot(
+                candidate_id=args.candidate_id,
+                snapshot_date=args.snapshot_date,
+                output_dir=Path(args.output_dir),
+            )
+        except ValueError as exc:
+            print("\nTarget-weight portfolio snapshot diagnostics")
+            print(f"  candidate: {args.candidate_id}")
+            print(f"  snapshot_date: {args.snapshot_date}")
+            print(f"  status: BLOCKED - {exc}")
+            raise SystemExit(1)
+
+        print("\nTarget-weight portfolio snapshot diagnostics")
+        print(f"  candidate: {result['candidate_id']}")
+        print(f"  snapshot_date: {result['snapshot_date']}")
+        print(f"  status: {result['status']}")
+        print(f"  reason: {result['reason']}")
+        _print_target_weight_portfolio_snapshot_diagnostics(result)
+        if str(result.get("status") or "").startswith("blocked_"):
             raise SystemExit(1)
         return
 
