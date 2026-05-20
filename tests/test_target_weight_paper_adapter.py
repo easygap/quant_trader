@@ -2993,7 +2993,11 @@ def test_paper_pilot_control_status_accepts_current_failure_priority(
             "target_weight_requested_trade_day_unavailable"
         ),
         "desc": "daily ops summary 실패 원인 해소 후 summary 재생성",
-        "command": command,
+        "command": (
+            "# blocked: requested trade-day market data unavailable; "
+            "target_weight_requested_trade_day_unavailable"
+        ),
+        "scheduled_command": command,
         "order_safety": "no_order",
     }
     (tmp_path / "current_blockers.json").write_text(
