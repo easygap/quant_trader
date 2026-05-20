@@ -3117,6 +3117,27 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "restore or create portfolio snapshot history for the target-weight "
             "account_key"
         ),
+        "snapshot_recovery_hint": (
+            "restore target-weight DB trade_history/positions persistence proof "
+            "before creating a portfolio snapshot"
+        ),
+        "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
+        "snapshot_recovery_guard": (
+            "target_weight_db_persistence_proof_required_before_snapshot"
+        ),
+        "snapshot_recovery_status": "blocked",
+        "snapshot_recovery_safe_to_write": False,
+        "snapshot_recovery_blockers": [
+            "portfolio_snapshot_history_missing",
+            "db_execution_state_missing_for_account_key",
+            "artifact_fills_without_current_db_trades",
+        ],
+        "snapshot_db_snapshot_count": 0,
+        "snapshot_db_trade_count_total": 0,
+        "snapshot_db_trade_count_on_date": 0,
+        "snapshot_db_position_count": 0,
+        "snapshot_artifact_fill_count": 4,
+        "snapshot_artifact_db_persistence_complete": False,
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
         ),
@@ -3145,12 +3166,23 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
 
     output = capsys.readouterr().out
     assert "Portfolio metrics probe: missing_snapshot_history" in output
-    assert "Portfolio metrics recovery: restore or create portfolio snapshot history" in output
+    assert "Portfolio metrics recovery: restore target-weight DB trade_history" in output
+    assert "Snapshot diagnostics status: blocked_missing_snapshot_history" in output
     assert (
-        "Operator next action: RUN no-order portfolio snapshot diagnostics "
-        "before finalize"
+        "Snapshot recovery guard: "
+        "target_weight_db_persistence_proof_required_before_snapshot"
+    ) in output
+    assert "Snapshot recovery status: blocked" in output
+    assert "Snapshot safe to write: False" in output
+    assert "Snapshot recovery blockers: portfolio_snapshot_history_missing" in output
+    assert "Snapshot DB state: snapshots=0 trades_total=0 trades_on_date=0 positions=0" in output
+    assert "Snapshot artifact state: fills=4 db_persistence=False" in output
+    assert (
+        "Operator next action: RESTORE authoritative DB trade_history/positions "
+        "proof before snapshot recovery"
         in output
     )
+    assert "do not create a snapshot from artifact-only fills" in output
     assert "Portfolio snapshot diagnostics command:" in output
     assert snapshot_diagnostics_command in output
     assert finalize_command in output
