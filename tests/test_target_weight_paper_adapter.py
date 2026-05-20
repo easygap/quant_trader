@@ -3062,6 +3062,12 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "--candidate-id target_weight_candidate "
         "--finalize-pilot-evidence --finalize-date 2026-04-10"
     )
+    repair_command = (
+        "# fallback: use only if finalize cannot produce promotable proof; "
+        "python tools/target_weight_rotation_pilot.py "
+        "--candidate-id target_weight_candidate "
+        "--repair-pilot-evidence --repair-date 2026-04-10"
+    )
     snapshot_diagnostics_command = (
         "python tools/target_weight_rotation_pilot.py "
         "--candidate-id target_weight_candidate "
@@ -3085,6 +3091,7 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
                 "decision": {},
                 "operator_commands": {
                     "finalize_pilot_evidence": finalize_command,
+                    "repair_pilot_evidence": repair_command,
                 },
             }),
             ensure_ascii=False,
@@ -3102,7 +3109,11 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
             "target_weight_pilot_evidence_finalize_missing_performance: "
             "total_value/daily_return unavailable"
         ),
-        "scheduled_command": finalize_command,
+        "scheduled_command": snapshot_diagnostics_command,
+        "scheduled_follow_up": (
+            "# blocked: portfolio snapshot recovery requires authoritative "
+            "DB/snapshot evidence before finalize"
+        ),
         "performance_evidence_guard": (
             "target_weight_pilot_evidence_finalize_missing_performance"
         ),
@@ -3140,6 +3151,14 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
         "snapshot_artifact_db_persistence_complete": False,
         "finalize_portfolio_snapshot_diagnostics_command": (
             snapshot_diagnostics_command
+        ),
+        "blocked_finalize_command": (
+            "# blocked: portfolio snapshot recovery requires authoritative "
+            "DB/snapshot evidence before finalize"
+        ),
+        "blocked_repair_command": (
+            "# blocked: portfolio snapshot recovery requires authoritative "
+            "DB/snapshot evidence before repair"
         ),
         "finalize_portfolio_metrics_current_snapshot_found": False,
         "finalize_portfolio_metrics_previous_snapshot_found": False,
@@ -3189,7 +3208,16 @@ def test_paper_pilot_control_status_guides_missing_snapshot_history(
     assert "do not create a snapshot from artifact-only fills" in output
     assert "Portfolio snapshot diagnostics command:" in output
     assert snapshot_diagnostics_command in output
-    assert finalize_command in output
+    assert "Priority follow-up guard:" in output
+    assert "--finalize-pilot-evidence" not in output
+    assert (
+        "Finalize evidence command: # blocked: portfolio snapshot recovery "
+        "requires authoritative DB/snapshot evidence before finalize"
+    ) in output
+    assert (
+        "Repair evidence command: # blocked: portfolio snapshot recovery requires "
+        "authoritative DB/snapshot evidence before repair"
+    ) in output
     assert "WAIT for final portfolio performance evidence" not in output
 
 
@@ -5562,6 +5590,12 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     assert "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10" in (
         report["operator_commands"]["diagnose_portfolio_snapshot"]
     )
+    assert report["operator_commands"]["finalize_pilot_evidence"].startswith(
+        "# blocked: restore authoritative DB trade_history/positions proof before finalize"
+    )
+    assert "--finalize-pilot-evidence" not in (
+        report["operator_commands"]["finalize_pilot_evidence"]
+    )
 
     report_path = Path(report["artifact_path"])
     assert report_path.exists()
@@ -5573,6 +5607,10 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
         "Recovery guard: `target_weight_db_persistence_proof_required_before_snapshot`"
         in report_md
     )
+    assert (
+        "finalize_pilot_evidence: `# blocked: restore authoritative DB "
+        "trade_history/positions proof before finalize"
+    ) in report_md
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(
