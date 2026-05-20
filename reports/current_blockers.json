@@ -1,13 +1,13 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T12:05:41.057617",
+  "generated_at": "2026-05-20T12:16:37.657768",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T12:05:41.057617",
+    "checked_at": "2026-05-20T12:16:37.657768",
     "age_days": 0.79,
     "max_age_days": 7,
     "status": "FRESH",
@@ -101,7 +101,7 @@
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
       "finalize_report_source": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "finalize_report_generated_at": "2026-05-20T12:05:33.472791",
+      "finalize_report_generated_at": "2026-05-20T12:16:32.909182",
       "finalize_report_status": "blocked",
       "finalize_source_record_fields_present": [
         "total_value",
@@ -118,6 +118,13 @@
         "total_value"
       ],
       "finalize_portfolio_metrics_checked": true,
+      "finalize_portfolio_metrics_probe_status": "missing_snapshot_history",
+      "finalize_portfolio_metrics_probe_reason": "no portfolio snapshot exists for account_key",
+      "finalize_portfolio_metrics_current_snapshot_found": false,
+      "finalize_portfolio_metrics_previous_snapshot_found": false,
+      "finalize_portfolio_metrics_previous_snapshot_at": null,
+      "finalize_portfolio_metrics_trades_today": 0,
+      "finalize_portfolio_metrics_trades_since_previous": 0,
       "finalize_portfolio_metrics_fields_present": [],
       "finalize_missing_performance_fields": [
         "total_value",
@@ -197,7 +204,7 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T12:05:41.057617",
+      "checked_at": "2026-05-20T12:16:37.657768",
       "age_days": 0.79,
       "max_age_days": 7,
       "status": "FRESH",
@@ -377,7 +384,7 @@
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
       "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
       "finalize_report_source": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "finalize_report_generated_at": "2026-05-20T12:05:33.472791",
+      "finalize_report_generated_at": "2026-05-20T12:16:32.909182",
       "finalize_report_status": "blocked",
       "finalize_source_record_fields_present": [
         "total_value",
@@ -394,6 +401,13 @@
         "total_value"
       ],
       "finalize_portfolio_metrics_checked": true,
+      "finalize_portfolio_metrics_probe_status": "missing_snapshot_history",
+      "finalize_portfolio_metrics_probe_reason": "no portfolio snapshot exists for account_key",
+      "finalize_portfolio_metrics_current_snapshot_found": false,
+      "finalize_portfolio_metrics_previous_snapshot_found": false,
+      "finalize_portfolio_metrics_previous_snapshot_at": null,
+      "finalize_portfolio_metrics_trades_today": 0,
+      "finalize_portfolio_metrics_trades_since_previous": 0,
       "finalize_portfolio_metrics_fields_present": [],
       "finalize_missing_performance_fields": [
         "total_value",
