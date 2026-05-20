@@ -5251,18 +5251,35 @@ def _first_text(items: Any) -> str | None:
     return None
 
 
-def _target_weight_finalize_first_invalid_reasons(invalid_reasons: Any) -> bool:
+def _target_weight_invalid_reason_keys(invalid_reasons: Any) -> set[str]:
     if not isinstance(invalid_reasons, dict):
-        return False
-    return any(reason in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS for reason in invalid_reasons)
+        return set()
+    return {str(reason).strip() for reason in invalid_reasons if str(reason).strip()}
+
+
+def _target_weight_finalize_first_invalid_reasons(invalid_reasons: Any) -> bool:
+    return any(
+        reason in REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS
+        for reason in _target_weight_invalid_reason_keys(invalid_reasons)
+    )
 
 
 def _target_weight_db_persistence_invalid_reasons(invalid_reasons: Any) -> bool:
-    if not isinstance(invalid_reasons, dict):
-        return False
     return any(
         reason in DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS
-        for reason in invalid_reasons
+        for reason in _target_weight_invalid_reason_keys(invalid_reasons)
+    )
+
+
+def _target_weight_non_repairable_invalid_reasons(invalid_reasons: Any) -> bool:
+    repairable = (
+        REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS
+        | DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS
+        | {"target_weight_repaired_performance_not_promotable"}
+    )
+    return any(
+        reason not in repairable
+        for reason in _target_weight_invalid_reason_keys(invalid_reasons)
     )
 
 
@@ -5884,14 +5901,20 @@ def build_target_weight_daily_ops_summary(
         and invalid_execution_days > 0
         and duplicate_execution_blocked
     )
+    invalid_reasons = evidence_progress.get("invalid_reasons") or {}
+    pilot_evidence_non_repairable_invalid_today = (
+        pilot_evidence_invalid_today
+        and _target_weight_non_repairable_invalid_reasons(invalid_reasons)
+    )
     if pilot_evidence_repaired_today:
         status = "PILOT_EVIDENCE_REPAIRED_NON_PROMOTABLE"
         next_step = "오늘 pilot_paper 실행 증거는 복구 보존됐지만 promotion 카운트에서는 제외; 다음 KRX 영업일 fresh readiness 점검"
     elif pilot_evidence_invalid_today:
         status = "PILOT_EVIDENCE_INVALID"
-        invalid_reasons = evidence_progress.get("invalid_reasons") or {}
         if _target_weight_db_persistence_invalid_reasons(invalid_reasons):
             next_step = "오늘 pilot_paper DB 저장 증거 불완전; portfolio snapshot/DB 진단 후 새 실행 증거 확보"
+        elif pilot_evidence_non_repairable_invalid_today:
+            next_step = "오늘 pilot_paper 실행 증거가 승격 불가능; 다음 KRX 영업일 fresh READY_TO_EXECUTE 증거 재수집"
         elif _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             next_step = "오늘 pilot_paper 증거 품질 미확정; final benchmark/portfolio evidence 확정 후 daily ops 재점검"
         else:
@@ -5953,7 +5976,11 @@ def build_target_weight_daily_ops_summary(
     next_operator_trade_day: str | None = None
     not_before_date: str | None = None
     premature_run_guard: str | None = None
-    if pilot_evidence_recorded_today or pilot_evidence_repaired_today:
+    if (
+        pilot_evidence_recorded_today
+        or pilot_evidence_repaired_today
+        or pilot_evidence_non_repairable_invalid_today
+    ):
         next_operator_trade_day = _next_kr_market_business_day(trade_day)
         not_before_date = next_operator_trade_day
         premature_run_guard = "target_weight_future_as_of_date_blocked"
@@ -5995,7 +6022,6 @@ def build_target_weight_daily_ops_summary(
         ),
     )
     if pilot_evidence_invalid_today:
-        invalid_reasons = evidence_progress.get("invalid_reasons") or {}
         if _target_weight_db_persistence_invalid_reasons(invalid_reasons):
             diagnose_command = str(
                 operator_commands.get("diagnose_portfolio_snapshot") or ""
@@ -6008,19 +6034,48 @@ def build_target_weight_daily_ops_summary(
                 "# blocked: DB persistence proof cannot be repaired from artifact; "
                 f"run diagnostics first: {diagnose_command}"
             )
+        elif pilot_evidence_non_repairable_invalid_today:
+            next_base = _base_no_order_command(
+                candidate_id=str(audit["candidate_id"]),
+                as_of_date=next_operator_trade_day,
+            )
+            operator_commands["next_daily_ops_summary"] = (
+                f"{next_base} --daily-ops-summary"
+            )
+            operator_commands["next_readiness_audit"] = (
+                f"{next_base} --readiness-audit"
+            )
+            operator_commands["finalize_pilot_evidence"] = (
+                "# blocked: pilot_paper execution proof is not repairable; "
+                "collect fresh READY_TO_EXECUTE evidence on next KRX business day"
+            )
+            operator_commands["repair_pilot_evidence"] = (
+                "# blocked: pilot_paper execution proof is not repairable; "
+                "collect fresh READY_TO_EXECUTE evidence on next KRX business day"
+            )
         elif _target_weight_finalize_first_invalid_reasons(invalid_reasons):
             operator_commands["repair_pilot_evidence"] = (
                 "# fallback: use only if finalize cannot produce promotable proof; "
                 + operator_commands["repair_pilot_evidence"]
             )
-        operator_commands["enable_suggested_caps"] = (
-            f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
-            "finalize or repair evidence before changing pilot caps"
-        )
-        operator_commands["execute_capped_paper"] = (
-            f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
-            "finalize benchmark/portfolio evidence before counting the day"
-        )
+        if pilot_evidence_non_repairable_invalid_today:
+            operator_commands["enable_suggested_caps"] = (
+                f"# blocked: pilot_paper evidence for {audit['trade_day']} is not repairable; "
+                f"rerun readiness audit for {next_operator_trade_day}"
+            )
+            operator_commands["execute_capped_paper"] = (
+                f"# blocked: pilot_paper evidence for {audit['trade_day']} is not repairable; "
+                "collect fresh READY_TO_EXECUTE evidence on next KRX business day"
+            )
+        else:
+            operator_commands["enable_suggested_caps"] = (
+                f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
+                "finalize or repair evidence before changing pilot caps"
+            )
+            operator_commands["execute_capped_paper"] = (
+                f"# blocked: pilot_paper evidence invalid for {audit['trade_day']}; "
+                "finalize benchmark/portfolio evidence before counting the day"
+            )
     elif pilot_evidence_repaired_today:
         operator_commands["enable_suggested_caps"] = (
             f"# blocked: repaired pilot_paper evidence already recorded for {audit['trade_day']}; "

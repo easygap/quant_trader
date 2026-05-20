@@ -57,7 +57,13 @@ TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS = frozenset({
     "target_weight_db_trade_history_row_count_missing",
     "target_weight_db_trade_history_row_count_mismatch",
     "target_weight_db_trade_history_row_count_invalid",
+    "target_weight_db_trade_history_ids_missing",
+    "target_weight_db_trade_history_id_invalid",
+    "target_weight_db_trade_history_id_duplicate",
     "target_weight_db_position_quantity_mismatch",
+})
+TARGET_WEIGHT_NON_REPAIRABLE_EXEMPT_INVALID_REASONS = frozenset({
+    "target_weight_repaired_performance_not_promotable",
 })
 
 CANONICAL_EVAL_START = "2023-01-01"
@@ -1743,6 +1749,24 @@ def _first_text(items) -> str | None:
     return None
 
 
+def _target_weight_invalid_reason_keys(invalid_reasons) -> set[str]:
+    if not isinstance(invalid_reasons, dict):
+        return set()
+    return {str(reason).strip() for reason in invalid_reasons if str(reason).strip()}
+
+
+def _target_weight_non_repairable_invalid_reasons(invalid_reasons) -> bool:
+    repairable = (
+        TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS
+        | TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS
+        | TARGET_WEIGHT_NON_REPAIRABLE_EXEMPT_INVALID_REASONS
+    )
+    return any(
+        reason not in repairable
+        for reason in _target_weight_invalid_reason_keys(invalid_reasons)
+    )
+
+
 def _not_before_blocked_command(not_before_date: str | None) -> str:
     if not_before_date:
         return f"# blocked: not before {not_before_date}; target_weight_future_as_of_date_blocked"
@@ -1860,7 +1884,7 @@ def _target_weight_ops_priority_action(
         invalid_reasons = progress.get("invalid_reasons") or {}
         db_persistence_blocked = any(
             reason in TARGET_WEIGHT_DB_PERSISTENCE_INVALID_REASONS
-            for reason in invalid_reasons
+            for reason in _target_weight_invalid_reason_keys(invalid_reasons)
         ) or _target_weight_finalize_blocks_on_db_persistence(latest_finalize_report)
         if db_persistence_blocked:
             diagnose_command = (
@@ -1915,9 +1939,66 @@ def _target_weight_ops_priority_action(
                     else None
                 ),
             }
+        if _target_weight_non_repairable_invalid_reasons(invalid_reasons):
+            next_trade_day = latest_daily_ops.get("next_operator_trade_day")
+            scheduled_command = (
+                target_weight_next_check_command_or_default(
+                    latest_daily_ops,
+                    ops_commands.get("next_daily_ops_summary"),
+                    "--daily-ops-summary",
+                )
+                or ops_commands.get("daily_ops_summary")
+                or commands.get("daily_ops_summary")
+            )
+            scheduled_follow_up = (
+                target_weight_next_check_command_or_default(
+                    latest_daily_ops,
+                    ops_commands.get("next_readiness_audit"),
+                    "--readiness-audit",
+                )
+                or ops_commands.get("rerun_readiness_audit")
+                or commands.get("readiness_audit")
+            )
+            command = scheduled_command
+            if _not_before_date_pending(next_trade_day):
+                command = _not_before_blocked_command(next_trade_day)
+            return {
+                **base_action,
+                "invalid_execution_days": _safe_int(
+                    progress.get("invalid_execution_days")
+                ),
+                "invalid_reasons": invalid_reasons,
+                "desc": (
+                    "오늘 target-weight pilot_paper 실행 증거가 승격 불가능, "
+                    "다음 KRX 영업일 fresh READY_TO_EXECUTE 증거 재수집"
+                ),
+                "command": command,
+                "scheduled_command": scheduled_command,
+                "order_safety": "no_order",
+                "requires": "fresh READY_TO_EXECUTE pilot evidence",
+                "non_repairable_guard": (
+                    "target_weight_pilot_evidence_fresh_execution_required"
+                ),
+                "not_before_date": next_trade_day,
+                "premature_run_guard": (
+                    "target_weight_future_as_of_date_blocked"
+                    if next_trade_day
+                    else None
+                ),
+                "follow_up": scheduled_follow_up,
+                "scheduled_follow_up": scheduled_follow_up,
+                "blocked_finalize_command": (
+                    "# blocked: pilot_paper execution proof is not repairable; "
+                    "collect fresh READY_TO_EXECUTE evidence"
+                ),
+                "blocked_repair_command": (
+                    "# blocked: pilot_paper execution proof is not repairable; "
+                    "collect fresh READY_TO_EXECUTE evidence"
+                ),
+            }
         finalize_first = any(
             reason in TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS
-            for reason in invalid_reasons
+            for reason in _target_weight_invalid_reason_keys(invalid_reasons)
         )
         command = (
             ops_commands.get("finalize_pilot_evidence")
