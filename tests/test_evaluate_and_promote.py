@@ -2446,7 +2446,10 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         "before target-weight snapshot recovery"
     )
     assert action["scheduled_command"] == snapshot_diagnostics_command
-    assert action["scheduled_follow_up"] == finalize_command
+    assert action["scheduled_follow_up"].startswith(
+        "# blocked: portfolio snapshot recovery requires"
+    )
+    assert finalize_command not in action["scheduled_follow_up"]
     assert action["snapshot_recovery_order"] == [
         "restore_authoritative_db_trade_history_positions_proof",
         "rerun_portfolio_snapshot_diagnostics",
@@ -2455,6 +2458,8 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     assert action["blocked_finalize_command"].startswith(
         "# blocked: portfolio snapshot recovery requires"
     )
+    assert action["blocked_finalize_command"].endswith("before finalize")
+    assert action["blocked_repair_command"].endswith("before repair")
     assert action["finalize_portfolio_metrics_recovery_hint"].startswith(
         "restore target-weight DB trade_history/positions persistence proof"
     )

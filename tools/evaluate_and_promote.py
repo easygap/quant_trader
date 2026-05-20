@@ -2281,7 +2281,14 @@ def _target_weight_ops_priority_action(
                     ),
                 })
                 if snapshot_recovery_guard:
-                    original_finalize_command = command
+                    blocked_finalize_command = (
+                        "# blocked: portfolio snapshot recovery requires "
+                        "authoritative DB/snapshot evidence before finalize"
+                    )
+                    blocked_repair_command = (
+                        "# blocked: portfolio snapshot recovery requires "
+                        "authoritative DB/snapshot evidence before repair"
+                    )
                     action["desc"] = (
                         "target-weight snapshot 복구 전 DB trade_history/positions "
                         "증거 복구 후 진단 재점검"
@@ -2291,16 +2298,14 @@ def _target_weight_ops_priority_action(
                         snapshot_recovery_guard
                     )
                     action["scheduled_command"] = snapshot_diagnostics_command
-                    action["scheduled_follow_up"] = original_finalize_command
+                    action["scheduled_follow_up"] = blocked_finalize_command
                     action["snapshot_recovery_order"] = [
                         "restore_authoritative_db_trade_history_positions_proof",
                         "rerun_portfolio_snapshot_diagnostics",
                         "rerun_finalize_pilot_evidence",
                     ]
-                    action["blocked_finalize_command"] = (
-                        "# blocked: portfolio snapshot recovery requires "
-                        "authoritative DB/snapshot evidence first"
-                    )
+                    action["blocked_finalize_command"] = blocked_finalize_command
+                    action["blocked_repair_command"] = blocked_repair_command
             if not diagnostics_present:
                 action.update({
                     "command": command,
