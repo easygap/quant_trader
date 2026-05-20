@@ -765,6 +765,33 @@ def test_build_pilot_evidence_caps_snapshot_persists_portfolio_drawdown_guard():
     assert caps["target_weight_plan"]["portfolio_drawdown_guard"] == guard
 
 
+def _db_persistence_proof_for_plan(plan):
+    return {
+        "checked": True,
+        "complete": True,
+        "reason": "target-weight paper execution is persisted in DB",
+        "trade_history": {
+            "source": "database.trade_history",
+            "row_count": len(plan.orders),
+            "expected_row_count": len(plan.orders),
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "trade_ids": list(range(1, len(plan.orders) + 1)),
+        },
+        "positions": {
+            "source": "database.positions",
+            "expected_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "actual_quantities": {
+                order.symbol: int(order.target_quantity)
+                for order in plan.orders
+            },
+            "missing_or_mismatched_symbols": [],
+        },
+    }
+
+
 def _existing_pilot_evidence_record(plan):
     return {
         "date": plan.trade_day,
@@ -826,6 +853,7 @@ def _existing_pilot_evidence_record(plan):
                 "execution_session_id": TEST_EXECUTION_SESSION_ID,
                 "fill_reconciliation": {
                     "complete": True,
+                    "source": "database.trade_history",
                     "execution_session_id": TEST_EXECUTION_SESSION_ID,
                     "fills": [
                         {
@@ -838,7 +866,12 @@ def _existing_pilot_evidence_record(plan):
                         for index, order in enumerate(plan.orders)
                     ],
                 },
-                "position_reconciliation": {"complete": True},
+                "position_reconciliation": {
+                    "complete": True,
+                    "source": "database.positions",
+                },
+                "db_persistence_complete": True,
+                "db_persistence_proof": _db_persistence_proof_for_plan(plan),
             },
         },
         "total_value": 10_000_000.0,
@@ -919,6 +952,7 @@ def _repairable_invalid_pilot_evidence_record(plan):
         "fill_reconciliation": {
             "checked": True,
             "complete": True,
+            "source": "database.trade_history",
             "reason": "paper trade fills match target-weight plan",
             "execution_session_id": TEST_EXECUTION_SESSION_ID,
             "expected_quantities": {
@@ -938,6 +972,7 @@ def _repairable_invalid_pilot_evidence_record(plan):
         "position_reconciliation": {
             "checked": True,
             "complete": True,
+            "source": "database.positions",
             "reason": "paper positions match target-weight target quantities",
             "expected_quantities": {
                 order.symbol: int(order.target_quantity)
@@ -4940,6 +4975,26 @@ def test_verify_existing_pilot_evidence_rejects_failed_benchmark(monkeypatch):
     assert verification["mismatches"][0]["actual"] == "target_weight_benchmark_status_not_final"
 
 
+def test_verify_existing_pilot_evidence_rejects_missing_db_persistence_proof(monkeypatch):
+    import core.paper_evidence as pe
+    from tools.target_weight_rotation_pilot import verify_existing_pilot_evidence_record
+
+    plan = _adapter_plan()
+    record = _existing_pilot_evidence_record(plan)
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    execution.pop("db_persistence_complete")
+    execution.pop("db_persistence_proof")
+    monkeypatch.setattr(pe, "get_canonical_records", lambda strategy: [record])
+
+    verification = verify_existing_pilot_evidence_record(plan)
+
+    assert verification["valid"] is False
+    assert "target_weight_existing_evidence_invalid" in verification["reason"]
+    fields = {item["field"] for item in verification["mismatches"]}
+    assert "target_weight_execution.db_persistence_complete" in fields
+    assert "target_weight_execution.db_persistence_proof.complete" in fields
+
+
 def test_repair_target_weight_pilot_evidence_appends_verified_record(monkeypatch, tmp_path):
     import core.paper_evidence as pe
     import tools.target_weight_rotation_pilot as twp
@@ -5305,6 +5360,9 @@ def test_diagnose_target_weight_portfolio_snapshot_reports_missing_history(
     record["cash_adjusted_excess"] = None
     record["total_value"] = 0
     record["daily_return"] = None
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    execution.pop("db_persistence_complete")
+    execution.pop("db_persistence_proof")
     pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
 
     report = twp.diagnose_target_weight_portfolio_snapshot(
@@ -5480,6 +5538,9 @@ def test_diagnose_target_weight_portfolio_snapshot_cli_prints_blocker(
     record["cash_adjusted_excess"] = None
     record["total_value"] = None
     record["daily_return"] = None
+    execution = record["pilot_caps_snapshot"]["target_weight_execution"]
+    execution.pop("db_persistence_complete")
+    execution.pop("db_persistence_proof")
     pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
     monkeypatch.setattr(
         sys,
@@ -5851,7 +5912,14 @@ def test_build_target_weight_experiment_manifest_freezes_pilot_flow():
     assert manifest["evidence_policy"]["target_weight_execution_required"]["order_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["order_result_reconciliation_complete"] is True
     assert manifest["evidence_policy"]["target_weight_execution_required"]["fill_reconciliation_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["db_persistence_complete"] is True
+    assert manifest["evidence_policy"]["target_weight_execution_required"]["db_persistence_proof_complete"] is True
+    assert (
+        manifest["evidence_policy"]["target_weight_execution_required"]["db_trade_history_source"]
+        == "database.trade_history"
+    )
     assert "shadow_bootstrap" in manifest["evidence_policy"]["blocked_evidence"]
+    assert "execution evidence without DB persistence proof" in manifest["evidence_policy"]["blocked_evidence"]
     assert manifest["risk_controls"]["liquidity_max_order_adv_pct"] == 3.5
     assert manifest["current_decision"]["ready_for_cap_approval"] is True
     assert "enable pilot" in manifest["current_decision"]["next_action"]
@@ -5904,6 +5972,7 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                     "fill_complete": True,
                     "fill_reconciliation": {
                         "complete": True,
+                        "source": "database.trade_history",
                         "execution_session_id": TEST_EXECUTION_SESSION_ID,
                         "fills": [
                             {
@@ -5915,7 +5984,29 @@ def test_summarize_target_weight_evidence_progress_counts_verified_days(monkeypa
                             }
                         ],
                     },
-                    "position_reconciliation": {"complete": True},
+                    "position_reconciliation": {
+                        "complete": True,
+                        "source": "database.positions",
+                    },
+                    "db_persistence_complete": True,
+                    "db_persistence_proof": {
+                        "checked": True,
+                        "complete": True,
+                        "reason": "target-weight paper execution is persisted in DB",
+                        "trade_history": {
+                            "source": "database.trade_history",
+                            "row_count": 1,
+                            "expected_row_count": 1,
+                            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                            "trade_ids": [1],
+                        },
+                        "positions": {
+                            "source": "database.positions",
+                            "expected_quantities": {"005930": 1},
+                            "actual_quantities": {"005930": 1},
+                            "missing_or_mismatched_symbols": [],
+                        },
+                    },
                 },
             },
             "total_value": 10_000_000.0,
