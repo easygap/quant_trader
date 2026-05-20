@@ -3022,6 +3022,148 @@ def _target_weight_artifact_execution_state(record: dict | None) -> dict[str, An
     return state
 
 
+def _target_weight_db_restore_checklist(
+    record: dict | None,
+    *,
+    database_state: dict[str, Any],
+    artifact_execution_state: dict[str, Any],
+) -> dict[str, Any]:
+    checked = isinstance(record, dict)
+    if not checked:
+        return {
+            "checked": False,
+            "status": "missing_source_record",
+            "reason": "source pilot evidence record is unavailable",
+            "restore_required": False,
+            "trade_history": {
+                "expected_row_count": 0,
+                "current_db_rows_on_date": _coerce_int_or_zero(
+                    database_state.get("trade_count_on_date")
+                ),
+                "rows": [],
+            },
+            "positions": {
+                "expected_symbol_count": 0,
+                "current_db_position_count": _coerce_int_or_zero(
+                    database_state.get("position_count")
+                ),
+                "expected_quantities": {},
+            },
+            "safety": {
+                "db_write_enabled": False,
+                "portfolio_snapshot_write_enabled": False,
+                "requires_manual_authoritative_db_restore": True,
+            },
+        }
+
+    caps = record.get("pilot_caps_snapshot") or {}
+    execution = caps.get("target_weight_execution") or {}
+    if not isinstance(execution, dict):
+        execution = {}
+    fill_reconciliation = execution.get("fill_reconciliation") or {}
+    if not isinstance(fill_reconciliation, dict):
+        fill_reconciliation = {}
+    position_reconciliation = execution.get("position_reconciliation") or {}
+    if not isinstance(position_reconciliation, dict):
+        position_reconciliation = {}
+    plan_snapshot = caps.get("target_weight_plan") or {}
+    if not isinstance(plan_snapshot, dict):
+        plan_snapshot = {}
+
+    execution_session_id = str(
+        artifact_execution_state.get("execution_session_id")
+        or execution.get("execution_session_id")
+        or fill_reconciliation.get("execution_session_id")
+        or ""
+    )
+    raw_fills = [
+        fill for fill in (fill_reconciliation.get("fills") or []) if isinstance(fill, dict)
+    ]
+    rows = []
+    for index, fill in enumerate(raw_fills, start=1):
+        rows.append({
+            "index": index,
+            "symbol": normalize_symbol(str(fill.get("symbol") or "")),
+            "action": str(fill.get("action") or "").upper(),
+            "quantity": _coerce_int_or_zero(fill.get("quantity")),
+            "price": fill.get("price") or fill.get("execution_price"),
+            "total_amount": fill.get("total_amount"),
+            "commission": fill.get("commission"),
+            "tax": fill.get("tax"),
+            "strategy": fill.get("strategy") or record.get("strategy"),
+            "mode": fill.get("mode") or "paper",
+            "account_key": fill.get("account_key") or record.get("strategy"),
+            "executed_at": str(fill.get("executed_at") or ""),
+            "execution_session_id": str(
+                fill.get("execution_session_id") or execution_session_id
+            ),
+            "order_id": str(fill.get("order_id") or ""),
+        })
+
+    expected_quantities = position_reconciliation.get("expected_quantities") or {}
+    if not isinstance(expected_quantities, dict):
+        expected_quantities = {}
+    if not expected_quantities:
+        expected_quantities = plan_snapshot.get("target_quantities_after") or {}
+        if not isinstance(expected_quantities, dict):
+            expected_quantities = {}
+    expected_quantities = {
+        normalize_symbol(str(symbol)): _coerce_int_or_zero(quantity)
+        for symbol, quantity in expected_quantities.items()
+        if normalize_symbol(str(symbol))
+    }
+    expected_row_count = _coerce_int_or_zero(
+        fill_reconciliation.get("fill_count") or len(rows)
+    )
+    current_rows_on_date = _coerce_int_or_zero(database_state.get("trade_count_on_date"))
+    current_positions = _coerce_int_or_zero(database_state.get("position_count"))
+    restore_required = (
+        expected_row_count > current_rows_on_date
+        or (expected_quantities and current_positions == 0)
+        or not bool(artifact_execution_state.get("db_persistence_complete"))
+    )
+    status = "restore_required" if restore_required else "db_evidence_present"
+    reason = (
+        "restore authoritative DB trade_history rows and positions before snapshot recovery"
+        if restore_required
+        else "DB trade_history/positions evidence is present for snapshot recovery"
+    )
+    return {
+        "checked": True,
+        "status": status,
+        "reason": reason,
+        "restore_required": restore_required,
+        "execution_session_id": execution_session_id,
+        "trade_history": {
+            "source": fill_reconciliation.get("source") or "",
+            "expected_row_count": expected_row_count,
+            "current_db_rows_on_date": current_rows_on_date,
+            "missing_or_unverified_row_count": max(
+                expected_row_count - current_rows_on_date,
+                0,
+            ),
+            "rows": rows,
+        },
+        "positions": {
+            "source": position_reconciliation.get("source") or "",
+            "expected_symbol_count": len(expected_quantities),
+            "current_db_position_count": current_positions,
+            "expected_quantities": expected_quantities,
+            "missing_or_unverified_symbols": (
+                sorted(expected_quantities)
+                if expected_quantities and current_positions == 0
+                else []
+            ),
+        },
+        "safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "requires_manual_authoritative_db_restore": True,
+            "artifact_only_snapshot_allowed": False,
+        },
+    }
+
+
 def _target_weight_snapshot_recovery_readiness(
     *,
     latest_record: dict | None,
@@ -3132,6 +3274,9 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
     database = report.get("database_state") or {}
     artifact_execution = report.get("artifact_execution_state") or {}
     readiness = report.get("snapshot_recovery_readiness") or {}
+    restore = report.get("db_restore_checklist") or {}
+    restore_trade_history = restore.get("trade_history") or {}
+    restore_positions = restore.get("positions") or {}
     commands = report.get("operator_commands") or {}
     lines = [
         "# Target-weight Portfolio Snapshot Diagnostics",
@@ -3200,8 +3345,36 @@ def render_target_weight_portfolio_snapshot_diagnostics_markdown(
         "- Warnings: "
         f"`{', '.join(readiness.get('warnings') or []) or 'none'}`",
         "",
+        "## DB Restore Checklist",
+        f"- Status: `{restore.get('status') or 'unknown'}`",
+        f"- Restore required: `{restore.get('restore_required', False)}`",
+        f"- Reason: `{restore.get('reason') or 'none'}`",
+        f"- Execution session id: `{restore.get('execution_session_id') or 'none'}`",
+        "- Trade history rows: "
+        f"`expected={restore_trade_history.get('expected_row_count', 0)} "
+        f"current={restore_trade_history.get('current_db_rows_on_date', 0)} "
+        f"missing_or_unverified={restore_trade_history.get('missing_or_unverified_row_count', 0)}`",
+        "- Position symbols: "
+        f"`expected={restore_positions.get('expected_symbol_count', 0)} "
+        f"current={restore_positions.get('current_db_position_count', 0)}`",
+        "- Missing or unverified position symbols: "
+        f"`{', '.join(restore_positions.get('missing_or_unverified_symbols') or []) or 'none'}`",
+        "- Safety: `db_write_enabled=False portfolio_snapshot_write_enabled=False artifact_only_snapshot_allowed=False`",
+        "",
         "## Operator Commands",
     ]
+    restore_rows = restore_trade_history.get("rows") or []
+    if restore_rows:
+        lines.append("### Expected Trade History Rows")
+        for row in restore_rows:
+            lines.append(
+                "- "
+                f"{row.get('symbol') or 'UNKNOWN'} {row.get('action') or 'UNKNOWN'} "
+                f"qty={row.get('quantity', 0)} "
+                f"order_id={row.get('order_id') or 'none'} "
+                f"session={row.get('execution_session_id') or 'none'}"
+            )
+        lines.append("")
     for key, value in sorted(commands.items()):
         lines.append(f"- {key}: `{value}`")
     lines.extend([
@@ -3378,6 +3551,11 @@ def diagnose_target_weight_portfolio_snapshot(
         artifact_execution_state=artifact_execution_state,
         missing_required_fields=missing_required_fields,
     )
+    db_restore_checklist = _target_weight_db_restore_checklist(
+        latest,
+        database_state=database_state,
+        artifact_execution_state=artifact_execution_state,
+    )
     recovery_blockers = list(recovery_readiness.get("blockers") or [])
     recovery_hint = _target_weight_snapshot_recovery_hint_from_blockers(
         recovery_blockers,
@@ -3441,6 +3619,7 @@ def diagnose_target_weight_portfolio_snapshot(
         "database_state": database_state,
         "artifact_execution_state": artifact_execution_state,
         "snapshot_recovery_readiness": recovery_readiness,
+        "db_restore_checklist": db_restore_checklist,
         "missing_required_fields": missing_required_fields,
         "operator_commands": commands,
         "no_order_safety": {
@@ -3467,6 +3646,9 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
     database = report.get("database_state") or {}
     artifact_execution = report.get("artifact_execution_state") or {}
     readiness = report.get("snapshot_recovery_readiness") or {}
+    restore = report.get("db_restore_checklist") or {}
+    restore_trade_history = restore.get("trade_history") or {}
+    restore_positions = restore.get("positions") or {}
     print(
         "  source_record_fields: "
         + (", ".join(str(field) for field in source.get("fields_present") or []) or "none")
@@ -3569,6 +3751,15 @@ def _print_target_weight_portfolio_snapshot_diagnostics(report: dict[str, Any]) 
                 "  snapshot_recovery_warnings: "
                 + ", ".join(str(item) for item in warnings)
             )
+    if restore:
+        print(
+            "  db_restore_checklist: "
+            f"status={restore.get('status') or 'unknown'} "
+            f"trade_rows_expected={restore_trade_history.get('expected_row_count', 0)} "
+            f"trade_rows_current={restore_trade_history.get('current_db_rows_on_date', 0)} "
+            f"positions_expected={restore_positions.get('expected_symbol_count', 0)} "
+            f"positions_current={restore_positions.get('current_db_position_count', 0)}"
+        )
     if report.get("recovery_hint"):
         print(f"  recovery_hint: {report.get('recovery_hint')}")
     if report.get("recovery_guard"):
