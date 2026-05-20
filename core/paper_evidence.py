@@ -323,7 +323,42 @@ def get_canonical_records(
 # 데이터 수집 함수들
 # ═══════════════════════════════════════════════════════════════
 
-def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
+def _portfolio_probe_metadata(
+    *,
+    account_key: str,
+    date: datetime,
+    source: str,
+    reason: str,
+    current_snapshot_found: bool,
+    previous_snapshot_found: bool,
+    previous_snapshot_at: datetime | None = None,
+    trades_today: int = 0,
+    trades_since_previous: int = 0,
+) -> dict:
+    return {
+        "_portfolio_probe_status": source,
+        "_portfolio_probe_reason": reason,
+        "_portfolio_probe_account_key": account_key,
+        "_portfolio_probe_date": date.strftime("%Y-%m-%d"),
+        "_portfolio_probe_current_snapshot_found": current_snapshot_found,
+        "_portfolio_probe_previous_snapshot_found": previous_snapshot_found,
+        "_portfolio_probe_previous_snapshot_at": (
+            previous_snapshot_at.isoformat() if previous_snapshot_at else None
+        ),
+        "_portfolio_probe_trades_today": trades_today,
+        "_portfolio_probe_trades_since_previous": trades_since_previous,
+    }
+
+
+def _strip_portfolio_probe_metadata(payload: dict) -> dict:
+    return {
+        key: value
+        for key, value in payload.items()
+        if not str(key).startswith("_portfolio_probe_")
+    }
+
+
+def _probe_portfolio_metrics(account_key: str, date: datetime) -> dict:
     """포트폴리오 메트릭 수집.
 
     당일 PortfolioSnapshot이 없으면 직전 snapshot을 조회하여
@@ -333,7 +368,8 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
       → 포트폴리오 가치 불변, daily_return=0.0 으로 처리
     이를 통해 blocked 상태에서도 valid evidence를 생성할 수 있다.
 
-    진짜 데이터 부재(snapshot 자체가 한 번도 없음)면 {} 반환.
+    `_portfolio_probe_*` 진단 필드는 snapshot 부재/거래 발생/추론 여부를
+    운영 리포트에 설명하기 위한 메타데이터다.
     """
     from database.models import PortfolioSnapshot, TradeHistory, get_session
 
@@ -342,6 +378,15 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
         ak = account_key or ""
         day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
         day_end = day_start + timedelta(days=1)
+        trades_today = (
+            session.query(TradeHistory)
+            .filter(
+                TradeHistory.account_key == ak,
+                TradeHistory.executed_at >= day_start,
+                TradeHistory.executed_at < day_end,
+            )
+            .count()
+        )
 
         # 1) 당일 snapshot 조회
         snap = (
@@ -356,6 +401,17 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
         )
         if snap:
             return {
+                **_portfolio_probe_metadata(
+                    account_key=ak,
+                    date=date,
+                    source="current_snapshot",
+                    reason="portfolio snapshot found for requested date",
+                    current_snapshot_found=True,
+                    previous_snapshot_found=True,
+                    previous_snapshot_at=snap.date,
+                    trades_today=trades_today,
+                    trades_since_previous=0,
+                ),
                 "total_value": snap.total_value or 0,
                 "cash": snap.cash or 0,
                 "invested": snap.invested or 0,
@@ -376,7 +432,15 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
             .first()
         )
         if not prev_snap:
-            return {}  # 진짜 데이터 부재
+            return _portfolio_probe_metadata(
+                account_key=ak,
+                date=date,
+                source="missing_snapshot_history",
+                reason="no portfolio snapshot exists for account_key",
+                current_snapshot_found=False,
+                previous_snapshot_found=False,
+                trades_today=trades_today,
+            )
 
         # 3) 직전 snapshot 이후 ~ 당일까지 거래 유무 확인
         trades_since = (
@@ -390,11 +454,32 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
         )
         if trades_since > 0:
             # 거래가 있었는데 snapshot이 없음 → 진짜 missing data
-            return {}
+            return _portfolio_probe_metadata(
+                account_key=ak,
+                date=date,
+                source="missing_current_snapshot_after_trades",
+                reason="trades exist after previous snapshot but current snapshot is missing",
+                current_snapshot_found=False,
+                previous_snapshot_found=True,
+                previous_snapshot_at=prev_snap.date,
+                trades_today=trades_today,
+                trades_since_previous=trades_since,
+            )
 
         # 4) 거래 없음 + 직전 snapshot 존재 → cash-only carry-forward
         #    포트폴리오 가치 불변이므로 daily_return=0.0
         return {
+            **_portfolio_probe_metadata(
+                account_key=ak,
+                date=date,
+                source="previous_snapshot_carry_forward",
+                reason="no trades since previous snapshot; inferred unchanged portfolio",
+                current_snapshot_found=False,
+                previous_snapshot_found=True,
+                previous_snapshot_at=prev_snap.date,
+                trades_today=trades_today,
+                trades_since_previous=trades_since,
+            ),
             "total_value": prev_snap.total_value or 0,
             "cash": prev_snap.cash or 0,
             "invested": prev_snap.invested or 0,
@@ -406,6 +491,29 @@ def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
         }
     finally:
         session.close()
+
+
+def _collect_portfolio_metrics(account_key: str, date: datetime) -> dict:
+    """
+    기존 evidence 수집 계약을 유지하는 wrapper.
+
+    진짜 데이터 부재면 기존처럼 {}를 반환하고, 추론 가능할 때만
+    `_inferred_from_previous`를 포함한 성과 필드를 반환한다.
+    """
+    probed = _probe_portfolio_metrics(account_key, date)
+    metrics = _strip_portfolio_probe_metadata(probed)
+    performance_keys = {
+        "total_value",
+        "cash",
+        "invested",
+        "daily_return",
+        "cumulative_return",
+        "mdd",
+        "position_count",
+    }
+    if not any(key in metrics for key in performance_keys):
+        return {}
+    return metrics
 
 
 def _collect_trade_metrics(mode: str, account_key: str, date: datetime) -> dict:
