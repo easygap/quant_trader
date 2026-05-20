@@ -1652,6 +1652,23 @@ def _target_weight_snapshot_recovery_hint_from_blockers(
     return fallback
 
 
+def _target_weight_snapshot_recovery_blocked_command(guard: str) -> str:
+    if guard == "target_weight_db_persistence_proof_required_before_snapshot":
+        return (
+            "# blocked: restore authoritative DB trade_history/positions proof "
+            "before target-weight snapshot recovery"
+        )
+    if guard == "target_weight_current_portfolio_snapshot_required":
+        return (
+            "# blocked: capture current portfolio snapshot before target-weight finalize"
+        )
+    if guard == "target_weight_portfolio_snapshot_history_required":
+        return (
+            "# blocked: restore portfolio snapshot history before target-weight finalize"
+        )
+    return "# blocked: portfolio snapshot recovery required before target-weight finalize"
+
+
 def _load_target_weight_snapshot_diagnostics_report(
     strategy: str,
     snapshot_date: str | None,
@@ -2264,7 +2281,17 @@ def _target_weight_ops_priority_action(
                     ),
                 })
                 if snapshot_recovery_guard:
+                    original_finalize_command = command
                     action["requires"] = "authoritative DB snapshot/trade/position evidence"
+                    action["command"] = _target_weight_snapshot_recovery_blocked_command(
+                        snapshot_recovery_guard
+                    )
+                    action["scheduled_command"] = snapshot_diagnostics_command
+                    action["scheduled_follow_up"] = original_finalize_command
+                    action["blocked_finalize_command"] = (
+                        "# blocked: portfolio snapshot recovery requires "
+                        "authoritative DB/snapshot evidence first"
+                    )
             if not diagnostics_present:
                 action.update({
                     "command": command,
