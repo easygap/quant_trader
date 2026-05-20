@@ -1125,6 +1125,14 @@ def _sanitize_target_weight_daily_ops_summary(payload: dict | None) -> dict | No
     enable_blocker = _target_weight_enable_blocker(sanitized, enable_command)
     if enable_blocker:
         operator_commands["enable_suggested_caps"] = enable_blocker
+    elif (
+        status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}
+        and not _ready_to_execute_trade_day_is_current(sanitized)
+    ):
+        operator_commands["enable_suggested_caps"] = (
+            "# blocked: daily_ops_summary.trade_day is stale; "
+            "rerun daily ops summary for the current KRX business day"
+        )
     elif status in {"READY_TO_ENABLE_CAPS", "WAITING_FOR_MARKET_SESSION"}:
         enable_issues = _target_weight_command_scope_issues(
             sanitized,
