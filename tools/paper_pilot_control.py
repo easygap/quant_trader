@@ -941,6 +941,8 @@ def _target_weight_operator_next_action(
     priority_probe_status: str,
     priority_recovery_hint: str,
     priority_snapshot_diagnostics_command: str,
+    priority_snapshot_recovery_guard: str,
+    priority_snapshot_recovery_blockers: list,
     enable_command: str,
     execute_command: str,
     next_daily_ops_command: str,
@@ -975,6 +977,20 @@ def _target_weight_operator_next_action(
                 priority_recovery_hint
                 or "restore or create portfolio snapshot history for the account_key"
             )
+            if priority_snapshot_recovery_guard == "target_weight_db_persistence_proof_required_before_snapshot":
+                blockers = ", ".join(str(item) for item in priority_snapshot_recovery_blockers) or "unknown"
+                if priority_snapshot_diagnostics_command:
+                    return (
+                        "RESTORE authoritative DB trade_history/positions proof before "
+                        f"snapshot recovery; blockers={blockers}; do not create a snapshot "
+                        "from artifact-only fills; rerun diagnostics: "
+                        f"{priority_snapshot_diagnostics_command}"
+                    )
+                return (
+                    "RESTORE authoritative DB trade_history/positions proof before "
+                    f"snapshot recovery; blockers={blockers}; do not create a snapshot "
+                    "from artifact-only fills"
+                )
             if priority_snapshot_diagnostics_command:
                 return (
                     "RUN no-order portfolio snapshot diagnostics before finalize: "
@@ -1483,9 +1499,19 @@ def _print_target_weight_daily_ops_status(
     priority_recovery_hint = str(
         priority_action.get("finalize_portfolio_metrics_recovery_hint") or ""
     ).strip()
+    if priority_action.get("snapshot_recovery_hint"):
+        priority_recovery_hint = str(priority_action.get("snapshot_recovery_hint") or "").strip()
     priority_snapshot_diagnostics_command = str(
         priority_action.get("finalize_portfolio_snapshot_diagnostics_command") or ""
     ).strip()
+    priority_snapshot_recovery_guard = str(
+        priority_action.get("snapshot_recovery_guard") or ""
+    ).strip()
+    priority_snapshot_recovery_blockers = (
+        priority_action.get("snapshot_recovery_blockers") or []
+    )
+    if not isinstance(priority_snapshot_recovery_blockers, list):
+        priority_snapshot_recovery_blockers = []
     if priority_desc or priority_command or priority_scheduled_command:
         print(f"    Current blockers priority: {priority_desc or 'N/A'}")
         priority_evidence = []
@@ -1608,6 +1634,49 @@ def _print_target_weight_daily_ops_status(
                     print(f"    Portfolio metrics probe reason: {probe_reason}")
                 if priority_recovery_hint:
                     print(f"    Portfolio metrics recovery: {priority_recovery_hint}")
+                if priority_action.get("snapshot_diagnostics_status"):
+                    print(
+                        "    Snapshot diagnostics status: "
+                        f"{priority_action.get('snapshot_diagnostics_status')}"
+                    )
+                if priority_snapshot_recovery_guard:
+                    print(
+                        "    Snapshot recovery guard: "
+                        f"{priority_snapshot_recovery_guard}"
+                    )
+                if priority_action.get("snapshot_recovery_status"):
+                    print(
+                        "    Snapshot recovery status: "
+                        f"{priority_action.get('snapshot_recovery_status')}"
+                    )
+                if "snapshot_recovery_safe_to_write" in priority_action:
+                    print(
+                        "    Snapshot safe to write: "
+                        f"{bool(priority_action.get('snapshot_recovery_safe_to_write'))}"
+                    )
+                if priority_snapshot_recovery_blockers:
+                    print(
+                        "    Snapshot recovery blockers: "
+                        + ", ".join(str(item) for item in priority_snapshot_recovery_blockers)
+                    )
+                if (
+                    "snapshot_db_trade_count_total" in priority_action
+                    or "snapshot_db_position_count" in priority_action
+                ):
+                    print(
+                        "    Snapshot DB state: "
+                        f"snapshots={priority_action.get('snapshot_db_snapshot_count', 0)} "
+                        f"trades_total={priority_action.get('snapshot_db_trade_count_total', 0)} "
+                        f"trades_on_date={priority_action.get('snapshot_db_trade_count_on_date', 0)} "
+                        f"positions={priority_action.get('snapshot_db_position_count', 0)}"
+                    )
+                if "snapshot_artifact_fill_count" in priority_action:
+                    print(
+                        "    Snapshot artifact state: "
+                        f"fills={priority_action.get('snapshot_artifact_fill_count', 0)} "
+                        "db_persistence="
+                        f"{bool(priority_action.get('snapshot_artifact_db_persistence_complete'))}"
+                    )
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
@@ -1651,6 +1720,8 @@ def _print_target_weight_daily_ops_status(
         priority_probe_status=priority_probe_status,
         priority_recovery_hint=priority_recovery_hint,
         priority_snapshot_diagnostics_command=priority_snapshot_diagnostics_command,
+        priority_snapshot_recovery_guard=priority_snapshot_recovery_guard,
+        priority_snapshot_recovery_blockers=priority_snapshot_recovery_blockers,
         enable_command=str(enable_command),
         execute_command=str(execute_command),
         next_daily_ops_command=str(next_daily_ops_command),

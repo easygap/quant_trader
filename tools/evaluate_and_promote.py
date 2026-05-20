@@ -1616,6 +1616,75 @@ def _target_weight_portfolio_snapshot_diagnostics_command(
     )
 
 
+def _target_weight_snapshot_recovery_guard_from_blockers(blockers) -> str:
+    blocker_set = {str(blocker) for blocker in blockers or []}
+    if (
+        "source_record_db_persistence_incomplete" in blocker_set
+        or "artifact_fills_without_current_db_trades" in blocker_set
+        or "db_execution_state_missing_for_account_key" in blocker_set
+    ):
+        return "target_weight_db_persistence_proof_required_before_snapshot"
+    if "current_portfolio_snapshot_missing_after_trades" in blocker_set:
+        return "target_weight_current_portfolio_snapshot_required"
+    if "portfolio_snapshot_history_missing" in blocker_set:
+        return "target_weight_portfolio_snapshot_history_required"
+    return ""
+
+
+def _target_weight_snapshot_recovery_hint_from_blockers(
+    blockers,
+    fallback: str,
+) -> str:
+    blocker_set = {str(blocker) for blocker in blockers or []}
+    if (
+        "source_record_db_persistence_incomplete" in blocker_set
+        or "artifact_fills_without_current_db_trades" in blocker_set
+    ):
+        return (
+            "restore target-weight DB trade_history/positions persistence proof "
+            "before creating a portfolio snapshot"
+        )
+    if "db_execution_state_missing_for_account_key" in blocker_set:
+        return (
+            "restore target-weight paper DB execution state for the account_key "
+            "before snapshot recovery"
+        )
+    return fallback
+
+
+def _load_target_weight_snapshot_diagnostics_report(
+    strategy: str,
+    snapshot_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not snapshot_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base / f"target_weight_portfolio_snapshot_diagnostics_{strategy}_{snapshot_date}.json",
+        base / "paper_runtime" / f"target_weight_portfolio_snapshot_diagnostics_{strategy}_{snapshot_date}.json",
+    ]
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_portfolio_snapshot_diagnostics":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("snapshot_date") != snapshot_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        return payload
+    return None
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -1789,6 +1858,7 @@ def _target_weight_ops_priority_action(
     commands: dict[str, str],
     latest_daily_ops: dict | None,
     latest_finalize_report: dict | None = None,
+    latest_snapshot_diagnostics: dict | None = None,
 ) -> dict | None:
     if not latest_daily_ops:
         return None
@@ -2050,6 +2120,40 @@ def _target_weight_ops_priority_action(
             probe_recovery_hint = _target_weight_portfolio_metrics_recovery_hint(
                 probe_status
             )
+            snapshot_recovery = {}
+            snapshot_database = {}
+            snapshot_artifact_execution = {}
+            if isinstance(latest_snapshot_diagnostics, dict):
+                snapshot_recovery = (
+                    latest_snapshot_diagnostics.get("snapshot_recovery_readiness")
+                    or {}
+                )
+                if not isinstance(snapshot_recovery, dict):
+                    snapshot_recovery = {}
+                snapshot_database = latest_snapshot_diagnostics.get("database_state") or {}
+                if not isinstance(snapshot_database, dict):
+                    snapshot_database = {}
+                snapshot_artifact_execution = (
+                    latest_snapshot_diagnostics.get("artifact_execution_state")
+                    or {}
+                )
+                if not isinstance(snapshot_artifact_execution, dict):
+                    snapshot_artifact_execution = {}
+                snapshot_recovery_blockers = snapshot_recovery.get("blockers") or []
+                snapshot_recovery_guard = (
+                    latest_snapshot_diagnostics.get("recovery_guard")
+                    or _target_weight_snapshot_recovery_guard_from_blockers(
+                        snapshot_recovery_blockers
+                    )
+                )
+                probe_recovery_hint = (
+                    _target_weight_snapshot_recovery_hint_from_blockers(
+                        snapshot_recovery_blockers,
+                        latest_snapshot_diagnostics.get("recovery_hint")
+                        or probe_recovery_hint,
+                    )
+                    or probe_recovery_hint
+                )
             snapshot_diagnostics_command = _target_weight_portfolio_snapshot_diagnostics_command(
                 strategy,
                 latest_finalize_report.get("finalize_date")
@@ -2112,6 +2216,55 @@ def _target_weight_ops_priority_action(
                     "present" if diagnostics_present else "missing"
                 ),
             })
+            if isinstance(latest_snapshot_diagnostics, dict):
+                action.update({
+                    "snapshot_diagnostics_source": latest_snapshot_diagnostics.get("source_path"),
+                    "snapshot_diagnostics_generated_at": latest_snapshot_diagnostics.get("generated_at"),
+                    "snapshot_diagnostics_status": latest_snapshot_diagnostics.get("status"),
+                    "snapshot_diagnostics_reason": latest_snapshot_diagnostics.get("reason"),
+                    "snapshot_recovery_guard": snapshot_recovery_guard,
+                    "snapshot_recovery_hint": probe_recovery_hint,
+                    "snapshot_recovery_next_action": latest_snapshot_diagnostics.get("next_action") or "",
+                    "snapshot_recovery_status": snapshot_recovery.get("status") or "",
+                    "snapshot_recovery_safe_to_write": bool(
+                        snapshot_recovery.get("safe_to_write_snapshot")
+                    ),
+                    "snapshot_recovery_reason": snapshot_recovery.get("reason") or "",
+                    "snapshot_recovery_blockers": snapshot_recovery.get("blockers") or [],
+                    "snapshot_recovery_warnings": snapshot_recovery.get("warnings") or [],
+                    "snapshot_db_snapshot_count": _safe_int(
+                        snapshot_database.get("snapshot_count")
+                    ),
+                    "snapshot_db_current_snapshot_found": bool(
+                        snapshot_database.get("current_snapshot_found")
+                    ),
+                    "snapshot_db_trade_count_total": _safe_int(
+                        snapshot_database.get("trade_count_total")
+                    ),
+                    "snapshot_db_trade_count_on_date": _safe_int(
+                        snapshot_database.get("trade_count_on_date")
+                    ),
+                    "snapshot_db_position_count": _safe_int(
+                        snapshot_database.get("position_count")
+                    ),
+                    "snapshot_artifact_fill_count": _safe_int(
+                        snapshot_artifact_execution.get("fill_count")
+                    ),
+                    "snapshot_artifact_execution_session_id": str(
+                        snapshot_artifact_execution.get("execution_session_id") or ""
+                    ),
+                    "snapshot_artifact_db_persistence_complete": bool(
+                        snapshot_artifact_execution.get("db_persistence_complete")
+                    ),
+                    "snapshot_artifact_db_trade_history_source": str(
+                        snapshot_artifact_execution.get("db_trade_history_source") or ""
+                    ),
+                    "snapshot_artifact_db_positions_source": str(
+                        snapshot_artifact_execution.get("db_positions_source") or ""
+                    ),
+                })
+                if snapshot_recovery_guard:
+                    action["requires"] = "authoritative DB snapshot/trade/position evidence"
             if not diagnostics_present:
                 action.update({
                     "command": command,
@@ -2288,6 +2441,7 @@ def _build_current_blockers_operator_runbook(
     latest_daily_ops: dict | None = None,
     latest_daily_ops_failure: dict | None = None,
     latest_finalize_report: dict | None = None,
+    latest_snapshot_diagnostics: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
@@ -2324,6 +2478,7 @@ def _build_current_blockers_operator_runbook(
                 commands,
                 latest_daily_ops,
                 latest_finalize_report=latest_finalize_report,
+                latest_snapshot_diagnostics=latest_snapshot_diagnostics,
             )
         sequence = [
             {
@@ -2454,6 +2609,7 @@ def build_current_blockers_report(
     latest_daily_ops: dict | None = None,
     latest_daily_ops_failure: dict | None = None,
     latest_finalize_report: dict | None = None,
+    latest_snapshot_diagnostics: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -2517,6 +2673,7 @@ def build_current_blockers_report(
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
         latest_finalize_report=latest_finalize_report,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
@@ -2653,11 +2810,21 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_snapshot_diagnostics = (
+        _load_target_weight_snapshot_diagnostics_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     return build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
         latest_finalize_report=latest_finalize_report,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         generated_at=generated_at,
     )
 
