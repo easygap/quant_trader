@@ -1,6 +1,6 @@
 # Paper Runbook
 
-최종 수정: 2026-05-13
+최종 수정: 2026-05-20
 
 ## 1. 시작 전 점검
 
@@ -51,7 +51,7 @@ python tools/run_paper_evidence_pipeline.py --strategy scoring --generate-packag
 
 수동 `--date`, `--backfill`, `--finalize` 실행으로 새로 생성된 record는 `backfill` provenance로 남기며 승격 증거로 카운트하지 않는다. 승격 패키지에는 실제 scheduler/pilot 세션에서 수집된 `real_paper`/`pilot_paper` evidence만 사용한다. 같은 날짜에 backfill/shadow/비승격 repair record가 뒤에 추가되어도 canonical view는 검증된 paper/pilot evidence를 우선 보존한다.
 
-Target-weight pilot evidence finalize가 `total_value` 또는 `daily_return` 미확정으로 막힌 경우에는 같은 finalize 명령을 즉시 반복하지 않는다. `tools/paper_pilot_control.py --status`의 `Operator next action`이 final portfolio performance evidence 대기를 안내하면, 성과 snapshot이 들어온 뒤 표시된 scheduled priority command를 다시 실행한다. 최신 finalize report는 source record와 portfolio metrics probe에서 확인된 성과 필드와 끝까지 누락된 필드를 기록하므로, 어떤 성과 snapshot이 아직 필요한지 함께 확인한다. finalize CLI도 실패 시 artifact/report 경로와 missing performance fields를 바로 출력한다. `daily_return`/`portfolio_value`/benchmark excess 누락처럼 finalize로 promotable record가 될 수 있는 사유는 repair보다 finalize를 먼저 실행하고, repair는 finalize가 promotable proof를 만들 수 없을 때의 fallback으로만 사용한다.
+Target-weight pilot evidence finalize가 `total_value` 또는 `daily_return` 미확정으로 막힌 경우에는 같은 finalize 명령을 즉시 반복하지 않는다. `tools/paper_pilot_control.py --status`의 `Operator next action`이 final portfolio performance evidence 대기를 안내하면, 성과 snapshot이 들어온 뒤 표시된 scheduled priority command를 다시 실행한다. 최신 finalize report는 source record와 portfolio metrics probe에서 확인된 성과 필드와 끝까지 누락된 필드를 기록하므로, 어떤 성과 snapshot이 아직 필요한지 함께 확인한다. `Finalize diagnostics: missing`이 보이면 구버전 finalize report라서 판단 근거가 부족한 상태이므로, 표시된 diagnostics refresh command를 주문 없이 한 번 실행하고 current blockers/status를 다시 생성한다. 그 뒤에도 performance evidence guard가 남아 있으면 성과 snapshot 대기 상태로 본다. finalize CLI도 실패 시 artifact/report 경로와 missing performance fields를 바로 출력한다. `daily_return`/`portfolio_value`/benchmark excess 누락처럼 finalize로 promotable record가 될 수 있는 사유는 repair보다 finalize를 먼저 실행하고, repair는 finalize가 promotable proof를 만들 수 없을 때의 fallback으로만 사용한다.
 
 생성된 promotion evidence package는 package payload hash와 source record hash를 포함한다. live gate는 이 값을 원본 `daily_evidence_{strategy}.jsonl`에서 재계산해 비교하므로, 패키지 요약값이나 원본 JSONL을 따로 수정했다면 package를 다시 생성해야 한다.
 
