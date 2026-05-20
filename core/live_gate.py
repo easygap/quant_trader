@@ -75,6 +75,40 @@ PROMOTION_BLOCKER_SOURCE_METADATA_KEYS = (
     "config_resolved_hash",
 )
 
+PAPER_EVIDENCE_HEADLINE_SOURCE_FIELDS = (
+    "total_days",
+    "avg_daily_return",
+    "paper_sharpe",
+    "cumulative_return",
+    "max_mdd",
+    "win_rate",
+    "total_trades",
+    "sell_count",
+    "avg_same_universe_excess",
+    "avg_exposure_matched_excess",
+    "avg_cash_adjusted_excess",
+    "avg_fill_rate",
+    "total_rejects",
+    "total_duplicate_blocked",
+    "degraded_days",
+    "frozen_days",
+    "anomaly_summary",
+    "benchmark_final_days",
+    "benchmark_provisional_days",
+    "benchmark_failed_days",
+    "benchmark_final_ratio",
+    "excess_non_null_days",
+    "excess_non_null_ratio",
+    "real_paper_days_total",
+    "pilot_real_paper_days",
+    "non_pilot_real_paper_days",
+    "non_promotable_evidence_days",
+    "shadow_days",
+    "real_paper_days",
+    "promotable_evidence_days",
+    "non_promotable_shadow_days",
+)
+
 
 def get_current_git_hash() -> str:
     """Return the current short commit hash, or unknown if git is unavailable."""
@@ -519,6 +553,18 @@ def _validate_target_weight_source_records(
     return issues
 
 
+def _headline_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        return actual == expected
+    if expected is None:
+        return actual is None
+    expected_float = _as_float(expected)
+    actual_float = _as_float(actual)
+    if expected_float is not None:
+        return actual_float is not None and abs(actual_float - expected_float) <= 1e-9
+    return actual == expected
+
+
 def _validate_paper_evidence_package_integrity(
     strategy_name: str,
     evidence: dict[str, Any],
@@ -534,6 +580,7 @@ def _validate_paper_evidence_package_integrity(
         from core.paper_evidence import (
             PROMOTION_PACKAGE_INTEGRITY_SCHEMA_VERSION,
             PROMOTION_SOURCE_RECORDS_SCHEMA_VERSION,
+            build_promotion_headline_summary,
             build_promotion_source_records_summary,
             compute_promotion_package_integrity_hash,
         )
@@ -608,6 +655,26 @@ def _validate_paper_evidence_package_integrity(
             "paper evidence latest_evidence_date와 source_records last_date 불일치: "
             f"{latest_evidence!r} != {expected_source.get('last_date')!r}."
         )
+
+    try:
+        expected_headline = build_promotion_headline_summary(
+            strategy_name,
+            canonical_metadata=canonical_metadata,
+            promotion_dir=promotion_base,
+            evidence_dir=evidence_base,
+        )
+    except Exception as exc:
+        issues.append(f"paper evidence headline 원본 재계산 실패: {exc}")
+        return issues
+
+    for field in PAPER_EVIDENCE_HEADLINE_SOURCE_FIELDS:
+        expected_value = expected_headline.get(field)
+        actual_value = evidence.get(field)
+        if not _headline_value_matches(actual_value, expected_value):
+            issues.append(
+                "paper evidence headline 원본 불일치: "
+                f"{field} expected={expected_value!r}, actual={actual_value!r}."
+            )
 
     return issues
 
