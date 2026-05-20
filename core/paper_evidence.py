@@ -276,6 +276,14 @@ def _has_target_weight_proof_shape(record: dict) -> bool:
     return bool(caps.get("target_weight_plan") or caps.get("target_weight_execution"))
 
 
+def _is_target_weight_non_promotable_repair(record: dict) -> bool:
+    reason = str(record.get("promotion_exclusion_reason") or "")
+    return (
+        reason == "target_weight_repaired_performance_not_promotable"
+        or _target_weight_record_has_repaired_performance(record)
+    )
+
+
 def get_canonical_records(
     strategy: str,
     *,
@@ -309,7 +317,11 @@ def get_canonical_records(
                     strategy,
                     r,
                 )
-                if prev_target_weight_valid and not curr_target_weight_valid:
+                if (
+                    prev_target_weight_valid
+                    and not curr_target_weight_valid
+                    and _is_target_weight_non_promotable_repair(r)
+                ):
                     continue
             prev_exec = prev.get("execution_backed", True)
             curr_exec = r.get("execution_backed", True)
