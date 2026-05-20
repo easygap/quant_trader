@@ -2140,6 +2140,9 @@ def _target_weight_ops_priority_action(
             snapshot_recovery = {}
             snapshot_database = {}
             snapshot_artifact_execution = {}
+            snapshot_db_restore = {}
+            snapshot_db_restore_trade_history = {}
+            snapshot_db_restore_positions = {}
             if isinstance(latest_snapshot_diagnostics, dict):
                 snapshot_recovery = (
                     latest_snapshot_diagnostics.get("snapshot_recovery_readiness")
@@ -2156,6 +2159,19 @@ def _target_weight_ops_priority_action(
                 )
                 if not isinstance(snapshot_artifact_execution, dict):
                     snapshot_artifact_execution = {}
+                snapshot_db_restore = (
+                    latest_snapshot_diagnostics.get("db_restore_checklist") or {}
+                )
+                if not isinstance(snapshot_db_restore, dict):
+                    snapshot_db_restore = {}
+                snapshot_db_restore_trade_history = (
+                    snapshot_db_restore.get("trade_history") or {}
+                )
+                if not isinstance(snapshot_db_restore_trade_history, dict):
+                    snapshot_db_restore_trade_history = {}
+                snapshot_db_restore_positions = snapshot_db_restore.get("positions") or {}
+                if not isinstance(snapshot_db_restore_positions, dict):
+                    snapshot_db_restore_positions = {}
                 snapshot_recovery_blockers = snapshot_recovery.get("blockers") or []
                 snapshot_recovery_guard = (
                     latest_snapshot_diagnostics.get("recovery_guard")
@@ -2278,6 +2294,35 @@ def _target_weight_ops_priority_action(
                     ),
                     "snapshot_artifact_db_positions_source": str(
                         snapshot_artifact_execution.get("db_positions_source") or ""
+                    ),
+                    "snapshot_db_restore_status": str(
+                        snapshot_db_restore.get("status") or ""
+                    ),
+                    "snapshot_db_restore_required": bool(
+                        snapshot_db_restore.get("restore_required")
+                    ),
+                    "snapshot_db_restore_trade_rows_expected": _safe_int(
+                        snapshot_db_restore_trade_history.get("expected_row_count")
+                    ),
+                    "snapshot_db_restore_trade_rows_current": _safe_int(
+                        snapshot_db_restore_trade_history.get("current_db_rows_on_date")
+                    ),
+                    "snapshot_db_restore_trade_rows_missing_or_unverified": _safe_int(
+                        snapshot_db_restore_trade_history.get(
+                            "missing_or_unverified_row_count"
+                        )
+                    ),
+                    "snapshot_db_restore_position_symbols_expected": _safe_int(
+                        snapshot_db_restore_positions.get("expected_symbol_count")
+                    ),
+                    "snapshot_db_restore_positions_current": _safe_int(
+                        snapshot_db_restore_positions.get("current_db_position_count")
+                    ),
+                    "snapshot_db_restore_missing_or_unverified_symbols": (
+                        snapshot_db_restore_positions.get(
+                            "missing_or_unverified_symbols"
+                        )
+                        or []
                     ),
                 })
                 if snapshot_recovery_guard:
