@@ -2165,6 +2165,8 @@ def test_current_blockers_waits_when_finalize_missing_performance():
         ),
         "performance_evidence_status": {
             "source_record_fields_present": ["cash"],
+            "source_record_fields_usable": ["cash"],
+            "source_record_fields_unusable": [],
             "portfolio_metrics_checked": True,
             "portfolio_metrics_fields_present": [],
             "missing_fields_after_probe": ["total_value", "daily_return"],
@@ -2190,6 +2192,8 @@ def test_current_blockers_waits_when_finalize_missing_performance():
     assert action["finalize_report_status"] == "blocked"
     assert action["finalize_report_generated_at"] == "2026-05-20T15:40:00"
     assert action["finalize_source_record_fields_present"] == ["cash"]
+    assert action["finalize_source_record_fields_usable"] == ["cash"]
+    assert action["finalize_source_record_fields_unusable"] == []
     assert action["finalize_portfolio_metrics_checked"] is True
     assert action["finalize_portfolio_metrics_fields_present"] == []
     assert action["finalize_missing_performance_fields"] == [

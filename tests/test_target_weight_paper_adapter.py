@@ -2826,6 +2826,8 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
         ),
         "finalize_report_generated_at": "2026-04-10T15:40:00",
         "finalize_report_status": "blocked",
+        "finalize_source_record_fields_usable": ["cash"],
+        "finalize_source_record_fields_unusable": ["total_value"],
         "finalize_missing_performance_fields": ["total_value", "daily_return"],
         "finalize_portfolio_metrics_checked": True,
         "finalize_portfolio_metrics_fields_present": [],
@@ -2877,6 +2879,8 @@ def test_paper_pilot_control_status_waits_when_finalize_missing_performance(
     assert "Performance evidence guard: waiting for total_value/daily_return" in output
     assert "Finalize report status: blocked" in output
     assert "Finalize report generated at: 2026-04-10T15:40:00" in output
+    assert "Source record usable fields: cash" in output
+    assert "Source record unusable fields: total_value" in output
     assert "Missing performance fields: total_value, daily_return" in output
     assert "Portfolio metrics probe fields: none" in output
     assert "Finalize report source: reports/paper_runtime/" in output
@@ -4963,6 +4967,8 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
     assert performance_status["source_record_fields_present"]
     assert "total_value" not in performance_status["source_record_fields_present"]
     assert "daily_return" not in performance_status["source_record_fields_present"]
+    assert "cash" in performance_status["source_record_fields_usable"]
+    assert performance_status["source_record_fields_unusable"] == []
     assert performance_status["portfolio_metrics_checked"] is True
     assert performance_status["portfolio_metrics_fields_present"] == ["cash"]
     assert performance_status["missing_fields_after_probe"] == [
@@ -4972,7 +4978,46 @@ def test_finalize_target_weight_pilot_evidence_reports_missing_performance_diagn
 
     report_md = report_path.with_suffix(".md").read_text(encoding="utf-8")
     assert "## Performance Evidence Status" in report_md
+    assert "Source record fields usable:" in report_md
     assert "Missing fields after probe: `total_value, daily_return`" in report_md
+
+
+def test_finalize_target_weight_pilot_evidence_marks_zero_total_value_unusable(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    monkeypatch.setattr(pe, "EVIDENCE_DIR", tmp_path / "paper_evidence")
+    monkeypatch.setattr(pe, "_collect_portfolio_metrics", lambda account_key, date: {})
+    record = _existing_pilot_evidence_record(plan)
+    record["benchmark_status"] = "failed"
+    record["same_universe_excess"] = None
+    record["exposure_matched_excess"] = None
+    record["cash_adjusted_excess"] = None
+    record["total_value"] = 0
+    record["daily_return"] = None
+    pe._append_jsonl(pe._evidence_path(plan.candidate_id), record)
+
+    with pytest.raises(ValueError, match="target_weight_pilot_evidence_finalize_missing_performance"):
+        twp.finalize_target_weight_pilot_evidence(
+            candidate_id=plan.candidate_id,
+            finalize_date=plan.trade_day,
+            output_dir=tmp_path / "paper_runtime",
+        )
+
+    report_path = next((tmp_path / "paper_runtime").glob("target_weight_pilot_evidence_finalize_*.json"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    performance_status = report["performance_evidence_status"]
+    assert "total_value" in performance_status["source_record_fields_present"]
+    assert "total_value" not in performance_status["source_record_fields_usable"]
+    assert "total_value" in performance_status["source_record_fields_unusable"]
+    assert performance_status["missing_fields_after_probe"] == [
+        "total_value",
+        "daily_return",
+    ]
 
 
 def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_diagnostics(
@@ -5018,6 +5063,8 @@ def test_finalize_target_weight_pilot_evidence_cli_prints_missing_performance_di
     assert "Target-weight pilot evidence finalize" in output
     assert "status: BLOCKED - target_weight_pilot_evidence_finalize_missing_performance" in output
     assert "source_record_fields:" in output
+    assert "source_record_usable_fields:" in output
+    assert "source_record_unusable_fields: none" in output
     assert "portfolio_metrics_checked: True" in output
     assert "portfolio_metrics_fields: cash" in output
     assert "missing_performance_fields: total_value, daily_return" in output
