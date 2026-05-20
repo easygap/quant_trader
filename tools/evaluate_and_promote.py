@@ -1869,6 +1869,12 @@ def _target_weight_ops_priority_action(
                 "finalize_source_record_fields_present": (
                     performance_status.get("source_record_fields_present") or []
                 ),
+                "finalize_source_record_fields_usable": (
+                    performance_status.get("source_record_fields_usable") or []
+                ),
+                "finalize_source_record_fields_unusable": (
+                    performance_status.get("source_record_fields_unusable") or []
+                ),
                 "finalize_portfolio_metrics_checked": bool(
                     performance_status.get("portfolio_metrics_checked")
                 ),
