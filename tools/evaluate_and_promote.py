@@ -1447,6 +1447,46 @@ def _public_target_weight_daily_ops_failure(payload: dict) -> dict:
     return public
 
 
+def _target_weight_finalize_waits_for_performance(report: dict | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    reason = str(report.get("reason") or "").strip()
+    return "target_weight_pilot_evidence_finalize_missing_performance" in reason
+
+
+def _load_target_weight_finalize_report(
+    strategy: str,
+    finalize_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not finalize_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base / f"target_weight_pilot_evidence_finalize_{strategy}_{finalize_date}.json",
+        base / "paper_runtime" / f"target_weight_pilot_evidence_finalize_{strategy}_{finalize_date}.json",
+    ]
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_pilot_evidence_finalize":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("finalize_date") != finalize_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        return payload
+    return None
+
+
 def validate_target_weight_daily_ops_artifacts(
     reports_dir: str | Path = "reports",
 ) -> list[str]:
@@ -1568,6 +1608,7 @@ def _target_weight_ops_priority_action(
     strategy: str,
     commands: dict[str, str],
     latest_daily_ops: dict | None,
+    latest_finalize_report: dict | None = None,
 ) -> dict | None:
     if not latest_daily_ops:
         return None
@@ -1673,7 +1714,7 @@ def _target_weight_ops_priority_action(
                 or ops_commands.get("daily_ops_summary")
                 or commands.get("daily_ops_summary")
             )
-        return {
+        action = {
             **base_action,
             "invalid_execution_days": _safe_int(progress.get("invalid_execution_days")),
             "invalid_reasons": invalid_reasons,
@@ -1691,6 +1732,19 @@ def _target_weight_ops_priority_action(
             ),
             "follow_up": ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary"),
         }
+        if finalize_first and _target_weight_finalize_waits_for_performance(latest_finalize_report):
+            reason = str(latest_finalize_report.get("reason") or "").strip()
+            blocked = f"# blocked: final performance evidence unavailable; {reason}"
+            action.update({
+                "command": blocked,
+                "scheduled_command": command,
+                "requires": "final portfolio performance evidence available",
+                "performance_evidence_guard": (
+                    "target_weight_pilot_evidence_finalize_missing_performance"
+                ),
+                "finalize_report_source": latest_finalize_report.get("source_path"),
+            })
+        return action
 
     if status == "READY_TO_EXECUTE":
         command = (
@@ -1859,6 +1913,7 @@ def _build_current_blockers_operator_runbook(
     live_candidates: list[str],
     latest_daily_ops: dict | None = None,
     latest_daily_ops_failure: dict | None = None,
+    latest_finalize_report: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
@@ -1894,6 +1949,7 @@ def _build_current_blockers_operator_runbook(
                 primary_strategy,
                 commands,
                 latest_daily_ops,
+                latest_finalize_report=latest_finalize_report,
             )
         sequence = [
             {
@@ -2023,6 +2079,7 @@ def build_current_blockers_report(
     *,
     latest_daily_ops: dict | None = None,
     latest_daily_ops_failure: dict | None = None,
+    latest_finalize_report: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -2085,6 +2142,7 @@ def build_current_blockers_report(
         live_candidates=live_candidates,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
+        latest_finalize_report=latest_finalize_report,
         promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
@@ -2212,10 +2270,20 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_finalize_report = (
+        _load_target_weight_finalize_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     return build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
         latest_daily_ops_failure=latest_daily_ops_failure,
+        latest_finalize_report=latest_finalize_report,
         generated_at=generated_at,
     )
 
