@@ -200,6 +200,8 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
                 "anomalies": [],
             }
             if use_pilot:
+                session_id = f"{strategy}_{record['date']}_session"
+                trade_id = idx + 1
                 record["pilot_caps_snapshot"] = {
                     "target_weight_plan": {
                         "candidate_id": strategy,
@@ -221,8 +223,42 @@ def _write_evidence(evidence_dir, *, strategy="scoring", **overrides):
                         "order_complete": True,
                         "order_result_reconciliation": {"complete": True},
                         "fill_complete": True,
-                        "fill_reconciliation": {"complete": True},
-                        "position_reconciliation": {"complete": True},
+                        "execution_session_id": session_id,
+                        "fill_reconciliation": {
+                            "complete": True,
+                            "source": "database.trade_history",
+                            "execution_session_id": session_id,
+                            "fill_count": 1,
+                            "fills": [{
+                                "trade_id": trade_id,
+                                "symbol": "005930",
+                                "action": "BUY",
+                                "quantity": 1,
+                                "execution_session_id": session_id,
+                                "order_id": f"order-{trade_id}",
+                            }],
+                        },
+                        "position_reconciliation": {
+                            "complete": True,
+                            "source": "database.positions",
+                        },
+                        "db_persistence_complete": True,
+                        "db_persistence_proof": {
+                            "checked": True,
+                            "complete": True,
+                            "trade_history": {
+                                "source": "database.trade_history",
+                                "row_count": 1,
+                                "expected_row_count": 1,
+                                "row_id_count": 1,
+                                "execution_session_id": session_id,
+                                "trade_ids": [trade_id],
+                            },
+                            "positions": {
+                                "source": "database.positions",
+                                "missing_or_mismatched_symbols": [],
+                            },
+                        },
                     },
                 }
             rows.append(json.dumps(record, ensure_ascii=False))
@@ -977,6 +1013,78 @@ def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
     )
 
     assert issues == []
+
+
+def test_target_weight_live_gate_rechecks_source_pilot_proof(tmp_path):
+    strategy = "target_weight_rotation_test"
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir, strategy=strategy)
+    _write_evidence(
+        evidence_dir,
+        strategy=strategy,
+        target_weight_evidence={
+            "required": True,
+            "valid_pilot_days": 60,
+            "invalid_days": 0,
+            "invalid_reasons": {},
+            "params_hash": "hash",
+            "params_hashes": ["hash"],
+            "params_hash_consistent": True,
+            "all_promotable_days_verified": True,
+        },
+        target_weight_verified_pilot_days=60,
+        target_weight_invalid_days=0,
+        target_weight_params_hash="hash",
+    )
+
+    jsonl_path = evidence_dir / f"daily_evidence_{strategy}.jsonl"
+    rows = [
+        json.loads(line)
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for row in rows:
+        trade_history = (
+            row["pilot_caps_snapshot"]["target_weight_execution"]
+            ["db_persistence_proof"]["trade_history"]
+        )
+        trade_history.pop("trade_ids", None)
+        trade_history.pop("row_id_count", None)
+    jsonl_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    from core.paper_evidence import (
+        build_promotion_source_records_summary,
+        compute_promotion_package_integrity_hash,
+    )
+
+    package_path = evidence_dir / f"promotion_evidence_{strategy}.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["source_records"] = build_promotion_source_records_summary(
+        strategy,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+    )
+    package["package_integrity"]["payload_hash"] = (
+        compute_promotion_package_integrity_hash(package)
+    )
+    _write_json(package_path, package)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        strategy,
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("target-weight 원본 invalid execution evidence" in issue for issue in issues)
+    assert any("target_weight_db_trade_history_ids_missing" in issue for issue in issues)
+    assert any("원본 proof 재계산 불일치" in issue for issue in issues)
 
 
 def test_target_weight_live_gate_blocks_params_hash_mismatch(tmp_path):
