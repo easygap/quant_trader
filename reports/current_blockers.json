@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-20T17:01:08.712167",
+  "generated_at": "2026-05-20T17:35:27.282298",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-20T17:01:08.712167",
-    "age_days": 0.99,
+    "checked_at": "2026-05-20T17:35:27.282298",
+    "age_days": 1.02,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -134,7 +134,7 @@
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T16:41:05.707467",
+      "snapshot_diagnostics_generated_at": "2026-05-20T17:35:19.768723",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
       "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
@@ -177,6 +177,16 @@
         "009150",
         "402340"
       ],
+      "snapshot_db_restore_candidate_package_generated": true,
+      "snapshot_db_restore_candidate_manifest": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
+      "snapshot_db_restore_trade_history_candidate_csv": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_trade_history.csv",
+      "snapshot_db_restore_positions_candidate_csv": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_positions.csv",
+      "snapshot_db_restore_trade_history_candidate_rows": 4,
+      "snapshot_db_restore_position_candidate_rows": 4,
+      "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols": [
+        "000660"
+      ],
+      "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
@@ -280,8 +290,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-20T17:01:08.712167",
-      "age_days": 0.99,
+      "checked_at": "2026-05-20T17:35:27.282298",
+      "age_days": 1.02,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -439,7 +449,7 @@
       "status": "BLOCKED",
       "allowed": false,
       "reason": "notifier stale — rerun preflight with --send-test-notification: Discord webhook test stale",
-      "checked_at": "2026-05-20T17:01:08.712167",
+      "checked_at": "2026-05-20T17:35:27.282298",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "caps_snapshot": {
@@ -523,7 +533,7 @@
       "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "finalize_report_diagnostics_status": "present",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T16:41:05.707467",
+      "snapshot_diagnostics_generated_at": "2026-05-20T17:35:19.768723",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
       "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
@@ -566,6 +576,16 @@
         "009150",
         "402340"
       ],
+      "snapshot_db_restore_candidate_package_generated": true,
+      "snapshot_db_restore_candidate_manifest": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
+      "snapshot_db_restore_trade_history_candidate_csv": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_trade_history.csv",
+      "snapshot_db_restore_positions_candidate_csv": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_positions.csv",
+      "snapshot_db_restore_trade_history_candidate_rows": 4,
+      "snapshot_db_restore_position_candidate_rows": 4,
+      "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols": [
+        "000660"
+      ],
+      "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
       "snapshot_recovery_order": [
         "restore_authoritative_db_trade_history_positions_proof",
