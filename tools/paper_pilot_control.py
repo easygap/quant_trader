@@ -1768,6 +1768,31 @@ def _print_target_weight_daily_ops_status(
                                 "    Snapshot DB restore verify command: "
                                 f"{priority_action.get('snapshot_db_restore_package_verify_command')}"
                             )
+                        if priority_action.get(
+                            "snapshot_db_restore_verification_status"
+                        ):
+                            print(
+                                "    Snapshot DB restore verification: "
+                                f"status={priority_action.get('snapshot_db_restore_verification_status')} "
+                                f"ready={bool(priority_action.get('snapshot_db_restore_verification_ready'))}"
+                            )
+                            verification_blockers = priority_action.get(
+                                "snapshot_db_restore_verification_blockers"
+                            ) or []
+                            if verification_blockers:
+                                print(
+                                    "    Snapshot DB restore verification blockers: "
+                                    + ", ".join(
+                                        str(blocker) for blocker in verification_blockers
+                                    )
+                                )
+                            print(
+                                "    Snapshot DB restore authoritative match: "
+                                "trade_history="
+                                f"{bool(priority_action.get('snapshot_db_restore_authoritative_trade_history_match'))} "
+                                "positions="
+                                f"{bool(priority_action.get('snapshot_db_restore_authoritative_positions_match'))}"
+                            )
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
