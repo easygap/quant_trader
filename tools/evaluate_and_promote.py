@@ -1560,6 +1560,16 @@ def _target_weight_finalize_report_has_performance_diagnostics(report: dict | No
     )
 
 
+def _target_weight_portfolio_metrics_recovery_hint(probe_status: str) -> str:
+    if probe_status == "missing_snapshot_history":
+        return (
+            "restore or create portfolio snapshot history for the target-weight account_key"
+        )
+    if probe_status == "missing_current_snapshot_after_trades":
+        return "run end-of-day portfolio snapshot capture for the trade day"
+    return ""
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -1856,6 +1866,12 @@ def _target_weight_ops_priority_action(
             )
             if not isinstance(performance_status, dict):
                 performance_status = {}
+            probe_status = str(
+                performance_status.get("portfolio_metrics_probe_status") or ""
+            ).strip()
+            probe_recovery_hint = _target_weight_portfolio_metrics_recovery_hint(
+                probe_status
+            )
             action.update({
                 "command": blocked,
                 "scheduled_command": command,
@@ -1879,7 +1895,7 @@ def _target_weight_ops_priority_action(
                     performance_status.get("portfolio_metrics_checked")
                 ),
                 "finalize_portfolio_metrics_probe_status": (
-                    performance_status.get("portfolio_metrics_probe_status") or ""
+                    probe_status
                 ),
                 "finalize_portfolio_metrics_probe_reason": (
                     performance_status.get("portfolio_metrics_probe_reason") or ""
@@ -1905,6 +1921,7 @@ def _target_weight_ops_priority_action(
                 "finalize_missing_performance_fields": (
                     performance_status.get("missing_fields_after_probe") or []
                 ),
+                "finalize_portfolio_metrics_recovery_hint": probe_recovery_hint,
                 "finalize_report_diagnostics_status": (
                     "present" if diagnostics_present else "missing"
                 ),
