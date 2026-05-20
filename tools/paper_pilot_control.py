@@ -1454,6 +1454,22 @@ def _print_target_weight_daily_ops_status(
                     f"{priority_action.get('finalize_report_generated_at')}"
                 )
             missing_fields = priority_action.get("finalize_missing_performance_fields") or []
+            usable_source_fields = (
+                priority_action.get("finalize_source_record_fields_usable") or []
+            )
+            unusable_source_fields = (
+                priority_action.get("finalize_source_record_fields_unusable") or []
+            )
+            if usable_source_fields:
+                print(
+                    "    Source record usable fields: "
+                    + ", ".join(str(field) for field in usable_source_fields)
+                )
+            if unusable_source_fields:
+                print(
+                    "    Source record unusable fields: "
+                    + ", ".join(str(field) for field in unusable_source_fields)
+                )
             if missing_fields:
                 print(
                     "    Missing performance fields: "
