@@ -1174,6 +1174,53 @@ def _target_weight_operator_next_action(
     return None
 
 
+def _target_weight_db_restore_effective_reason(review_guard: str) -> str:
+    if review_guard == "target_weight_authoritative_db_restore_csv_required":
+        return (
+            "current blockers requires DB restore review bundle and "
+            "authoritative CSV verification before execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_csv_fill_required":
+        return (
+            "current blockers requires filled DB restore authoritative CSV "
+            "before execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_review_bundle_stale":
+        return (
+            "current blockers requires fresh DB restore review bundle before "
+            "execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_verification_stale_after_review_edit":
+        return (
+            "current blockers requires DB restore re-verification after reviewed "
+            "CSV edit before execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_apply_plan_required":
+        return (
+            "current blockers requires no-write DB restore apply plan before "
+            "execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_backup_required":
+        return (
+            "current blockers requires DB restore pre-apply backup before "
+            "execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_apply_ready_manual_confirm_required":
+        return (
+            "current blockers requires confirmed guarded DB restore apply before "
+            "execution"
+        )
+    if review_guard == "target_weight_authoritative_db_restore_ready_manual_db_write":
+        return (
+            "current blockers requires verified authoritative DB restore before "
+            "execution"
+        )
+    return (
+        "current blockers requires DB restore review before execution: "
+        f"{review_guard}"
+    )
+
+
 def _daily_ops_trade_day_is_available(payload: dict, *, current_date: str | None = None) -> bool:
     trade_day = str(payload.get("trade_day") or "").strip()
     if not trade_day:
@@ -1495,6 +1542,10 @@ def _print_target_weight_daily_ops_status(
     priority_snapshot_recovery_guard = str(
         priority_action.get("snapshot_recovery_guard") or ""
     ).strip()
+    priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
+    priority_db_restore_review_guard = str(
+        priority_action.get("db_restore_review_guard") or ""
+    ).strip()
     not_before_date = (
         run_guard.get("not_before_date")
         or summary.get("not_before_date")
@@ -1568,6 +1619,14 @@ def _print_target_weight_daily_ops_status(
             "current blockers requires DB trade_history/positions proof before "
             "snapshot recovery"
         )
+    elif (
+        priority_db_guard == "target_weight_db_persistence_proof_required"
+        and priority_db_restore_review_guard
+    ):
+        effective_status = "BLOCKED"
+        effective_reason = _target_weight_db_restore_effective_reason(
+            priority_db_restore_review_guard
+        )
     print(f"    Effective target-weight execution: {effective_status}")
     print(f"    Effective reason: {effective_reason}")
     if next_operator_trade_day:
@@ -1624,10 +1683,6 @@ def _print_target_weight_daily_ops_status(
         priority_action.get("scheduled_follow_up") or priority_action.get("follow_up") or ""
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
-    priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
-    priority_db_restore_review_guard = str(
-        priority_action.get("db_restore_review_guard") or ""
-    ).strip()
     priority_db_restore_review_bundle_command = str(
         priority_action.get("snapshot_db_restore_review_bundle_command") or ""
     ).strip()
