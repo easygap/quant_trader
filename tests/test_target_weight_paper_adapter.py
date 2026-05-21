@@ -2696,11 +2696,11 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
     assert "Snapshot DB restore verify after manual review:" in output
     assert (
         "Snapshot DB restore authoritative trade history CSV: "
-        "provided=True rows=0/4 empty_template=True missing_columns=none"
+        "provided=True rows=0/4 empty_template=True verify_stale=False missing_columns=none"
     ) in output
     assert (
         "Snapshot DB restore authoritative positions CSV: "
-        "provided=True rows=0/4 empty_template=True missing_columns=none"
+        "provided=True rows=0/4 empty_template=True verify_stale=False missing_columns=none"
     ) in output
     assert (
         "Operator next action: FILL reviewed authoritative "
