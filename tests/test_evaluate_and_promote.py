@@ -2495,9 +2495,13 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
                 "empty_template": False,
                 "missing_columns": [],
                 "review_metadata_ok": False,
-                "metadata_missing_columns": ["authoritative_source"],
+                "metadata_missing_columns": [
+                    "authoritative_source",
+                    "authoritative_evidence_ref",
+                ],
                 "metadata_incomplete_row_count": 0,
                 "metadata_candidate_source_row_count": 0,
+                "metadata_candidate_evidence_ref_row_count": 0,
             },
             "positions": {
                 "provided": False,
@@ -2509,10 +2513,12 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
                 "review_metadata_ok": False,
                 "metadata_missing_columns": [
                     "authoritative_source",
+                    "authoritative_evidence_ref",
                     "reviewed_by",
                 ],
                 "metadata_incomplete_row_count": 2,
                 "metadata_candidate_source_row_count": 1,
+                "metadata_candidate_evidence_ref_row_count": 1,
             },
         },
         "current_db_state": {
@@ -2644,10 +2650,16 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     )
     assert action[
         "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns"
-    ] == ["authoritative_source"]
+    ] == ["authoritative_source", "authoritative_evidence_ref"]
     assert (
         action[
             "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count"
+        ]
+        == 0
+    )
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count"
         ]
         == 0
     )
@@ -2663,7 +2675,7 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     )
     assert action[
         "snapshot_db_restore_authoritative_positions_metadata_missing_columns"
-    ] == ["authoritative_source", "reviewed_by"]
+    ] == ["authoritative_source", "authoritative_evidence_ref", "reviewed_by"]
     assert (
         action[
             "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count"
@@ -2673,6 +2685,12 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     assert (
         action[
             "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count"
+        ]
+        == 1
+    )
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count"
         ]
         == 1
     )
@@ -3259,6 +3277,7 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns"
     ] == [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at",
     ]
@@ -3301,6 +3320,7 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         "snapshot_db_restore_authoritative_positions_metadata_missing_columns"
     ] == [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at",
     ]
@@ -3916,6 +3936,7 @@ def test_current_blockers_review_template_fields_report_metadata_quality(tmp_pat
     reviewed_row = {
         **candidate_row,
         "authoritative_source": "unknown",
+        "authoritative_evidence_ref": "target_weight_db_restore_candidates_manifest.json",
         "reviewed_by": "<reviewer>",
         "reviewed_at": "2026-05-20T08:30:00",
     }
@@ -3951,6 +3972,12 @@ def test_current_blockers_review_template_fields_report_metadata_quality(tmp_pat
     assert (
         fields[
             "snapshot_db_restore_authoritative_trade_history_metadata_placeholder_row_count"
+        ]
+        == 1
+    )
+    assert (
+        fields[
+            "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count"
         ]
         == 1
     )

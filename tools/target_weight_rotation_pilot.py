@@ -3627,6 +3627,7 @@ TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
 }
 TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS = [
     "authoritative_source",
+    "authoritative_evidence_ref",
     "reviewed_by",
     "reviewed_at",
 ]
@@ -3643,6 +3644,17 @@ TARGET_WEIGHT_RESTORE_METADATA_PLACEHOLDER_VALUES = {
     "unknown",
 }
 TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE = timedelta(minutes=5)
+TARGET_WEIGHT_RESTORE_CANDIDATE_EVIDENCE_REF_TOKENS = (
+    "artifact_candidate",
+    "candidate_csv",
+    "candidate_package",
+    "restore_candidate",
+    "target_weight_db_restore_candidates",
+    "trade_history_candidate",
+    "positions_candidate",
+    "reviewed_authoritative_trade_history.csv",
+    "reviewed_authoritative_positions.csv",
+)
 
 
 def _target_weight_restore_authoritative_columns(columns: list[str]) -> list[str]:
@@ -3770,6 +3782,16 @@ def _restore_metadata_value_is_placeholder(value: Any) -> bool:
     )
 
 
+def _restore_evidence_ref_points_to_candidate(value: Any) -> bool:
+    normalized = str(value or "").strip().lower().replace("\\", "/")
+    if not normalized or _restore_metadata_value_is_placeholder(normalized):
+        return False
+    return any(
+        token in normalized
+        for token in TARGET_WEIGHT_RESTORE_CANDIDATE_EVIDENCE_REF_TOKENS
+    )
+
+
 def _parse_restore_reviewed_at(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text or _restore_metadata_value_is_placeholder(text):
@@ -3824,6 +3846,7 @@ def _restore_authoritative_metadata_status(
     ]
     incomplete_count = 0
     candidate_source_count = 0
+    candidate_evidence_ref_count = 0
     placeholder_count = 0
     invalid_reviewed_at_count = 0
     future_reviewed_at_count = 0
@@ -3848,6 +3871,10 @@ def _restore_authoritative_metadata_status(
             "candidate-only",
         }:
             candidate_source_count += 1
+        if _restore_evidence_ref_points_to_candidate(
+            row.get("authoritative_evidence_ref")
+        ):
+            candidate_evidence_ref_count += 1
         reviewed_at = _parse_restore_reviewed_at(row.get("reviewed_at"))
         if str(row.get("reviewed_at") or "").strip() and reviewed_at is None:
             invalid_reviewed_at_count += 1
@@ -3867,6 +3894,7 @@ def _restore_authoritative_metadata_status(
         "metadata_missing_columns": missing_columns,
         "metadata_incomplete_row_count": incomplete_count,
         "metadata_candidate_source_row_count": candidate_source_count,
+        "metadata_candidate_evidence_ref_row_count": candidate_evidence_ref_count,
         "metadata_placeholder_row_count": placeholder_count,
         "metadata_invalid_reviewed_at_row_count": invalid_reviewed_at_count,
         "metadata_future_reviewed_at_row_count": future_reviewed_at_count,
@@ -3877,6 +3905,7 @@ def _restore_authoritative_metadata_status(
             not missing_columns
             and incomplete_count == 0
             and candidate_source_count == 0
+            and candidate_evidence_ref_count == 0
             and placeholder_count == 0
             and invalid_reviewed_at_count == 0
             and future_reviewed_at_count == 0
@@ -3988,6 +4017,7 @@ def _verify_authoritative_restore_csv(
         "metadata_missing_columns": [],
         "metadata_incomplete_row_count": 0,
         "metadata_candidate_source_row_count": 0,
+        "metadata_candidate_evidence_ref_row_count": 0,
         "metadata_placeholder_row_count": 0,
         "metadata_invalid_reviewed_at_row_count": 0,
         "metadata_future_reviewed_at_row_count": 0,
@@ -4085,6 +4115,10 @@ def _verify_authoritative_restore_csv(
         blockers.append(f"authoritative_{kind}_csv_review_metadata_incomplete")
     if metadata_status["metadata_candidate_source_row_count"]:
         blockers.append(f"authoritative_{kind}_csv_review_metadata_candidate_source")
+    if metadata_status["metadata_candidate_evidence_ref_row_count"]:
+        blockers.append(
+            f"authoritative_{kind}_csv_review_metadata_candidate_evidence_ref"
+        )
     if metadata_status["metadata_placeholder_row_count"]:
         blockers.append(f"authoritative_{kind}_csv_review_metadata_placeholder")
     if metadata_status["metadata_invalid_reviewed_at_row_count"]:
@@ -4374,7 +4408,7 @@ def render_target_weight_db_restore_review_bundle_markdown(
         "## Manual Review Steps",
         "1. Open the candidate CSV files and compare them against broker/DB evidence.",
         "2. Fill the reviewed authoritative template CSV files from the external authoritative source.",
-        "3. Fill `authoritative_source`, `reviewed_by`, and `reviewed_at` for every reviewed row.",
+        "3. Fill `authoritative_source`, `authoritative_evidence_ref`, `reviewed_by`, and `reviewed_at` for every reviewed row.",
         "4. Run the verification command below. Do not use artifact-only candidate rows as authoritative evidence.",
         "",
         "## Operator Commands",
@@ -4689,6 +4723,8 @@ def render_target_weight_db_restore_package_verification_markdown(
         f"`{authoritative_trade.get('metadata_incomplete_row_count', 0)}`",
         "- Trade history review metadata candidate-source rows: "
         f"`{authoritative_trade.get('metadata_candidate_source_row_count', 0)}`",
+        "- Trade history review metadata candidate evidence-ref rows: "
+        f"`{authoritative_trade.get('metadata_candidate_evidence_ref_row_count', 0)}`",
         "- Trade history review metadata placeholder rows: "
         f"`{authoritative_trade.get('metadata_placeholder_row_count', 0)}`",
         "- Trade history review metadata invalid reviewed_at rows: "
@@ -4720,6 +4756,8 @@ def render_target_weight_db_restore_package_verification_markdown(
         f"`{authoritative_positions.get('metadata_incomplete_row_count', 0)}`",
         "- Positions review metadata candidate-source rows: "
         f"`{authoritative_positions.get('metadata_candidate_source_row_count', 0)}`",
+        "- Positions review metadata candidate evidence-ref rows: "
+        f"`{authoritative_positions.get('metadata_candidate_evidence_ref_row_count', 0)}`",
         "- Positions review metadata placeholder rows: "
         f"`{authoritative_positions.get('metadata_placeholder_row_count', 0)}`",
         "- Positions review metadata invalid reviewed_at rows: "
@@ -4823,6 +4861,8 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"candidate_marker_rejected="
         f"{bool(authoritative_trade.get('candidate_marker_rejected'))} "
         f"metadata_ok={bool(authoritative_trade.get('review_metadata_ok'))} "
+        "candidate_evidence_refs="
+        f"{authoritative_trade.get('metadata_candidate_evidence_ref_row_count', 0)} "
         "metadata_placeholders="
         f"{authoritative_trade.get('metadata_placeholder_row_count', 0)} "
         "invalid_reviewed_at="
@@ -4846,6 +4886,8 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"candidate_marker_rejected="
         f"{bool(authoritative_positions.get('candidate_marker_rejected'))} "
         f"metadata_ok={bool(authoritative_positions.get('review_metadata_ok'))} "
+        "candidate_evidence_refs="
+        f"{authoritative_positions.get('metadata_candidate_evidence_ref_row_count', 0)} "
         "metadata_placeholders="
         f"{authoritative_positions.get('metadata_placeholder_row_count', 0)} "
         "invalid_reviewed_at="
