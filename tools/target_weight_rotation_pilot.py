@@ -1805,6 +1805,32 @@ def blocked_execution_for_pre_trade_risk(
     }
 
 
+def blocked_execution_for_current_blockers_guard(
+    plan: TargetWeightPlan,
+    current_blockers_execution_guard: dict[str, Any],
+) -> dict[str, Any]:
+    reason = current_blockers_execution_guard.get(
+        "reason",
+        "target_weight_current_blockers_guard_blocked",
+    )
+    return {
+        "executed": 0,
+        "skipped": len(plan.orders),
+        "failed": 0,
+        "halted": True,
+        "halt_reason": reason,
+        "current_blockers_execution_guard": current_blockers_execution_guard,
+        "details": [
+            {
+                "order": asdict(order),
+                "status": "skipped_current_blockers_guard",
+                "reason": reason,
+            }
+            for order in plan.orders
+        ],
+    }
+
+
 def reconcile_order_results(plan: TargetWeightPlan, execution: dict[str, Any]) -> dict[str, Any]:
     details = list(execution.get("details") or [])
     mismatches: list[dict[str, Any]] = []
@@ -3348,6 +3374,16 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _paths_point_to_same_file(left: Path, right_value: Any) -> bool:
+    if not right_value:
+        return False
+    right = Path(str(right_value))
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
+
+
 def _target_weight_db_restore_candidate_package(
     report: dict[str, Any],
     *,
@@ -3684,6 +3720,21 @@ def _compare_restore_rows(
     }
 
 
+def _restore_bool_marker(value: Any) -> bool:
+    return str(value or "").strip().lower() == "true"
+
+
+def _restore_authoritative_candidate_marker_count(
+    rows: list[dict[str, Any]],
+) -> int:
+    return sum(
+        _restore_bool_marker(row.get("candidate_only"))
+        or _restore_bool_marker(row.get("requires_authoritative_confirmation"))
+        or str(row.get("source") or "").startswith("artifact_candidate")
+        for row in rows
+    )
+
+
 def _verify_restore_csv_file(
     *,
     path_value: Any,
@@ -3760,6 +3811,7 @@ def _verify_restore_csv_file(
 def _verify_authoritative_restore_csv(
     *,
     path_value: str | None,
+    candidate_source_path: str | Path | None,
     candidate_rows: list[dict[str, Any]],
     columns: list[str],
     identity_columns: list[str],
@@ -3770,8 +3822,12 @@ def _verify_authoritative_restore_csv(
     info: dict[str, Any] = {
         "kind": kind,
         "path": str(path_value or ""),
+        "candidate_source_path": str(candidate_source_path or ""),
         "provided": bool(path_value),
         "exists": False,
+        "candidate_source_rejected": False,
+        "candidate_marker_rejected": False,
+        "candidate_marker_row_count": 0,
         "row_count": 0,
         "expected_rows": len(candidate_rows),
         "empty_template": False,
@@ -3797,7 +3853,15 @@ def _verify_authoritative_restore_csv(
         blockers.append(f"authoritative_{kind}_csv_missing")
         return info
 
+    if _paths_point_to_same_file(path, candidate_source_path):
+        info["candidate_source_rejected"] = True
+        blockers.append(f"authoritative_{kind}_csv_candidate_source_rejected")
+
     rows, fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+    candidate_marker_row_count = _restore_authoritative_candidate_marker_count(rows)
+    if candidate_marker_row_count:
+        info["candidate_marker_rejected"] = True
+        blockers.append(f"authoritative_{kind}_csv_candidate_marker_rejected")
     missing_columns = [column for column in columns if column not in fieldnames]
     comparison = _compare_restore_rows(
         candidate_rows=candidate_rows,
@@ -3826,6 +3890,9 @@ def _verify_authoritative_restore_csv(
         "sha256": _file_sha256(path),
         "fieldnames": fieldnames,
         "missing_columns": missing_columns,
+        "candidate_source_rejected": bool(info["candidate_source_rejected"]),
+        "candidate_marker_rejected": bool(info["candidate_marker_rejected"]),
+        "candidate_marker_row_count": candidate_marker_row_count,
         "identity_match": identity_match,
         "economic_match": economic_match,
         "identity_missing_from_authoritative_count": identity_comparison[
@@ -4203,6 +4270,7 @@ def verify_target_weight_db_restore_package(
         path_value=str(authoritative_trade_history_csv)
         if authoritative_trade_history_csv
         else None,
+        candidate_source_path=manifest.get("trade_history_candidate_csv"),
         candidate_rows=trade_info.get("rows") or [],
         columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
         identity_columns=TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
@@ -4214,6 +4282,7 @@ def verify_target_weight_db_restore_package(
         path_value=str(authoritative_positions_csv)
         if authoritative_positions_csv
         else None,
+        candidate_source_path=manifest.get("positions_candidate_csv"),
         candidate_rows=position_info.get("rows") or [],
         columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
         identity_columns=TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
@@ -4372,6 +4441,11 @@ def render_target_weight_db_restore_package_verification_markdown(
         "- Trade history authoritative rows: "
         f"`{authoritative_trade.get('row_count', 0)}/{authoritative_trade_expected_rows}`",
         f"- Trade history match: `{authoritative_trade.get('match', False)}`",
+        "- Trade history candidate source rejected: "
+        f"`{authoritative_trade.get('candidate_source_rejected', False)}`",
+        "- Trade history candidate markers rejected: "
+        f"`{authoritative_trade.get('candidate_marker_rejected', False)}` "
+        f"({authoritative_trade.get('candidate_marker_row_count', 0)} rows)",
         f"- Trade history identity match: `{authoritative_trade.get('identity_match', False)}`",
         f"- Trade history economic match: `{authoritative_trade.get('economic_match', False)}`",
         "- Trade history economic differences: "
@@ -4382,6 +4456,11 @@ def render_target_weight_db_restore_package_verification_markdown(
         "- Positions authoritative rows: "
         f"`{authoritative_positions.get('row_count', 0)}/{authoritative_positions_expected_rows}`",
         f"- Positions match: `{authoritative_positions.get('match', False)}`",
+        "- Positions candidate source rejected: "
+        f"`{authoritative_positions.get('candidate_source_rejected', False)}`",
+        "- Positions candidate markers rejected: "
+        f"`{authoritative_positions.get('candidate_marker_rejected', False)}` "
+        f"({authoritative_positions.get('candidate_marker_row_count', 0)} rows)",
         f"- Positions identity match: `{authoritative_positions.get('identity_match', False)}`",
         f"- Positions economic match: `{authoritative_positions.get('economic_match', False)}`",
         "- Positions economic differences: "
@@ -4468,6 +4547,10 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"rows={authoritative_trade.get('row_count', 0)}/"
         f"{authoritative_trade_expected_rows} "
         f"match={bool(authoritative_trade.get('match'))} "
+        f"candidate_source_rejected="
+        f"{bool(authoritative_trade.get('candidate_source_rejected'))} "
+        f"candidate_marker_rejected="
+        f"{bool(authoritative_trade.get('candidate_marker_rejected'))} "
         f"identity_match={bool(authoritative_trade.get('identity_match'))} "
         f"economic_match={bool(authoritative_trade.get('economic_match'))} "
         f"scope={authoritative_trade.get('content_mismatch_scope') or 'none'}"
@@ -4478,6 +4561,10 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"rows={authoritative_positions.get('row_count', 0)}/"
         f"{authoritative_positions_expected_rows} "
         f"match={bool(authoritative_positions.get('match'))} "
+        f"candidate_source_rejected="
+        f"{bool(authoritative_positions.get('candidate_source_rejected'))} "
+        f"candidate_marker_rejected="
+        f"{bool(authoritative_positions.get('candidate_marker_rejected'))} "
         f"identity_match={bool(authoritative_positions.get('identity_match'))} "
         f"economic_match={bool(authoritative_positions.get('economic_match'))} "
         f"scope={authoritative_positions.get('content_mismatch_scope') or 'none'}"
@@ -5963,6 +6050,7 @@ def write_session_artifact(
     execution_trade_day_check: dict[str, Any] | None = None,
     execution_market_session_check: dict[str, Any] | None = None,
     pilot_authorization_snapshot_check: dict[str, Any] | None = None,
+    current_blockers_execution_guard: dict[str, Any] | None = None,
     execution_idempotency: dict[str, Any] | None = None,
     execution_lock: dict[str, Any] | None = None,
     execution_lock_release: dict[str, Any] | None = None,
@@ -6000,6 +6088,10 @@ def write_session_artifact(
             or _authorization_snapshot_not_required(
                 "pilot authorization snapshot check not required"
             )
+        ),
+        "current_blockers_execution_guard": (
+            current_blockers_execution_guard
+            or current_blockers_execution_guard_not_required()
         ),
         "execution_idempotency": execution_idempotency or {"checked": False},
         "execution_lock": execution_lock or {"checked": False},
@@ -8750,6 +8842,106 @@ def run_shadow_bootstrap(
     }
 
 
+def current_blockers_execution_guard_not_required() -> dict[str, Any]:
+    return {
+        "checked": False,
+        "allowed": True,
+        "reason": "current blockers execution guard not required",
+    }
+
+
+def load_current_blockers_execution_guard(
+    plan: TargetWeightPlan,
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    path = Path(output_dir).parent / "current_blockers.json"
+    result: dict[str, Any] = {
+        "checked": False,
+        "allowed": True,
+        "path": path.as_posix(),
+        "reason": "current_blockers.json unavailable; guard not applied",
+        "matched_action": {},
+        "guards": {},
+    }
+    if not path.exists():
+        return result
+
+    result["checked"] = True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_current_blockers_unreadable: "
+                f"{exc.__class__.__name__}"
+            ),
+        }
+
+    matched_action: dict[str, Any] = {}
+    for action in payload.get("next_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        if str(action.get("strategy") or "").strip() != plan.candidate_id:
+            continue
+        trade_day = str(action.get("daily_ops_trade_day") or "").strip()
+        if trade_day and trade_day != plan.trade_day:
+            continue
+        matched_action = action
+        break
+
+    if not matched_action:
+        return {
+            **result,
+            "reason": "no current blockers action for this strategy/trade day",
+        }
+
+    guards = {
+        "db_persistence_guard": str(
+            matched_action.get("db_persistence_guard") or ""
+        ).strip(),
+        "db_restore_review_guard": str(
+            matched_action.get("db_restore_review_guard") or ""
+        ).strip(),
+        "snapshot_recovery_guard": str(
+            matched_action.get("snapshot_recovery_guard") or ""
+        ).strip(),
+        "command": str(matched_action.get("command") or "").strip(),
+    }
+    result = {
+        **result,
+        "reason": "current blockers action allows execution",
+        "matched_action": {
+            "priority": matched_action.get("priority"),
+            "strategy": matched_action.get("strategy"),
+            "daily_ops_trade_day": matched_action.get("daily_ops_trade_day"),
+            "desc": matched_action.get("desc"),
+        },
+        "guards": guards,
+    }
+    blocking_guards = [
+        value
+        for value in (
+            guards["db_persistence_guard"],
+            guards["db_restore_review_guard"],
+            guards["snapshot_recovery_guard"],
+        )
+        if value
+    ]
+    if blocking_guards or guards["command"].startswith("# blocked:"):
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_current_blockers_execution_blocked: "
+                + ", ".join(blocking_guards or [guards["command"]])
+            ),
+        }
+    return result
+
+
 def run_pilot(
     *,
     candidate_id: str = DEFAULT_TARGET_WEIGHT_CANDIDATE_ID,
@@ -8797,12 +8989,19 @@ def run_pilot(
         collector=collector,
     )
 
+    current_blockers_execution_guard = current_blockers_execution_guard_not_required()
+    if execute:
+        current_blockers_execution_guard = load_current_blockers_execution_guard(
+            plan,
+            output_dir=output_dir,
+        )
+
     preflight_refresh = {
         "checked": False,
         "complete": True,
         "reason": "paper preflight refresh not required for dry-run",
     }
-    if execute:
+    if execute and current_blockers_execution_guard["allowed"]:
         preflight_refresh = refresh_paper_preflight_status(plan.candidate_id, plan.trade_day)
 
     pilot_check = check_pilot_entry(
@@ -8845,6 +9044,7 @@ def run_pilot(
     execution_lock_release = None
     if (
         execute
+        and current_blockers_execution_guard["allowed"]
         and validation.allowed
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
@@ -8872,6 +9072,7 @@ def run_pilot(
     pre_execution_reconciliation = None
     if (
         execute
+        and current_blockers_execution_guard["allowed"]
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
         and pilot_authorization_snapshot_check["allowed"]
@@ -8884,6 +9085,11 @@ def run_pilot(
     execution_session_id: str | None = None
     if execute and not preflight_refresh["complete"]:
         execution = blocked_execution_for_preflight_refresh(plan, preflight_refresh)
+    elif execute and not current_blockers_execution_guard["allowed"]:
+        execution = blocked_execution_for_current_blockers_guard(
+            plan,
+            current_blockers_execution_guard,
+        )
     elif execute and not validation.allowed:
         execution = blocked_execution_for_pilot_validation(plan, validation)
     elif execute and not execution_trade_day_check["allowed"]:
@@ -8932,6 +9138,7 @@ def run_pilot(
     position_reconciliation = None
     if (
         execute
+        and current_blockers_execution_guard["allowed"]
         and validation.allowed
         and execution_trade_day_check["allowed"]
         and execution_market_session_check["allowed"]
@@ -9018,6 +9225,7 @@ def run_pilot(
             and execution_trade_day_check["allowed"]
             and execution_market_session_check["allowed"]
             and pilot_authorization_snapshot_check["allowed"]
+            and current_blockers_execution_guard["allowed"]
             and preflight_refresh["complete"]
             and (execution_idempotency is None or execution_idempotency["allowed"])
             and (execution_evidence["complete"] or order_submission_reached)
@@ -9108,6 +9316,7 @@ def run_pilot(
         execution_trade_day_check=execution_trade_day_check,
         execution_market_session_check=execution_market_session_check,
         pilot_authorization_snapshot_check=pilot_authorization_snapshot_check,
+        current_blockers_execution_guard=current_blockers_execution_guard,
         execution_idempotency=execution_idempotency,
         execution_lock=execution_lock,
         execution_lock_release=execution_lock_release,
@@ -9134,6 +9343,7 @@ def run_pilot(
         "execution_trade_day_check": execution_trade_day_check,
         "execution_market_session_check": execution_market_session_check,
         "pilot_authorization_snapshot_check": pilot_authorization_snapshot_check,
+        "current_blockers_execution_guard": current_blockers_execution_guard,
         "execution_idempotency": execution_idempotency,
         "execution_lock": execution_lock,
         "execution_lock_release": execution_lock_release,
