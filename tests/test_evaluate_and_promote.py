@@ -3257,6 +3257,197 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
     )
 
 
+def test_current_blockers_requires_reverify_when_ready_restore_csv_becomes_stale(tmp_path):
+    from tools.evaluate_and_promote import build_current_blockers_report
+    import tools.evaluate_and_promote as ep
+
+    review_dir = tmp_path / "review_bundle"
+    review_dir.mkdir()
+    candidate_trade = review_dir / "candidate_trade_history.csv"
+    candidate_positions = review_dir / "candidate_positions.csv"
+    trade_template = review_dir / "reviewed_authoritative_trade_history.csv"
+    positions_template = review_dir / "reviewed_authoritative_positions.csv"
+    trade_row = {
+        "account_key": "target_weight_best",
+        "symbol": "005930",
+        "action": "BUY",
+        "price": "70000",
+        "quantity": "1",
+        "total_amount": "70000",
+        "commission": "0",
+        "tax": "0",
+        "slippage": "0",
+        "strategy": "target_weight_best",
+        "mode": "paper",
+        "executed_at": "2026-05-20 09:00:00",
+        "execution_session_id": "session",
+        "order_id": "ORD-1",
+    }
+    with candidate_trade.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerow(trade_row)
+    with trade_template.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerow({**trade_row, "price": "70001"})
+    position_row = {
+        "account_key": "target_weight_best",
+        "symbol": "005930",
+        "quantity": "1",
+        "avg_price": "70000",
+        "total_invested": "70000",
+        "strategy": "target_weight_best",
+    }
+    for path in (candidate_positions, positions_template):
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=ep.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            )
+            writer.writeheader()
+            writer.writerow(position_row)
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+            },
+        },
+    }
+    latest_daily_ops = {
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+        },
+    }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+            "trade_history": {
+                "expected_row_count": 1,
+                "current_db_rows_on_date": 0,
+            },
+            "positions": {
+                "expected_symbol_count": 1,
+                "current_db_position_count": 0,
+                "missing_or_unverified_symbols": ["005930"],
+            },
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "trade_history_candidate_csv": candidate_trade.as_posix(),
+            "positions_candidate_csv": candidate_positions.as_posix(),
+            "trade_history_candidate_rows": 1,
+            "position_candidate_rows": 1,
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json"
+            )
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "ready_for_authoritative_db_restore",
+        "restore_ready": True,
+        "blockers": [],
+        "authoritative_evidence": {
+            "trade_history": {
+                "provided": True,
+                "match": True,
+                "sha256": "verified-before-review-edit",
+            },
+            "positions": {
+                "provided": True,
+                "match": True,
+                "sha256": ep._file_sha256(positions_template),
+            },
+        },
+    }
+    latest_db_restore_review_bundle = {
+        "artifact_type": "target_weight_db_restore_review_bundle",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "ready_for_manual_authoritative_review",
+        "review_bundle_ready": True,
+        "bundle_dir": review_dir.as_posix(),
+        "review_files": {
+            "candidate_trade_history_csv": candidate_trade.as_posix(),
+            "candidate_positions_csv": candidate_positions.as_posix(),
+            "authoritative_trade_history_template_csv": trade_template.as_posix(),
+            "authoritative_positions_template_csv": positions_template.as_posix(),
+        },
+        "operator_commands": {
+            "verify_after_manual_review": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json "
+                f"--authoritative-trade-history-csv {trade_template.as_posix()} "
+                f"--authoritative-positions-csv {positions_template.as_posix()}"
+            )
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
+        latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+    )
+
+    action = report["next_actions"][0]
+    assert action["snapshot_db_restore_verification_ready"] is True
+    assert action["snapshot_db_restore_verification_stale_after_review_edit"] is True
+    assert action["command"] == (
+        "# blocked: reviewed authoritative DB restore verification stale after CSV edit"
+    )
+    assert action["scheduled_command"] == action[
+        "snapshot_db_restore_verify_after_manual_review_command"
+    ]
+    assert action["requires"] == "rerun DB restore verification after reviewed CSV edit"
+    assert (
+        action["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_verification_stale_after_review_edit"
+    )
+    assert "manual DB restore" not in action["requires"]
+
+
 def test_current_blockers_routes_db_persistence_gap_to_diagnostics_before_restore_package():
     from tools.evaluate_and_promote import build_current_blockers_report
 
