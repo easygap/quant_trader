@@ -2170,6 +2170,15 @@ def _db_restore_authoritative_csv_action_fields(
         f"{prefix}_expected_rows": _safe_int(expected_rows),
         f"{prefix}_empty_template": bool(evidence.get("empty_template")),
         f"{prefix}_missing_columns": _text_list(evidence.get("missing_columns")),
+        f"{prefix}_candidate_source_rejected": bool(
+            evidence.get("candidate_source_rejected")
+        ),
+        f"{prefix}_candidate_marker_rejected": bool(
+            evidence.get("candidate_marker_rejected")
+        ),
+        f"{prefix}_candidate_marker_row_count": _safe_int(
+            evidence.get("candidate_marker_row_count")
+        ),
         f"{prefix}_identity_match": bool(evidence.get("identity_match")),
         f"{prefix}_economic_match": bool(evidence.get("economic_match")),
         f"{prefix}_economic_difference_count": _safe_int(
