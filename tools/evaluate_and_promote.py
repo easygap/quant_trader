@@ -2044,6 +2044,14 @@ def _text_list(value) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _db_restore_authoritative_csv_action_fields(
     prefix: str,
     evidence: dict,
@@ -2067,6 +2075,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "exists": False,
             "row_count": 0,
             "missing_columns": [],
+            "sha256": "",
         }
     path = Path(path_text)
     if not path.exists():
@@ -2075,6 +2084,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "exists": False,
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
+            "sha256": "",
         }
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -2083,12 +2093,14 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             fieldnames = [
                 str(column or "").strip() for column in reader.fieldnames or []
             ]
+        sha256 = _file_sha256(path)
     except OSError:
         return {
             "provided": True,
             "exists": False,
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
+            "sha256": "",
         }
     missing_columns = [
         column for column in expected_columns if column not in fieldnames
@@ -2098,6 +2110,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
         "exists": True,
         "row_count": len(rows),
         "missing_columns": missing_columns,
+        "sha256": sha256,
     }
 
 
@@ -2107,9 +2120,15 @@ def _db_restore_review_template_action_fields(
     path_value: object,
     expected_rows: int,
     expected_columns: list[str],
+    verification_sha256: object = "",
 ) -> dict[str, object]:
     progress = _read_csv_progress(path_value, expected_columns)
     row_count = _safe_int(progress.get("row_count"))
+    current_sha256 = str(progress.get("sha256") or "").strip()
+    verified_sha256 = str(verification_sha256 or "").strip()
+    verification_stale = bool(
+        current_sha256 and verified_sha256 and current_sha256 != verified_sha256
+    )
     return {
         f"{prefix}_provided": bool(progress.get("provided")),
         f"{prefix}_row_count": row_count,
@@ -2118,6 +2137,9 @@ def _db_restore_review_template_action_fields(
         and expected_rows > 0
         and row_count == 0,
         f"{prefix}_missing_columns": _text_list(progress.get("missing_columns")),
+        f"{prefix}_current_sha256": current_sha256,
+        f"{prefix}_verified_sha256": verified_sha256,
+        f"{prefix}_verification_stale": verification_stale,
     }
 
 
@@ -2428,6 +2450,8 @@ def _target_weight_ops_priority_action(
                         or ""
                     ),
                 })
+            verification_trade = {}
+            verification_positions = {}
             if isinstance(latest_db_restore_verification, dict):
                 verification_candidate = (
                     latest_db_restore_verification.get("candidate_package") or {}
@@ -2610,6 +2634,9 @@ def _target_weight_ops_priority_action(
                             )
                         ),
                         expected_columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+                        verification_sha256=verification_trade.get("sha256")
+                        if isinstance(verification_trade, dict)
+                        else "",
                     )
                 )
                 action.update(
@@ -2626,6 +2653,17 @@ def _target_weight_ops_priority_action(
                             )
                         ),
                         expected_columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+                        verification_sha256=verification_positions.get("sha256")
+                        if isinstance(verification_positions, dict)
+                        else "",
+                    )
+                )
+                action["snapshot_db_restore_verification_stale_after_review_edit"] = bool(
+                    action.get(
+                        "snapshot_db_restore_authoritative_trade_history_verification_stale"
+                    )
+                    or action.get(
+                        "snapshot_db_restore_authoritative_positions_verification_stale"
                     )
                 )
             verification_ready = bool(
