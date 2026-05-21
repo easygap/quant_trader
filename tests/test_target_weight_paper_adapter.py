@@ -2666,11 +2666,13 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                         "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": False,
                         "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
                             "authoritative_source",
+                            "authoritative_evidence_ref",
                             "reviewed_by",
                             "reviewed_at",
                         ],
                         "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
                         "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
+                        "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count": 0,
                         "snapshot_db_restore_authoritative_positions_provided": True,
                         "snapshot_db_restore_authoritative_positions_match": False,
                         "snapshot_db_restore_authoritative_positions_row_count": 0,
@@ -2680,11 +2682,13 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                         "snapshot_db_restore_authoritative_positions_review_metadata_ok": False,
                         "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
                             "authoritative_source",
+                            "authoritative_evidence_ref",
                             "reviewed_by",
                             "reviewed_at",
                         ],
                         "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
                         "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
+                        "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count": 0,
                     },
                 },
             },
@@ -2722,8 +2726,8 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
     ) in output
     assert (
         "Snapshot DB restore authoritative trade history metadata: "
-        "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
-        "incomplete_rows=0 candidate_source_rows=0 placeholder_rows=0 "
+        "ok=False missing_columns=authoritative_source, authoritative_evidence_ref, reviewed_by, reviewed_at "
+        "incomplete_rows=0 candidate_source_rows=0 candidate_evidence_ref_rows=0 placeholder_rows=0 "
         "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0 "
         "before_source_reviewed_at_rows=0"
     ) in output
@@ -2734,8 +2738,8 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
     ) in output
     assert (
         "Snapshot DB restore authoritative positions metadata: "
-        "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
-        "incomplete_rows=0 candidate_source_rows=0 placeholder_rows=0 "
+        "ok=False missing_columns=authoritative_source, authoritative_evidence_ref, reviewed_by, reviewed_at "
+        "incomplete_rows=0 candidate_source_rows=0 candidate_evidence_ref_rows=0 placeholder_rows=0 "
         "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0 "
         "before_source_reviewed_at_rows=0"
     ) in output
@@ -6581,12 +6585,14 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
         {
             **trade_rows[0],
             "authoritative_source": "todo",
+            "authoritative_evidence_ref": "target_weight_db_restore_candidates_manifest.json",
             "reviewed_by": "operator",
             "reviewed_at": "not-a-date",
         },
         {
             **trade_rows[1],
             "authoritative_source": "broker_statement",
+            "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
             "reviewed_by": "unknown",
             "reviewed_at": "2026-04-10T08:30:00",
         },
@@ -6595,12 +6601,14 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
         {
             **position_rows[0],
             "authoritative_source": "candidate_csv",
+            "authoritative_evidence_ref": "candidate_csv:positions",
             "reviewed_by": "operator",
             "reviewed_at": "2026-04-09T23:59:00",
         },
         {
             **position_rows[1],
             "authoritative_source": "broker_statement",
+            "authoritative_evidence_ref": "<evidence_ref>",
             "reviewed_by": "<reviewer>",
             "reviewed_at": "2099-01-01T00:00:00",
         },
@@ -6648,6 +6656,14 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
         in verified["blockers"]
     )
     assert (
+        "authoritative_trade_history_csv_review_metadata_candidate_evidence_ref"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_review_metadata_candidate_evidence_ref"
+        in verified["blockers"]
+    )
+    assert (
         "authoritative_positions_csv_review_metadata_placeholder"
         in verified["blockers"]
     )
@@ -6665,11 +6681,13 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
     assert positions_evidence["match"] is True
     assert trade_evidence["review_metadata_ok"] is False
     assert trade_evidence["metadata_placeholder_row_count"] == 2
+    assert trade_evidence["metadata_candidate_evidence_ref_row_count"] == 1
     assert trade_evidence["metadata_invalid_reviewed_at_row_count"] == 1
     assert trade_evidence["metadata_future_reviewed_at_row_count"] == 0
     assert trade_evidence["metadata_reviewed_at_before_source_row_count"] == 1
     assert positions_evidence["review_metadata_ok"] is False
     assert positions_evidence["metadata_candidate_source_row_count"] == 1
+    assert positions_evidence["metadata_candidate_evidence_ref_row_count"] == 1
     assert positions_evidence["metadata_placeholder_row_count"] == 1
     assert positions_evidence["metadata_future_reviewed_at_row_count"] == 1
     assert positions_evidence["metadata_reviewed_at_before_source_row_count"] == 1
@@ -6752,6 +6770,7 @@ def _write_reviewed_authoritative_csvs_from_package(twp, package, output_dir: Pa
     positions_path = output_dir / "reviewed_authoritative_positions.csv"
     metadata = {
         "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
         "reviewed_by": "operator",
         "reviewed_at": "2026-04-10T16:00:00",
     }
@@ -7075,6 +7094,7 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_co
     )
     review_metadata = {
         "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
         "reviewed_by": "operator",
         "reviewed_at": "2026-04-10T16:00:00",
     }
@@ -7134,6 +7154,7 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_row_count_
     )
     review_metadata = {
         "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
         "reviewed_by": "operator",
         "reviewed_at": "2026-04-10T16:00:00",
     }
@@ -7191,6 +7212,7 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mi
     )
     review_metadata = {
         "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
         "reviewed_by": "operator",
         "reviewed_at": "2026-04-10T16:00:00",
     }
@@ -7263,6 +7285,7 @@ def test_verify_target_weight_db_restore_package_separates_economic_mismatch(
     )
     review_metadata = {
         "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
         "reviewed_by": "operator",
         "reviewed_at": "2026-04-10T16:00:00",
     }
@@ -7398,9 +7421,13 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert list(trade_template_reader) == []
     assert list(positions_template_reader) == []
     assert "authoritative_source" in (trade_template_reader.fieldnames or [])
+    assert "authoritative_evidence_ref" in (trade_template_reader.fieldnames or [])
     assert "reviewed_by" in (trade_template_reader.fieldnames or [])
     assert "reviewed_at" in (trade_template_reader.fieldnames or [])
     assert "authoritative_source" in (positions_template_reader.fieldnames or [])
+    assert "authoritative_evidence_ref" in (
+        positions_template_reader.fieldnames or []
+    )
     assert "reviewed_by" in (positions_template_reader.fieldnames or [])
     assert "reviewed_at" in (positions_template_reader.fieldnames or [])
     empty_template_verification = twp.verify_target_weight_db_restore_package(

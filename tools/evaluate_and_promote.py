@@ -76,6 +76,7 @@ TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
 }
 TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS = [
     "authoritative_source",
+    "authoritative_evidence_ref",
     "reviewed_by",
     "reviewed_at",
 ]
@@ -92,6 +93,17 @@ TARGET_WEIGHT_RESTORE_METADATA_PLACEHOLDER_VALUES = {
     "unknown",
 }
 TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE = timedelta(minutes=5)
+TARGET_WEIGHT_RESTORE_CANDIDATE_EVIDENCE_REF_TOKENS = (
+    "artifact_candidate",
+    "candidate_csv",
+    "candidate_package",
+    "restore_candidate",
+    "target_weight_db_restore_candidates",
+    "trade_history_candidate",
+    "positions_candidate",
+    "reviewed_authoritative_trade_history.csv",
+    "reviewed_authoritative_positions.csv",
+)
 TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS = [
     "symbol",
     "action",
@@ -2317,6 +2329,9 @@ def _db_restore_authoritative_csv_action_fields(
         f"{prefix}_metadata_candidate_source_row_count": _safe_int(
             evidence.get("metadata_candidate_source_row_count")
         ),
+        f"{prefix}_metadata_candidate_evidence_ref_row_count": _safe_int(
+            evidence.get("metadata_candidate_evidence_ref_row_count")
+        ),
         f"{prefix}_metadata_placeholder_row_count": _safe_int(
             evidence.get("metadata_placeholder_row_count")
         ),
@@ -2368,6 +2383,16 @@ def _restore_metadata_value_is_placeholder(value: object) -> bool:
     return (
         normalized in TARGET_WEIGHT_RESTORE_METADATA_PLACEHOLDER_VALUES
         or (normalized.startswith("<") and normalized.endswith(">"))
+    )
+
+
+def _restore_evidence_ref_points_to_candidate(value: object) -> bool:
+    normalized = str(value or "").strip().lower().replace("\\", "/")
+    if not normalized or _restore_metadata_value_is_placeholder(normalized):
+        return False
+    return any(
+        token in normalized
+        for token in TARGET_WEIGHT_RESTORE_CANDIDATE_EVIDENCE_REF_TOKENS
     )
 
 
@@ -2428,6 +2453,7 @@ def _db_restore_authoritative_metadata_status(
     ]
     incomplete_count = 0
     candidate_source_count = 0
+    candidate_evidence_ref_count = 0
     placeholder_count = 0
     invalid_reviewed_at_count = 0
     future_reviewed_at_count = 0
@@ -2452,6 +2478,10 @@ def _db_restore_authoritative_metadata_status(
             "candidate-only",
         }:
             candidate_source_count += 1
+        if _restore_evidence_ref_points_to_candidate(
+            row.get("authoritative_evidence_ref")
+        ):
+            candidate_evidence_ref_count += 1
         reviewed_at = _parse_restore_reviewed_at(row.get("reviewed_at"))
         if str(row.get("reviewed_at") or "").strip() and reviewed_at is None:
             invalid_reviewed_at_count += 1
@@ -2471,6 +2501,7 @@ def _db_restore_authoritative_metadata_status(
             not missing_columns
             and incomplete_count == 0
             and candidate_source_count == 0
+            and candidate_evidence_ref_count == 0
             and placeholder_count == 0
             and invalid_reviewed_at_count == 0
             and future_reviewed_at_count == 0
@@ -2479,6 +2510,7 @@ def _db_restore_authoritative_metadata_status(
         "metadata_missing_columns": missing_columns,
         "metadata_incomplete_row_count": incomplete_count,
         "metadata_candidate_source_row_count": candidate_source_count,
+        "metadata_candidate_evidence_ref_row_count": candidate_evidence_ref_count,
         "metadata_placeholder_row_count": placeholder_count,
         "metadata_invalid_reviewed_at_row_count": invalid_reviewed_at_count,
         "metadata_future_reviewed_at_row_count": future_reviewed_at_count,
@@ -2583,6 +2615,7 @@ def _db_restore_review_template_action_fields(
         "metadata_missing_columns": [],
         "metadata_incomplete_row_count": 0,
         "metadata_candidate_source_row_count": 0,
+        "metadata_candidate_evidence_ref_row_count": 0,
         "metadata_placeholder_row_count": 0,
         "metadata_invalid_reviewed_at_row_count": 0,
         "metadata_future_reviewed_at_row_count": 0,
@@ -2626,6 +2659,9 @@ def _db_restore_review_template_action_fields(
         ),
         f"{prefix}_metadata_candidate_source_row_count": _safe_int(
             metadata_status.get("metadata_candidate_source_row_count")
+        ),
+        f"{prefix}_metadata_candidate_evidence_ref_row_count": _safe_int(
+            metadata_status.get("metadata_candidate_evidence_ref_row_count")
         ),
         f"{prefix}_metadata_placeholder_row_count": _safe_int(
             metadata_status.get("metadata_placeholder_row_count")
