@@ -3892,6 +3892,86 @@ def test_current_blockers_requires_reverify_for_legacy_ready_restore_without_rev
     )
 
 
+def test_current_blockers_review_template_fields_report_metadata_quality(tmp_path):
+    import tools.evaluate_and_promote as ep
+
+    candidate_csv = tmp_path / "candidate_trade_history.csv"
+    reviewed_csv = tmp_path / "reviewed_authoritative_trade_history.csv"
+    candidate_row = {
+        "account_key": "target_weight_best",
+        "symbol": "005930",
+        "action": "BUY",
+        "price": "70000",
+        "quantity": "1",
+        "total_amount": "70000",
+        "commission": "0",
+        "tax": "0",
+        "slippage": "0",
+        "strategy": "target_weight_best",
+        "mode": "paper",
+        "executed_at": "2026-05-20 09:00:00",
+        "execution_session_id": "session",
+        "order_id": "ORD-1",
+    }
+    reviewed_row = {
+        **candidate_row,
+        "authoritative_source": "unknown",
+        "reviewed_by": "<reviewer>",
+        "reviewed_at": "2099-01-01T00:00:00",
+    }
+    reviewed_columns = (
+        ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        + ep.TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+    )
+    with candidate_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        )
+        writer.writeheader()
+        writer.writerow(candidate_row)
+    with reviewed_csv.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=reviewed_columns)
+        writer.writeheader()
+        writer.writerow(reviewed_row)
+
+    fields = ep._db_restore_review_template_action_fields(
+        "snapshot_db_restore_authoritative_trade_history",
+        path_value=reviewed_csv.as_posix(),
+        candidate_path_value=candidate_csv.as_posix(),
+        expected_rows=1,
+        expected_columns=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        sample_columns=ep.TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS,
+    )
+
+    assert (
+        fields["snapshot_db_restore_authoritative_trade_history_review_metadata_ok"]
+        is False
+    )
+    assert (
+        fields[
+            "snapshot_db_restore_authoritative_trade_history_metadata_placeholder_row_count"
+        ]
+        == 1
+    )
+    assert (
+        fields[
+            "snapshot_db_restore_authoritative_trade_history_metadata_future_reviewed_at_row_count"
+        ]
+        == 1
+    )
+    assert (
+        fields[
+            "snapshot_db_restore_authoritative_trade_history_metadata_invalid_reviewed_at_row_count"
+        ]
+        == 0
+    )
+    assert (
+        fields["snapshot_db_restore_authoritative_trade_history_missing_row_count"]
+        == 0
+    )
+
+
 def test_current_blockers_routes_ready_apply_plan_to_pre_apply_backup():
     from tools.evaluate_and_promote import build_current_blockers_report
 
