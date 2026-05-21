@@ -1084,6 +1084,16 @@ def _target_weight_operator_next_action(
             return "PREPARE no-write DB restore apply plan before manual DB restore"
         if (
             priority_db_restore_review_guard
+            == "target_weight_authoritative_db_restore_review_bundle_stale"
+        ):
+            if priority_command and not _command_is_blocked(priority_command):
+                return (
+                    "REGENERATE DB restore review bundle before filling CSV: "
+                    f"{priority_command}"
+                )
+            return "REGENERATE DB restore review bundle before filling CSV"
+        if (
+            priority_db_restore_review_guard
             == "target_weight_authoritative_db_restore_backup_required"
         ):
             if priority_scheduled_command:
