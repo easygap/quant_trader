@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T08:52:47.042766",
+  "generated_at": "2026-05-21T09:02:54.704500",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T08:52:47.042766",
-    "age_days": 1.65,
+    "checked_at": "2026-05-21T09:02:54.704500",
+    "age_days": 1.66,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -86,83 +86,28 @@
       "target_days": 60,
       "remaining_pilot_days": 60,
       "invalid_execution_days": 3,
-      "repaired_pilot_days": 2,
+      "repaired_pilot_days": 0,
       "non_promotable_days": 0,
       "progress_ratio": 0.0,
       "invalid_reasons": {
         "target_weight_repaired_performance_not_promotable": 2,
-        "target_weight_benchmark_status_not_final": 1
+        "target_weight_db_persistence_complete_false": 1
       },
-      "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
-      "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
+      "desc": "오늘 target-weight pilot_paper DB 저장 증거 불완전, portfolio snapshot/DB 진단 후 새 실행 증거 확보",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "order_safety": "no_order",
-      "requires": "authoritative DB snapshot/trade/position evidence",
+      "requires": "database trade/position persistence proof",
+      "db_persistence_guard": "target_weight_db_persistence_proof_required",
+      "blocked_finalize_command": "# blocked: DB persistence proof incomplete; run diagnostics first",
+      "blocked_repair_command": "# blocked: DB persistence proof cannot be repaired from artifact",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
-      "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
       "finalize_report_source": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "finalize_report_generated_at": "2026-05-20T12:16:32.909182",
       "finalize_report_status": "blocked",
-      "finalize_source_record_fields_present": [
-        "total_value",
-        "cash",
-        "invested",
-        "position_count"
-      ],
-      "finalize_source_record_fields_usable": [
-        "cash",
-        "invested",
-        "position_count"
-      ],
-      "finalize_source_record_fields_unusable": [
-        "total_value"
-      ],
-      "finalize_portfolio_metrics_checked": true,
-      "finalize_portfolio_metrics_probe_status": "missing_snapshot_history",
-      "finalize_portfolio_metrics_probe_reason": "no portfolio snapshot exists for account_key",
-      "finalize_portfolio_metrics_current_snapshot_found": false,
-      "finalize_portfolio_metrics_previous_snapshot_found": false,
-      "finalize_portfolio_metrics_previous_snapshot_at": null,
-      "finalize_portfolio_metrics_trades_today": 0,
-      "finalize_portfolio_metrics_trades_since_previous": 0,
-      "finalize_portfolio_metrics_fields_present": [],
-      "finalize_missing_performance_fields": [
-        "total_value",
-        "daily_return"
-      ],
-      "finalize_portfolio_metrics_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "finalize_report_diagnostics_status": "present",
+      "finalize_report_reason": "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "snapshot_diagnostics_generated_at": "2026-05-20T17:48:59.979391",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
-      "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
-      "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
-      "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "snapshot_recovery_next_action": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20; do not create a portfolio snapshot from artifact-only fills",
-      "snapshot_recovery_status": "blocked",
-      "snapshot_recovery_safe_to_write": false,
-      "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
-      "snapshot_recovery_blockers": [
-        "portfolio_snapshot_history_missing",
-        "portfolio_metrics_required_fields_missing",
-        "db_execution_state_missing_for_account_key",
-        "artifact_fills_without_current_db_trades",
-        "source_record_db_persistence_incomplete"
-      ],
-      "snapshot_recovery_warnings": [
-        "source_record_proof_before_finalize=target_weight_db_persistence_complete_false"
-      ],
-      "snapshot_db_snapshot_count": 0,
-      "snapshot_db_current_snapshot_found": false,
-      "snapshot_db_trade_count_total": 0,
-      "snapshot_db_trade_count_on_date": 0,
-      "snapshot_db_position_count": 0,
-      "snapshot_artifact_fill_count": 4,
-      "snapshot_artifact_execution_session_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_20260520101654_df83e6e3",
-      "snapshot_artifact_db_persistence_complete": false,
-      "snapshot_artifact_db_trade_history_source": "",
-      "snapshot_artifact_db_positions_source": "",
       "snapshot_db_restore_status": "restore_required",
       "snapshot_db_restore_required": true,
       "snapshot_db_restore_trade_rows_expected": 4,
@@ -204,15 +149,7 @@
       "snapshot_db_restore_authoritative_positions_provided": false,
       "snapshot_db_restore_authoritative_positions_match": false,
       "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
-      "snapshot_db_restore_verification_db_positions": 0,
-      "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
-      "snapshot_recovery_order": [
-        "restore_authoritative_db_trade_history_positions_proof",
-        "rerun_portfolio_snapshot_diagnostics",
-        "rerun_finalize_pilot_evidence"
-      ],
-      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
-      "blocked_repair_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before repair"
+      "snapshot_db_restore_verification_db_positions": 0
     },
     {
       "priority": 2,
@@ -259,13 +196,11 @@
       },
       {
         "step": 3,
-        "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
-        "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
+        "desc": "오늘 target-weight pilot_paper DB 저장 증거 불완전, portfolio snapshot/DB 진단 후 새 실행 증거 확보",
+        "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
         "order_safety": "no_order",
-        "requires": "authoritative DB snapshot/trade/position evidence",
-        "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
-        "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-        "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize"
+        "requires": "database trade/position persistence proof",
+        "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary"
       },
       {
         "step": 4,
@@ -288,8 +223,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T08:52:47.042766",
-      "age_days": 1.65,
+      "checked_at": "2026-05-21T09:02:54.704500",
+      "age_days": 1.66,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -298,12 +233,12 @@
     },
     "latest_daily_ops": {
       "source_path": "reports/paper_runtime/target_weight_daily_ops_summary_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "generated_at": "2026-05-20T10:17:37.947326",
+      "generated_at": "2026-05-21T08:56:39.673900",
       "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "trade_day": "2026-05-20",
       "next_operator_trade_day": null,
       "status": "PILOT_EVIDENCE_INVALID",
-      "next_step": "오늘 pilot_paper 증거 품질 미확정; final benchmark/portfolio evidence 확정 후 daily ops 재점검",
+      "next_step": "오늘 pilot_paper DB 저장 증거 불완전; portfolio snapshot/DB 진단 후 새 실행 증거 확보",
       "evidence_progress": {
         "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
         "target_days": 60,
@@ -314,61 +249,214 @@
         "invalid_execution_days": 3,
         "invalid_reasons": {
           "target_weight_repaired_performance_not_promotable": 2,
-          "target_weight_benchmark_status_not_final": 1
+          "target_weight_db_persistence_complete_false": 1
         },
-        "repaired_pilot_days": 2,
+        "repaired_pilot_days": 0,
         "non_promotable_days": 0,
         "total_canonical_records": 5,
         "latest_record_date": "2026-05-20",
         "latest_verified_pilot_date": null,
-        "latest_repaired_pilot_date": "2026-05-19",
+        "latest_repaired_pilot_date": null,
         "latest_shadow_date": "2026-05-15",
         "ready_for_promotion_day_count": false
       },
       "decision": {
         "ready_for_cap_approval": false,
         "ready_for_capped_pilot": false,
-        "readiness_next_action": "resolve blocking requirements before enabling or executing pilot",
+        "readiness_next_action": "rerun readiness audit with current market data before enabling or executing pilot",
         "blocking_reasons": [
           "launch_readiness: clean_final_days: 0/3 (need 3 more)",
           "launch_readiness: infrastructure requirements are not met",
-          "pilot_validation: max_orders_per_day=4 reached (today=4)",
-          "execution_idempotency: target_weight_duplicate_execution_attempt: existing pilot session artifact for target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 2026-05-20"
+          "execution_idempotency: target_weight_duplicate_execution_attempt: existing pilot session artifact for target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 2026-05-20",
+          "execution_trade_day: target_weight_execution_trade_day_mismatch: plan_trade_day=2026-05-20 execution_day=2026-05-21 plan_as_of_date=2026-05-21; rerun with current market data before --execute",
+          "execution_market_session: target_weight_execution_market_session_closed: 장 운영 시간 외 (현재: 08:56, 장: 09:00:00~15:30:00); execute only during KRX regular session",
+          "pilot_authorization_snapshot: target_weight_pilot_authorization_snapshot_mismatch: as_of_date actual=2026-05-20 expected=2026-05-21, gross_exposure_after actual=4793500.0 expected=4892400.0, max_order_notional actual=1436000.0 expected=1422400.0"
         ],
         "warning_reasons": [
-          "preview_caps: target positions 4 > cap 2; gross exposure 4,798,100 > cap 3,000,000",
-          "plan_orders: no rebalance orders for this trade day"
+          "preview_caps: orders 4 > remaining_orders 2; required exposure increase 4,892,400 > remaining_exposure 3,000,000; max order notional 1,422,400 > cap 1,000,000; target positions 4 > cap 2; gross exposure 4,892,400 > cap 3,000,000"
         ],
         "post_evidence_diagnostics": [],
         "execution_trade_day_check": {
           "checked": true,
-          "allowed": true,
-          "complete": true,
-          "reason": "target-weight execution trade day matches current KST date",
+          "allowed": false,
+          "complete": false,
+          "reason": "target_weight_execution_trade_day_mismatch: plan_trade_day=2026-05-20 execution_day=2026-05-21 plan_as_of_date=2026-05-21; rerun with current market data before --execute",
           "plan_trade_day": "2026-05-20",
-          "plan_as_of_date": "2026-05-20",
-          "execution_day": "2026-05-20",
+          "plan_as_of_date": "2026-05-21",
+          "execution_day": "2026-05-21",
           "timezone": "Asia/Seoul"
         },
         "execution_market_session_check": {
           "checked": true,
           "plan_trade_day": "2026-05-20",
-          "plan_as_of_date": "2026-05-20",
-          "execution_day": "2026-05-20",
-          "execution_time": "10:17:37",
+          "plan_as_of_date": "2026-05-21",
+          "execution_day": "2026-05-21",
+          "execution_time": "08:56:39",
           "timezone": "Asia/Seoul",
-          "allowed": true,
-          "complete": true,
-          "reason": "target-weight execution market session is open",
+          "allowed": false,
+          "complete": false,
+          "reason": "target_weight_execution_market_session_closed: 장 운영 시간 외 (현재: 08:56, 장: 09:00:00~15:30:00); execute only during KRX regular session",
           "market_open": "09:00",
           "market_close": "15:30"
         },
         "pilot_authorization_snapshot_check": {
-          "checked": false,
-          "allowed": true,
-          "complete": true,
-          "reason": "pilot authorization snapshot not checked because pilot entry is blocked",
-          "mismatches": []
+          "checked": true,
+          "allowed": false,
+          "complete": false,
+          "reason": "target_weight_pilot_authorization_snapshot_mismatch: as_of_date actual=2026-05-20 expected=2026-05-21, gross_exposure_after actual=4793500.0 expected=4892400.0, max_order_notional actual=1436000.0 expected=1422400.0",
+          "mismatches": [
+            {
+              "field": "as_of_date",
+              "expected": "2026-05-21",
+              "actual": "2026-05-20"
+            },
+            {
+              "field": "gross_exposure_after",
+              "expected": 4892400.0,
+              "actual": 4793500.0,
+              "tolerance": 24462.0
+            },
+            {
+              "field": "max_order_notional",
+              "expected": 1422400.0,
+              "actual": 1436000.0,
+              "tolerance": 10000.0
+            }
+          ],
+          "authorized_snapshot": {
+            "schema_version": 1,
+            "snapshot_type": "target_weight_plan_authorization",
+            "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+            "as_of_date": "2026-05-20",
+            "trade_day": "2026-05-20",
+            "score_day": "2026-05-19",
+            "params_hash": "5358065db4f872fb2c29a66bffa87dc28ebedf5aac007f641d7074279e710191",
+            "targets": [
+              "009150",
+              "402340",
+              "000660",
+              "005930",
+              "005935"
+            ],
+            "target_position_count": 4,
+            "target_exposure": 0.75,
+            "base_target_exposure": 0.75,
+            "risk_off": false,
+            "gross_exposure_after": 4793500.0,
+            "max_order_notional": 1436000.0,
+            "order_count": 4,
+            "position_quantities_before": {},
+            "target_quantities_after": {
+              "000660": 0,
+              "005930": 5,
+              "005935": 8,
+              "009150": 1,
+              "402340": 1
+            },
+            "portfolio_drawdown_guard": {
+              "enabled": true,
+              "active": false,
+              "triggered": false,
+              "reason": "portfolio drawdown guard observed without exposure reduction",
+              "trigger_pct": 10.0,
+              "exposure_pct": 40.0,
+              "cooldown_rebalances": 1,
+              "cooldown_before": 0,
+              "cooldown_after_trigger": 0,
+              "cooldown_after_plan": 0,
+              "drawdown_pct": -0.01,
+              "last_equity_value": 9999267.0,
+              "peak_value": 10000000.0,
+              "target_exposure_before": 0.75,
+              "target_exposure_after": 0.75,
+              "state_source": "paper_evidence",
+              "state_record_count": 4,
+              "latest_record_date": "2026-05-19"
+            },
+            "readiness_audit": {
+              "generated_at": "2026-05-20T10:14:37.209981",
+              "ready_for_cap_approval": true,
+              "ready_for_capped_pilot": false,
+              "blocking_reasons": [
+                "pilot_authorization_snapshot: target_weight_pilot_authorization_snapshot_mismatch: as_of_date actual=2026-05-19 expected=2026-05-20, trade_day actual=2026-05-19 expected=2026-05-20, score_day actual=2026-05-18 expected=2026-05-19, portfolio_drawdown_guard actual={'enabled': True, 'active': False, 'triggered': False, 'trigger_pct': 10.0, 'exposure_pct': 40.0, 'cooldown_rebalances': 1, 'cooldown_before': 0, 'cooldown_after_trigger': 0, 'cooldown_after_plan': 0, 'drawdown_pct': -0.01, 'last_equity_value': 9999271.0, 'peak_value': 10000000.0, 'target_exposure_before': 0.75, 'target_exposure_after': 0.75} expected={'enabled': True, 'active': False, 'triggered': False, 'trigger_pct': 10.0, 'exposure_pct': 40.0, 'cooldown_rebalances': 1, 'cooldown_before': 0, 'cooldown_after_trigger': 0, 'cooldown_after_plan': 0, 'drawdown_pct': -0.01, 'last_equity_value': 9999267.0, 'peak_value': 10000000.0, 'target_exposure_before': 0.75, 'target_exposure_after': 0.75}, gross_exposure_after actual=4875700.0 expected=4793500.0"
+              ],
+              "warning_reasons": [],
+              "execution_trade_day_check": {
+                "checked": true,
+                "allowed": true,
+                "complete": true,
+                "reason": "target-weight execution trade day matches current KST date",
+                "plan_trade_day": "2026-05-20",
+                "plan_as_of_date": "2026-05-20",
+                "execution_day": "2026-05-20",
+                "timezone": "Asia/Seoul"
+              },
+              "execution_market_session_check": {
+                "checked": true,
+                "plan_trade_day": "2026-05-20",
+                "plan_as_of_date": "2026-05-20",
+                "execution_day": "2026-05-20",
+                "execution_time": "10:14:37",
+                "timezone": "Asia/Seoul",
+                "allowed": true,
+                "complete": true,
+                "reason": "target-weight execution market session is open",
+                "market_open": "09:00",
+                "market_close": "15:30"
+              }
+            }
+          },
+          "current_snapshot": {
+            "schema_version": 1,
+            "snapshot_type": "target_weight_plan_authorization",
+            "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
+            "as_of_date": "2026-05-21",
+            "trade_day": "2026-05-20",
+            "score_day": "2026-05-19",
+            "params_hash": "5358065db4f872fb2c29a66bffa87dc28ebedf5aac007f641d7074279e710191",
+            "targets": [
+              "009150",
+              "402340",
+              "000660",
+              "005930",
+              "005935"
+            ],
+            "target_position_count": 4,
+            "target_exposure": 0.75,
+            "base_target_exposure": 0.75,
+            "risk_off": false,
+            "gross_exposure_after": 4892400.0,
+            "max_order_notional": 1422400.0,
+            "order_count": 4,
+            "position_quantities_before": {},
+            "target_quantities_after": {
+              "000660": 0,
+              "005930": 5,
+              "005935": 8,
+              "009150": 1,
+              "402340": 1
+            },
+            "portfolio_drawdown_guard": {
+              "enabled": true,
+              "active": false,
+              "triggered": false,
+              "reason": "portfolio drawdown guard observed without exposure reduction",
+              "trigger_pct": 10.0,
+              "exposure_pct": 40.0,
+              "cooldown_rebalances": 1,
+              "cooldown_before": 0,
+              "cooldown_after_trigger": 0,
+              "cooldown_after_plan": 0,
+              "drawdown_pct": -0.01,
+              "last_equity_value": 9999267.0,
+              "peak_value": 10000000.0,
+              "target_exposure_before": 0.75,
+              "target_exposure_after": 0.75,
+              "state_source": "paper_evidence",
+              "state_record_count": 4,
+              "latest_record_date": "2026-05-19"
+            }
+          }
         },
         "data_quality_check": {
           "checked": true,
@@ -433,12 +521,13 @@
         }
       },
       "operator_commands": {
-        "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-20",
-        "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-20 --readiness-audit",
+        "collect_shadow_days": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --shadow-days 3 --shadow-end-date 2026-05-21",
+        "rerun_readiness_audit": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --as-of-date 2026-05-21 --readiness-audit",
         "enable_suggested_caps": "# blocked: pilot_paper evidence invalid for 2026-05-20; finalize or repair evidence before changing pilot caps",
         "execute_capped_paper": "# blocked: pilot_paper evidence invalid for 2026-05-20; finalize benchmark/portfolio evidence before counting the day",
-        "finalize_pilot_evidence": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --finalize-pilot-evidence --finalize-date 2026-05-20",
-        "repair_pilot_evidence": "# fallback: use only if finalize cannot produce promotable proof; python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --repair-pilot-evidence --repair-date 2026-05-20"
+        "finalize_pilot_evidence": "# blocked: pilot_paper DB persistence proof incomplete; run diagnostics first: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+        "repair_pilot_evidence": "# blocked: DB persistence proof cannot be repaired from artifact; run diagnostics first: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
+        "diagnose_portfolio_snapshot": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
       }
     },
     "core_entry_check": {
@@ -447,7 +536,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T08:52:47.042766",
+      "checked_at": "2026-05-21T09:02:54.704500",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -566,83 +655,28 @@
       "target_days": 60,
       "remaining_pilot_days": 60,
       "invalid_execution_days": 3,
-      "repaired_pilot_days": 2,
+      "repaired_pilot_days": 0,
       "non_promotable_days": 0,
       "progress_ratio": 0.0,
       "invalid_reasons": {
         "target_weight_repaired_performance_not_promotable": 2,
-        "target_weight_benchmark_status_not_final": 1
+        "target_weight_db_persistence_complete_false": 1
       },
-      "desc": "target-weight snapshot 복구 전 DB trade_history/positions 증거 복구 후 진단 재점검",
-      "command": "# blocked: restore authoritative DB trade_history/positions proof before target-weight snapshot recovery",
+      "desc": "오늘 target-weight pilot_paper DB 저장 증거 불완전, portfolio snapshot/DB 진단 후 새 실행 증거 확보",
+      "command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
       "order_safety": "no_order",
-      "requires": "authoritative DB snapshot/trade/position evidence",
+      "requires": "database trade/position persistence proof",
+      "db_persistence_guard": "target_weight_db_persistence_proof_required",
+      "blocked_finalize_command": "# blocked: DB persistence proof incomplete; run diagnostics first",
+      "blocked_repair_command": "# blocked: DB persistence proof cannot be repaired from artifact",
       "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
-      "scheduled_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "performance_evidence_guard": "target_weight_pilot_evidence_finalize_missing_performance",
       "finalize_report_source": "reports/paper_runtime/target_weight_pilot_evidence_finalize_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "finalize_report_generated_at": "2026-05-20T12:16:32.909182",
       "finalize_report_status": "blocked",
-      "finalize_source_record_fields_present": [
-        "total_value",
-        "cash",
-        "invested",
-        "position_count"
-      ],
-      "finalize_source_record_fields_usable": [
-        "cash",
-        "invested",
-        "position_count"
-      ],
-      "finalize_source_record_fields_unusable": [
-        "total_value"
-      ],
-      "finalize_portfolio_metrics_checked": true,
-      "finalize_portfolio_metrics_probe_status": "missing_snapshot_history",
-      "finalize_portfolio_metrics_probe_reason": "no portfolio snapshot exists for account_key",
-      "finalize_portfolio_metrics_current_snapshot_found": false,
-      "finalize_portfolio_metrics_previous_snapshot_found": false,
-      "finalize_portfolio_metrics_previous_snapshot_at": null,
-      "finalize_portfolio_metrics_trades_today": 0,
-      "finalize_portfolio_metrics_trades_since_previous": 0,
-      "finalize_portfolio_metrics_fields_present": [],
-      "finalize_missing_performance_fields": [
-        "total_value",
-        "daily_return"
-      ],
-      "finalize_portfolio_metrics_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "finalize_portfolio_snapshot_diagnostics_command": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20",
-      "finalize_report_diagnostics_status": "present",
+      "finalize_report_reason": "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "snapshot_diagnostics_generated_at": "2026-05-20T17:48:59.979391",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
-      "snapshot_diagnostics_reason": "target_weight_portfolio_snapshot_history_missing",
-      "snapshot_recovery_guard": "target_weight_db_persistence_proof_required_before_snapshot",
-      "snapshot_recovery_hint": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot",
-      "snapshot_recovery_next_action": "restore target-weight DB trade_history/positions persistence proof before creating a portfolio snapshot; then rerun diagnostics: python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --diagnose-portfolio-snapshot --snapshot-date 2026-05-20; do not create a portfolio snapshot from artifact-only fills",
-      "snapshot_recovery_status": "blocked",
-      "snapshot_recovery_safe_to_write": false,
-      "snapshot_recovery_reason": "snapshot recovery requires authoritative DB snapshot/trade/position evidence",
-      "snapshot_recovery_blockers": [
-        "portfolio_snapshot_history_missing",
-        "portfolio_metrics_required_fields_missing",
-        "db_execution_state_missing_for_account_key",
-        "artifact_fills_without_current_db_trades",
-        "source_record_db_persistence_incomplete"
-      ],
-      "snapshot_recovery_warnings": [
-        "source_record_proof_before_finalize=target_weight_db_persistence_complete_false"
-      ],
-      "snapshot_db_snapshot_count": 0,
-      "snapshot_db_current_snapshot_found": false,
-      "snapshot_db_trade_count_total": 0,
-      "snapshot_db_trade_count_on_date": 0,
-      "snapshot_db_position_count": 0,
-      "snapshot_artifact_fill_count": 4,
-      "snapshot_artifact_execution_session_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_20260520101654_df83e6e3",
-      "snapshot_artifact_db_persistence_complete": false,
-      "snapshot_artifact_db_trade_history_source": "",
-      "snapshot_artifact_db_positions_source": "",
       "snapshot_db_restore_status": "restore_required",
       "snapshot_db_restore_required": true,
       "snapshot_db_restore_trade_rows_expected": 4,
@@ -684,15 +718,7 @@
       "snapshot_db_restore_authoritative_positions_provided": false,
       "snapshot_db_restore_authoritative_positions_match": false,
       "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
-      "snapshot_db_restore_verification_db_positions": 0,
-      "scheduled_follow_up": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
-      "snapshot_recovery_order": [
-        "restore_authoritative_db_trade_history_positions_proof",
-        "rerun_portfolio_snapshot_diagnostics",
-        "rerun_finalize_pilot_evidence"
-      ],
-      "blocked_finalize_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before finalize",
-      "blocked_repair_command": "# blocked: portfolio snapshot recovery requires authoritative DB/snapshot evidence before repair"
+      "snapshot_db_restore_verification_db_positions": 0
     }
   },
   "default_strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 capped paper pilot 우선, scoring은 관찰만 유지"
