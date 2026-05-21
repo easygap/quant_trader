@@ -4203,6 +4203,19 @@ def _target_weight_db_restore_inspect_review_progress_command(
     )
 
 
+def _target_weight_db_restore_validate_review_worklist_command(
+    *,
+    manifest_path: str | Path,
+    review_worklist_csv: str | Path,
+) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        "--validate-db-restore-review-worklist "
+        f"--restore-manifest {manifest_path} "
+        f"--review-worklist-csv {review_worklist_csv}"
+    )
+
+
 def _target_weight_db_restore_apply_plan_command(
     verification_report_path: str | Path,
 ) -> str:
@@ -4268,6 +4281,26 @@ TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_COLUMNS = [
     "reviewed_at",
     "review_notes",
 ]
+TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_ACCEPTED_STATUSES = {
+    "approved",
+    "confirmed",
+    "done",
+    "reviewed",
+    "verified",
+}
+TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_PENDING_STATUSES = {
+    "",
+    "needs_review",
+    "pending",
+    "todo",
+}
+TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_REJECTED_STATUSES = {
+    "excluded",
+    "mismatch",
+    "rejected",
+    "skip",
+    "skipped",
+}
 
 
 def _target_weight_restore_review_checklist_columns(
@@ -4930,6 +4963,10 @@ def inspect_target_weight_db_restore_review_progress(
         trade_history_template=str(authoritative_trade_history_csv or ""),
         positions_template=str(authoritative_positions_csv or ""),
     )
+    validate_worklist_command = _target_weight_db_restore_validate_review_worklist_command(
+        manifest_path=manifest_file.as_posix(),
+        review_worklist_csv=review_worklist_path.as_posix(),
+    )
     report = {
         "artifact_type": "target_weight_db_restore_review_progress",
         "schema_version": 1,
@@ -4985,6 +5022,7 @@ def inspect_target_weight_db_restore_review_progress(
         },
         "operator_commands": {
             "verify_when_complete": verify_command,
+            "validate_review_worklist": validate_worklist_command,
             "manual_review_guard": (
                 "# manual step required: fill reviewed authoritative CSV files "
                 "from broker/DB evidence before verification"
@@ -4998,6 +5036,466 @@ def inspect_target_weight_db_restore_review_progress(
     report["artifact_path"] = json_path.as_posix()
     report["report_path"] = md_path.as_posix()
     return report
+
+
+def _target_weight_restore_candidate_row_hash(
+    row: dict[str, Any],
+    columns: list[str],
+) -> str:
+    row_payload = {
+        column: _normalize_restore_compare_value(column, row.get(column))
+        for column in columns
+    }
+    return _stable_manifest_hash(row_payload)
+
+
+def _target_weight_restore_worklist_kind_columns(kind: str) -> list[str]:
+    if kind == "trade_history":
+        return TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+    if kind == "positions":
+        return TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+    return []
+
+
+def _validate_target_weight_restore_worklist_kind(
+    *,
+    kind: str,
+    rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    min_reviewed_at: datetime | None,
+    blockers: list[str],
+) -> dict[str, Any]:
+    columns = _target_weight_restore_worklist_kind_columns(kind)
+    accepted_status_count = 0
+    pending_status_count = 0
+    rejected_status_count = 0
+    invalid_status_count = 0
+    hash_mismatch_count = 0
+    row_number_invalid_count = 0
+    target_csv_missing_count = 0
+    missing_reason_invalid_count = 0
+    not_authoritative_missing_count = 0
+    duplicate_candidate_keys = 0
+    seen_candidate_keys: set[tuple[int, str]] = set()
+    target_csv_values: list[str] = []
+    for row in rows:
+        status = str(row.get("review_status") or "").strip().lower()
+        if status in TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_ACCEPTED_STATUSES:
+            accepted_status_count += 1
+        elif status in TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_PENDING_STATUSES:
+            pending_status_count += 1
+        elif status in TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_REJECTED_STATUSES:
+            rejected_status_count += 1
+        else:
+            invalid_status_count += 1
+
+        if not _restore_bool_marker(row.get("not_authoritative")):
+            not_authoritative_missing_count += 1
+        if str(row.get("missing_reason") or "").strip() != "missing_from_authoritative":
+            missing_reason_invalid_count += 1
+        target_csv = str(row.get("target_authoritative_csv") or "").strip()
+        if target_csv:
+            target_csv_values.append(target_csv)
+        else:
+            target_csv_missing_count += 1
+
+        row_number = _coerce_int_or_zero(row.get("candidate_row_number"))
+        expected_hash = str(row.get("candidate_row_sha256") or "").strip()
+        if row_number <= 0 or row_number > len(candidate_rows):
+            row_number_invalid_count += 1
+            continue
+        candidate_row = candidate_rows[row_number - 1]
+        actual_hash = _target_weight_restore_candidate_row_hash(
+            candidate_row,
+            columns,
+        )
+        candidate_key = (row_number, expected_hash)
+        if candidate_key in seen_candidate_keys:
+            duplicate_candidate_keys += 1
+        seen_candidate_keys.add(candidate_key)
+        if expected_hash != actual_hash:
+            hash_mismatch_count += 1
+
+    fieldnames = list(TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_COLUMNS) + [
+        column
+        for column in columns
+        if column not in TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_COLUMNS
+    ]
+    metadata_status = _restore_authoritative_metadata_status(
+        rows,
+        fieldnames,
+        min_reviewed_at=min_reviewed_at,
+    )
+    prefix = f"review_worklist_{kind}"
+    if pending_status_count:
+        blockers.append(f"{prefix}_review_status_pending")
+    if rejected_status_count:
+        blockers.append(f"{prefix}_review_status_rejected")
+    if invalid_status_count:
+        blockers.append(f"{prefix}_review_status_invalid")
+    if row_number_invalid_count:
+        blockers.append(f"{prefix}_candidate_row_number_invalid")
+    if hash_mismatch_count:
+        blockers.append(f"{prefix}_candidate_row_hash_mismatch")
+    if duplicate_candidate_keys:
+        blockers.append(f"{prefix}_duplicate_candidate_rows")
+    if target_csv_missing_count:
+        blockers.append(f"{prefix}_target_authoritative_csv_missing")
+    if missing_reason_invalid_count:
+        blockers.append(f"{prefix}_missing_reason_invalid")
+    if not_authoritative_missing_count:
+        blockers.append(f"{prefix}_not_authoritative_marker_missing")
+    if metadata_status["metadata_missing_columns"]:
+        blockers.append(f"{prefix}_metadata_columns_missing")
+    elif rows and metadata_status["metadata_incomplete_row_count"]:
+        blockers.append(f"{prefix}_metadata_incomplete")
+    if metadata_status["metadata_candidate_source_row_count"]:
+        blockers.append(f"{prefix}_metadata_candidate_source")
+    if metadata_status["metadata_candidate_evidence_ref_row_count"]:
+        blockers.append(f"{prefix}_metadata_candidate_evidence_ref")
+    if metadata_status["metadata_placeholder_row_count"]:
+        blockers.append(f"{prefix}_metadata_placeholder")
+    if metadata_status["metadata_invalid_reviewed_at_row_count"]:
+        blockers.append(f"{prefix}_metadata_invalid_reviewed_at")
+    if metadata_status["metadata_future_reviewed_at_row_count"]:
+        blockers.append(f"{prefix}_metadata_future_reviewed_at")
+    if metadata_status["metadata_reviewed_at_before_source_row_count"]:
+        blockers.append(f"{prefix}_metadata_reviewed_at_before_source")
+
+    return {
+        "kind": kind,
+        "row_count": len(rows),
+        "candidate_rows": len(candidate_rows),
+        "accepted_status_count": accepted_status_count,
+        "pending_status_count": pending_status_count,
+        "rejected_status_count": rejected_status_count,
+        "invalid_status_count": invalid_status_count,
+        "row_number_invalid_count": row_number_invalid_count,
+        "candidate_row_hash_mismatch_count": hash_mismatch_count,
+        "duplicate_candidate_row_count": duplicate_candidate_keys,
+        "target_authoritative_csv_missing_count": target_csv_missing_count,
+        "target_authoritative_csv_values": sorted(set(target_csv_values)),
+        "missing_reason_invalid_count": missing_reason_invalid_count,
+        "not_authoritative_marker_missing_count": not_authoritative_missing_count,
+        **metadata_status,
+    }
+
+
+def validate_target_weight_db_restore_review_worklist(
+    *,
+    manifest_path: str | Path,
+    review_worklist_csv: str | Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """DB 조회/쓰기 없이 review worklist의 수동 검토 완료 상태를 검증한다."""
+    manifest_file = Path(manifest_path)
+    worklist_path = Path(review_worklist_csv)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    manifest: dict[str, Any] = {}
+    if not manifest_file.exists():
+        blockers.append("manifest_missing")
+    else:
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"manifest_invalid_json:{exc}")
+            manifest = {}
+
+    if manifest.get("artifact_type") != "target_weight_db_restore_candidate_package":
+        blockers.append("manifest_artifact_type_invalid")
+    if not bool(manifest.get("generated")):
+        blockers.append("manifest_package_not_generated")
+    if bool(manifest.get("db_write_enabled")):
+        blockers.append("manifest_db_write_enabled_must_be_false")
+    if bool(manifest.get("portfolio_snapshot_write_enabled")):
+        blockers.append("manifest_snapshot_write_enabled_must_be_false")
+    if not bool(manifest.get("candidate_only")):
+        blockers.append("manifest_candidate_only_required")
+    if not bool(manifest.get("requires_authoritative_confirmation")):
+        blockers.append("manifest_authoritative_confirmation_required")
+
+    candidate_id = str(manifest.get("candidate_id") or "")
+    snapshot_date = str(manifest.get("snapshot_date") or "")
+    trade_info = _verify_restore_csv_file(
+        path_value=manifest.get("trade_history_candidate_csv"),
+        expected_hash=str(manifest.get("trade_history_candidate_csv_sha256") or ""),
+        expected_rows=_coerce_int_or_zero(
+            manifest.get("trade_history_candidate_rows")
+        ),
+        kind="trade_history",
+        blockers=blockers,
+        warnings=warnings,
+    )
+    position_info = _verify_restore_csv_file(
+        path_value=manifest.get("positions_candidate_csv"),
+        expected_hash=str(manifest.get("positions_candidate_csv_sha256") or ""),
+        expected_rows=_coerce_int_or_zero(manifest.get("position_candidate_rows")),
+        kind="positions",
+        blockers=blockers,
+        warnings=warnings,
+    )
+
+    worklist_rows: list[dict[str, Any]] = []
+    fieldnames: list[str] = []
+    if not worklist_path.exists():
+        blockers.append("review_worklist_csv_missing")
+    else:
+        worklist_rows, fieldnames = _read_csv_dict_rows_with_fieldnames(worklist_path)
+    required_columns = _target_weight_restore_review_worklist_columns(
+        TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        + TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+    )
+    missing_columns = [column for column in required_columns if column not in fieldnames]
+    if missing_columns:
+        blockers.append("review_worklist_csv_columns_missing")
+
+    package_blockers = [
+        blocker
+        for blocker in blockers
+        if not str(blocker).startswith("review_worklist_")
+    ]
+    fatal_blockers = package_blockers + [
+        blocker
+        for blocker in blockers
+        if blocker
+        in {
+            "review_worklist_csv_missing",
+            "review_worklist_csv_columns_missing",
+        }
+    ]
+    trade_rows = [
+        row
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "trade_history"
+    ]
+    position_rows = [
+        row
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "positions"
+    ]
+    unknown_kind_count = len(worklist_rows) - len(trade_rows) - len(position_rows)
+    if unknown_kind_count:
+        blockers.append("review_worklist_candidate_kind_invalid")
+
+    trade_validation = _validate_target_weight_restore_worklist_kind(
+        kind="trade_history",
+        rows=trade_rows if not missing_columns else [],
+        candidate_rows=trade_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=trade_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+            timestamp_column="executed_at",
+        ),
+        blockers=blockers,
+    )
+    position_validation = _validate_target_weight_restore_worklist_kind(
+        kind="positions",
+        rows=position_rows if not missing_columns else [],
+        candidate_rows=position_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=position_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+        ),
+        blockers=blockers,
+    )
+    ready = bool(worklist_rows) and not blockers
+    status = "ready_for_authoritative_csv_update" if ready else "review_incomplete"
+    if fatal_blockers:
+        status = "blocked"
+    verify_command = ""
+    trade_target = _first_text(
+        trade_validation.get("target_authoritative_csv_values") or []
+    )
+    position_target = _first_text(
+        position_validation.get("target_authoritative_csv_values") or []
+    )
+    if trade_target and position_target:
+        verify_command = _target_weight_db_restore_verify_with_templates_command(
+            manifest_path=manifest_file.as_posix(),
+            trade_history_template=trade_target,
+            positions_template=position_target,
+        )
+    report = {
+        "artifact_type": "target_weight_db_restore_review_worklist_validation",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": status,
+        "review_worklist_ready_for_authoritative_csv_update": ready,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "manifest_path": manifest_file.as_posix(),
+        "manifest_hash": _file_sha256(manifest_file) if manifest_file.exists() else "",
+        "review_worklist_csv": worklist_path.as_posix(),
+        "review_worklist_csv_exists": worklist_path.exists(),
+        "review_worklist_csv_sha256": (
+            _file_sha256(worklist_path) if worklist_path.exists() else ""
+        ),
+        "review_worklist_row_count": len(worklist_rows),
+        "unknown_candidate_kind_count": unknown_kind_count,
+        "missing_columns": missing_columns,
+        "validation": {
+            "trade_history": trade_validation,
+            "positions": position_validation,
+        },
+        "candidate_package": {
+            "trade_history": {
+                key: value for key, value in trade_info.items() if key != "rows"
+            },
+            "positions": {
+                key: value for key, value in position_info.items() if key != "rows"
+            },
+        },
+        "no_write_safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "db_state_checked": False,
+            "restore_applied": False,
+            "dry_run_only": True,
+            "authoritative_csv_written": False,
+        },
+        "operator_commands": {
+            "verify_after_authoritative_csv_update": verify_command,
+            "manual_review_guard": (
+                "# manual step required: copy reviewed worklist evidence into "
+                "the reviewed authoritative CSV files, then verify"
+            ),
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_review_worklist_validation_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    return report
+
+
+def render_target_weight_db_restore_review_worklist_validation_markdown(
+    report: dict[str, Any],
+) -> str:
+    validation = report.get("validation") or {}
+    trade = validation.get("trade_history") or {}
+    positions = validation.get("positions") or {}
+    lines = [
+        "# Target-weight DB Restore Review Worklist Validation",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        "- Ready for authoritative CSV update: "
+        f"`{bool(report.get('review_worklist_ready_for_authoritative_csv_update'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        "- Warnings: "
+        f"`{', '.join(report.get('warnings') or []) or 'none'}`",
+        "",
+        "## No-write Safety",
+        "- DB write enabled: `False`",
+        "- Portfolio snapshot write enabled: `False`",
+        "- DB state checked: `False`",
+        "- Restore applied: `False`",
+        "- Authoritative CSV written: `False`",
+        "",
+        "## Worklist",
+        f"- CSV: `{report.get('review_worklist_csv') or 'none'}`",
+        f"- Rows: `{report.get('review_worklist_row_count', 0)}`",
+        f"- Unknown kind rows: `{report.get('unknown_candidate_kind_count', 0)}`",
+        "- Missing columns: "
+        f"`{', '.join(report.get('missing_columns') or []) or 'none'}`",
+        "",
+        "## Trade History",
+        f"- Rows: `{trade.get('row_count', 0)}`",
+        f"- Accepted statuses: `{trade.get('accepted_status_count', 0)}`",
+        f"- Pending statuses: `{trade.get('pending_status_count', 0)}`",
+        f"- Metadata ok: `{trade.get('review_metadata_ok', False)}`",
+        f"- Hash mismatches: `{trade.get('candidate_row_hash_mismatch_count', 0)}`",
+        "",
+        "## Positions",
+        f"- Rows: `{positions.get('row_count', 0)}`",
+        f"- Accepted statuses: `{positions.get('accepted_status_count', 0)}`",
+        f"- Pending statuses: `{positions.get('pending_status_count', 0)}`",
+        f"- Metadata ok: `{positions.get('review_metadata_ok', False)}`",
+        f"- Hash mismatches: `{positions.get('candidate_row_hash_mismatch_count', 0)}`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_review_worklist_validation_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_review_worklist_validation_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_review_worklist_validation_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_review_worklist_validation(
+    report: dict[str, Any],
+) -> None:
+    validation = report.get("validation") or {}
+    trade = validation.get("trade_history") or {}
+    positions = validation.get("positions") or {}
+    print(f"  status: {report.get('status')}")
+    print(
+        "  ready_for_authoritative_csv_update: "
+        f"{bool(report.get('review_worklist_ready_for_authoritative_csv_update'))}"
+    )
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    if report.get("warnings"):
+        print(f"  warnings: {', '.join(report.get('warnings') or [])}")
+    print("  no_write_safety: db_write=False snapshot_write=False restore_applied=False")
+    print(
+        "  worklist: "
+        f"rows={report.get('review_worklist_row_count', 0)} "
+        f"unknown_kind_rows={report.get('unknown_candidate_kind_count', 0)} "
+        f"path={report.get('review_worklist_csv')}"
+    )
+    print(
+        "  trade_history: "
+        f"rows={trade.get('row_count', 0)} "
+        f"accepted={trade.get('accepted_status_count', 0)} "
+        f"pending={trade.get('pending_status_count', 0)} "
+        f"metadata_ok={bool(trade.get('review_metadata_ok'))} "
+        f"hash_mismatches={trade.get('candidate_row_hash_mismatch_count', 0)}"
+    )
+    print(
+        "  positions: "
+        f"rows={positions.get('row_count', 0)} "
+        f"accepted={positions.get('accepted_status_count', 0)} "
+        f"pending={positions.get('pending_status_count', 0)} "
+        f"metadata_ok={bool(positions.get('review_metadata_ok'))} "
+        f"hash_mismatches={positions.get('candidate_row_hash_mismatch_count', 0)}"
+    )
+    verify_command = (report.get("operator_commands") or {}).get(
+        "verify_after_authoritative_csv_update"
+    )
+    if verify_command:
+        print(f"  verify_after_authoritative_csv_update: {verify_command}")
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
 
 
 def render_target_weight_db_restore_review_progress_markdown(
@@ -5165,6 +5663,11 @@ def _print_target_weight_db_restore_review_progress(report: dict[str, Any]) -> N
     verify_command = (report.get("operator_commands") or {}).get(
         "verify_when_complete"
     )
+    validate_command = (report.get("operator_commands") or {}).get(
+        "validate_review_worklist"
+    )
+    if validate_command:
+        print(f"  validate_review_worklist: {validate_command}")
     if verify_command:
         print(f"  verify_when_complete: {verify_command}")
     print(f"  artifact: {report.get('artifact_path')}")
@@ -11642,6 +12145,11 @@ def main() -> None:
         help="Inspect reviewed authoritative CSV completion progress without DB writes or DB state checks.",
     )
     parser.add_argument(
+        "--validate-db-restore-review-worklist",
+        action="store_true",
+        help="Validate DB restore review worklist completion without DB writes or DB state checks.",
+    )
+    parser.add_argument(
         "--plan-db-restore-apply",
         action="store_true",
         help="Create a no-write manual DB restore apply plan from a ready verification report.",
@@ -11661,8 +12169,13 @@ def main() -> None:
         help=(
             "Candidate package manifest path for --verify-db-restore-package or "
             "--prepare-db-restore-review-bundle or "
-            "--inspect-db-restore-review-progress."
+            "--inspect-db-restore-review-progress or "
+            "--validate-db-restore-review-worklist."
         ),
+    )
+    parser.add_argument(
+        "--review-worklist-csv",
+        help="DB restore review worklist CSV to validate with --validate-db-restore-review-worklist.",
     )
     parser.add_argument(
         "--restore-verification",
@@ -11771,6 +12284,8 @@ def main() -> None:
             cash_blocked_modes.append("--prepare-db-restore-review-bundle")
         if args.inspect_db_restore_review_progress:
             cash_blocked_modes.append("--inspect-db-restore-review-progress")
+        if args.validate_db_restore_review_worklist:
+            cash_blocked_modes.append("--validate-db-restore-review-worklist")
         if args.plan_db_restore_apply:
             cash_blocked_modes.append("--plan-db-restore-apply")
         if args.apply_db_restore:
@@ -11791,6 +12306,7 @@ def main() -> None:
         args.verify_db_restore_package,
         args.prepare_db_restore_review_bundle,
         args.inspect_db_restore_review_progress,
+        args.validate_db_restore_review_worklist,
         args.plan_db_restore_apply,
         args.apply_db_restore,
         args.backup_db_restore_state,
@@ -11800,8 +12316,10 @@ def main() -> None:
             "--repair-pilot-evidence, --finalize-pilot-evidence, "
             "--diagnose-portfolio-snapshot, --verify-db-restore-package, "
             "--prepare-db-restore-review-bundle, "
-            "--inspect-db-restore-review-progress, --plan-db-restore-apply, "
-            "--backup-db-restore-state, and --apply-db-restore are mutually exclusive"
+            "--inspect-db-restore-review-progress, "
+            "--validate-db-restore-review-worklist, "
+            "--plan-db-restore-apply, --backup-db-restore-state, "
+            "and --apply-db-restore are mutually exclusive"
         )
     if (
         args.repair_pilot_evidence
@@ -11810,6 +12328,7 @@ def main() -> None:
         or args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
         or args.inspect_db_restore_review_progress
+        or args.validate_db_restore_review_worklist
         or args.plan_db_restore_apply
         or args.apply_db_restore
         or args.backup_db_restore_state
@@ -11849,21 +12368,35 @@ def main() -> None:
         args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
         or args.inspect_db_restore_review_progress
+        or args.validate_db_restore_review_worklist
     ) and not args.restore_manifest:
         parser.error(
             "--restore-manifest is required with --verify-db-restore-package "
             "or --prepare-db-restore-review-bundle or "
-            "--inspect-db-restore-review-progress"
+            "--inspect-db-restore-review-progress or "
+            "--validate-db-restore-review-worklist"
         )
     if args.restore_manifest and not (
         args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
         or args.inspect_db_restore_review_progress
+        or args.validate_db_restore_review_worklist
     ):
         parser.error(
             "--restore-manifest is only used with --verify-db-restore-package "
             "or --prepare-db-restore-review-bundle or "
-            "--inspect-db-restore-review-progress"
+            "--inspect-db-restore-review-progress or "
+            "--validate-db-restore-review-worklist"
+        )
+    if args.validate_db_restore_review_worklist and not args.review_worklist_csv:
+        parser.error(
+            "--review-worklist-csv is required with "
+            "--validate-db-restore-review-worklist"
+        )
+    if args.review_worklist_csv and not args.validate_db_restore_review_worklist:
+        parser.error(
+            "--review-worklist-csv is only used with "
+            "--validate-db-restore-review-worklist"
         )
     if args.plan_db_restore_apply and not args.restore_verification:
         parser.error("--restore-verification is required with --plan-db-restore-apply")
@@ -12073,6 +12606,21 @@ def main() -> None:
         print(f"  manifest: {result.get('manifest_path')}")
         _print_target_weight_db_restore_review_bundle(result)
         if result["status"] != "ready_for_manual_authoritative_review":
+            raise SystemExit(1)
+        return
+
+    if args.validate_db_restore_review_worklist:
+        result = validate_target_weight_db_restore_review_worklist(
+            manifest_path=args.restore_manifest,
+            review_worklist_csv=args.review_worklist_csv,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore review worklist validation")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  manifest: {result.get('manifest_path')}")
+        _print_target_weight_db_restore_review_worklist_validation(result)
+        if result["status"] == "blocked":
             raise SystemExit(1)
         return
 
