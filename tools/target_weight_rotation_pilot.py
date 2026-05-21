@@ -3408,8 +3408,18 @@ TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
 
 
 def _read_csv_dict_rows(path: Path) -> list[dict[str, Any]]:
+    rows, _fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+    return rows
+
+
+def _read_csv_dict_rows_with_fieldnames(
+    path: Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        return [dict(row) for row in csv.DictReader(handle)]
+        reader = csv.DictReader(handle)
+        rows = [dict(row) for row in reader]
+        fieldnames = [str(column or "").strip() for column in reader.fieldnames or []]
+        return rows, fieldnames
 
 
 def _normalize_restore_compare_value(column: str, value: Any) -> str:
@@ -3579,6 +3589,8 @@ def _verify_authoritative_restore_csv(
         "row_count": 0,
         "expected_rows": len(candidate_rows),
         "empty_template": False,
+        "fieldnames": [],
+        "missing_columns": [],
         "match": False,
     }
     if not path_value:
@@ -3589,7 +3601,8 @@ def _verify_authoritative_restore_csv(
         blockers.append(f"authoritative_{kind}_csv_missing")
         return info
 
-    rows = _read_csv_dict_rows(path)
+    rows, fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+    missing_columns = [column for column in columns if column not in fieldnames]
     comparison = _compare_restore_rows(
         candidate_rows=candidate_rows,
         authoritative_rows=rows,
@@ -3599,13 +3612,19 @@ def _verify_authoritative_restore_csv(
         "exists": True,
         "row_count": len(rows),
         "sha256": _file_sha256(path),
+        "fieldnames": fieldnames,
+        "missing_columns": missing_columns,
         **comparison,
     })
-    if candidate_rows and not rows:
+    if missing_columns:
+        blockers.append(f"authoritative_{kind}_csv_columns_missing")
+    elif candidate_rows and not rows:
         info["empty_template"] = True
         blockers.append(f"authoritative_{kind}_csv_empty_template")
+    elif len(rows) != len(candidate_rows):
+        blockers.append(f"authoritative_{kind}_csv_row_count_mismatch")
     elif not comparison["match"]:
-        blockers.append(f"authoritative_{kind}_csv_mismatch")
+        blockers.append(f"authoritative_{kind}_csv_content_mismatch")
     return info
 
 
