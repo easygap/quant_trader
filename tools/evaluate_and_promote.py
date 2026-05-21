@@ -2154,6 +2154,29 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _db_restore_review_bundle_manifest_state(
+    bundle: dict,
+) -> dict[str, object]:
+    manifest_path = str(bundle.get("manifest_path") or "").strip()
+    expected_hash = str(bundle.get("manifest_hash") or "").strip()
+    current_hash = ""
+    exists = False
+    stale = False
+    if manifest_path:
+        path = Path(manifest_path)
+        exists = path.exists()
+        if exists:
+            current_hash = _file_sha256(path)
+        stale = bool(expected_hash) and current_hash != expected_hash
+    return {
+        "manifest_path": manifest_path,
+        "manifest_exists": exists,
+        "manifest_hash": expected_hash,
+        "current_manifest_hash": current_hash,
+        "manifest_stale": stale,
+    }
+
+
 def _normalize_restore_compare_value(column: str, value) -> str:
     raw = "" if value is None else str(value).strip()
     if column == "symbol":
@@ -2805,6 +2828,7 @@ def _target_weight_ops_priority_action(
                 )
             review_bundle_ready = False
             review_bundle_verify_command = ""
+            review_bundle_manifest_stale = False
             if isinstance(latest_db_restore_review_bundle, dict):
                 review_files = latest_db_restore_review_bundle.get("review_files") or {}
                 if not isinstance(review_files, dict):
@@ -2827,6 +2851,12 @@ def _target_weight_ops_priority_action(
                     review_positions = {}
                 review_bundle_ready = bool(
                     latest_db_restore_review_bundle.get("review_bundle_ready")
+                )
+                review_manifest_state = _db_restore_review_bundle_manifest_state(
+                    latest_db_restore_review_bundle
+                )
+                review_bundle_manifest_stale = bool(
+                    review_manifest_state.get("manifest_stale")
                 )
                 review_bundle_verify_command = str(
                     review_commands.get("verify_after_manual_review") or ""
@@ -2856,6 +2886,21 @@ def _target_weight_ops_priority_action(
                     ),
                     "snapshot_db_restore_review_bundle_candidate_positions_csv": str(
                         review_files.get("candidate_positions_csv") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_manifest_path": str(
+                        review_manifest_state.get("manifest_path") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_manifest_exists": bool(
+                        review_manifest_state.get("manifest_exists")
+                    ),
+                    "snapshot_db_restore_review_bundle_manifest_hash": str(
+                        review_manifest_state.get("manifest_hash") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_current_manifest_hash": str(
+                        review_manifest_state.get("current_manifest_hash") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_manifest_stale": (
+                        review_bundle_manifest_stale
                     ),
                     "snapshot_db_restore_authoritative_trade_history_template_csv": str(
                         review_files.get(
@@ -2961,6 +3006,30 @@ def _target_weight_ops_priority_action(
                     "blocked_repair_command": (
                         "# blocked: reviewed authoritative DB restore "
                         "verification stale after CSV edit"
+                    ),
+                })
+                return action
+            if package_generated and review_bundle_ready and review_bundle_manifest_stale:
+                action.update({
+                    "desc": (
+                        "target-weight DB 복구 review bundle 기준 manifest 변경 감지, "
+                        "review bundle 재생성"
+                    ),
+                    "command": (
+                        review_bundle_command
+                        or "# blocked: DB restore review bundle manifest stale"
+                    ),
+                    "scheduled_command": review_bundle_command,
+                    "scheduled_follow_up": follow_up,
+                    "requires": "fresh DB restore review bundle",
+                    "db_restore_review_guard": (
+                        "target_weight_authoritative_db_restore_review_bundle_stale"
+                    ),
+                    "blocked_finalize_command": (
+                        "# blocked: fresh DB restore review bundle required before finalize"
+                    ),
+                    "blocked_repair_command": (
+                        "# blocked: fresh DB restore review bundle required before repair"
                     ),
                 })
                 return action
