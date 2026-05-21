@@ -1894,6 +1894,28 @@ def _print_target_weight_daily_ops_status(
                         "    Snapshot DB restore review bundle dir: "
                         f"{priority_action.get('snapshot_db_restore_review_bundle_dir')}"
                     )
+                created_review_files = (
+                    priority_action.get(
+                        "snapshot_db_restore_review_bundle_manual_review_files_created"
+                    )
+                    or []
+                )
+                if created_review_files:
+                    print(
+                        "    Snapshot DB restore manual review files created: "
+                        + ", ".join(str(item) for item in created_review_files)
+                    )
+                preserved_review_files = (
+                    priority_action.get(
+                        "snapshot_db_restore_review_bundle_manual_review_files_preserved"
+                    )
+                    or []
+                )
+                if preserved_review_files:
+                    print(
+                        "    Snapshot DB restore manual review files preserved: "
+                        + ", ".join(str(item) for item in preserved_review_files)
+                    )
                 if priority_action.get(
                     "snapshot_db_restore_authoritative_trade_history_template_csv"
                 ):
@@ -1907,6 +1929,20 @@ def _print_target_weight_daily_ops_status(
                     print(
                         "    Snapshot DB restore authoritative positions template: "
                         f"{priority_action.get('snapshot_db_restore_authoritative_positions_template_csv')}"
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_trade_history_review_checklist_csv"
+                ):
+                    print(
+                        "    Snapshot DB restore trade history review checklist: "
+                        f"{priority_action.get('snapshot_db_restore_trade_history_review_checklist_csv')}"
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_positions_review_checklist_csv"
+                ):
+                    print(
+                        "    Snapshot DB restore positions review checklist: "
+                        f"{priority_action.get('snapshot_db_restore_positions_review_checklist_csv')}"
                     )
                 if priority_db_restore_verify_after_manual_review_command:
                     print(
