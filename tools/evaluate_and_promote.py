@@ -1860,6 +1860,46 @@ def _load_target_weight_db_restore_review_bundle_report(
     return None
 
 
+def _load_target_weight_db_restore_review_progress_report(
+    strategy: str,
+    snapshot_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not snapshot_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base
+        / f"target_weight_db_restore_review_progress_{strategy}_{snapshot_date}.json",
+        base
+        / "paper_runtime"
+        / f"target_weight_db_restore_review_progress_{strategy}_{snapshot_date}.json",
+    ]
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_db_restore_review_progress":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("snapshot_date") != snapshot_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append((_artifact_time_key(payload), payload))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
 def _load_target_weight_db_restore_apply_plan_report(
     strategy: str,
     snapshot_date: str | None,
@@ -2731,6 +2771,7 @@ def _target_weight_ops_priority_action(
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
+    latest_db_restore_review_progress: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
     latest_db_restore_backup: dict | None = None,
 ) -> dict | None:
@@ -3271,6 +3312,49 @@ def _target_weight_ops_priority_action(
                         review_bundle_inspect_command
                     ),
                 })
+                if isinstance(latest_db_restore_review_progress, dict):
+                    review_worklist = (
+                        latest_db_restore_review_progress.get("review_worklist")
+                        or {}
+                    )
+                    action.update({
+                        "snapshot_db_restore_review_progress_source": str(
+                            latest_db_restore_review_progress.get("source_path")
+                            or latest_db_restore_review_progress.get("artifact_path")
+                            or ""
+                        ),
+                        "snapshot_db_restore_review_progress_generated_at": str(
+                            latest_db_restore_review_progress.get("generated_at")
+                            or ""
+                        ),
+                        "snapshot_db_restore_review_progress_status": str(
+                            latest_db_restore_review_progress.get("status") or ""
+                        ),
+                        "snapshot_db_restore_review_worklist_generated": bool(
+                            review_worklist.get("generated")
+                        ),
+                        "snapshot_db_restore_review_worklist_csv": str(
+                            review_worklist.get("path") or ""
+                        ),
+                        "snapshot_db_restore_review_worklist_row_count": (
+                            _safe_int(review_worklist.get("row_count"))
+                        ),
+                        "snapshot_db_restore_review_worklist_trade_history_missing": (
+                            _safe_int(
+                                review_worklist.get(
+                                    "trade_history_missing_row_count"
+                                )
+                            )
+                        ),
+                        "snapshot_db_restore_review_worklist_positions_missing": (
+                            _safe_int(
+                                review_worklist.get("positions_missing_row_count")
+                            )
+                        ),
+                        "snapshot_db_restore_review_worklist_not_authoritative": bool(
+                            review_worklist.get("not_authoritative")
+                        ),
+                    })
                 action.update(
                     _db_restore_review_template_action_fields(
                         "snapshot_db_restore_authoritative_trade_history",
@@ -4256,6 +4340,7 @@ def _build_current_blockers_operator_runbook(
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
+    latest_db_restore_review_progress: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
     latest_db_restore_backup: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
@@ -4305,6 +4390,7 @@ def _build_current_blockers_operator_runbook(
                 latest_snapshot_diagnostics=latest_snapshot_diagnostics,
                 latest_db_restore_verification=latest_db_restore_verification,
                 latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+                latest_db_restore_review_progress=latest_db_restore_review_progress,
                 latest_db_restore_apply_plan=latest_db_restore_apply_plan,
                 latest_db_restore_backup=latest_db_restore_backup,
             )
@@ -4420,6 +4506,8 @@ def _build_current_blockers_operator_runbook(
             runbook["latest_db_restore_verification"] = latest_db_restore_verification
         if latest_db_restore_review_bundle:
             runbook["latest_db_restore_review_bundle"] = latest_db_restore_review_bundle
+        if latest_db_restore_review_progress:
+            runbook["latest_db_restore_review_progress"] = latest_db_restore_review_progress
         if latest_db_restore_apply_plan:
             runbook["latest_db_restore_apply_plan"] = latest_db_restore_apply_plan
         if latest_db_restore_backup:
@@ -4472,6 +4560,7 @@ def build_current_blockers_report(
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
+    latest_db_restore_review_progress: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
     latest_db_restore_backup: dict | None = None,
     generated_at: str | None = None,
@@ -4540,6 +4629,7 @@ def build_current_blockers_report(
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         latest_db_restore_verification=latest_db_restore_verification,
         latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+        latest_db_restore_review_progress=latest_db_restore_review_progress,
         latest_db_restore_apply_plan=latest_db_restore_apply_plan,
         latest_db_restore_backup=latest_db_restore_backup,
         promotion_artifact_freshness=promotion_artifact_freshness,
@@ -4722,6 +4812,15 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_db_restore_review_progress = (
+        _load_target_weight_db_restore_review_progress_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     latest_db_restore_apply_plan = (
         _load_target_weight_db_restore_apply_plan_report(
             provisional_candidates[0],
@@ -4748,6 +4847,7 @@ def _build_current_blockers_report_with_latest_ops(
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         latest_db_restore_verification=latest_db_restore_verification,
         latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+        latest_db_restore_review_progress=latest_db_restore_review_progress,
         latest_db_restore_apply_plan=latest_db_restore_apply_plan,
         latest_db_restore_backup=latest_db_restore_backup,
         generated_at=generated_at,
