@@ -2134,7 +2134,7 @@ def _target_weight_ops_priority_action(
             follow_up = (
                 ops_commands.get("daily_ops_summary") or commands.get("daily_ops_summary")
             )
-            return {
+            action = {
                 **base_action,
                 "invalid_execution_days": _safe_int(
                     progress.get("invalid_execution_days")
@@ -2176,6 +2176,183 @@ def _target_weight_ops_priority_action(
                     else None
                 ),
             }
+            if isinstance(latest_snapshot_diagnostics, dict):
+                snapshot_db_restore = (
+                    latest_snapshot_diagnostics.get("db_restore_checklist") or {}
+                )
+                if not isinstance(snapshot_db_restore, dict):
+                    snapshot_db_restore = {}
+                snapshot_db_restore_trade_history = (
+                    snapshot_db_restore.get("trade_history") or {}
+                )
+                if not isinstance(snapshot_db_restore_trade_history, dict):
+                    snapshot_db_restore_trade_history = {}
+                snapshot_db_restore_positions = (
+                    snapshot_db_restore.get("positions") or {}
+                )
+                if not isinstance(snapshot_db_restore_positions, dict):
+                    snapshot_db_restore_positions = {}
+                snapshot_db_restore_package = (
+                    latest_snapshot_diagnostics.get("db_restore_candidate_package")
+                    or {}
+                )
+                if not isinstance(snapshot_db_restore_package, dict):
+                    snapshot_db_restore_package = {}
+                snapshot_operator_commands = (
+                    latest_snapshot_diagnostics.get("operator_commands") or {}
+                )
+                if not isinstance(snapshot_operator_commands, dict):
+                    snapshot_operator_commands = {}
+                action.update({
+                    "snapshot_diagnostics_source": latest_snapshot_diagnostics.get(
+                        "source_path"
+                    ),
+                    "snapshot_diagnostics_generated_at": latest_snapshot_diagnostics.get(
+                        "generated_at"
+                    ),
+                    "snapshot_diagnostics_status": latest_snapshot_diagnostics.get(
+                        "status"
+                    ),
+                    "snapshot_db_restore_status": str(
+                        snapshot_db_restore.get("status") or ""
+                    ),
+                    "snapshot_db_restore_required": bool(
+                        snapshot_db_restore.get("restore_required")
+                    ),
+                    "snapshot_db_restore_trade_rows_expected": _safe_int(
+                        snapshot_db_restore_trade_history.get("expected_row_count")
+                    ),
+                    "snapshot_db_restore_trade_rows_current": _safe_int(
+                        snapshot_db_restore_trade_history.get(
+                            "current_db_rows_on_date"
+                        )
+                    ),
+                    "snapshot_db_restore_trade_rows_missing_or_unverified": _safe_int(
+                        snapshot_db_restore_trade_history.get(
+                            "missing_or_unverified_row_count"
+                        )
+                    ),
+                    "snapshot_db_restore_position_symbols_expected": _safe_int(
+                        snapshot_db_restore_positions.get("expected_symbol_count")
+                    ),
+                    "snapshot_db_restore_positions_current": _safe_int(
+                        snapshot_db_restore_positions.get("current_db_position_count")
+                    ),
+                    "snapshot_db_restore_missing_or_unverified_symbols": (
+                        snapshot_db_restore_positions.get(
+                            "missing_or_unverified_symbols"
+                        )
+                        or []
+                    ),
+                    "snapshot_db_restore_candidate_package_generated": bool(
+                        snapshot_db_restore_package.get("generated")
+                    ),
+                    "snapshot_db_restore_candidate_manifest": str(
+                        snapshot_db_restore_package.get("manifest_path") or ""
+                    ),
+                    "snapshot_db_restore_trade_history_candidate_csv": str(
+                        snapshot_db_restore_package.get("trade_history_candidate_csv")
+                        or ""
+                    ),
+                    "snapshot_db_restore_positions_candidate_csv": str(
+                        snapshot_db_restore_package.get("positions_candidate_csv")
+                        or ""
+                    ),
+                    "snapshot_db_restore_trade_history_candidate_rows": _safe_int(
+                        snapshot_db_restore_package.get("trade_history_candidate_rows")
+                    ),
+                    "snapshot_db_restore_position_candidate_rows": _safe_int(
+                        snapshot_db_restore_package.get("position_candidate_rows")
+                    ),
+                    "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols": (
+                        snapshot_db_restore_package.get(
+                            "position_candidate_skipped_zero_quantity_symbols"
+                        )
+                        or []
+                    ),
+                    "snapshot_db_restore_candidate_requires_authoritative_confirmation": bool(
+                        snapshot_db_restore_package.get(
+                            "requires_authoritative_confirmation"
+                        )
+                    ),
+                    "snapshot_db_restore_package_verify_command": str(
+                        snapshot_operator_commands.get("verify_db_restore_package")
+                        or ""
+                    ),
+                })
+            if isinstance(latest_db_restore_verification, dict):
+                verification_candidate = (
+                    latest_db_restore_verification.get("candidate_package") or {}
+                )
+                if not isinstance(verification_candidate, dict):
+                    verification_candidate = {}
+                verification_authoritative = (
+                    latest_db_restore_verification.get("authoritative_evidence") or {}
+                )
+                if not isinstance(verification_authoritative, dict):
+                    verification_authoritative = {}
+                verification_trade = (
+                    verification_authoritative.get("trade_history") or {}
+                )
+                if not isinstance(verification_trade, dict):
+                    verification_trade = {}
+                verification_positions = (
+                    verification_authoritative.get("positions") or {}
+                )
+                if not isinstance(verification_positions, dict):
+                    verification_positions = {}
+                verification_current_db = (
+                    latest_db_restore_verification.get("current_db_state") or {}
+                )
+                if not isinstance(verification_current_db, dict):
+                    verification_current_db = {}
+                action.update({
+                    "snapshot_db_restore_verification_source": str(
+                        latest_db_restore_verification.get("source_path") or ""
+                    ),
+                    "snapshot_db_restore_verification_generated_at": str(
+                        latest_db_restore_verification.get("generated_at") or ""
+                    ),
+                    "snapshot_db_restore_verification_status": str(
+                        latest_db_restore_verification.get("status") or ""
+                    ),
+                    "snapshot_db_restore_verification_ready": bool(
+                        latest_db_restore_verification.get("restore_ready")
+                    ),
+                    "snapshot_db_restore_verification_blockers": (
+                        latest_db_restore_verification.get("blockers") or []
+                    ),
+                    "snapshot_db_restore_verification_warnings": (
+                        latest_db_restore_verification.get("warnings") or []
+                    ),
+                    "snapshot_db_restore_verification_trade_hash_ok": bool(
+                        (verification_candidate.get("trade_history") or {}).get(
+                            "hash_ok"
+                        )
+                    ),
+                    "snapshot_db_restore_verification_positions_hash_ok": bool(
+                        (verification_candidate.get("positions") or {}).get("hash_ok")
+                    ),
+                    "snapshot_db_restore_authoritative_trade_history_provided": bool(
+                        verification_trade.get("provided")
+                    ),
+                    "snapshot_db_restore_authoritative_trade_history_match": bool(
+                        verification_trade.get("match")
+                    ),
+                    "snapshot_db_restore_authoritative_positions_provided": bool(
+                        verification_positions.get("provided")
+                    ),
+                    "snapshot_db_restore_authoritative_positions_match": bool(
+                        verification_positions.get("match")
+                    ),
+                    "snapshot_db_restore_verification_db_trade_rows_on_date": _safe_int(
+                        verification_current_db.get("trade_count_on_date")
+                    ),
+                    "snapshot_db_restore_verification_db_positions": _safe_int(
+                        verification_current_db.get("position_count")
+                    ),
+                })
+            return action
         if _target_weight_non_repairable_invalid_reasons(invalid_reasons):
             next_trade_day = latest_daily_ops.get("next_operator_trade_day")
             scheduled_command = (
