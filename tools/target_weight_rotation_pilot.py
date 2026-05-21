@@ -3768,6 +3768,10 @@ def _restore_authoritative_candidate_marker_count(
     return sum(
         _restore_bool_marker(row.get("candidate_only"))
         or _restore_bool_marker(row.get("requires_authoritative_confirmation"))
+        or _restore_bool_marker(row.get("not_authoritative"))
+        or bool(str(row.get("review_item_id") or "").strip())
+        or bool(str(row.get("candidate_row_sha256") or "").strip())
+        or bool(str(row.get("review_status") or "").strip())
         or str(row.get("source") or "").startswith("artifact_candidate")
         for row in rows
     )
