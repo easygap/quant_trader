@@ -1869,6 +1869,46 @@ def _load_target_weight_db_restore_apply_plan_report(
     return None
 
 
+def _load_target_weight_db_restore_backup_report(
+    strategy: str,
+    snapshot_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not snapshot_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base
+        / f"target_weight_db_restore_pre_apply_backup_{strategy}_{snapshot_date}.json",
+        base
+        / "paper_runtime"
+        / f"target_weight_db_restore_pre_apply_backup_{strategy}_{snapshot_date}.json",
+    ]
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_db_restore_pre_apply_backup":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("snapshot_date") != snapshot_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append((_artifact_time_key(payload), payload))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -2388,6 +2428,7 @@ def _target_weight_ops_priority_action(
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
+    latest_db_restore_backup: dict | None = None,
 ) -> dict | None:
     if not latest_daily_ops:
         return None
@@ -2988,6 +3029,7 @@ def _target_weight_ops_priority_action(
                 ).strip()
                 apply_plan_ready = False
                 apply_plan_apply_command = ""
+                apply_plan_backup_command = ""
                 if isinstance(latest_db_restore_apply_plan, dict):
                     apply_plan_commands = (
                         latest_db_restore_apply_plan.get("operator_commands") or {}
@@ -2999,6 +3041,9 @@ def _target_weight_ops_priority_action(
                     )
                     apply_plan_apply_command = str(
                         apply_plan_commands.get("apply_manual_db_restore") or ""
+                    ).strip()
+                    apply_plan_backup_command = str(
+                        apply_plan_commands.get("backup_db_restore_state") or ""
                     ).strip()
                     action.update({
                         "snapshot_db_restore_apply_plan_source": str(
@@ -3017,18 +3062,77 @@ def _target_weight_ops_priority_action(
                         "snapshot_db_restore_apply_command": (
                             apply_plan_apply_command
                         ),
+                        "snapshot_db_restore_backup_command": (
+                            apply_plan_backup_command
+                        ),
                     })
                 if apply_plan_ready:
+                    backup_ready = False
+                    backup_apply_command = ""
+                    if isinstance(latest_db_restore_backup, dict):
+                        backup_commands = (
+                            latest_db_restore_backup.get("operator_commands") or {}
+                        )
+                        if not isinstance(backup_commands, dict):
+                            backup_commands = {}
+                        backup_ready = bool(
+                            latest_db_restore_backup.get("backup_ready")
+                        )
+                        backup_apply_command = str(
+                            backup_commands.get("apply_guarded_db_restore") or ""
+                        ).strip()
+                        action.update({
+                            "snapshot_db_restore_backup_source": str(
+                                latest_db_restore_backup.get("source_path") or ""
+                            ),
+                            "snapshot_db_restore_backup_generated_at": str(
+                                latest_db_restore_backup.get("generated_at") or ""
+                            ),
+                            "snapshot_db_restore_backup_status": str(
+                                latest_db_restore_backup.get("status") or ""
+                            ),
+                            "snapshot_db_restore_backup_ready": backup_ready,
+                            "snapshot_db_restore_backup_blockers": (
+                                latest_db_restore_backup.get("blockers") or []
+                            ),
+                            "snapshot_db_restore_backup_apply_command": (
+                                backup_apply_command
+                            ),
+                        })
+                    if not backup_ready:
+                        action.update({
+                            "desc": (
+                                "target-weight DB 복구 적용 계획 검증 완료, "
+                                "guarded apply 전 DB 상태 백업 생성"
+                            ),
+                            "command": (
+                                apply_plan_backup_command
+                                or "# blocked: pre-apply DB restore backup command missing"
+                            ),
+                            "scheduled_command": apply_plan_backup_command,
+                            "scheduled_follow_up": follow_up,
+                            "requires": "pre-apply DB restore backup artifact",
+                            "db_restore_review_guard": (
+                                "target_weight_authoritative_db_restore_backup_required"
+                            ),
+                            "blocked_finalize_command": (
+                                "# blocked: DB restore pre-apply backup required before finalize"
+                            ),
+                            "blocked_repair_command": (
+                                "# blocked: DB restore pre-apply backup required before repair"
+                            ),
+                        })
+                        return action
                     action.update({
                         "desc": (
-                            "target-weight DB 복구 적용 계획 검증 완료, 백업 "
-                            "확인 후 guarded DB 복구 반영"
+                            "target-weight DB 복구 적용 계획 및 백업 확인 완료, "
+                            "guarded DB 복구 반영"
                         ),
                         "command": (
-                            apply_plan_apply_command
+                            backup_apply_command
                             or "# blocked: guarded DB restore apply command missing"
                         ),
-                        "scheduled_command": apply_plan_apply_command,
+                        "scheduled_command": backup_apply_command,
                         "scheduled_follow_up": follow_up,
                         "requires": "confirmed DB backup and guarded DB restore apply",
                         "db_restore_review_guard": (
@@ -3692,6 +3796,7 @@ def _build_current_blockers_operator_runbook(
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
+    latest_db_restore_backup: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
@@ -3740,6 +3845,7 @@ def _build_current_blockers_operator_runbook(
                 latest_db_restore_verification=latest_db_restore_verification,
                 latest_db_restore_review_bundle=latest_db_restore_review_bundle,
                 latest_db_restore_apply_plan=latest_db_restore_apply_plan,
+                latest_db_restore_backup=latest_db_restore_backup,
             )
         sequence = [
             {
@@ -3855,6 +3961,8 @@ def _build_current_blockers_operator_runbook(
             runbook["latest_db_restore_review_bundle"] = latest_db_restore_review_bundle
         if latest_db_restore_apply_plan:
             runbook["latest_db_restore_apply_plan"] = latest_db_restore_apply_plan
+        if latest_db_restore_backup:
+            runbook["latest_db_restore_backup"] = latest_db_restore_backup
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
@@ -3904,6 +4012,7 @@ def build_current_blockers_report(
     latest_db_restore_verification: dict | None = None,
     latest_db_restore_review_bundle: dict | None = None,
     latest_db_restore_apply_plan: dict | None = None,
+    latest_db_restore_backup: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -3971,6 +4080,7 @@ def build_current_blockers_report(
         latest_db_restore_verification=latest_db_restore_verification,
         latest_db_restore_review_bundle=latest_db_restore_review_bundle,
         latest_db_restore_apply_plan=latest_db_restore_apply_plan,
+        latest_db_restore_backup=latest_db_restore_backup,
         promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
@@ -4160,6 +4270,15 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_db_restore_backup = (
+        _load_target_weight_db_restore_backup_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     return build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
@@ -4169,6 +4288,7 @@ def _build_current_blockers_report_with_latest_ops(
         latest_db_restore_verification=latest_db_restore_verification,
         latest_db_restore_review_bundle=latest_db_restore_review_bundle,
         latest_db_restore_apply_plan=latest_db_restore_apply_plan,
+        latest_db_restore_backup=latest_db_restore_backup,
         generated_at=generated_at,
     )
 
