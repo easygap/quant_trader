@@ -2891,6 +2891,143 @@ def _target_weight_db_restore_package_verify_command(manifest_path: str) -> str:
     )
 
 
+def _first_restore_value(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return ""
+
+
+def _restore_trade_quantity(value: Any) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _restore_trade_lookup_key(
+    *,
+    symbol: Any,
+    action: Any,
+    quantity: Any,
+) -> tuple[str, str, int]:
+    return (
+        normalize_symbol(str(symbol or "")),
+        str(action or "").upper(),
+        _restore_trade_quantity(quantity),
+    )
+
+
+def _restore_trade_enrichment_from_execution(
+    execution: dict[str, Any],
+) -> dict[str, dict[Any, dict[str, Any]]]:
+    """Paper 실행 세부 증거에서 DB 복구 후보 CSV 보조 필드를 만든다."""
+    by_order_id: dict[Any, dict[str, Any]] = {}
+    by_trade_key: dict[Any, dict[str, Any]] = {}
+
+    def _remember(source: dict[str, Any], payload: dict[str, Any]) -> None:
+        symbol = normalize_symbol(
+            str(source.get("symbol") or payload.get("symbol") or "")
+        )
+        action = str(source.get("action") or payload.get("action") or "").upper()
+        quantity = _restore_trade_quantity(
+            source.get("quantity") or payload.get("quantity")
+        )
+        if not symbol or not action or quantity <= 0:
+            return
+        item = {key: value for key, value in payload.items() if value is not None}
+        if not item:
+            return
+        order_id = str(source.get("order_id") or payload.get("order_id") or "").strip()
+        if order_id:
+            by_order_id[order_id] = {**by_order_id.get(order_id, {}), **item}
+        key = _restore_trade_lookup_key(
+            symbol=symbol,
+            action=action,
+            quantity=quantity,
+        )
+        by_trade_key[key] = {**by_trade_key.get(key, {}), **item}
+
+    details = execution.get("details")
+    if not isinstance(details, list):
+        details = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        result = detail.get("result") or {}
+        if not isinstance(result, dict) or result.get("success") is False:
+            continue
+        order = detail.get("order") or {}
+        if not isinstance(order, dict):
+            order = {}
+        costs = result.get("costs") or {}
+        if not isinstance(costs, dict):
+            costs = {}
+        source = {
+            "symbol": result.get("symbol") or order.get("symbol"),
+            "action": result.get("action") or order.get("action"),
+            "quantity": result.get("quantity") or order.get("quantity"),
+            "order_id": result.get("order_id"),
+        }
+        _remember(
+            source,
+            {
+                "price": result.get("price"),
+                "total_amount": result.get("total_amount"),
+                "commission": costs.get("commission"),
+                "tax": costs.get("tax"),
+                "slippage": costs.get("slippage"),
+                "source": "target_weight_execution.details.result",
+            },
+        )
+
+    pre_trade = execution.get("pre_trade_risk_check") or {}
+    if not isinstance(pre_trade, dict):
+        pre_trade = {}
+    order_costs = pre_trade.get("order_costs")
+    if not isinstance(order_costs, list):
+        order_costs = []
+    for costs in order_costs:
+        if not isinstance(costs, dict):
+            continue
+        quantity = _coerce_int_or_zero(costs.get("quantity"))
+        execution_price = _coerce_float_or_none(costs.get("execution_price"))
+        total_amount = execution_price * quantity if execution_price is not None else None
+        _remember(
+            costs,
+            {
+                "price": execution_price,
+                "total_amount": total_amount,
+                "commission": costs.get("commission"),
+                "tax": costs.get("tax"),
+                "slippage": costs.get("slippage"),
+                "source": "target_weight_execution.pre_trade_risk_check.order_costs",
+            },
+        )
+
+    return {"by_order_id": by_order_id, "by_trade_key": by_trade_key}
+
+
+def _restore_trade_enrichment_for_fill(
+    fill: dict[str, Any],
+    enrichment: dict[str, dict[Any, dict[str, Any]]],
+) -> dict[str, Any]:
+    order_id = str(fill.get("order_id") or "").strip()
+    by_order_id = enrichment.get("by_order_id") or {}
+    if order_id and order_id in by_order_id:
+        return by_order_id[order_id]
+    key = _restore_trade_lookup_key(
+        symbol=fill.get("symbol"),
+        action=fill.get("action"),
+        quantity=fill.get("quantity"),
+    )
+    by_trade_key = enrichment.get("by_trade_key") or {}
+    return by_trade_key.get(key, {})
+
+
 def _target_weight_snapshot_database_state(
     *,
     account_key: str,
@@ -3092,17 +3229,34 @@ def _target_weight_db_restore_checklist(
     raw_fills = [
         fill for fill in (fill_reconciliation.get("fills") or []) if isinstance(fill, dict)
     ]
+    fill_enrichment = _restore_trade_enrichment_from_execution(execution)
     rows = []
     for index, fill in enumerate(raw_fills, start=1):
+        enrichment = _restore_trade_enrichment_for_fill(fill, fill_enrichment)
         rows.append({
             "index": index,
             "symbol": normalize_symbol(str(fill.get("symbol") or "")),
             "action": str(fill.get("action") or "").upper(),
             "quantity": _coerce_int_or_zero(fill.get("quantity")),
-            "price": fill.get("price") or fill.get("execution_price"),
-            "total_amount": fill.get("total_amount"),
-            "commission": fill.get("commission"),
-            "tax": fill.get("tax"),
+            "price": _first_restore_value(
+                fill.get("price"),
+                fill.get("execution_price"),
+                enrichment.get("price"),
+            ),
+            "total_amount": _first_restore_value(
+                fill.get("total_amount"),
+                enrichment.get("total_amount"),
+            ),
+            "commission": _first_restore_value(
+                fill.get("commission"),
+                enrichment.get("commission"),
+            ),
+            "tax": _first_restore_value(fill.get("tax"), enrichment.get("tax")),
+            "slippage": _first_restore_value(
+                fill.get("slippage"),
+                enrichment.get("slippage"),
+            ),
+            "price_source": enrichment.get("source") or "",
             "strategy": fill.get("strategy") or record.get("strategy"),
             "mode": fill.get("mode") or "paper",
             "account_key": fill.get("account_key") or record.get("strategy"),
@@ -3246,6 +3400,7 @@ def _target_weight_db_restore_candidate_package(
             "commission": row.get("commission") or 0,
             "tax": row.get("tax") or 0,
             "slippage": row.get("slippage") or 0,
+            "price_source": row.get("price_source") or "",
             "strategy": row.get("strategy") or candidate_id,
             "mode": row.get("mode") or "paper",
             "executed_at": row.get("executed_at") or snapshot_date,
@@ -3306,6 +3461,7 @@ def _target_weight_db_restore_candidate_package(
         "commission",
         "tax",
         "slippage",
+        "price_source",
         "strategy",
         "mode",
         "executed_at",
