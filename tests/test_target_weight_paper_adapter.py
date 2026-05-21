@@ -7728,6 +7728,62 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert "Trade history missing rows: `1`" in progress_md
     assert "Review Worklist" in progress_md
     assert "Rows: `2`" in progress_md
+    worklist_validation = twp.validate_target_weight_db_restore_review_worklist(
+        manifest_path=package["manifest_path"],
+        review_worklist_csv=worklist["path"],
+        output_dir=tmp_path / "review_worklist_validation_pending",
+    )
+    assert worklist_validation["status"] == "review_incomplete"
+    assert worklist_validation[
+        "review_worklist_ready_for_authoritative_csv_update"
+    ] is False
+    assert "review_worklist_trade_history_review_status_pending" in (
+        worklist_validation["blockers"]
+    )
+    assert "review_worklist_positions_review_status_pending" in (
+        worklist_validation["blockers"]
+    )
+    worklist_path = Path(worklist["path"])
+    worklist_rows, worklist_fieldnames = twp._read_csv_dict_rows_with_fieldnames(
+        worklist_path
+    )
+    reviewed_worklist_rows = [
+        {
+            **row,
+            "review_status": "reviewed",
+            "authoritative_source": "broker_statement",
+            "authoritative_evidence_ref": (
+                f"broker_statement:2026-04-10:{row['candidate_kind']}:"
+                f"{row['candidate_row_number']}"
+            ),
+            "reviewed_by": "operator",
+            "reviewed_at": "2026-04-10T16:00:00",
+        }
+        for row in worklist_rows
+    ]
+    twp._write_csv_rows(worklist_path, reviewed_worklist_rows, worklist_fieldnames)
+    ready_worklist_validation = twp.validate_target_weight_db_restore_review_worklist(
+        manifest_path=package["manifest_path"],
+        review_worklist_csv=worklist_path,
+        output_dir=tmp_path / "review_worklist_validation_ready",
+    )
+    assert ready_worklist_validation["status"] == (
+        "ready_for_authoritative_csv_update"
+    )
+    assert ready_worklist_validation[
+        "review_worklist_ready_for_authoritative_csv_update"
+    ] is True
+    assert ready_worklist_validation["blockers"] == []
+    assert ready_worklist_validation["validation"]["trade_history"][
+        "accepted_status_count"
+    ] == 1
+    assert ready_worklist_validation["validation"]["positions"][
+        "accepted_status_count"
+    ] == 1
+    assert Path(ready_worklist_validation["artifact_path"]).exists()
+    assert "Ready for authoritative CSV update: `True`" in Path(
+        ready_worklist_validation["report_path"]
+    ).read_text(encoding="utf-8")
     assert Path(bundle["artifact_path"]).exists()
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")
