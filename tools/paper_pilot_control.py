@@ -1994,6 +1994,23 @@ def _print_target_weight_daily_ops_status(
                         f"positions_missing={priority_action.get('snapshot_db_restore_review_worklist_positions_missing', 0)} "
                         f"path={priority_action.get('snapshot_db_restore_review_worklist_csv')}"
                     )
+                if priority_action.get(
+                    "snapshot_db_restore_review_worklist_validate_command"
+                ):
+                    print(
+                        "    Snapshot DB restore review worklist validation: "
+                        f"{priority_action.get('snapshot_db_restore_review_worklist_validate_command')}"
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_review_worklist_validation_status"
+                ):
+                    print(
+                        "    Snapshot DB restore review worklist validation status: "
+                        f"status={priority_action.get('snapshot_db_restore_review_worklist_validation_status')} "
+                        f"ready={bool(priority_action.get('snapshot_db_restore_review_worklist_validation_ready'))} "
+                        f"trade_pending={priority_action.get('snapshot_db_restore_review_worklist_validation_trade_pending', 0)} "
+                        f"positions_pending={priority_action.get('snapshot_db_restore_review_worklist_validation_positions_pending', 0)}"
+                    )
             if priority_db_restore_review_guard:
                 print(
                     "    Snapshot DB restore review guard: "
