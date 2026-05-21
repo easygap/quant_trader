@@ -2917,11 +2917,21 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     )
 
     action = report["next_actions"][0]
-    assert action["command"] == diagnose_command
+    assert action["command"].startswith(
+        "# blocked: reviewed authoritative trade_history/positions CSV required"
+    )
+    assert action["scheduled_command"].startswith(
+        "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
+    )
+    assert action["scheduled_command"] != diagnose_command
     assert action["command"] != repair_command
     assert action["order_safety"] == "no_order"
-    assert action["requires"] == "database trade/position persistence proof"
+    assert action["requires"] == "reviewed authoritative trade_history/positions CSV"
     assert action["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
+    assert (
+        action["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_csv_required"
+    )
     assert action["snapshot_diagnostics_status"] == "blocked_missing_snapshot_history"
     assert action["snapshot_db_restore_status"] == "restore_required"
     assert action["snapshot_db_restore_trade_rows_expected"] == 4
@@ -2940,8 +2950,76 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["snapshot_db_restore_verification_positions_hash_ok"] is True
     assert action["snapshot_db_restore_authoritative_trade_history_match"] is False
     assert action["snapshot_db_restore_authoritative_positions_match"] is False
-    assert "cannot be repaired from artifact" in action["blocked_repair_command"]
+    assert (
+        action["blocked_finalize_command"]
+        == "# blocked: reviewed authoritative DB restore verification required before finalize"
+    )
+    assert (
+        action["blocked_repair_command"]
+        == "# blocked: reviewed authoritative DB restore verification required before repair"
+    )
+    assert action["scheduled_follow_up"].endswith("--daily-ops-summary")
     assert action["follow_up"].endswith("--daily-ops-summary")
+
+
+def test_current_blockers_routes_db_persistence_gap_to_diagnostics_before_restore_package():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    diagnose_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--diagnose-portfolio-snapshot --snapshot-date 2026-05-20"
+    )
+    repair_command = (
+        "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_best "
+        "--repair-pilot-evidence --repair-date 2026-05-20"
+    )
+    report = build_current_blockers_report(
+        {
+            "artifact_type": "promotion_blocker_summary",
+            "schema_version": 1,
+            "generated_at": "2026-05-13T14:07:37",
+            "source_artifact_hash": "e" * 64,
+            "summary": {
+                "total_strategies": 1,
+                "status_counts": {"provisional_paper_candidate": 1},
+                "live_ready_count": 0,
+                "blocked_from_live_count": 1,
+            },
+            "strategies": {
+                "target_weight_best": {
+                    "status": "provisional_paper_candidate",
+                    "allowed_modes": ["backtest", "paper"],
+                },
+            },
+        },
+        latest_daily_ops={
+            "trade_day": "2026-05-20",
+            "status": "PILOT_EVIDENCE_INVALID",
+            "evidence_progress": {
+                "verified_pilot_days": 0,
+                "shadow_days": 2,
+                "invalid_execution_days": 1,
+                "invalid_reasons": {
+                    "target_weight_db_persistence_complete_false": 1
+                },
+            },
+            "operator_commands": {
+                "daily_ops_summary": (
+                    "python tools/target_weight_rotation_pilot.py "
+                    "--candidate-id target_weight_best --daily-ops-summary"
+                ),
+                "diagnose_portfolio_snapshot": diagnose_command,
+                "repair_pilot_evidence": repair_command,
+            },
+        },
+    )
+
+    action = report["next_actions"][0]
+    assert action["command"] == diagnose_command
+    assert action["command"] != repair_command
+    assert "scheduled_command" not in action
+    assert action["requires"] == "database trade/position persistence proof"
+    assert action["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
 
 
 def test_current_blockers_keeps_db_restore_first_and_adds_core_entry_recheck(
