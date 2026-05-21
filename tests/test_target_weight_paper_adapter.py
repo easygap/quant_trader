@@ -6261,6 +6261,7 @@ def test_verify_target_weight_db_restore_package_requires_authoritative_match(
 
 def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     tmp_path,
+    monkeypatch,
 ):
     import tools.target_weight_rotation_pilot as twp
 
@@ -6303,6 +6304,20 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
         report,
         output_dir=tmp_path / "paper_runtime",
     )
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": kwargs["account_key"],
+            "snapshot_date": kwargs["snapshot_date"],
+            "snapshot_count": 0,
+            "current_snapshot_found": False,
+            "trade_count_total": 0,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+    )
 
     bundle = twp.prepare_target_weight_db_restore_review_bundle(
         manifest_path=package["manifest_path"],
@@ -6327,6 +6342,46 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert len(list(csv.DictReader(candidate_positions.open(encoding="utf-8-sig")))) == 1
     assert list(csv.DictReader(authoritative_trade.open(encoding="utf-8-sig"))) == []
     assert list(csv.DictReader(authoritative_positions.open(encoding="utf-8-sig"))) == []
+    empty_template_verification = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=authoritative_trade,
+        authoritative_positions_csv=authoritative_positions,
+        output_dir=tmp_path / "verification_empty_templates",
+    )
+    assert empty_template_verification["status"] == "blocked"
+    assert empty_template_verification["restore_ready"] is False
+    assert (
+        "authoritative_trade_history_csv_empty_template"
+        in empty_template_verification["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_empty_template"
+        in empty_template_verification["blockers"]
+    )
+    assert "authoritative_trade_history_csv_mismatch" not in (
+        empty_template_verification["blockers"]
+    )
+    assert "authoritative_positions_csv_mismatch" not in (
+        empty_template_verification["blockers"]
+    )
+    assert empty_template_verification["authoritative_evidence"]["trade_history"][
+        "empty_template"
+    ] is True
+    assert empty_template_verification["authoritative_evidence"]["trade_history"][
+        "row_count"
+    ] == 0
+    assert empty_template_verification["authoritative_evidence"]["trade_history"][
+        "expected_rows"
+    ] == 1
+    assert empty_template_verification["authoritative_evidence"]["positions"][
+        "empty_template"
+    ] is True
+    assert empty_template_verification["authoritative_evidence"]["positions"][
+        "row_count"
+    ] == 0
+    assert empty_template_verification["authoritative_evidence"]["positions"][
+        "expected_rows"
+    ] == 1
     assert (
         "verify_after_manual_review"
         in bundle["operator_commands"]
