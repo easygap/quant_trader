@@ -2754,9 +2754,10 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "before_source_reviewed_at_rows=0"
     ) in output
     assert (
-        "Operator next action: FILL reviewed authoritative "
-        "trade_history/positions CSV templates, then run DB restore verification:"
+        "Operator next action: RUN no-order DB restore review progress check, "
+        "then fill reviewed authoritative CSV and verify:"
     ) in output
+    assert f"verify when complete: {verify_after_review}" in output
     assert verify_after_review in output
 
 
