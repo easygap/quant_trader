@@ -2680,6 +2680,11 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
     ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
 
     output = capsys.readouterr().out
+    assert "Effective target-weight execution: BLOCKED" in output
+    assert (
+        "Effective reason: current blockers requires filled DB restore "
+        "authoritative CSV before execution"
+    ) in output
     assert (
         "Snapshot DB restore review bundle: "
         "status=ready_for_manual_authoritative_review ready=True"
