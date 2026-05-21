@@ -1,5 +1,6 @@
 import hashlib
 import json
+import csv
 from datetime import date, datetime
 from pathlib import Path
 
@@ -2992,8 +2993,40 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
-def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready():
+def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp_path):
     from tools.evaluate_and_promote import build_current_blockers_report
+    import tools.evaluate_and_promote as ep
+
+    review_dir = tmp_path / "review_bundle"
+    review_dir.mkdir()
+    trade_template = review_dir / "reviewed_authoritative_trade_history.csv"
+    positions_template = review_dir / "reviewed_authoritative_positions.csv"
+    with trade_template.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerow({
+            "account_key": "target_weight_best",
+            "symbol": "005930",
+            "action": "BUY",
+            "price": "70000",
+            "quantity": "1",
+            "total_amount": "70000",
+            "commission": "0",
+            "tax": "0",
+            "slippage": "0",
+            "strategy": "target_weight_best",
+            "mode": "paper",
+            "executed_at": "2026-05-20 09:00:00",
+            "execution_session_id": "session",
+            "order_id": "ORD-1",
+        })
+    with positions_template.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+        )
+        writer.writeheader()
 
     blocker_summary = {
         "artifact_type": "promotion_blocker_summary",
@@ -3080,19 +3113,19 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready():
         "generated_at": "2026-05-20T16:00:00",
         "status": "ready_for_manual_authoritative_review",
         "review_bundle_ready": True,
-        "bundle_dir": "reports/paper_runtime/review_bundle",
+        "bundle_dir": review_dir.as_posix(),
         "review_files": {
-            "candidate_trade_history_csv": "reports/paper_runtime/review_bundle/candidate_trade_history.csv",
-            "candidate_positions_csv": "reports/paper_runtime/review_bundle/candidate_positions.csv",
-            "authoritative_trade_history_template_csv": "reports/paper_runtime/review_bundle/reviewed_authoritative_trade_history.csv",
-            "authoritative_positions_template_csv": "reports/paper_runtime/review_bundle/reviewed_authoritative_positions.csv",
+            "candidate_trade_history_csv": (review_dir / "candidate_trade_history.csv").as_posix(),
+            "candidate_positions_csv": (review_dir / "candidate_positions.csv").as_posix(),
+            "authoritative_trade_history_template_csv": trade_template.as_posix(),
+            "authoritative_positions_template_csv": positions_template.as_posix(),
         },
         "operator_commands": {
             "verify_after_manual_review": (
                 "python tools/target_weight_rotation_pilot.py "
                 "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json "
-                "--authoritative-trade-history-csv reports/paper_runtime/review_bundle/reviewed_authoritative_trade_history.csv "
-                "--authoritative-positions-csv reports/paper_runtime/review_bundle/reviewed_authoritative_positions.csv"
+                f"--authoritative-trade-history-csv {trade_template.as_posix()} "
+                f"--authoritative-positions-csv {positions_template.as_posix()}"
             )
         },
     }
@@ -3127,6 +3160,19 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready():
     assert action[
         "snapshot_db_restore_authoritative_positions_template_csv"
     ].endswith("reviewed_authoritative_positions.csv")
+    assert action["snapshot_db_restore_authoritative_trade_history_provided"] is True
+    assert action["snapshot_db_restore_authoritative_trade_history_row_count"] == 1
+    assert action["snapshot_db_restore_authoritative_trade_history_expected_rows"] == 4
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_empty_template"]
+        is False
+    )
+    assert action["snapshot_db_restore_authoritative_trade_history_missing_columns"] == []
+    assert action["snapshot_db_restore_authoritative_positions_provided"] is True
+    assert action["snapshot_db_restore_authoritative_positions_row_count"] == 0
+    assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
+    assert action["snapshot_db_restore_authoritative_positions_empty_template"] is True
+    assert action["snapshot_db_restore_authoritative_positions_missing_columns"] == []
     assert action["scheduled_command"] == action[
         "snapshot_db_restore_verify_after_manual_review_command"
     ]
