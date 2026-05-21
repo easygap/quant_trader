@@ -3123,6 +3123,7 @@ def _target_weight_ops_priority_action(
                 )
             review_bundle_ready = False
             review_bundle_verify_command = ""
+            review_bundle_inspect_command = ""
             review_bundle_manifest_stale = False
             if isinstance(latest_db_restore_review_bundle, dict):
                 review_files = latest_db_restore_review_bundle.get("review_files") or {}
@@ -3156,6 +3157,37 @@ def _target_weight_ops_priority_action(
                 review_bundle_verify_command = str(
                     review_commands.get("verify_after_manual_review") or ""
                 ).strip()
+                review_bundle_inspect_command = str(
+                    review_commands.get("inspect_review_progress") or ""
+                ).strip()
+                if not review_bundle_inspect_command:
+                    review_manifest_path = str(
+                        review_manifest_state.get("manifest_path")
+                        or latest_db_restore_review_bundle.get("manifest_path")
+                        or ""
+                    ).strip()
+                    review_trade_template = str(
+                        review_files.get("authoritative_trade_history_template_csv")
+                        or ""
+                    ).strip()
+                    review_positions_template = str(
+                        review_files.get("authoritative_positions_template_csv")
+                        or ""
+                    ).strip()
+                    if (
+                        review_manifest_path
+                        and review_trade_template
+                        and review_positions_template
+                    ):
+                        review_bundle_inspect_command = (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--inspect-db-restore-review-progress "
+                            f"--restore-manifest {review_manifest_path} "
+                            "--authoritative-trade-history-csv "
+                            f"{review_trade_template} "
+                            "--authoritative-positions-csv "
+                            f"{review_positions_template}"
+                        )
                 action.update({
                     "snapshot_db_restore_review_bundle_source": str(
                         latest_db_restore_review_bundle.get("source_path") or ""
@@ -3209,6 +3241,9 @@ def _target_weight_ops_priority_action(
                     ),
                     "snapshot_db_restore_verify_after_manual_review_command": (
                         review_bundle_verify_command
+                    ),
+                    "snapshot_db_restore_inspect_review_progress_command": (
+                        review_bundle_inspect_command
                     ),
                 })
                 action.update(

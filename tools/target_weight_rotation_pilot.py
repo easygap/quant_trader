@@ -4165,6 +4165,20 @@ def _target_weight_db_restore_verify_with_templates_command(
     )
 
 
+def _target_weight_db_restore_inspect_review_progress_command(
+    *,
+    manifest_path: str | Path,
+    trade_history_template: str | Path,
+    positions_template: str | Path,
+) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--inspect-db-restore-review-progress --restore-manifest {manifest_path} "
+        f"--authoritative-trade-history-csv {trade_history_template} "
+        f"--authoritative-positions-csv {positions_template}"
+    )
+
+
 def _target_weight_db_restore_apply_plan_command(
     verification_report_path: str | Path,
 ) -> str:
@@ -4292,6 +4306,11 @@ def prepare_target_weight_db_restore_review_bundle(
         trade_history_template=authoritative_trade_template.as_posix(),
         positions_template=authoritative_positions_template.as_posix(),
     )
+    inspect_command = _target_weight_db_restore_inspect_review_progress_command(
+        manifest_path=manifest_file.as_posix(),
+        trade_history_template=authoritative_trade_template.as_posix(),
+        positions_template=authoritative_positions_template.as_posix(),
+    )
     report = {
         "artifact_type": "target_weight_db_restore_review_bundle",
         "schema_version": 1,
@@ -4348,6 +4367,7 @@ def prepare_target_weight_db_restore_review_bundle(
             "authoritative_csv_auto_generated": False,
         },
         "operator_commands": {
+            "inspect_review_progress": inspect_command,
             "verify_after_manual_review": verify_command,
             "manual_review_guard": (
                 "# manual step required: fill reviewed authoritative CSV files "
@@ -4467,6 +4487,318 @@ def _print_target_weight_db_restore_review_bundle(report: dict[str, Any]) -> Non
     )
     if verify_command:
         print(f"  verify_after_manual_review: {verify_command}")
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
+
+
+def inspect_target_weight_db_restore_review_progress(
+    *,
+    manifest_path: str | Path,
+    authoritative_trade_history_csv: str | Path | None = None,
+    authoritative_positions_csv: str | Path | None = None,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """DB 조회/쓰기 없이 reviewed authoritative CSV 작성 진행상태를 점검한다."""
+    manifest_file = Path(manifest_path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    manifest: dict[str, Any] = {}
+    if not manifest_file.exists():
+        blockers.append("manifest_missing")
+    else:
+        try:
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"manifest_invalid_json:{exc}")
+            manifest = {}
+
+    if manifest.get("artifact_type") != "target_weight_db_restore_candidate_package":
+        blockers.append("manifest_artifact_type_invalid")
+    if not bool(manifest.get("generated")):
+        blockers.append("manifest_package_not_generated")
+    if bool(manifest.get("db_write_enabled")):
+        blockers.append("manifest_db_write_enabled_must_be_false")
+    if bool(manifest.get("portfolio_snapshot_write_enabled")):
+        blockers.append("manifest_snapshot_write_enabled_must_be_false")
+    if not bool(manifest.get("candidate_only")):
+        blockers.append("manifest_candidate_only_required")
+    if not bool(manifest.get("requires_authoritative_confirmation")):
+        blockers.append("manifest_authoritative_confirmation_required")
+
+    candidate_id = str(manifest.get("candidate_id") or "")
+    snapshot_date = str(manifest.get("snapshot_date") or "")
+    trade_info = _verify_restore_csv_file(
+        path_value=manifest.get("trade_history_candidate_csv"),
+        expected_hash=str(manifest.get("trade_history_candidate_csv_sha256") or ""),
+        expected_rows=_coerce_int_or_zero(
+            manifest.get("trade_history_candidate_rows")
+        ),
+        kind="trade_history",
+        blockers=blockers,
+        warnings=warnings,
+    )
+    position_info = _verify_restore_csv_file(
+        path_value=manifest.get("positions_candidate_csv"),
+        expected_hash=str(manifest.get("positions_candidate_csv_sha256") or ""),
+        expected_rows=_coerce_int_or_zero(manifest.get("position_candidate_rows")),
+        kind="positions",
+        blockers=blockers,
+        warnings=warnings,
+    )
+    authoritative_trade = _verify_authoritative_restore_csv(
+        path_value=str(authoritative_trade_history_csv)
+        if authoritative_trade_history_csv
+        else None,
+        candidate_source_path=manifest.get("trade_history_candidate_csv"),
+        candidate_rows=trade_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=trade_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+            timestamp_column="executed_at",
+        ),
+        columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        identity_columns=TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
+        economic_columns=TARGET_WEIGHT_RESTORE_TRADE_ECONOMIC_COLUMNS,
+        kind="trade_history",
+        blockers=blockers,
+    )
+    authoritative_positions = _verify_authoritative_restore_csv(
+        path_value=str(authoritative_positions_csv)
+        if authoritative_positions_csv
+        else None,
+        candidate_source_path=manifest.get("positions_candidate_csv"),
+        candidate_rows=position_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=position_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+        ),
+        columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        identity_columns=TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
+        economic_columns=TARGET_WEIGHT_RESTORE_POSITION_ECONOMIC_COLUMNS,
+        kind="positions",
+        blockers=blockers,
+    )
+    review_ready = not blockers
+    package_blockers = [
+        blocker
+        for blocker in blockers
+        if not str(blocker).startswith("authoritative_")
+    ]
+    status = (
+        "blocked"
+        if package_blockers
+        else ("ready_for_verification" if review_ready else "review_incomplete")
+    )
+    verify_command = _target_weight_db_restore_verify_with_templates_command(
+        manifest_path=manifest_file.as_posix(),
+        trade_history_template=str(authoritative_trade_history_csv or ""),
+        positions_template=str(authoritative_positions_csv or ""),
+    )
+    report = {
+        "artifact_type": "target_weight_db_restore_review_progress",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": status,
+        "review_ready_for_verification": review_ready and not package_blockers,
+        "package_blockers": package_blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "manifest_path": manifest_file.as_posix(),
+        "manifest_hash": _file_sha256(manifest_file) if manifest_file.exists() else "",
+        "candidate_package": {
+            "candidate_only": bool(manifest.get("candidate_only")),
+            "db_write_enabled": bool(manifest.get("db_write_enabled")),
+            "portfolio_snapshot_write_enabled": bool(
+                manifest.get("portfolio_snapshot_write_enabled")
+            ),
+            "requires_authoritative_confirmation": bool(
+                manifest.get("requires_authoritative_confirmation")
+            ),
+            "trade_history": {
+                key: value
+                for key, value in trade_info.items()
+                if key != "rows"
+            },
+            "positions": {
+                key: value
+                for key, value in position_info.items()
+                if key != "rows"
+            },
+        },
+        "review_progress": {
+            "trade_history": authoritative_trade,
+            "positions": authoritative_positions,
+        },
+        "no_write_safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "db_state_checked": False,
+            "restore_applied": False,
+            "dry_run_only": True,
+        },
+        "operator_commands": {
+            "verify_when_complete": verify_command,
+            "manual_review_guard": (
+                "# manual step required: fill reviewed authoritative CSV files "
+                "from broker/DB evidence before verification"
+            ),
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_review_progress_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    return report
+
+
+def render_target_weight_db_restore_review_progress_markdown(
+    report: dict[str, Any],
+) -> str:
+    candidate = report.get("candidate_package") or {}
+    trade_candidate = candidate.get("trade_history") or {}
+    positions_candidate = candidate.get("positions") or {}
+    progress = report.get("review_progress") or {}
+    trade = progress.get("trade_history") or {}
+    positions = progress.get("positions") or {}
+    lines = [
+        "# Target-weight DB Restore Review Progress",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        "- Review ready for verification: "
+        f"`{bool(report.get('review_ready_for_verification'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        "- Warnings: "
+        f"`{', '.join(report.get('warnings') or []) or 'none'}`",
+        "",
+        "## No-write Safety",
+        "- DB write enabled: `False`",
+        "- Portfolio snapshot write enabled: `False`",
+        "- DB state checked: `False`",
+        "- Restore applied: `False`",
+        "",
+        "## Candidate Package",
+        "- Trade history candidate rows: "
+        f"`{trade_candidate.get('row_count', 0)}/{trade_candidate.get('expected_rows', 0)}`",
+        "- Positions candidate rows: "
+        f"`{positions_candidate.get('row_count', 0)}/{positions_candidate.get('expected_rows', 0)}`",
+        "",
+        "## Review Progress",
+        "- Trade history reviewed rows: "
+        f"`{trade.get('row_count', 0)}/{trade.get('expected_rows', 0)}`",
+        f"- Trade history empty template: `{trade.get('empty_template', False)}`",
+        "- Trade history missing rows: "
+        f"`{trade.get('missing_from_authoritative_count', 0)}`",
+        "- Trade history unexpected rows: "
+        f"`{trade.get('unexpected_authoritative_count', 0)}`",
+        f"- Trade history match: `{trade.get('match', False)}`",
+        f"- Trade history review metadata ok: `{trade.get('review_metadata_ok', False)}`",
+        "- Trade history metadata missing columns: "
+        f"`{', '.join(trade.get('metadata_missing_columns') or []) or 'none'}`",
+        "- Trade history metadata incomplete rows: "
+        f"`{trade.get('metadata_incomplete_row_count', 0)}`",
+        "- Trade history candidate evidence-ref rows: "
+        f"`{trade.get('metadata_candidate_evidence_ref_row_count', 0)}`",
+        "- Positions reviewed rows: "
+        f"`{positions.get('row_count', 0)}/{positions.get('expected_rows', 0)}`",
+        f"- Positions empty template: `{positions.get('empty_template', False)}`",
+        "- Positions missing rows: "
+        f"`{positions.get('missing_from_authoritative_count', 0)}`",
+        "- Positions unexpected rows: "
+        f"`{positions.get('unexpected_authoritative_count', 0)}`",
+        f"- Positions match: `{positions.get('match', False)}`",
+        f"- Positions review metadata ok: `{positions.get('review_metadata_ok', False)}`",
+        "- Positions metadata missing columns: "
+        f"`{', '.join(positions.get('metadata_missing_columns') or []) or 'none'}`",
+        "- Positions metadata incomplete rows: "
+        f"`{positions.get('metadata_incomplete_row_count', 0)}`",
+        "- Positions candidate evidence-ref rows: "
+        f"`{positions.get('metadata_candidate_evidence_ref_row_count', 0)}`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_review_progress_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_review_progress_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_review_progress_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_review_progress(report: dict[str, Any]) -> None:
+    progress = report.get("review_progress") or {}
+    trade = progress.get("trade_history") or {}
+    positions = progress.get("positions") or {}
+    print(f"  status: {report.get('status')}")
+    print(
+        "  review_ready_for_verification: "
+        f"{bool(report.get('review_ready_for_verification'))}"
+    )
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    if report.get("warnings"):
+        print(f"  warnings: {', '.join(report.get('warnings') or [])}")
+    print("  no_write_safety: db_write=False snapshot_write=False restore_applied=False")
+    print(
+        "  trade_history: "
+        f"rows={trade.get('row_count', 0)}/{trade.get('expected_rows', 0)} "
+        f"missing_rows={trade.get('missing_from_authoritative_count', 0)} "
+        f"unexpected_rows={trade.get('unexpected_authoritative_count', 0)} "
+        f"match={bool(trade.get('match'))} "
+        f"metadata_ok={bool(trade.get('review_metadata_ok'))} "
+        "metadata_missing_columns="
+        f"{', '.join(trade.get('metadata_missing_columns') or []) or 'none'} "
+        "metadata_incomplete_rows="
+        f"{trade.get('metadata_incomplete_row_count', 0)} "
+        "candidate_evidence_ref_rows="
+        f"{trade.get('metadata_candidate_evidence_ref_row_count', 0)}"
+    )
+    print(
+        "  positions: "
+        f"rows={positions.get('row_count', 0)}/{positions.get('expected_rows', 0)} "
+        f"missing_rows={positions.get('missing_from_authoritative_count', 0)} "
+        f"unexpected_rows={positions.get('unexpected_authoritative_count', 0)} "
+        f"match={bool(positions.get('match'))} "
+        f"metadata_ok={bool(positions.get('review_metadata_ok'))} "
+        "metadata_missing_columns="
+        f"{', '.join(positions.get('metadata_missing_columns') or []) or 'none'} "
+        "metadata_incomplete_rows="
+        f"{positions.get('metadata_incomplete_row_count', 0)} "
+        "candidate_evidence_ref_rows="
+        f"{positions.get('metadata_candidate_evidence_ref_row_count', 0)}"
+    )
+    verify_command = (report.get("operator_commands") or {}).get(
+        "verify_when_complete"
+    )
+    if verify_command:
+        print(f"  verify_when_complete: {verify_command}")
     print(f"  artifact: {report.get('artifact_path')}")
     print(f"  report: {report.get('report_path')}")
 
@@ -10909,6 +11241,11 @@ def main() -> None:
         help="Prepare a no-write manual authoritative CSV review bundle for a DB restore package.",
     )
     parser.add_argument(
+        "--inspect-db-restore-review-progress",
+        action="store_true",
+        help="Inspect reviewed authoritative CSV completion progress without DB writes or DB state checks.",
+    )
+    parser.add_argument(
         "--plan-db-restore-apply",
         action="store_true",
         help="Create a no-write manual DB restore apply plan from a ready verification report.",
@@ -10927,7 +11264,8 @@ def main() -> None:
         "--restore-manifest",
         help=(
             "Candidate package manifest path for --verify-db-restore-package or "
-            "--prepare-db-restore-review-bundle."
+            "--prepare-db-restore-review-bundle or "
+            "--inspect-db-restore-review-progress."
         ),
     )
     parser.add_argument(
@@ -11035,6 +11373,8 @@ def main() -> None:
             cash_blocked_modes.append("--verify-db-restore-package")
         if args.prepare_db_restore_review_bundle:
             cash_blocked_modes.append("--prepare-db-restore-review-bundle")
+        if args.inspect_db_restore_review_progress:
+            cash_blocked_modes.append("--inspect-db-restore-review-progress")
         if args.plan_db_restore_apply:
             cash_blocked_modes.append("--plan-db-restore-apply")
         if args.apply_db_restore:
@@ -11054,6 +11394,7 @@ def main() -> None:
         args.diagnose_portfolio_snapshot,
         args.verify_db_restore_package,
         args.prepare_db_restore_review_bundle,
+        args.inspect_db_restore_review_progress,
         args.plan_db_restore_apply,
         args.apply_db_restore,
         args.backup_db_restore_state,
@@ -11062,7 +11403,8 @@ def main() -> None:
         parser.error(
             "--repair-pilot-evidence, --finalize-pilot-evidence, "
             "--diagnose-portfolio-snapshot, --verify-db-restore-package, "
-            "--prepare-db-restore-review-bundle, --plan-db-restore-apply, "
+            "--prepare-db-restore-review-bundle, "
+            "--inspect-db-restore-review-progress, --plan-db-restore-apply, "
             "--backup-db-restore-state, and --apply-db-restore are mutually exclusive"
         )
     if (
@@ -11071,6 +11413,7 @@ def main() -> None:
         or args.diagnose_portfolio_snapshot
         or args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
+        or args.inspect_db_restore_review_progress
         or args.plan_db_restore_apply
         or args.apply_db_restore
         or args.backup_db_restore_state
@@ -11109,17 +11452,22 @@ def main() -> None:
     if (
         args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
+        or args.inspect_db_restore_review_progress
     ) and not args.restore_manifest:
         parser.error(
             "--restore-manifest is required with --verify-db-restore-package "
-            "or --prepare-db-restore-review-bundle"
+            "or --prepare-db-restore-review-bundle or "
+            "--inspect-db-restore-review-progress"
         )
     if args.restore_manifest and not (
-        args.verify_db_restore_package or args.prepare_db_restore_review_bundle
+        args.verify_db_restore_package
+        or args.prepare_db_restore_review_bundle
+        or args.inspect_db_restore_review_progress
     ):
         parser.error(
             "--restore-manifest is only used with --verify-db-restore-package "
-            "or --prepare-db-restore-review-bundle"
+            "or --prepare-db-restore-review-bundle or "
+            "--inspect-db-restore-review-progress"
         )
     if args.plan_db_restore_apply and not args.restore_verification:
         parser.error("--restore-verification is required with --plan-db-restore-apply")
@@ -11148,10 +11496,23 @@ def main() -> None:
         )
     if (
         args.authoritative_trade_history_csv or args.authoritative_positions_csv
-    ) and not args.verify_db_restore_package:
+    ) and not (
+        args.verify_db_restore_package or args.inspect_db_restore_review_progress
+    ):
         parser.error(
             "--authoritative-trade-history-csv and --authoritative-positions-csv "
-            "are only used with --verify-db-restore-package"
+            "are only used with --verify-db-restore-package or "
+            "--inspect-db-restore-review-progress"
+        )
+    if (
+        args.verify_db_restore_package or args.inspect_db_restore_review_progress
+    ) and not (
+        args.authoritative_trade_history_csv and args.authoritative_positions_csv
+    ):
+        parser.error(
+            "--authoritative-trade-history-csv and --authoritative-positions-csv "
+            "are required with --verify-db-restore-package or "
+            "--inspect-db-restore-review-progress"
         )
 
     from database.models import init_database
@@ -11316,6 +11677,22 @@ def main() -> None:
         print(f"  manifest: {result.get('manifest_path')}")
         _print_target_weight_db_restore_review_bundle(result)
         if result["status"] != "ready_for_manual_authoritative_review":
+            raise SystemExit(1)
+        return
+
+    if args.inspect_db_restore_review_progress:
+        result = inspect_target_weight_db_restore_review_progress(
+            manifest_path=args.restore_manifest,
+            authoritative_trade_history_csv=args.authoritative_trade_history_csv,
+            authoritative_positions_csv=args.authoritative_positions_csv,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore review progress")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  manifest: {result.get('manifest_path')}")
+        _print_target_weight_db_restore_review_progress(result)
+        if result["status"] == "blocked":
             raise SystemExit(1)
         return
 

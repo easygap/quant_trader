@@ -6799,6 +6799,49 @@ def _write_reviewed_authoritative_csvs_from_package(twp, package, output_dir: Pa
     return trade_path, positions_path
 
 
+def test_inspect_target_weight_db_restore_review_progress_reports_ready_csvs(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+
+    progress = twp.inspect_target_weight_db_restore_review_progress(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "review_progress_ready",
+    )
+
+    assert progress["status"] == "ready_for_verification"
+    assert progress["review_ready_for_verification"] is True
+    assert progress["blockers"] == []
+    assert progress["no_write_safety"]["db_state_checked"] is False
+    trade_progress = progress["review_progress"]["trade_history"]
+    positions_progress = progress["review_progress"]["positions"]
+    assert trade_progress["match"] is True
+    assert trade_progress["review_metadata_ok"] is True
+    assert trade_progress["metadata_candidate_evidence_ref_row_count"] == 0
+    assert positions_progress["match"] is True
+    assert positions_progress["review_metadata_ok"] is True
+    assert positions_progress["metadata_candidate_evidence_ref_row_count"] == 0
+    assert "--verify-db-restore-package" in progress["operator_commands"][
+        "verify_when_complete"
+    ]
+    assert Path(progress["artifact_path"]).exists()
+    assert "Review ready for verification: `True`" in Path(
+        progress["report_path"]
+    ).read_text(encoding="utf-8")
+
+
 def test_plan_target_weight_db_restore_apply_is_no_write_and_sha_guarded(
     monkeypatch,
     tmp_path,
@@ -7474,9 +7517,38 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
         "verify_after_manual_review"
         in bundle["operator_commands"]
     )
+    assert "inspect_review_progress" in bundle["operator_commands"]
+    assert "--inspect-db-restore-review-progress" in (
+        bundle["operator_commands"]["inspect_review_progress"]
+    )
     assert "--prepare-db-restore-review-bundle" not in (
         bundle["operator_commands"]["verify_after_manual_review"]
     )
+    progress = twp.inspect_target_weight_db_restore_review_progress(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=authoritative_trade,
+        authoritative_positions_csv=authoritative_positions,
+        output_dir=tmp_path / "review_progress_empty_templates",
+    )
+    assert progress["status"] == "review_incomplete"
+    assert progress["review_ready_for_verification"] is False
+    assert progress["no_write_safety"]["db_state_checked"] is False
+    assert (
+        "authoritative_trade_history_csv_empty_template"
+        in progress["blockers"]
+    )
+    assert "authoritative_positions_csv_empty_template" in progress["blockers"]
+    assert progress["review_progress"]["trade_history"][
+        "missing_from_authoritative_count"
+    ] == 1
+    assert progress["review_progress"]["positions"][
+        "missing_from_authoritative_count"
+    ] == 1
+    assert Path(progress["artifact_path"]).exists()
+    assert Path(progress["report_path"]).exists()
+    progress_md = Path(progress["report_path"]).read_text(encoding="utf-8")
+    assert "Review ready for verification: `False`" in progress_md
+    assert "Trade history missing rows: `1`" in progress_md
     assert Path(bundle["artifact_path"]).exists()
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")
