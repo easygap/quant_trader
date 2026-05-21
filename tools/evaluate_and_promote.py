@@ -3217,6 +3217,12 @@ def _target_weight_ops_priority_action(
                         )
                         or []
                     ),
+                    "snapshot_db_restore_review_bundle_manual_review_files_upgraded": (
+                        latest_db_restore_review_bundle.get(
+                            "manual_review_files_upgraded"
+                        )
+                        or []
+                    ),
                     "snapshot_db_restore_review_bundle_dir": str(
                         latest_db_restore_review_bundle.get("bundle_dir") or ""
                     ),
