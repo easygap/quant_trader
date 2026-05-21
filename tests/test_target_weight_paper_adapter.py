@@ -7444,17 +7444,46 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert bundle["manual_review_required"] is True
     assert bundle["no_write_safety"]["restore_applied"] is False
     assert bundle["no_write_safety"]["authoritative_csv_auto_generated"] is False
+    assert bundle["manual_review_files_created"] == [
+        "authoritative_trade_history_template_csv",
+        "authoritative_positions_template_csv",
+        "trade_history_review_checklist_csv",
+        "positions_review_checklist_csv",
+    ]
+    assert bundle["manual_review_files_preserved"] == []
     files = bundle["review_files"]
     candidate_trade = Path(files["candidate_trade_history_csv"])
     candidate_positions = Path(files["candidate_positions_csv"])
     authoritative_trade = Path(files["authoritative_trade_history_template_csv"])
     authoritative_positions = Path(files["authoritative_positions_template_csv"])
+    trade_checklist = Path(files["trade_history_review_checklist_csv"])
+    positions_checklist = Path(files["positions_review_checklist_csv"])
     assert candidate_trade.exists()
     assert candidate_positions.exists()
     assert authoritative_trade.exists()
     assert authoritative_positions.exists()
+    assert trade_checklist.exists()
+    assert positions_checklist.exists()
     assert len(list(csv.DictReader(candidate_trade.open(encoding="utf-8-sig")))) == 1
     assert len(list(csv.DictReader(candidate_positions.open(encoding="utf-8-sig")))) == 1
+    trade_checklist_reader = csv.DictReader(
+        trade_checklist.open(encoding="utf-8-sig")
+    )
+    positions_checklist_reader = csv.DictReader(
+        positions_checklist.open(encoding="utf-8-sig")
+    )
+    trade_checklist_rows = list(trade_checklist_reader)
+    positions_checklist_rows = list(positions_checklist_reader)
+    assert len(trade_checklist_rows) == 1
+    assert len(positions_checklist_rows) == 1
+    assert trade_checklist_rows[0]["candidate_kind"] == "trade_history"
+    assert trade_checklist_rows[0]["review_status"] == "pending"
+    assert trade_checklist_rows[0]["not_authoritative"] == "true"
+    assert trade_checklist_rows[0]["authoritative_evidence_ref"] == ""
+    assert trade_checklist_rows[0]["review_item_id"].startswith("trade_history-0001-")
+    assert positions_checklist_rows[0]["candidate_kind"] == "positions"
+    assert positions_checklist_rows[0]["review_status"] == "pending"
+    assert positions_checklist_rows[0]["review_item_id"].startswith("positions-0001-")
     trade_template_reader = csv.DictReader(
         authoritative_trade.open(encoding="utf-8-sig")
     )
@@ -7553,8 +7582,28 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")
     assert "Authoritative CSV auto-generated: `False`" in report_md
+    assert "Review checklist auto-generated: `True`" in report_md
+    assert "Manual review files created" in report_md
+    assert "manual review checklist" in report_md
     assert "Required authoritative metadata columns" in report_md
     assert "Do not use artifact-only candidate rows as authoritative evidence" in report_md
+
+    edited_trade_template = "manual,edit\nkeep,1\n"
+    authoritative_trade.write_text(edited_trade_template, encoding="utf-8")
+    edited_trade_checklist = trade_checklist.read_text(encoding="utf-8") + "# note\n"
+    trade_checklist.write_text(edited_trade_checklist, encoding="utf-8")
+    rerun_bundle = twp.prepare_target_weight_db_restore_review_bundle(
+        manifest_path=package["manifest_path"],
+        output_dir=tmp_path / "review_runtime",
+    )
+    assert "authoritative_trade_history_template_csv" in (
+        rerun_bundle["manual_review_files_preserved"]
+    )
+    assert "trade_history_review_checklist_csv" in (
+        rerun_bundle["manual_review_files_preserved"]
+    )
+    assert authoritative_trade.read_text(encoding="utf-8") == edited_trade_template
+    assert trade_checklist.read_text(encoding="utf-8") == edited_trade_checklist
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(

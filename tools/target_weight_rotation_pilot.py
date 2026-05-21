@@ -4215,6 +4215,77 @@ def _target_weight_db_restore_backup_command(apply_plan_path: str | Path) -> str
     )
 
 
+TARGET_WEIGHT_RESTORE_REVIEW_CHECKLIST_COLUMNS = [
+    "review_item_id",
+    "candidate_kind",
+    "candidate_row_number",
+    "candidate_row_sha256",
+    "not_authoritative",
+    "review_status",
+    "authoritative_source",
+    "authoritative_evidence_ref",
+    "reviewed_by",
+    "reviewed_at",
+    "review_notes",
+]
+
+
+def _target_weight_restore_review_checklist_columns(
+    candidate_columns: list[str],
+) -> list[str]:
+    return TARGET_WEIGHT_RESTORE_REVIEW_CHECKLIST_COLUMNS + [
+        column
+        for column in candidate_columns
+        if column not in TARGET_WEIGHT_RESTORE_REVIEW_CHECKLIST_COLUMNS
+    ]
+
+
+def _target_weight_restore_review_checklist_rows(
+    *,
+    kind: str,
+    candidate_rows: list[dict[str, Any]],
+    candidate_columns: list[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(candidate_rows, start=1):
+        row_payload = {
+            column: _normalize_restore_compare_value(column, row.get(column))
+            for column in candidate_columns
+        }
+        row_hash = _stable_manifest_hash(row_payload)
+        rows.append({
+            "review_item_id": f"{kind}-{index:04d}-{row_hash[:12]}",
+            "candidate_kind": kind,
+            "candidate_row_number": index,
+            "candidate_row_sha256": row_hash,
+            "not_authoritative": "true",
+            "review_status": "pending",
+            "authoritative_source": "",
+            "authoritative_evidence_ref": "",
+            "reviewed_by": "",
+            "reviewed_at": "",
+            "review_notes": "",
+            **{column: row.get(column, "") for column in candidate_columns},
+        })
+    return rows
+
+
+def _write_manual_review_csv_if_missing(
+    path: Path,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    *,
+    file_key: str,
+    created_files: list[str],
+    preserved_files: list[str],
+) -> None:
+    if path.exists():
+        preserved_files.append(file_key)
+        return
+    _write_csv_rows(path, rows, columns)
+    created_files.append(file_key)
+
+
 def prepare_target_weight_db_restore_review_bundle(
     *,
     manifest_path: str | Path,
@@ -4280,25 +4351,63 @@ def prepare_target_weight_db_restore_review_bundle(
     authoritative_positions_template = (
         bundle_dir / "reviewed_authoritative_positions.csv"
     )
+    trade_review_checklist_path = bundle_dir / "manual_review_trade_history_checklist.csv"
+    positions_review_checklist_path = bundle_dir / "manual_review_positions_checklist.csv"
 
     bundle_ready = not blockers
+    manual_review_files_created: list[str] = []
+    manual_review_files_preserved: list[str] = []
     if bundle_ready:
         bundle_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(Path(str(trade_info.get("path"))), candidate_trade_path)
         shutil.copy2(Path(str(position_info.get("path"))), candidate_positions_path)
-        _write_csv_rows(
+        _write_manual_review_csv_if_missing(
             authoritative_trade_template,
             [],
             _target_weight_restore_authoritative_columns(
                 TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
             ),
+            file_key="authoritative_trade_history_template_csv",
+            created_files=manual_review_files_created,
+            preserved_files=manual_review_files_preserved,
         )
-        _write_csv_rows(
+        _write_manual_review_csv_if_missing(
             authoritative_positions_template,
             [],
             _target_weight_restore_authoritative_columns(
                 TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
             ),
+            file_key="authoritative_positions_template_csv",
+            created_files=manual_review_files_created,
+            preserved_files=manual_review_files_preserved,
+        )
+        _write_manual_review_csv_if_missing(
+            trade_review_checklist_path,
+            _target_weight_restore_review_checklist_rows(
+                kind="trade_history",
+                candidate_rows=trade_info.get("rows") or [],
+                candidate_columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+            ),
+            _target_weight_restore_review_checklist_columns(
+                TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+            ),
+            file_key="trade_history_review_checklist_csv",
+            created_files=manual_review_files_created,
+            preserved_files=manual_review_files_preserved,
+        )
+        _write_manual_review_csv_if_missing(
+            positions_review_checklist_path,
+            _target_weight_restore_review_checklist_rows(
+                kind="positions",
+                candidate_rows=position_info.get("rows") or [],
+                candidate_columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            ),
+            _target_weight_restore_review_checklist_columns(
+                TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+            ),
+            file_key="positions_review_checklist_csv",
+            created_files=manual_review_files_created,
+            preserved_files=manual_review_files_preserved,
         )
 
     verify_command = _target_weight_db_restore_verify_with_templates_command(
@@ -4357,14 +4466,32 @@ def prepare_target_weight_db_restore_review_bundle(
             "authoritative_positions_template_csv": (
                 authoritative_positions_template.as_posix()
             ),
+            "trade_history_review_checklist_csv": (
+                trade_review_checklist_path.as_posix()
+            ),
+            "positions_review_checklist_csv": (
+                positions_review_checklist_path.as_posix()
+            ),
         },
         "manual_review_required": True,
+        "manual_review_files_created": manual_review_files_created,
+        "manual_review_files_preserved": manual_review_files_preserved,
         "no_write_safety": {
             "db_write_enabled": False,
             "portfolio_snapshot_write_enabled": False,
             "restore_applied": False,
             "dry_run_only": True,
             "authoritative_csv_auto_generated": False,
+            "review_checklist_auto_generated": bool(
+                bundle_ready
+                and (
+                    "trade_history_review_checklist_csv"
+                    in manual_review_files_created
+                    or "positions_review_checklist_csv"
+                    in manual_review_files_created
+                )
+            ),
+            "manual_review_files_preserved": manual_review_files_preserved,
         },
         "operator_commands": {
             "inspect_review_progress": inspect_command,
@@ -4391,6 +4518,8 @@ def render_target_weight_db_restore_review_bundle_markdown(
     trade = candidate.get("trade_history") or {}
     positions = candidate.get("positions") or {}
     files = report.get("review_files") or {}
+    created_files = report.get("manual_review_files_created") or []
+    preserved_files = report.get("manual_review_files_preserved") or []
     lines = [
         "# Target-weight DB Restore Review Bundle",
         "",
@@ -4408,6 +4537,7 @@ def render_target_weight_db_restore_review_bundle_markdown(
         "- Portfolio snapshot write enabled: `False`",
         "- Restore applied: `False`",
         "- Authoritative CSV auto-generated: `False`",
+        f"- Review checklist auto-generated: `{bool((report.get('no_write_safety') or {}).get('review_checklist_auto_generated'))}`",
         "",
         "## Review Files",
         f"- Candidate trade_history CSV: `{files.get('candidate_trade_history_csv') or 'none'}`",
@@ -4416,6 +4546,14 @@ def render_target_weight_db_restore_review_bundle_markdown(
         f"`{files.get('authoritative_trade_history_template_csv') or 'none'}`",
         "- Reviewed authoritative positions template: "
         f"`{files.get('authoritative_positions_template_csv') or 'none'}`",
+        "- Trade history manual review checklist: "
+        f"`{files.get('trade_history_review_checklist_csv') or 'none'}`",
+        "- Positions manual review checklist: "
+        f"`{files.get('positions_review_checklist_csv') or 'none'}`",
+        "- Manual review files created: "
+        f"`{', '.join(created_files) or 'none'}`",
+        "- Manual review files preserved: "
+        f"`{', '.join(preserved_files) or 'none'}`",
         "- Required authoritative metadata columns: "
         f"`{', '.join(TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS)}`",
         "",
@@ -4427,9 +4565,10 @@ def render_target_weight_db_restore_review_bundle_markdown(
         "",
         "## Manual Review Steps",
         "1. Open the candidate CSV files and compare them against broker/DB evidence.",
-        "2. Fill the reviewed authoritative template CSV files from the external authoritative source.",
-        "3. Fill `authoritative_source`, `authoritative_evidence_ref`, `reviewed_by`, and `reviewed_at` for every reviewed row.",
-        "4. Run the verification command below. Do not use artifact-only candidate rows as authoritative evidence.",
+        "2. Use the manual review checklist files to track each candidate row's external evidence reference.",
+        "3. Fill the reviewed authoritative template CSV files from the external authoritative source.",
+        "4. Fill `authoritative_source`, `authoritative_evidence_ref`, `reviewed_by`, and `reviewed_at` for every reviewed row.",
+        "5. Run the verification command below. Do not use artifact-only candidate rows as authoritative evidence.",
         "",
         "## Operator Commands",
     ]
@@ -4482,6 +4621,24 @@ def _print_target_weight_db_restore_review_bundle(report: dict[str, Any]) -> Non
         "  authoritative_positions_template: "
         f"{files.get('authoritative_positions_template_csv')}"
     )
+    print(
+        "  trade_history_review_checklist: "
+        f"{files.get('trade_history_review_checklist_csv')}"
+    )
+    print(
+        "  positions_review_checklist: "
+        f"{files.get('positions_review_checklist_csv')}"
+    )
+    if report.get("manual_review_files_created"):
+        print(
+            "  manual_review_files_created: "
+            f"{', '.join(report.get('manual_review_files_created') or [])}"
+        )
+    if report.get("manual_review_files_preserved"):
+        print(
+            "  manual_review_files_preserved: "
+            f"{', '.join(report.get('manual_review_files_preserved') or [])}"
+        )
     verify_command = (report.get("operator_commands") or {}).get(
         "verify_after_manual_review"
     )
