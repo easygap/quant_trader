@@ -3544,6 +3544,24 @@ TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS = [
     "execution_session_id",
     "order_id",
 ]
+TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS = [
+    "account_key",
+    "symbol",
+    "action",
+    "quantity",
+    "strategy",
+    "mode",
+    "executed_at",
+    "execution_session_id",
+    "order_id",
+]
+TARGET_WEIGHT_RESTORE_TRADE_ECONOMIC_COLUMNS = [
+    "price",
+    "total_amount",
+    "commission",
+    "tax",
+    "slippage",
+]
 TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS = [
     "account_key",
     "symbol",
@@ -3551,6 +3569,16 @@ TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS = [
     "avg_price",
     "total_invested",
     "strategy",
+]
+TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS = [
+    "account_key",
+    "symbol",
+    "quantity",
+    "strategy",
+]
+TARGET_WEIGHT_RESTORE_POSITION_ECONOMIC_COLUMNS = [
+    "avg_price",
+    "total_invested",
 ]
 TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
     "price",
@@ -3734,6 +3762,8 @@ def _verify_authoritative_restore_csv(
     path_value: str | None,
     candidate_rows: list[dict[str, Any]],
     columns: list[str],
+    identity_columns: list[str],
+    economic_columns: list[str],
     kind: str,
     blockers: list[str],
 ) -> dict[str, Any]:
@@ -3748,6 +3778,16 @@ def _verify_authoritative_restore_csv(
         "fieldnames": [],
         "missing_columns": [],
         "match": False,
+        "identity_match": False,
+        "economic_match": False,
+        "identity_missing_from_authoritative_count": 0,
+        "identity_unexpected_authoritative_count": 0,
+        "identity_missing_from_authoritative_sample": [],
+        "identity_unexpected_authoritative_sample": [],
+        "economic_difference_count": 0,
+        "identity_compare_columns": identity_columns,
+        "economic_compare_columns": economic_columns,
+        "content_mismatch_scope": "",
     }
     if not path_value:
         blockers.append(f"authoritative_{kind}_csv_required")
@@ -3764,12 +3804,44 @@ def _verify_authoritative_restore_csv(
         authoritative_rows=rows,
         columns=columns,
     )
+    identity_comparison = _compare_restore_rows(
+        candidate_rows=candidate_rows,
+        authoritative_rows=rows,
+        columns=identity_columns,
+    )
+    identity_match = bool(identity_comparison["match"])
+    economic_match = bool(identity_match and comparison["match"])
+    economic_difference_count = (
+        _coerce_int_or_zero(comparison.get("missing_from_authoritative_count"))
+        + _coerce_int_or_zero(comparison.get("unexpected_authoritative_count"))
+        if identity_match and not comparison["match"]
+        else 0
+    )
+    content_mismatch_scope = ""
+    if rows and candidate_rows and not comparison["match"]:
+        content_mismatch_scope = "economic" if identity_match else "identity"
     info.update({
         "exists": True,
         "row_count": len(rows),
         "sha256": _file_sha256(path),
         "fieldnames": fieldnames,
         "missing_columns": missing_columns,
+        "identity_match": identity_match,
+        "economic_match": economic_match,
+        "identity_missing_from_authoritative_count": identity_comparison[
+            "missing_from_authoritative_count"
+        ],
+        "identity_unexpected_authoritative_count": identity_comparison[
+            "unexpected_authoritative_count"
+        ],
+        "identity_missing_from_authoritative_sample": identity_comparison[
+            "missing_from_authoritative_sample"
+        ],
+        "identity_unexpected_authoritative_sample": identity_comparison[
+            "unexpected_authoritative_sample"
+        ],
+        "economic_difference_count": economic_difference_count,
+        "content_mismatch_scope": content_mismatch_scope,
         **comparison,
     })
     if missing_columns:
@@ -3780,6 +3852,10 @@ def _verify_authoritative_restore_csv(
     elif len(rows) != len(candidate_rows):
         blockers.append(f"authoritative_{kind}_csv_row_count_mismatch")
     elif not comparison["match"]:
+        if identity_match:
+            blockers.append(f"authoritative_{kind}_csv_economic_mismatch")
+        else:
+            blockers.append(f"authoritative_{kind}_csv_identity_mismatch")
         blockers.append(f"authoritative_{kind}_csv_content_mismatch")
     return info
 
@@ -4129,6 +4205,8 @@ def verify_target_weight_db_restore_package(
         else None,
         candidate_rows=trade_info.get("rows") or [],
         columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        identity_columns=TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
+        economic_columns=TARGET_WEIGHT_RESTORE_TRADE_ECONOMIC_COLUMNS,
         kind="trade_history",
         blockers=blockers,
     )
@@ -4138,6 +4216,8 @@ def verify_target_weight_db_restore_package(
         else None,
         candidate_rows=position_info.get("rows") or [],
         columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        identity_columns=TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
+        economic_columns=TARGET_WEIGHT_RESTORE_POSITION_ECONOMIC_COLUMNS,
         kind="positions",
         blockers=blockers,
     )
@@ -4292,10 +4372,22 @@ def render_target_weight_db_restore_package_verification_markdown(
         "- Trade history authoritative rows: "
         f"`{authoritative_trade.get('row_count', 0)}/{authoritative_trade_expected_rows}`",
         f"- Trade history match: `{authoritative_trade.get('match', False)}`",
+        f"- Trade history identity match: `{authoritative_trade.get('identity_match', False)}`",
+        f"- Trade history economic match: `{authoritative_trade.get('economic_match', False)}`",
+        "- Trade history economic differences: "
+        f"`{authoritative_trade.get('economic_difference_count', 0)}`",
+        "- Trade history mismatch scope: "
+        f"`{authoritative_trade.get('content_mismatch_scope') or 'none'}`",
         f"- Positions CSV provided: `{authoritative_positions.get('provided', False)}`",
         "- Positions authoritative rows: "
         f"`{authoritative_positions.get('row_count', 0)}/{authoritative_positions_expected_rows}`",
         f"- Positions match: `{authoritative_positions.get('match', False)}`",
+        f"- Positions identity match: `{authoritative_positions.get('identity_match', False)}`",
+        f"- Positions economic match: `{authoritative_positions.get('economic_match', False)}`",
+        "- Positions economic differences: "
+        f"`{authoritative_positions.get('economic_difference_count', 0)}`",
+        "- Positions mismatch scope: "
+        f"`{authoritative_positions.get('content_mismatch_scope') or 'none'}`",
         "",
         "## Current DB State",
         f"- Checked: `{db_state.get('checked', False)}`",
@@ -4375,14 +4467,20 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"provided={bool(authoritative_trade.get('provided'))} "
         f"rows={authoritative_trade.get('row_count', 0)}/"
         f"{authoritative_trade_expected_rows} "
-        f"match={bool(authoritative_trade.get('match'))}"
+        f"match={bool(authoritative_trade.get('match'))} "
+        f"identity_match={bool(authoritative_trade.get('identity_match'))} "
+        f"economic_match={bool(authoritative_trade.get('economic_match'))} "
+        f"scope={authoritative_trade.get('content_mismatch_scope') or 'none'}"
     )
     print(
         "  authoritative_positions: "
         f"provided={bool(authoritative_positions.get('provided'))} "
         f"rows={authoritative_positions.get('row_count', 0)}/"
         f"{authoritative_positions_expected_rows} "
-        f"match={bool(authoritative_positions.get('match'))}"
+        f"match={bool(authoritative_positions.get('match'))} "
+        f"identity_match={bool(authoritative_positions.get('identity_match'))} "
+        f"economic_match={bool(authoritative_positions.get('economic_match'))} "
+        f"scope={authoritative_positions.get('content_mismatch_scope') or 'none'}"
     )
     print(
         "  current_db_state: "
