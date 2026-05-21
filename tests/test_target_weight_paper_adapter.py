@@ -6315,10 +6315,16 @@ def test_verify_target_weight_db_restore_package_requires_authoritative_match(
     assert "authoritative_positions_csv_required" in blocked["blockers"]
     assert blocked["no_write_safety"]["restore_applied"] is False
 
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+
     verified = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
-        authoritative_trade_history_csv=package["trade_history_candidate_csv"],
-        authoritative_positions_csv=package["positions_candidate_csv"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
         output_dir=tmp_path / "verification_ready",
     )
 
@@ -6339,6 +6345,53 @@ def test_verify_target_weight_db_restore_package_requires_authoritative_match(
     assert "Target-weight DB Restore Package Verification" in report_md
     assert "Restore ready: `True`" in report_md
     assert "DB write enabled: `False`" in report_md
+
+
+def test_verify_target_weight_db_restore_package_rejects_candidate_csv_as_authoritative(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=package["trade_history_candidate_csv"],
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_candidate_source_rejected",
+    )
+
+    assert verified["status"] == "blocked"
+    assert verified["restore_ready"] is False
+    assert (
+        "authoritative_trade_history_csv_candidate_source_rejected"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_candidate_source_rejected"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_trade_history_csv_candidate_marker_rejected"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_candidate_marker_rejected"
+        in verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    positions_evidence = verified["authoritative_evidence"]["positions"]
+    assert trade_evidence["candidate_source_rejected"] is True
+    assert trade_evidence["candidate_marker_rejected"] is True
+    assert trade_evidence["candidate_marker_row_count"] == 2
+    assert positions_evidence["candidate_source_rejected"] is True
+    assert positions_evidence["candidate_marker_rejected"] is True
+    assert positions_evidence["candidate_marker_row_count"] == 2
 
 
 def _target_weight_db_restore_report_with_two_rows():
@@ -6412,6 +6465,23 @@ def _patch_empty_target_weight_db_state(monkeypatch, twp) -> None:
     )
 
 
+def _write_reviewed_authoritative_csvs_from_package(twp, package, output_dir: Path):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trade_path = output_dir / "reviewed_authoritative_trade_history.csv"
+    positions_path = output_dir / "reviewed_authoritative_positions.csv"
+    twp._write_csv_rows(
+        trade_path,
+        twp._read_csv_dict_rows(Path(package["trade_history_candidate_csv"])),
+        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+    )
+    twp._write_csv_rows(
+        positions_path,
+        twp._read_csv_dict_rows(Path(package["positions_candidate_csv"])),
+        twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+    )
+    return trade_path, positions_path
+
+
 def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_columns(
     monkeypatch,
     tmp_path,
@@ -6437,11 +6507,16 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_co
         candidate_trade_rows,
         trade_columns_without_order_id,
     )
+    _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_missing_columns",
+    )
 
     verified = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
         authoritative_trade_history_csv=missing_order_id_csv,
-        authoritative_positions_csv=package["positions_candidate_csv"],
+        authoritative_positions_csv=reviewed_positions,
         output_dir=tmp_path / "verification_missing_columns",
     )
 
@@ -6479,11 +6554,16 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_row_count_
         candidate_trade_rows[:1],
         twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
     )
+    _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_row_count",
+    )
 
     verified = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
         authoritative_trade_history_csv=one_row_trade_csv,
-        authoritative_positions_csv=package["positions_candidate_csv"],
+        authoritative_positions_csv=reviewed_positions,
         output_dir=tmp_path / "verification_row_count",
     )
 
@@ -6526,11 +6606,16 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mi
         changed_trade_rows,
         twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
     )
+    _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_content",
+    )
 
     verified = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
         authoritative_trade_history_csv=changed_trade_csv,
-        authoritative_positions_csv=package["positions_candidate_csv"],
+        authoritative_positions_csv=reviewed_positions,
         output_dir=tmp_path / "verification_content",
     )
 
@@ -6586,11 +6671,16 @@ def test_verify_target_weight_db_restore_package_separates_economic_mismatch(
         changed_trade_rows,
         twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
     )
+    _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_economic_mismatch",
+    )
 
     verified = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
         authoritative_trade_history_csv=economic_mismatch_csv,
-        authoritative_positions_csv=package["positions_candidate_csv"],
+        authoritative_positions_csv=reviewed_positions,
         output_dir=tmp_path / "verification_economic_mismatch",
     )
 
@@ -10031,6 +10121,139 @@ def test_run_pilot_blocks_order_submission_when_preflight_refresh_fails(monkeypa
     assert saved_sessions == []
     assert payload["preflight_refresh"]["complete"] is False
     assert payload["execution"]["details"][0]["status"] == "skipped_preflight_refresh"
+
+
+def test_run_pilot_blocks_execute_when_current_blockers_requires_db_restore(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "next_actions": [
+                    {
+                        "priority": 1,
+                        "strategy": plan.candidate_id,
+                        "daily_ops_trade_day": plan.trade_day,
+                        "desc": "target-weight DB 복구 authoritative CSV 템플릿 작성 후 verify 실행",
+                        "command": "# blocked: fill reviewed authoritative trade_history/positions CSV templates before DB restore verification",
+                        "db_persistence_guard": (
+                            "target_weight_db_persistence_proof_required"
+                        ),
+                        "db_restore_review_guard": (
+                            "target_weight_authoritative_db_restore_csv_fill_required"
+                        ),
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pp, "RUNTIME_DIR", tmp_path / "paper_runtime")
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        twp,
+        "refresh_paper_preflight_status",
+        lambda *args, **kwargs: pytest.fail(
+            "current blockers DB restore guard must block before preflight refresh"
+        ),
+    )
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        twp,
+        "assess_plan_liquidity",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+            "orders": [],
+            "violations": [],
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "assess_plan_pre_trade_risk",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+            "violations": [],
+            "order_costs": [],
+            "cost_summary": {},
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "check_execution_idempotency",
+        lambda *args, **kwargs: pytest.fail(
+            "current blockers DB restore guard must block before idempotency"
+        ),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail(
+            "current blockers DB restore guard must block before order submission"
+        ),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail(
+            "current blockers DB restore guard must block before position reads"
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail(
+            "current blockers DB restore guard must not write runtime pilot session"
+        ),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail(
+            "current blockers DB restore guard must not collect pilot evidence"
+        ),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=tmp_path / "sessions",
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+    payload = json.loads(result["artifact_path"].read_text(encoding="utf-8"))
+
+    guard = result["current_blockers_execution_guard"]
+    assert guard["checked"] is True
+    assert guard["allowed"] is False
+    assert (
+        guard["guards"]["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_csv_fill_required"
+    )
+    assert result["preflight_refresh"]["checked"] is False
+    assert result["execution"]["executed"] == 0
+    assert result["execution"]["skipped"] == len(plan.orders)
+    assert result["execution"]["halted"] is True
+    assert result["execution"]["details"][0]["status"] == "skipped_current_blockers_guard"
+    assert "target_weight_current_blockers_execution_blocked" in (
+        result["execution"]["halt_reason"]
+    )
+    assert result["evidence_collection"]["status"] == "blocked"
+    assert "target_weight_current_blockers_execution_blocked" in (
+        result["evidence_collection"]["reason"]
+    )
+    assert payload["current_blockers_execution_guard"]["allowed"] is False
+    assert payload["execution"]["current_blockers_execution_guard"]["allowed"] is False
 
 
 def test_run_pilot_readiness_audit_blocks_stale_execution_day(monkeypatch, tmp_path):
