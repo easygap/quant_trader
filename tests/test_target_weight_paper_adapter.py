@@ -10123,6 +10123,142 @@ def test_run_pilot_blocks_order_submission_when_preflight_refresh_fails(monkeypa
     assert payload["execution"]["details"][0]["status"] == "skipped_preflight_refresh"
 
 
+def test_run_pilot_blocks_execute_when_operational_current_blockers_missing(
+    monkeypatch,
+    tmp_path,
+):
+    import core.paper_evidence as pe
+    import core.paper_pilot as pp
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    output_dir = tmp_path / "reports" / "paper_runtime"
+    monkeypatch.setattr(pp, "RUNTIME_DIR", output_dir)
+    monkeypatch.setattr(twp, "build_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        twp,
+        "refresh_paper_preflight_status",
+        lambda *args, **kwargs: pytest.fail(
+            "missing operational current blockers must block before preflight refresh"
+        ),
+    )
+    monkeypatch.setattr(pp, "check_pilot_entry", lambda *args, **kwargs: _pilot_check_for_plan(plan))
+    monkeypatch.setattr(
+        twp,
+        "assess_plan_liquidity",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_liquidity_preflight_passed",
+            "orders": [],
+            "violations": [],
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "assess_plan_pre_trade_risk",
+        lambda *args, **kwargs: {
+            "checked": True,
+            "complete": True,
+            "reason": "target_weight_pre_trade_risk_passed",
+            "violations": [],
+            "order_costs": [],
+            "cost_summary": {},
+        },
+    )
+    monkeypatch.setattr(
+        twp,
+        "check_execution_idempotency",
+        lambda *args, **kwargs: pytest.fail(
+            "missing operational current blockers must block before idempotency"
+        ),
+    )
+    monkeypatch.setattr(
+        twp,
+        "execute_plan",
+        lambda *args, **kwargs: pytest.fail(
+            "missing operational current blockers must block before order submission"
+        ),
+    )
+    monkeypatch.setattr(
+        twp,
+        "_load_positions",
+        lambda account_key: pytest.fail(
+            "missing operational current blockers must block before position reads"
+        ),
+    )
+    monkeypatch.setattr(
+        pp,
+        "save_pilot_session_artifact",
+        lambda **kwargs: pytest.fail(
+            "missing operational current blockers must not write runtime pilot session"
+        ),
+    )
+    monkeypatch.setattr(
+        pe,
+        "collect_daily_evidence",
+        lambda **kwargs: pytest.fail(
+            "missing operational current blockers must not collect pilot evidence"
+        ),
+    )
+
+    result = twp.run_pilot(
+        execute=True,
+        collect_evidence=True,
+        output_dir=output_dir,
+        config=SimpleNamespace(trading={"mode": "paper"}),
+        execution_now=_plan_execution_now(),
+    )
+
+    guard = result["current_blockers_execution_guard"]
+    assert guard["required"] is True
+    assert guard["allowed"] is False
+    assert guard["reason"] == "target_weight_current_blockers_missing"
+    assert result["preflight_refresh"]["checked"] is False
+    assert result["execution"]["details"][0]["status"] == "skipped_current_blockers_guard"
+    assert "target_weight_current_blockers_missing" in result["evidence_collection"]["reason"]
+
+
+def test_current_blockers_execution_guard_blocks_stale_operational_report(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "current_go_live_blockers",
+                "schema_version": 3,
+                "promotion_artifact_freshness": {"status": "STALE"},
+                "next_actions": [
+                    {
+                        "priority": 1,
+                        "strategy": plan.candidate_id,
+                        "daily_ops_trade_day": plan.trade_day,
+                        "desc": "READY_TO_EXECUTE capped paper 실행",
+                        "command": "python tools/target_weight_rotation_pilot.py --execute --collect-evidence",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    guard = twp.load_current_blockers_execution_guard(
+        plan,
+        output_dir=reports_dir / "paper_runtime",
+    )
+
+    assert guard["required"] is True
+    assert guard["checked"] is True
+    assert guard["allowed"] is False
+    assert guard["reason"] == "target_weight_current_blockers_not_fresh: STALE"
+
+
 def test_run_pilot_blocks_execute_when_current_blockers_requires_db_restore(
     monkeypatch,
     tmp_path,
@@ -10135,6 +10271,9 @@ def test_run_pilot_blocks_execute_when_current_blockers_requires_db_restore(
     (tmp_path / "current_blockers.json").write_text(
         json.dumps(
             {
+                "artifact_type": "current_go_live_blockers",
+                "schema_version": 3,
+                "promotion_artifact_freshness": {"status": "FRESH"},
                 "next_actions": [
                     {
                         "priority": 1,
