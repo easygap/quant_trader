@@ -8850,21 +8850,33 @@ def current_blockers_execution_guard_not_required() -> dict[str, Any]:
     }
 
 
+def _current_blockers_guard_required(path: Path) -> bool:
+    return path.parent.name == "reports"
+
+
 def load_current_blockers_execution_guard(
     plan: TargetWeightPlan,
     *,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> dict[str, Any]:
     path = Path(output_dir).parent / "current_blockers.json"
+    guard_required = _current_blockers_guard_required(path)
     result: dict[str, Any] = {
         "checked": False,
         "allowed": True,
+        "required": guard_required,
         "path": path.as_posix(),
         "reason": "current_blockers.json unavailable; guard not applied",
         "matched_action": {},
         "guards": {},
     }
     if not path.exists():
+        if guard_required:
+            return {
+                **result,
+                "allowed": False,
+                "reason": "target_weight_current_blockers_missing",
+            }
         return result
 
     result["checked"] = True
@@ -8877,6 +8889,30 @@ def load_current_blockers_execution_guard(
             "reason": (
                 "target_weight_current_blockers_unreadable: "
                 f"{exc.__class__.__name__}"
+            ),
+        }
+
+    if payload.get("artifact_type") != "current_go_live_blockers":
+        return {
+            **result,
+            "allowed": False,
+            "reason": "target_weight_current_blockers_invalid_artifact_type",
+        }
+    if _coerce_int_or_zero(payload.get("schema_version")) < 3:
+        return {
+            **result,
+            "allowed": False,
+            "reason": "target_weight_current_blockers_schema_too_old",
+        }
+    freshness = payload.get("promotion_artifact_freshness") or {}
+    freshness_status = str(freshness.get("status") or "").strip()
+    if guard_required and freshness_status != "FRESH":
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_current_blockers_not_fresh: "
+                f"{freshness_status or 'missing'}"
             ),
         }
 
@@ -8893,6 +8929,15 @@ def load_current_blockers_execution_guard(
         break
 
     if not matched_action:
+        if guard_required:
+            return {
+                **result,
+                "allowed": False,
+                "reason": (
+                    "target_weight_current_blockers_action_missing: "
+                    f"strategy={plan.candidate_id} trade_day={plan.trade_day}"
+                ),
+            }
         return {
             **result,
             "reason": "no current blockers action for this strategy/trade day",
