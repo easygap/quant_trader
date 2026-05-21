@@ -3960,12 +3960,27 @@ def _target_weight_db_restore_apply_plan_command(
 
 def _target_weight_db_restore_apply_command(
     apply_plan_path: str | Path,
+    backup_path: str | Path | None = None,
 ) -> str:
+    backup_part = (
+        f"--restore-backup {backup_path} "
+        if backup_path
+        else "--restore-backup <pre_apply_backup_json> "
+    )
     return (
         "python tools/target_weight_rotation_pilot.py "
         "--apply-db-restore "
         f"--restore-apply-plan {apply_plan_path} "
+        f"{backup_part}"
         "--backup-confirmed --confirm-db-restore-apply"
+    )
+
+
+def _target_weight_db_restore_backup_command(apply_plan_path: str | Path) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        "--backup-db-restore-state "
+        f"--restore-apply-plan {apply_plan_path}"
     )
 
 
@@ -4959,8 +4974,12 @@ def write_target_weight_db_restore_apply_plan_report(
     report["artifact_path"] = json_path.as_posix()
     report["report_path"] = md_path.as_posix()
     if bool(report.get("apply_ready")):
-        report.setdefault("operator_commands", {})["apply_manual_db_restore"] = (
-            _target_weight_db_restore_apply_command(json_path.as_posix())
+        commands = report.setdefault("operator_commands", {})
+        commands["backup_db_restore_state"] = _target_weight_db_restore_backup_command(
+            json_path.as_posix()
+        )
+        commands["apply_manual_db_restore"] = _target_weight_db_restore_apply_command(
+            json_path.as_posix()
         )
     json_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
@@ -4999,6 +5018,300 @@ def _print_target_weight_db_restore_apply_plan(report: dict[str, Any]) -> None:
     print(
         "  planned_positions: "
         f"operation={position_ops.get('operation')} rows={position_ops.get('row_count', 0)}"
+    )
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
+
+
+def _restore_model_datetime(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _serialize_restore_backup_trade(row: Any) -> dict[str, Any]:
+    return {
+        "id": getattr(row, "id", None),
+        "account_key": getattr(row, "account_key", "") or "",
+        "symbol": getattr(row, "symbol", "") or "",
+        "action": getattr(row, "action", "") or "",
+        "price": getattr(row, "price", None),
+        "quantity": getattr(row, "quantity", None),
+        "total_amount": getattr(row, "total_amount", None),
+        "commission": getattr(row, "commission", None),
+        "tax": getattr(row, "tax", None),
+        "slippage": getattr(row, "slippage", None),
+        "expected_price": getattr(row, "expected_price", None),
+        "actual_slippage_pct": getattr(row, "actual_slippage_pct", None),
+        "execution_session_id": getattr(row, "execution_session_id", "") or "",
+        "order_id": getattr(row, "order_id", "") or "",
+        "strategy": getattr(row, "strategy", "") or "",
+        "mode": getattr(row, "mode", "") or "",
+        "order_at": _restore_model_datetime(getattr(row, "order_at", None)),
+        "executed_at": _restore_model_datetime(getattr(row, "executed_at", None)),
+        "created_at": _restore_model_datetime(getattr(row, "created_at", None)),
+    }
+
+
+def _serialize_restore_backup_position(row: Any) -> dict[str, Any]:
+    return {
+        "id": getattr(row, "id", None),
+        "account_key": getattr(row, "account_key", "") or "",
+        "symbol": getattr(row, "symbol", "") or "",
+        "avg_price": getattr(row, "avg_price", None),
+        "quantity": getattr(row, "quantity", None),
+        "total_invested": getattr(row, "total_invested", None),
+        "stop_loss_price": getattr(row, "stop_loss_price", None),
+        "take_profit_price": getattr(row, "take_profit_price", None),
+        "trailing_stop_price": getattr(row, "trailing_stop_price", None),
+        "highest_price": getattr(row, "highest_price", None),
+        "strategy": getattr(row, "strategy", "") or "",
+        "bought_at": _restore_model_datetime(getattr(row, "bought_at", None)),
+        "updated_at": _restore_model_datetime(getattr(row, "updated_at", None)),
+    }
+
+
+def backup_target_weight_db_restore_state(
+    *,
+    apply_plan_path: str | Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """guarded apply 직전 대상 DB row 상태를 no-write backup artifact로 남긴다."""
+    plan_file = Path(apply_plan_path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    plan: dict[str, Any] = {}
+    if not plan_file.exists():
+        blockers.append("restore_backup_apply_plan_missing")
+    else:
+        try:
+            plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"restore_backup_apply_plan_invalid_json:{exc}")
+            plan = {}
+
+    if plan.get("artifact_type") != "target_weight_db_restore_apply_plan":
+        blockers.append("restore_backup_apply_plan_artifact_type_invalid")
+    if plan.get("status") != "ready_for_manual_db_apply":
+        blockers.append("restore_backup_apply_plan_status_not_ready")
+    if not bool(plan.get("apply_ready")):
+        blockers.append("restore_backup_apply_plan_not_ready")
+    if plan.get("blockers"):
+        blockers.append("restore_backup_apply_plan_blockers_present")
+
+    candidate_id = str(plan.get("candidate_id") or "")
+    snapshot_date = str(plan.get("snapshot_date") or "")
+    if not candidate_id or not snapshot_date:
+        blockers.append("restore_backup_candidate_or_snapshot_date_missing")
+
+    verification_path = str(plan.get("verification_report_path") or "")
+    if verification_path:
+        fresh_plan = plan_target_weight_db_restore_apply(
+            verification_report_path=verification_path,
+            output_dir=output_dir,
+        )
+        if not bool(fresh_plan.get("apply_ready")):
+            blockers.append("restore_backup_fresh_plan_not_ready")
+        if (
+            str(fresh_plan.get("verification_report_hash") or "")
+            != str(plan.get("verification_report_hash") or "")
+        ):
+            blockers.append("restore_backup_verification_report_changed_after_plan")
+    else:
+        blockers.append("restore_backup_verification_report_missing")
+
+    trade_rows: list[dict[str, Any]] = []
+    position_rows: list[dict[str, Any]] = []
+    current_db_state: dict[str, Any] = {"checked": False}
+    if candidate_id and snapshot_date:
+        from database.models import Position, TradeHistory, get_session
+
+        day_start = datetime.strptime(snapshot_date, "%Y-%m-%d")
+        day_end = day_start + timedelta(days=1)
+        session = get_session()
+        try:
+            trades = (
+                session.query(TradeHistory)
+                .filter(
+                    TradeHistory.account_key == candidate_id,
+                    TradeHistory.executed_at >= day_start,
+                    TradeHistory.executed_at < day_end,
+                )
+                .order_by(TradeHistory.executed_at.asc(), TradeHistory.id.asc())
+                .all()
+            )
+            positions = (
+                session.query(Position)
+                .filter(Position.account_key == candidate_id)
+                .order_by(Position.symbol.asc())
+                .all()
+            )
+            trade_rows = [_serialize_restore_backup_trade(row) for row in trades]
+            position_rows = [
+                _serialize_restore_backup_position(row) for row in positions
+            ]
+            current_db_state = {
+                "checked": True,
+                "trade_count_on_date": len(trade_rows),
+                "position_count": len(position_rows),
+            }
+        except Exception as exc:
+            current_db_state = {
+                "checked": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            blockers.append("restore_backup_current_db_state_unavailable")
+        finally:
+            session.close()
+
+    if not current_db_state.get("checked"):
+        blockers.append("restore_backup_current_db_state_not_checked")
+    elif (
+        _coerce_int_or_zero(current_db_state.get("trade_count_on_date")) > 0
+        or _coerce_int_or_zero(current_db_state.get("position_count")) > 0
+    ):
+        blockers.append("restore_backup_current_db_state_not_empty_reconcile_before_apply")
+
+    backup_ready = not blockers
+    status = "ready_for_guarded_apply" if backup_ready else "blocked"
+    report = {
+        "artifact_type": "target_weight_db_restore_pre_apply_backup",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": status,
+        "backup_ready": backup_ready,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "apply_plan_path": plan_file.as_posix(),
+        "apply_plan_hash": _file_sha256(plan_file) if plan_file.exists() else "",
+        "verification_report_path": verification_path,
+        "current_db_state": current_db_state,
+        "logical_backup": {
+            "trade_history": {
+                "row_count": len(trade_rows),
+                "rows": trade_rows,
+            },
+            "positions": {
+                "row_count": len(position_rows),
+                "rows": position_rows,
+            },
+        },
+        "no_write_safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "restore_applied": False,
+            "dry_run_only": True,
+        },
+        "operator_commands": {
+            "apply_guarded_db_restore": "",
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_backup_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    report["operator_commands"]["apply_guarded_db_restore"] = (
+        _target_weight_db_restore_apply_command(
+            plan_file.as_posix(),
+            backup_path=json_path.as_posix(),
+        )
+    )
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_backup_markdown(report),
+        encoding="utf-8",
+    )
+    return report
+
+
+def render_target_weight_db_restore_backup_markdown(report: dict[str, Any]) -> str:
+    backup = report.get("logical_backup") or {}
+    trade = backup.get("trade_history") or {}
+    positions = backup.get("positions") or {}
+    db_state = report.get("current_db_state") or {}
+    lines = [
+        "# Target-weight DB Restore Pre-Apply Backup",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        f"- Backup ready: `{bool(report.get('backup_ready'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        f"- Apply plan: `{report.get('apply_plan_path') or 'none'}`",
+        "",
+        "## Current DB State",
+        f"- Checked: `{db_state.get('checked', False)}`",
+        f"- Trade rows on date: `{db_state.get('trade_count_on_date', 0)}`",
+        f"- Positions: `{db_state.get('position_count', 0)}`",
+        "",
+        "## Logical Backup",
+        f"- TradeHistory rows: `{trade.get('row_count', 0)}`",
+        f"- Position rows: `{positions.get('row_count', 0)}`",
+        "",
+        "## No-write Safety",
+        "- DB write enabled: `False`",
+        "- Restore applied: `False`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_backup_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_pre_apply_backup_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_backup_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_backup(report: dict[str, Any]) -> None:
+    backup = report.get("logical_backup") or {}
+    trade = backup.get("trade_history") or {}
+    positions = backup.get("positions") or {}
+    db_state = report.get("current_db_state") or {}
+    print(f"  status: {report.get('status')}")
+    print(f"  backup_ready: {bool(report.get('backup_ready'))}")
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    print(
+        "  current_db_state: "
+        f"checked={bool(db_state.get('checked'))} "
+        f"trades_on_date={db_state.get('trade_count_on_date', 0)} "
+        f"positions={db_state.get('position_count', 0)}"
+    )
+    print(
+        "  logical_backup: "
+        f"trade_history={trade.get('row_count', 0)} "
+        f"positions={positions.get('row_count', 0)}"
     )
     print(f"  artifact: {report.get('artifact_path')}")
     print(f"  report: {report.get('report_path')}")
@@ -5122,6 +5435,7 @@ def _validate_restore_apply_rows(
 def apply_target_weight_db_restore_plan(
     *,
     apply_plan_path: str | Path,
+    restore_backup_path: str | Path | None = None,
     backup_confirmed: bool = False,
     confirm_db_restore_apply: bool = False,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -5144,6 +5458,19 @@ def apply_target_weight_db_restore_plan(
         blockers.append("restore_apply_db_backup_confirmation_required")
     if not confirm_db_restore_apply:
         blockers.append("restore_apply_explicit_confirmation_required")
+    backup_file = Path(str(restore_backup_path or ""))
+    backup_report: dict[str, Any] = {}
+    if not restore_backup_path:
+        blockers.append("restore_apply_backup_artifact_required")
+    elif not backup_file.exists():
+        blockers.append("restore_apply_backup_artifact_missing")
+    else:
+        try:
+            backup_report = json.loads(backup_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"restore_apply_backup_artifact_invalid_json:{exc}")
+            backup_report = {}
+
     if plan.get("artifact_type") != "target_weight_db_restore_apply_plan":
         blockers.append("restore_apply_plan_artifact_type_invalid")
     if plan.get("status") != "ready_for_manual_db_apply":
@@ -5157,6 +5484,31 @@ def apply_target_weight_db_restore_plan(
     snapshot_date = str(plan.get("snapshot_date") or "")
     if not candidate_id or not snapshot_date:
         blockers.append("restore_apply_candidate_or_snapshot_date_missing")
+
+    apply_plan_hash = _file_sha256(plan_file) if plan_file.exists() else ""
+    if backup_report:
+        if backup_report.get("artifact_type") != "target_weight_db_restore_pre_apply_backup":
+            blockers.append("restore_apply_backup_artifact_type_invalid")
+        if backup_report.get("candidate_id") != candidate_id:
+            blockers.append("restore_apply_backup_candidate_mismatch")
+        if backup_report.get("snapshot_date") != snapshot_date:
+            blockers.append("restore_apply_backup_snapshot_date_mismatch")
+        if not bool(backup_report.get("backup_ready")):
+            blockers.append("restore_apply_backup_not_ready")
+        if backup_report.get("blockers"):
+            blockers.append("restore_apply_backup_blockers_present")
+        if str(backup_report.get("apply_plan_hash") or "") != apply_plan_hash:
+            blockers.append("restore_apply_backup_plan_hash_mismatch")
+        backup_state = backup_report.get("current_db_state") or {}
+        if not isinstance(backup_state, dict):
+            backup_state = {}
+        if not bool(backup_state.get("checked")):
+            blockers.append("restore_apply_backup_state_not_checked")
+        if (
+            _coerce_int_or_zero(backup_state.get("trade_count_on_date")) > 0
+            or _coerce_int_or_zero(backup_state.get("position_count")) > 0
+        ):
+            blockers.append("restore_apply_backup_state_not_empty")
 
     verification_path = str(plan.get("verification_report_path") or "")
     if not verification_path:
@@ -5292,7 +5644,11 @@ def apply_target_weight_db_restore_plan(
         "candidate_id": candidate_id,
         "snapshot_date": snapshot_date,
         "apply_plan_path": plan_file.as_posix(),
-        "apply_plan_hash": _file_sha256(plan_file) if plan_file.exists() else "",
+        "apply_plan_hash": apply_plan_hash,
+        "restore_backup_path": backup_file.as_posix() if restore_backup_path else "",
+        "restore_backup_hash": _file_sha256(backup_file)
+        if restore_backup_path and backup_file.exists()
+        else "",
         "backup_confirmed": backup_confirmed,
         "explicit_confirmation": confirm_db_restore_apply,
         "db_precondition": db_precondition,
@@ -5332,6 +5688,7 @@ def render_target_weight_db_restore_apply_result_markdown(report: dict[str, Any]
         "- Blockers: "
         f"`{', '.join(report.get('blockers') or []) or 'none'}`",
         f"- Apply plan: `{report.get('apply_plan_path') or 'none'}`",
+        f"- Restore backup: `{report.get('restore_backup_path') or 'none'}`",
         "",
         "## Confirmation",
         f"- Backup confirmed: `{bool(report.get('backup_confirmed'))}`",
@@ -10271,6 +10628,11 @@ def main() -> None:
         help="Apply a ready DB restore apply plan after explicit backup and restore confirmation.",
     )
     parser.add_argument(
+        "--backup-db-restore-state",
+        action="store_true",
+        help="Create a no-write pre-apply backup artifact for a ready DB restore apply plan.",
+    )
+    parser.add_argument(
         "--restore-manifest",
         help=(
             "Candidate package manifest path for --verify-db-restore-package or "
@@ -10283,7 +10645,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--restore-apply-plan",
-        help="Ready DB restore apply plan path for --apply-db-restore.",
+        help=(
+            "Ready DB restore apply plan path for --backup-db-restore-state or "
+            "--apply-db-restore."
+        ),
+    )
+    parser.add_argument(
+        "--restore-backup",
+        help="Pre-apply DB restore backup artifact path for --apply-db-restore.",
     )
     parser.add_argument(
         "--backup-confirmed",
@@ -10379,6 +10748,8 @@ def main() -> None:
             cash_blocked_modes.append("--plan-db-restore-apply")
         if args.apply_db_restore:
             cash_blocked_modes.append("--apply-db-restore")
+        if args.backup_db_restore_state:
+            cash_blocked_modes.append("--backup-db-restore-state")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -10394,13 +10765,14 @@ def main() -> None:
         args.prepare_db_restore_review_bundle,
         args.plan_db_restore_apply,
         args.apply_db_restore,
+        args.backup_db_restore_state,
     ]
     if sum(1 for enabled in evidence_maintenance_modes if enabled) > 1:
         parser.error(
             "--repair-pilot-evidence, --finalize-pilot-evidence, "
             "--diagnose-portfolio-snapshot, --verify-db-restore-package, "
             "--prepare-db-restore-review-bundle, --plan-db-restore-apply, "
-            "and --apply-db-restore are mutually exclusive"
+            "--backup-db-restore-state, and --apply-db-restore are mutually exclusive"
         )
     if (
         args.repair_pilot_evidence
@@ -10410,6 +10782,7 @@ def main() -> None:
         or args.prepare_db_restore_review_bundle
         or args.plan_db_restore_apply
         or args.apply_db_restore
+        or args.backup_db_restore_state
     ) and (
         args.readiness_audit
         or args.daily_ops_summary
@@ -10461,10 +10834,22 @@ def main() -> None:
         parser.error("--restore-verification is required with --plan-db-restore-apply")
     if args.restore_verification and not args.plan_db_restore_apply:
         parser.error("--restore-verification is only used with --plan-db-restore-apply")
-    if args.apply_db_restore and not args.restore_apply_plan:
-        parser.error("--restore-apply-plan is required with --apply-db-restore")
-    if args.restore_apply_plan and not args.apply_db_restore:
-        parser.error("--restore-apply-plan is only used with --apply-db-restore")
+    if (args.apply_db_restore or args.backup_db_restore_state) and not args.restore_apply_plan:
+        parser.error(
+            "--restore-apply-plan is required with --backup-db-restore-state "
+            "or --apply-db-restore"
+        )
+    if args.restore_apply_plan and not (
+        args.apply_db_restore or args.backup_db_restore_state
+    ):
+        parser.error(
+            "--restore-apply-plan is only used with --backup-db-restore-state "
+            "or --apply-db-restore"
+        )
+    if args.apply_db_restore and not args.restore_backup:
+        parser.error("--restore-backup is required with --apply-db-restore")
+    if args.restore_backup and not args.apply_db_restore:
+        parser.error("--restore-backup is only used with --apply-db-restore")
     if (args.backup_confirmed or args.confirm_db_restore_apply) and not args.apply_db_restore:
         parser.error(
             "--backup-confirmed and --confirm-db-restore-apply are only used "
@@ -10673,9 +11058,24 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    if args.backup_db_restore_state:
+        result = backup_target_weight_db_restore_state(
+            apply_plan_path=args.restore_apply_plan,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore pre-apply backup")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  apply_plan: {result.get('apply_plan_path')}")
+        _print_target_weight_db_restore_backup(result)
+        if result["status"] != "ready_for_guarded_apply":
+            raise SystemExit(1)
+        return
+
     if args.apply_db_restore:
         result = apply_target_weight_db_restore_plan(
             apply_plan_path=args.restore_apply_plan,
+            restore_backup_path=args.restore_backup,
             backup_confirmed=args.backup_confirmed,
             confirm_db_restore_apply=args.confirm_db_restore_apply,
             output_dir=Path(args.output_dir),
