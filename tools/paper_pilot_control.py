@@ -937,6 +937,10 @@ def _target_weight_operator_next_action(
     priority_scheduled_command: str,
     priority_failure_reason: str,
     priority_wait_guard: str,
+    priority_db_guard: str,
+    priority_db_restore_review_guard: str,
+    priority_db_restore_verify_command: str,
+    priority_db_restore_verification_blockers: list,
     priority_diagnostics_status: str,
     priority_probe_status: str,
     priority_recovery_hint: str,
@@ -1024,6 +1028,32 @@ def _target_weight_operator_next_action(
                 "WAIT for final portfolio performance evidence, then rerun "
                 f"scheduled priority command: {recovery_command}"
             )
+    if (
+        priority_db_guard == "target_weight_db_persistence_proof_required"
+        and priority_db_restore_review_guard
+    ):
+        blockers = ", ".join(
+            str(item) for item in priority_db_restore_verification_blockers
+        )
+        verify_command = priority_db_restore_verify_command or priority_scheduled_command
+        if (
+            priority_db_restore_review_guard
+            == "target_weight_authoritative_db_restore_ready_manual_db_write"
+        ):
+            return (
+                "RESTORE verified authoritative DB trade_history/positions proof, "
+                "then rerun daily ops"
+            )
+        if verify_command:
+            suffix = f"; blockers={blockers}" if blockers else ""
+            return (
+                "REVIEW authoritative trade_history/positions CSV, then run DB "
+                f"restore verification: {verify_command}{suffix}"
+            )
+        return (
+            "REVIEW authoritative trade_history/positions CSV before DB restore "
+            "verification"
+        )
     if priority_command and not _command_is_blocked(priority_command):
         if priority_failure_reason:
             return (
@@ -1499,6 +1529,17 @@ def _print_target_weight_daily_ops_status(
     ).strip()
     priority_wait_guard = str(priority_action.get("performance_evidence_guard") or "").strip()
     priority_db_guard = str(priority_action.get("db_persistence_guard") or "").strip()
+    priority_db_restore_review_guard = str(
+        priority_action.get("db_restore_review_guard") or ""
+    ).strip()
+    priority_db_restore_verify_command = str(
+        priority_action.get("snapshot_db_restore_package_verify_command") or ""
+    ).strip()
+    priority_db_restore_verification_blockers = (
+        priority_action.get("snapshot_db_restore_verification_blockers") or []
+    )
+    if not isinstance(priority_db_restore_verification_blockers, list):
+        priority_db_restore_verification_blockers = []
     priority_blocked_finalize_command = str(
         priority_action.get("blocked_finalize_command") or ""
     ).strip()
@@ -1591,10 +1632,54 @@ def _print_target_weight_daily_ops_status(
                     "    Snapshot DB restore missing symbols: "
                     + ", ".join(str(symbol) for symbol in missing_symbols)
                 )
+            if priority_action.get("snapshot_db_restore_candidate_package_generated"):
+                print(
+                    "    Snapshot DB restore candidate package: "
+                    "generated=True "
+                    "trade_rows="
+                    f"{priority_action.get('snapshot_db_restore_trade_history_candidate_rows', 0)} "
+                    "positions="
+                    f"{priority_action.get('snapshot_db_restore_position_candidate_rows', 0)}"
+                )
+                if priority_action.get("snapshot_db_restore_candidate_manifest"):
+                    print(
+                        "    Snapshot DB restore candidate manifest: "
+                        f"{priority_action.get('snapshot_db_restore_candidate_manifest')}"
+                    )
+                if priority_action.get("snapshot_db_restore_trade_history_candidate_csv"):
+                    print(
+                        "    Snapshot DB restore trade history CSV: "
+                        f"{priority_action.get('snapshot_db_restore_trade_history_candidate_csv')}"
+                    )
+                if priority_action.get("snapshot_db_restore_positions_candidate_csv"):
+                    print(
+                        "    Snapshot DB restore positions CSV: "
+                        f"{priority_action.get('snapshot_db_restore_positions_candidate_csv')}"
+                    )
+                skipped_zero_positions = priority_action.get(
+                    "snapshot_db_restore_position_candidate_skipped_zero_quantity_symbols"
+                ) or []
+                if skipped_zero_positions:
+                    print(
+                        "    Snapshot DB restore skipped zero-quantity positions: "
+                        + ", ".join(str(symbol) for symbol in skipped_zero_positions)
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_candidate_requires_authoritative_confirmation"
+                ):
+                    print(
+                        "    Snapshot DB restore safety: "
+                        "authoritative confirmation required before DB write"
+                    )
             if priority_action.get("snapshot_db_restore_package_verify_command"):
                 print(
                     "    Snapshot DB restore verify command: "
                     f"{priority_action.get('snapshot_db_restore_package_verify_command')}"
+                )
+            if priority_db_restore_review_guard:
+                print(
+                    "    Snapshot DB restore review guard: "
+                    f"{priority_db_restore_review_guard}"
                 )
             if priority_action.get("snapshot_db_restore_verification_status"):
                 print(
@@ -1885,6 +1970,10 @@ def _print_target_weight_daily_ops_status(
         if priority_action.get("source") == "latest_daily_ops_failure"
         else "",
         priority_wait_guard=priority_wait_guard,
+        priority_db_guard=priority_db_guard,
+        priority_db_restore_review_guard=priority_db_restore_review_guard,
+        priority_db_restore_verify_command=priority_db_restore_verify_command,
+        priority_db_restore_verification_blockers=priority_db_restore_verification_blockers,
         priority_diagnostics_status=priority_diagnostics_status,
         priority_probe_status=priority_probe_status,
         priority_recovery_hint=priority_recovery_hint,
@@ -1925,6 +2014,17 @@ def _print_target_weight_daily_ops_status(
             repair_command = (
                 priority_blocked_repair_command
                 or "# blocked: restore authoritative DB trade_history/positions proof before repair"
+            )
+    elif priority_db_guard == "target_weight_db_persistence_proof_required":
+        if finalize_command:
+            finalize_command = (
+                priority_blocked_finalize_command
+                or "# blocked: DB persistence proof incomplete before finalize"
+            )
+        if repair_command:
+            repair_command = (
+                priority_blocked_repair_command
+                or "# blocked: DB persistence proof incomplete before repair"
             )
     if finalize_command:
         print(f"    Finalize evidence command: {finalize_command}")

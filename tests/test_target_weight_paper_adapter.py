@@ -2392,12 +2392,22 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                 "operator_commands": {
                     "execute_capped_paper": "# blocked: DB persistence proof incomplete",
                     "enable_suggested_caps": "# blocked: DB persistence proof incomplete",
-                    "daily_ops_summary": (
-                        "python tools/target_weight_rotation_pilot.py "
-                        "--candidate-id target_weight_candidate --daily-ops-summary"
-                    ),
-                },
-            }),
+                        "daily_ops_summary": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate --daily-ops-summary"
+                        ),
+                        "finalize_pilot_evidence": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate "
+                            "--finalize-pilot-evidence --finalize-date 2026-04-10"
+                        ),
+                        "repair_pilot_evidence": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate "
+                            "--repair-pilot-evidence --repair-date 2026-04-10"
+                        ),
+                    },
+                }),
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -2409,15 +2419,28 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                     "primary_strategy": strategy,
                     "current_priority_action": {
                         "strategy": strategy,
-                        "desc": "DB 저장 증거 복구",
+                        "desc": (
+                            "target-weight DB 복구 패키지 authoritative CSV 검토 후 "
+                            "verify 실행"
+                        ),
                         "command": (
+                            "# blocked: reviewed authoritative trade_history/positions "
+                            "CSV required before DB restore verification"
+                        ),
+                        "scheduled_command": (
                             "python tools/target_weight_rotation_pilot.py "
-                            "--candidate-id target_weight_candidate "
-                            "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10"
+                            "--verify-db-restore-package --restore-manifest restore.json"
+                        ),
+                        "scheduled_follow_up": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate --daily-ops-summary"
                         ),
                         "order_safety": "no_order",
                         "db_persistence_guard": (
                             "target_weight_db_persistence_proof_required"
+                        ),
+                        "db_restore_review_guard": (
+                            "target_weight_authoritative_db_restore_csv_required"
                         ),
                         "verified_pilot_days": 0,
                         "target_days": 60,
@@ -2434,6 +2457,15 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                             "AAA",
                             "BBB",
                         ],
+                        "snapshot_db_restore_candidate_package_generated": True,
+                        "snapshot_db_restore_candidate_manifest": "restore.json",
+                        "snapshot_db_restore_trade_history_candidate_csv": (
+                            "trades.csv"
+                        ),
+                        "snapshot_db_restore_positions_candidate_csv": "positions.csv",
+                        "snapshot_db_restore_trade_history_candidate_rows": 4,
+                        "snapshot_db_restore_position_candidate_rows": 4,
+                        "snapshot_db_restore_candidate_requires_authoritative_confirmation": True,
                         "snapshot_db_restore_package_verify_command": (
                             "python tools/target_weight_rotation_pilot.py "
                             "--verify-db-restore-package --restore-manifest restore.json"
@@ -2445,6 +2477,14 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                         ],
                         "snapshot_db_restore_authoritative_trade_history_match": False,
                         "snapshot_db_restore_authoritative_positions_match": False,
+                        "blocked_finalize_command": (
+                            "# blocked: reviewed authoritative DB restore "
+                            "verification required before finalize"
+                        ),
+                        "blocked_repair_command": (
+                            "# blocked: reviewed authoritative DB restore "
+                            "verification required before repair"
+                        ),
                     },
                 },
             },
@@ -2463,7 +2503,22 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
         "trade_rows=0/4 positions=0/4"
     ) in output
     assert "Snapshot DB restore missing symbols: AAA, BBB" in output
+    assert (
+        "Snapshot DB restore candidate package: generated=True "
+        "trade_rows=4 positions=4"
+    ) in output
+    assert "Snapshot DB restore candidate manifest: restore.json" in output
+    assert "Snapshot DB restore trade history CSV: trades.csv" in output
+    assert "Snapshot DB restore positions CSV: positions.csv" in output
+    assert (
+        "Snapshot DB restore safety: authoritative confirmation required before DB write"
+        in output
+    )
     assert "Snapshot DB restore verify command:" in output
+    assert (
+        "Snapshot DB restore review guard: "
+        "target_weight_authoritative_db_restore_csv_required"
+    ) in output
     assert "Snapshot DB restore verification: status=blocked ready=False" in output
     assert (
         "Snapshot DB restore verification blockers: "
@@ -2472,6 +2527,19 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
     assert (
         "Snapshot DB restore authoritative match: "
         "trade_history=False positions=False"
+    ) in output
+    assert (
+        "Operator next action: REVIEW authoritative trade_history/positions CSV, "
+        "then run DB restore verification:"
+    ) in output
+    assert "blockers=authoritative_trade_history_csv_required" in output
+    assert (
+        "Finalize evidence command: # blocked: reviewed authoritative DB restore "
+        "verification required before finalize"
+    ) in output
+    assert (
+        "Repair evidence command: # blocked: reviewed authoritative DB restore "
+        "verification required before repair"
     ) in output
 
 
