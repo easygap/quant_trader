@@ -4252,6 +4252,22 @@ TARGET_WEIGHT_RESTORE_REVIEW_CHECKLIST_COLUMNS = [
     "reviewed_at",
     "review_notes",
 ]
+TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_COLUMNS = [
+    "work_item_id",
+    "candidate_kind",
+    "candidate_row_number",
+    "candidate_row_sha256",
+    "not_authoritative",
+    "target_authoritative_csv",
+    "missing_reason",
+    "required_action",
+    "review_status",
+    "authoritative_source",
+    "authoritative_evidence_ref",
+    "reviewed_by",
+    "reviewed_at",
+    "review_notes",
+]
 
 
 def _target_weight_restore_review_checklist_columns(
@@ -4292,6 +4308,69 @@ def _target_weight_restore_review_checklist_rows(
             **{column: row.get(column, "") for column in candidate_columns},
         })
     return rows
+
+
+def _target_weight_restore_review_worklist_columns(
+    candidate_columns: list[str],
+) -> list[str]:
+    columns = list(TARGET_WEIGHT_RESTORE_REVIEW_WORKLIST_COLUMNS)
+    for column in candidate_columns:
+        if column not in columns:
+            columns.append(column)
+    return columns
+
+
+def _target_weight_restore_missing_worklist_rows(
+    *,
+    kind: str,
+    candidate_rows: list[dict[str, Any]],
+    authoritative_rows: list[dict[str, Any]],
+    candidate_columns: list[str],
+    target_authoritative_csv: str | Path,
+) -> list[dict[str, Any]]:
+    remaining_authoritative = _restore_row_counter(authoritative_rows, candidate_columns)
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(candidate_rows, start=1):
+        row_payload = {
+            column: _normalize_restore_compare_value(column, row.get(column))
+            for column in candidate_columns
+        }
+        row_key = tuple((column, row_payload[column]) for column in candidate_columns)
+        if remaining_authoritative[row_key] > 0:
+            remaining_authoritative[row_key] -= 1
+            continue
+        row_hash = _stable_manifest_hash(row_payload)
+        rows.append({
+            "work_item_id": f"{kind}-missing-{index:04d}-{row_hash[:12]}",
+            "candidate_kind": kind,
+            "candidate_row_number": index,
+            "candidate_row_sha256": row_hash,
+            "not_authoritative": "true",
+            "target_authoritative_csv": str(target_authoritative_csv),
+            "missing_reason": "missing_from_authoritative",
+            "required_action": (
+                "confirm external broker/DB evidence and add reviewed "
+                "authoritative row"
+            ),
+            "review_status": "pending",
+            "authoritative_source": "",
+            "authoritative_evidence_ref": "",
+            "reviewed_by": "",
+            "reviewed_at": "",
+            "review_notes": "",
+            **{column: row.get(column, "") for column in candidate_columns},
+        })
+    return rows
+
+
+def _target_weight_restore_rows_for_worklist(path_value: Any) -> list[dict[str, Any]]:
+    path_text = str(path_value or "")
+    if not path_text:
+        return []
+    path = Path(path_text)
+    if not path.exists():
+        return []
+    return _read_csv_dict_rows(path)
 
 
 def _write_manual_review_csv_if_missing(
@@ -4795,6 +4874,52 @@ def inspect_target_weight_db_restore_review_progress(
         for blocker in blockers
         if not str(blocker).startswith("authoritative_")
     ]
+    candidate = _safe_path_component(candidate_id or "target_weight")
+    date_part = _safe_path_component(snapshot_date or "unknown")
+    review_worklist_path = (
+        output_dir
+        / f"target_weight_db_restore_review_worklist_{candidate}_{date_part}.csv"
+    )
+    trade_worklist_rows: list[dict[str, Any]] = []
+    positions_worklist_rows: list[dict[str, Any]] = []
+    review_worklist_rows: list[dict[str, Any]] = []
+    review_worklist_generated = not package_blockers
+    if review_worklist_generated:
+        trade_authoritative_rows_for_worklist = (
+            []
+            if authoritative_trade.get("candidate_source_rejected")
+            or authoritative_trade.get("candidate_marker_rejected")
+            else _target_weight_restore_rows_for_worklist(authoritative_trade_history_csv)
+        )
+        positions_authoritative_rows_for_worklist = (
+            []
+            if authoritative_positions.get("candidate_source_rejected")
+            or authoritative_positions.get("candidate_marker_rejected")
+            else _target_weight_restore_rows_for_worklist(authoritative_positions_csv)
+        )
+        trade_worklist_rows = _target_weight_restore_missing_worklist_rows(
+            kind="trade_history",
+            candidate_rows=trade_info.get("rows") or [],
+            authoritative_rows=trade_authoritative_rows_for_worklist,
+            candidate_columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+            target_authoritative_csv=str(authoritative_trade_history_csv or ""),
+        )
+        positions_worklist_rows = _target_weight_restore_missing_worklist_rows(
+            kind="positions",
+            candidate_rows=position_info.get("rows") or [],
+            authoritative_rows=positions_authoritative_rows_for_worklist,
+            candidate_columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            target_authoritative_csv=str(authoritative_positions_csv or ""),
+        )
+        review_worklist_rows = trade_worklist_rows + positions_worklist_rows
+        _write_csv_rows(
+            review_worklist_path,
+            review_worklist_rows,
+            _target_weight_restore_review_worklist_columns(
+                TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+                + TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+            ),
+        )
     status = (
         "blocked"
         if package_blockers
@@ -4842,12 +4967,21 @@ def inspect_target_weight_db_restore_review_progress(
             "trade_history": authoritative_trade,
             "positions": authoritative_positions,
         },
+        "review_worklist": {
+            "generated": review_worklist_generated,
+            "path": review_worklist_path.as_posix(),
+            "row_count": len(review_worklist_rows),
+            "trade_history_missing_row_count": len(trade_worklist_rows),
+            "positions_missing_row_count": len(positions_worklist_rows),
+            "not_authoritative": True,
+        },
         "no_write_safety": {
             "db_write_enabled": False,
             "portfolio_snapshot_write_enabled": False,
             "db_state_checked": False,
             "restore_applied": False,
             "dry_run_only": True,
+            "review_worklist_generated": review_worklist_generated,
         },
         "operator_commands": {
             "verify_when_complete": verify_command,
@@ -4875,6 +5009,7 @@ def render_target_weight_db_restore_review_progress_markdown(
     progress = report.get("review_progress") or {}
     trade = progress.get("trade_history") or {}
     positions = progress.get("positions") or {}
+    worklist = report.get("review_worklist") or {}
     lines = [
         "# Target-weight DB Restore Review Progress",
         "",
@@ -4893,6 +5028,8 @@ def render_target_weight_db_restore_review_progress_markdown(
         "- Portfolio snapshot write enabled: `False`",
         "- DB state checked: `False`",
         "- Restore applied: `False`",
+        "- Review worklist generated: "
+        f"`{bool((report.get('no_write_safety') or {}).get('review_worklist_generated'))}`",
         "",
         "## Candidate Package",
         "- Trade history candidate rows: "
@@ -4932,6 +5069,16 @@ def render_target_weight_db_restore_review_progress_markdown(
         "- Positions candidate evidence-ref rows: "
         f"`{positions.get('metadata_candidate_evidence_ref_row_count', 0)}`",
         "",
+        "## Review Worklist",
+        f"- Generated: `{bool(worklist.get('generated'))}`",
+        f"- CSV: `{worklist.get('path') or 'none'}`",
+        f"- Rows: `{worklist.get('row_count', 0)}`",
+        "- Trade history missing work items: "
+        f"`{worklist.get('trade_history_missing_row_count', 0)}`",
+        "- Positions missing work items: "
+        f"`{worklist.get('positions_missing_row_count', 0)}`",
+        f"- Not authoritative: `{bool(worklist.get('not_authoritative'))}`",
+        "",
         "## Operator Commands",
     ]
     for key, value in sorted((report.get("operator_commands") or {}).items()):
@@ -4967,6 +5114,7 @@ def _print_target_weight_db_restore_review_progress(report: dict[str, Any]) -> N
     progress = report.get("review_progress") or {}
     trade = progress.get("trade_history") or {}
     positions = progress.get("positions") or {}
+    worklist = report.get("review_worklist") or {}
     print(f"  status: {report.get('status')}")
     print(
         "  review_ready_for_verification: "
@@ -5005,6 +5153,15 @@ def _print_target_weight_db_restore_review_progress(report: dict[str, Any]) -> N
         "candidate_evidence_ref_rows="
         f"{positions.get('metadata_candidate_evidence_ref_row_count', 0)}"
     )
+    if worklist:
+        print(
+            "  review_worklist: "
+            f"generated={bool(worklist.get('generated'))} "
+            f"rows={worklist.get('row_count', 0)} "
+            f"trade_history_missing={worklist.get('trade_history_missing_row_count', 0)} "
+            f"positions_missing={worklist.get('positions_missing_row_count', 0)} "
+            f"path={worklist.get('path')}"
+        )
     verify_command = (report.get("operator_commands") or {}).get(
         "verify_when_complete"
     )

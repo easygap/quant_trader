@@ -6528,6 +6528,16 @@ def test_verify_target_weight_db_restore_package_rejects_candidate_csv_as_author
     assert positions_evidence["candidate_source_rejected"] is True
     assert positions_evidence["candidate_marker_rejected"] is True
     assert positions_evidence["candidate_marker_row_count"] == 2
+    progress = twp.inspect_target_weight_db_restore_review_progress(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=package["trade_history_candidate_csv"],
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "review_progress_candidate_source_rejected",
+    )
+    assert progress["review_worklist"]["generated"] is True
+    assert progress["review_worklist"]["row_count"] == 4
+    assert progress["review_worklist"]["trade_history_missing_row_count"] == 2
+    assert progress["review_worklist"]["positions_missing_row_count"] == 2
 
 
 def test_verify_target_weight_db_restore_package_rejects_review_checklist_as_authoritative(
@@ -6906,13 +6916,59 @@ def test_inspect_target_weight_db_restore_review_progress_reports_ready_csvs(
     assert positions_progress["match"] is True
     assert positions_progress["review_metadata_ok"] is True
     assert positions_progress["metadata_candidate_evidence_ref_row_count"] == 0
+    worklist = progress["review_worklist"]
+    assert worklist["generated"] is True
+    assert worklist["row_count"] == 0
+    assert worklist["trade_history_missing_row_count"] == 0
+    assert worklist["positions_missing_row_count"] == 0
+    assert worklist["not_authoritative"] is True
+    assert Path(worklist["path"]).exists()
+    assert list(csv.DictReader(Path(worklist["path"]).open(encoding="utf-8-sig"))) == []
     assert "--verify-db-restore-package" in progress["operator_commands"][
         "verify_when_complete"
     ]
     assert Path(progress["artifact_path"]).exists()
-    assert "Review ready for verification: `True`" in Path(
-        progress["report_path"]
-    ).read_text(encoding="utf-8")
+    progress_md = Path(progress["report_path"]).read_text(encoding="utf-8")
+    assert "Review ready for verification: `True`" in progress_md
+    assert "## Review Worklist" in progress_md
+    assert "Rows: `0`" in progress_md
+
+    trade_rows = list(csv.DictReader(reviewed_trade.open(encoding="utf-8-sig")))
+    position_rows = list(
+        csv.DictReader(reviewed_positions.open(encoding="utf-8-sig"))
+    )
+    twp._write_csv_rows(
+        reviewed_trade,
+        trade_rows[:1],
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        ),
+    )
+    twp._write_csv_rows(
+        reviewed_positions,
+        position_rows[:1],
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+        ),
+    )
+    partial_progress = twp.inspect_target_weight_db_restore_review_progress(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "review_progress_partial",
+    )
+    partial_worklist = partial_progress["review_worklist"]
+    assert partial_worklist["row_count"] == 2
+    assert partial_worklist["trade_history_missing_row_count"] == 1
+    assert partial_worklist["positions_missing_row_count"] == 1
+    partial_worklist_rows = list(
+        csv.DictReader(Path(partial_worklist["path"]).open(encoding="utf-8-sig"))
+    )
+    assert len(partial_worklist_rows) == 2
+    assert {row["candidate_kind"] for row in partial_worklist_rows} == {
+        "trade_history",
+        "positions",
+    }
 
 
 def test_plan_target_weight_db_restore_apply_is_no_write_and_sha_guarded(
@@ -7647,11 +7703,31 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert progress["review_progress"]["positions"][
         "missing_from_authoritative_count"
     ] == 1
+    worklist = progress["review_worklist"]
+    assert worklist["generated"] is True
+    assert worklist["row_count"] == 2
+    assert worklist["trade_history_missing_row_count"] == 1
+    assert worklist["positions_missing_row_count"] == 1
+    worklist_rows = list(
+        csv.DictReader(Path(worklist["path"]).open(encoding="utf-8-sig"))
+    )
+    assert len(worklist_rows) == 2
+    assert {row["candidate_kind"] for row in worklist_rows} == {
+        "trade_history",
+        "positions",
+    }
+    assert {row["not_authoritative"] for row in worklist_rows} == {"true"}
+    assert all(row["target_authoritative_csv"] for row in worklist_rows)
+    assert {row["missing_reason"] for row in worklist_rows} == {
+        "missing_from_authoritative"
+    }
     assert Path(progress["artifact_path"]).exists()
     assert Path(progress["report_path"]).exists()
     progress_md = Path(progress["report_path"]).read_text(encoding="utf-8")
     assert "Review ready for verification: `False`" in progress_md
     assert "Trade history missing rows: `1`" in progress_md
+    assert "Review Worklist" in progress_md
+    assert "Rows: `2`" in progress_md
     assert Path(bundle["artifact_path"]).exists()
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")

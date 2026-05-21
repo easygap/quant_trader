@@ -1986,6 +1986,14 @@ def _print_target_weight_daily_ops_status(
                         "    Snapshot DB restore inspect review progress: "
                         f"{priority_db_restore_inspect_review_progress_command}"
                     )
+                if priority_action.get("snapshot_db_restore_review_worklist_csv"):
+                    print(
+                        "    Snapshot DB restore review worklist: "
+                        f"rows={priority_action.get('snapshot_db_restore_review_worklist_row_count', 0)} "
+                        f"trade_history_missing={priority_action.get('snapshot_db_restore_review_worklist_trade_history_missing', 0)} "
+                        f"positions_missing={priority_action.get('snapshot_db_restore_review_worklist_positions_missing', 0)} "
+                        f"path={priority_action.get('snapshot_db_restore_review_worklist_csv')}"
+                    )
             if priority_db_restore_review_guard:
                 print(
                     "    Snapshot DB restore review guard: "
