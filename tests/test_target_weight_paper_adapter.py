@@ -2663,12 +2663,28 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                         "snapshot_db_restore_authoritative_trade_history_expected_rows": 4,
                         "snapshot_db_restore_authoritative_trade_history_empty_template": True,
                         "snapshot_db_restore_authoritative_trade_history_missing_columns": [],
+                        "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": False,
+                        "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
+                            "authoritative_source",
+                            "reviewed_by",
+                            "reviewed_at",
+                        ],
+                        "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
+                        "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
                         "snapshot_db_restore_authoritative_positions_provided": True,
                         "snapshot_db_restore_authoritative_positions_match": False,
                         "snapshot_db_restore_authoritative_positions_row_count": 0,
                         "snapshot_db_restore_authoritative_positions_expected_rows": 4,
                         "snapshot_db_restore_authoritative_positions_empty_template": True,
                         "snapshot_db_restore_authoritative_positions_missing_columns": [],
+                        "snapshot_db_restore_authoritative_positions_review_metadata_ok": False,
+                        "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
+                            "authoritative_source",
+                            "reviewed_by",
+                            "reviewed_at",
+                        ],
+                        "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
+                        "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
                     },
                 },
             },
@@ -2705,9 +2721,19 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "missing_rows=0 unexpected_rows=0 missing_columns=none"
     ) in output
     assert (
+        "Snapshot DB restore authoritative trade history metadata: "
+        "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
+        "incomplete_rows=0 candidate_source_rows=0"
+    ) in output
+    assert (
         "Snapshot DB restore authoritative positions CSV: "
         "provided=True rows=0/4 empty_template=True verify_stale=False "
         "missing_rows=0 unexpected_rows=0 missing_columns=none"
+    ) in output
+    assert (
+        "Snapshot DB restore authoritative positions metadata: "
+        "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
+        "incomplete_rows=0 candidate_source_rows=0"
     ) in output
     assert (
         "Operator next action: FILL reviewed authoritative "
@@ -6485,6 +6511,55 @@ def test_verify_target_weight_db_restore_package_rejects_candidate_csv_as_author
     assert positions_evidence["candidate_marker_row_count"] == 2
 
 
+def test_verify_target_weight_db_restore_package_requires_review_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    trade_csv = tmp_path / "reviewed_trade_without_metadata.csv"
+    positions_csv = tmp_path / "reviewed_positions_without_metadata.csv"
+    twp._write_csv_rows(
+        trade_csv,
+        twp._read_csv_dict_rows(Path(package["trade_history_candidate_csv"])),
+        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+    )
+    twp._write_csv_rows(
+        positions_csv,
+        twp._read_csv_dict_rows(Path(package["positions_candidate_csv"])),
+        twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+    )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=trade_csv,
+        authoritative_positions_csv=positions_csv,
+        output_dir=tmp_path / "verification_review_metadata_required",
+    )
+
+    assert verified["status"] == "blocked"
+    assert verified["restore_ready"] is False
+    assert (
+        "authoritative_trade_history_csv_review_metadata_columns_missing"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_review_metadata_columns_missing"
+        in verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    positions_evidence = verified["authoritative_evidence"]["positions"]
+    assert trade_evidence["match"] is True
+    assert positions_evidence["match"] is True
+    assert trade_evidence["review_metadata_ok"] is False
+    assert positions_evidence["review_metadata_ok"] is False
+
+
 def _target_weight_db_restore_report_with_two_rows():
     return {
         "candidate_id": "target_weight_candidate",
@@ -6560,15 +6635,32 @@ def _write_reviewed_authoritative_csvs_from_package(twp, package, output_dir: Pa
     output_dir.mkdir(parents=True, exist_ok=True)
     trade_path = output_dir / "reviewed_authoritative_trade_history.csv"
     positions_path = output_dir / "reviewed_authoritative_positions.csv"
+    metadata = {
+        "authoritative_source": "broker_statement",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
+    trade_rows = [
+        {**row, **metadata}
+        for row in twp._read_csv_dict_rows(Path(package["trade_history_candidate_csv"]))
+    ]
+    position_rows = [
+        {**row, **metadata}
+        for row in twp._read_csv_dict_rows(Path(package["positions_candidate_csv"]))
+    ]
     twp._write_csv_rows(
         trade_path,
-        twp._read_csv_dict_rows(Path(package["trade_history_candidate_csv"])),
-        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        trade_rows,
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        ),
     )
     twp._write_csv_rows(
         positions_path,
-        twp._read_csv_dict_rows(Path(package["positions_candidate_csv"])),
-        twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        position_rows,
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+        ),
     )
     return trade_path, positions_path
 
@@ -6866,15 +6958,22 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_co
     candidate_trade_rows = twp._read_csv_dict_rows(
         Path(package["trade_history_candidate_csv"])
     )
+    review_metadata = {
+        "authoritative_source": "broker_statement",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
     missing_order_id_csv = tmp_path / "authoritative_missing_order_id.csv"
     trade_columns_without_order_id = [
         column
-        for column in twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        for column in twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
         if column != "order_id"
     ]
     twp._write_csv_rows(
         missing_order_id_csv,
-        candidate_trade_rows,
+        [{**row, **review_metadata} for row in candidate_trade_rows],
         trade_columns_without_order_id,
     )
     _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
@@ -6918,11 +7017,18 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_row_count_
     candidate_trade_rows = twp._read_csv_dict_rows(
         Path(package["trade_history_candidate_csv"])
     )
+    review_metadata = {
+        "authoritative_source": "broker_statement",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
     one_row_trade_csv = tmp_path / "authoritative_one_trade.csv"
     twp._write_csv_rows(
         one_row_trade_csv,
-        candidate_trade_rows[:1],
-        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        [{**row, **review_metadata} for row in candidate_trade_rows[:1]],
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        ),
     )
     _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
         twp,
@@ -6968,13 +7074,20 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mi
     candidate_trade_rows = twp._read_csv_dict_rows(
         Path(package["trade_history_candidate_csv"])
     )
-    changed_trade_rows = [dict(row) for row in candidate_trade_rows]
+    review_metadata = {
+        "authoritative_source": "broker_statement",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
+    changed_trade_rows = [{**row, **review_metadata} for row in candidate_trade_rows]
     changed_trade_rows[0]["quantity"] = "11"
     changed_trade_csv = tmp_path / "authoritative_changed_trade.csv"
     twp._write_csv_rows(
         changed_trade_csv,
         changed_trade_rows,
-        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        ),
     )
     _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
         twp,
@@ -7033,13 +7146,20 @@ def test_verify_target_weight_db_restore_package_separates_economic_mismatch(
     candidate_trade_rows = twp._read_csv_dict_rows(
         Path(package["trade_history_candidate_csv"])
     )
-    changed_trade_rows = [dict(row) for row in candidate_trade_rows]
+    review_metadata = {
+        "authoritative_source": "broker_statement",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
+    changed_trade_rows = [{**row, **review_metadata} for row in candidate_trade_rows]
     changed_trade_rows[0]["price"] = "70001"
     economic_mismatch_csv = tmp_path / "authoritative_economic_mismatch.csv"
     twp._write_csv_rows(
         economic_mismatch_csv,
         changed_trade_rows,
-        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        twp._target_weight_restore_authoritative_columns(
+            twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        ),
     )
     _, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
         twp,
@@ -7154,8 +7274,20 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert authoritative_positions.exists()
     assert len(list(csv.DictReader(candidate_trade.open(encoding="utf-8-sig")))) == 1
     assert len(list(csv.DictReader(candidate_positions.open(encoding="utf-8-sig")))) == 1
-    assert list(csv.DictReader(authoritative_trade.open(encoding="utf-8-sig"))) == []
-    assert list(csv.DictReader(authoritative_positions.open(encoding="utf-8-sig"))) == []
+    trade_template_reader = csv.DictReader(
+        authoritative_trade.open(encoding="utf-8-sig")
+    )
+    positions_template_reader = csv.DictReader(
+        authoritative_positions.open(encoding="utf-8-sig")
+    )
+    assert list(trade_template_reader) == []
+    assert list(positions_template_reader) == []
+    assert "authoritative_source" in (trade_template_reader.fieldnames or [])
+    assert "reviewed_by" in (trade_template_reader.fieldnames or [])
+    assert "reviewed_at" in (trade_template_reader.fieldnames or [])
+    assert "authoritative_source" in (positions_template_reader.fieldnames or [])
+    assert "reviewed_by" in (positions_template_reader.fieldnames or [])
+    assert "reviewed_at" in (positions_template_reader.fieldnames or [])
     empty_template_verification = twp.verify_target_weight_db_restore_package(
         manifest_path=package["manifest_path"],
         authoritative_trade_history_csv=authoritative_trade,
@@ -7207,6 +7339,7 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")
     assert "Authoritative CSV auto-generated: `False`" in report_md
+    assert "Required authoritative metadata columns" in report_md
     assert "Do not use artifact-only candidate rows as authoritative evidence" in report_md
 
 
