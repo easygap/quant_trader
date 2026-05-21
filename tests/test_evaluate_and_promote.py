@@ -3105,6 +3105,17 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         "status": "blocked",
         "restore_ready": False,
         "blockers": ["authoritative_trade_history_csv_required"],
+        "authoritative_evidence": {
+            "trade_history": {
+                "provided": True,
+                "match": False,
+                "sha256": "previous-trade-template-hash",
+            },
+            "positions": {
+                "provided": True,
+                "match": False,
+            },
+        },
     }
     latest_db_restore_review_bundle = {
         "artifact_type": "target_weight_db_restore_review_bundle",
@@ -3168,11 +3179,25 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         is False
     )
     assert action["snapshot_db_restore_authoritative_trade_history_missing_columns"] == []
+    assert action["snapshot_db_restore_authoritative_trade_history_current_sha256"]
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_verified_sha256"]
+        == "previous-trade-template-hash"
+    )
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_verification_stale"]
+        is True
+    )
     assert action["snapshot_db_restore_authoritative_positions_provided"] is True
     assert action["snapshot_db_restore_authoritative_positions_row_count"] == 0
     assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
     assert action["snapshot_db_restore_authoritative_positions_empty_template"] is True
     assert action["snapshot_db_restore_authoritative_positions_missing_columns"] == []
+    assert (
+        action["snapshot_db_restore_authoritative_positions_verification_stale"]
+        is False
+    )
+    assert action["snapshot_db_restore_verification_stale_after_review_edit"] is True
     assert action["scheduled_command"] == action[
         "snapshot_db_restore_verify_after_manual_review_command"
     ]
