@@ -3222,6 +3222,11 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
         "status": "ready_for_manual_authoritative_review",
         "review_bundle_ready": True,
         "bundle_dir": review_dir.as_posix(),
+        "manual_review_files_created": [],
+        "manual_review_files_preserved": ["trade_history_review_checklist_csv"],
+        "manual_review_files_upgraded": [
+            "authoritative_trade_history_template_csv"
+        ],
         "review_files": {
             "candidate_trade_history_csv": candidate_trade.as_posix(),
             "candidate_positions_csv": candidate_positions.as_posix(),
@@ -3267,6 +3272,13 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
     assert action["snapshot_db_restore_review_bundle_status"] == (
         "ready_for_manual_authoritative_review"
     )
+    assert action["snapshot_db_restore_review_bundle_manual_review_files_created"] == []
+    assert action["snapshot_db_restore_review_bundle_manual_review_files_preserved"] == [
+        "trade_history_review_checklist_csv"
+    ]
+    assert action["snapshot_db_restore_review_bundle_manual_review_files_upgraded"] == [
+        "authoritative_trade_history_template_csv"
+    ]
     assert action["snapshot_db_restore_review_bundle_dir"].endswith("review_bundle")
     assert action[
         "snapshot_db_restore_authoritative_trade_history_template_csv"
