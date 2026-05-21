@@ -2741,10 +2741,63 @@ def test_current_blockers_prioritizes_finalize_for_performance_missing_reason():
             "repair_pilot_evidence": repair_command,
         },
     }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "generated_at": "2026-05-20T15:42:00",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+            "trade_history": {
+                "expected_row_count": 4,
+                "current_db_rows_on_date": 0,
+            },
+            "positions": {
+                "expected_symbol_count": 4,
+                "current_db_position_count": 0,
+                "missing_or_unverified_symbols": ["AAA", "BBB"],
+            },
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "trade_history_candidate_csv": "reports/paper_runtime/trades.csv",
+            "positions_candidate_csv": "reports/paper_runtime/positions.csv",
+            "trade_history_candidate_rows": 4,
+            "position_candidate_rows": 4,
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json"
+            )
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked",
+        "restore_ready": False,
+        "blockers": ["authoritative_trade_history_csv_required"],
+        "candidate_package": {
+            "trade_history": {"hash_ok": True},
+            "positions": {"hash_ok": True},
+        },
+        "authoritative_evidence": {
+            "trade_history": {"match": False},
+            "positions": {"match": False},
+        },
+    }
 
     report = build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
     )
 
     action = report["next_actions"][0]
@@ -2804,10 +2857,63 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
             "repair_pilot_evidence": repair_command,
         },
     }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "generated_at": "2026-05-20T15:42:00",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+            "trade_history": {
+                "expected_row_count": 4,
+                "current_db_rows_on_date": 0,
+            },
+            "positions": {
+                "expected_symbol_count": 4,
+                "current_db_position_count": 0,
+                "missing_or_unverified_symbols": ["AAA", "BBB"],
+            },
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "trade_history_candidate_csv": "reports/paper_runtime/trades.csv",
+            "positions_candidate_csv": "reports/paper_runtime/positions.csv",
+            "trade_history_candidate_rows": 4,
+            "position_candidate_rows": 4,
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json"
+            )
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked",
+        "restore_ready": False,
+        "blockers": ["authoritative_trade_history_csv_required"],
+        "candidate_package": {
+            "trade_history": {"hash_ok": True},
+            "positions": {"hash_ok": True},
+        },
+        "authoritative_evidence": {
+            "trade_history": {"match": False},
+            "positions": {"match": False},
+        },
+    }
 
     report = build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
     )
 
     action = report["next_actions"][0]
@@ -2816,6 +2922,24 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["order_safety"] == "no_order"
     assert action["requires"] == "database trade/position persistence proof"
     assert action["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
+    assert action["snapshot_diagnostics_status"] == "blocked_missing_snapshot_history"
+    assert action["snapshot_db_restore_status"] == "restore_required"
+    assert action["snapshot_db_restore_trade_rows_expected"] == 4
+    assert action["snapshot_db_restore_trade_rows_current"] == 0
+    assert action["snapshot_db_restore_missing_or_unverified_symbols"] == ["AAA", "BBB"]
+    assert action["snapshot_db_restore_candidate_package_generated"] is True
+    assert action["snapshot_db_restore_package_verify_command"].startswith(
+        "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
+    )
+    assert action["snapshot_db_restore_verification_status"] == "blocked"
+    assert action["snapshot_db_restore_verification_ready"] is False
+    assert action["snapshot_db_restore_verification_blockers"] == [
+        "authoritative_trade_history_csv_required"
+    ]
+    assert action["snapshot_db_restore_verification_trade_hash_ok"] is True
+    assert action["snapshot_db_restore_verification_positions_hash_ok"] is True
+    assert action["snapshot_db_restore_authoritative_trade_history_match"] is False
+    assert action["snapshot_db_restore_authoritative_positions_match"] is False
     assert "cannot be repaired from artifact" in action["blocked_repair_command"]
     assert action["follow_up"].endswith("--daily-ops-summary")
 
