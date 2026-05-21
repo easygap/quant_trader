@@ -3398,22 +3398,25 @@ def _target_weight_ops_priority_action(
                 return action
             if package_generated and verify_command and not verification_ready:
                 if review_bundle_ready:
+                    progress_command = (
+                        review_bundle_inspect_command
+                        or "# blocked: fill reviewed authoritative "
+                        "trade_history/positions CSV templates before DB "
+                        "restore verification"
+                    )
                     action.update({
                         "desc": (
-                            "target-weight DB 복구 authoritative CSV 템플릿 작성 후 "
-                            "verify 실행"
+                            "target-weight DB 복구 reviewed CSV 진행상태 점검 후 "
+                            "authoritative verify 준비"
                         ),
-                        "command": (
-                            "# blocked: fill reviewed authoritative "
-                            "trade_history/positions CSV templates before DB "
-                            "restore verification"
-                        ),
+                        "command": progress_command,
                         "scheduled_command": (
                             review_bundle_verify_command or verify_command
                         ),
                         "scheduled_follow_up": follow_up,
                         "requires": (
-                            "filled reviewed authoritative trade_history/positions CSV"
+                            "inspect reviewed authoritative CSV progress and "
+                            "fill missing rows/metadata"
                         ),
                         "db_restore_review_guard": (
                             "target_weight_authoritative_db_restore_csv_fill_required"

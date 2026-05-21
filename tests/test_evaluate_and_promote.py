@@ -3054,7 +3054,7 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
-def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp_path):
+def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_ready(tmp_path):
     from tools.evaluate_and_promote import build_current_blockers_report
     import tools.evaluate_and_promote as ep
 
@@ -3207,10 +3207,17 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
             },
         },
     }
+    inspect_progress = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--inspect-db-restore-review-progress --restore-manifest reports/paper_runtime/restore_manifest.json "
+        f"--authoritative-trade-history-csv {trade_template.as_posix()} "
+        f"--authoritative-positions-csv {positions_template.as_posix()}"
+    )
     latest_db_restore_review_bundle = {
         "artifact_type": "target_weight_db_restore_review_bundle",
         "candidate_id": "target_weight_best",
         "snapshot_date": "2026-05-20",
+        "manifest_path": "reports/paper_runtime/restore_manifest.json",
         "generated_at": "2026-05-20T16:00:00",
         "status": "ready_for_manual_authoritative_review",
         "review_bundle_ready": True,
@@ -3222,6 +3229,7 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
             "authoritative_positions_template_csv": positions_template.as_posix(),
         },
         "operator_commands": {
+            "inspect_review_progress": inspect_progress,
             "verify_after_manual_review": (
                 "python tools/target_weight_rotation_pilot.py "
                 "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json "
@@ -3240,15 +3248,20 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
     )
 
     action = report["next_actions"][0]
-    assert action["command"].startswith(
-        "# blocked: fill reviewed authoritative trade_history/positions CSV templates"
+    assert action["command"] == inspect_progress
+    assert action["order_safety"] == "no_order"
+    assert action["scheduled_command"].startswith(
+        "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
     )
     assert action["requires"] == (
-        "filled reviewed authoritative trade_history/positions CSV"
+        "inspect reviewed authoritative CSV progress and fill missing rows/metadata"
     )
     assert (
         action["db_restore_review_guard"]
         == "target_weight_authoritative_db_restore_csv_fill_required"
+    )
+    assert action["snapshot_db_restore_inspect_review_progress_command"] == (
+        inspect_progress
     )
     assert action["snapshot_db_restore_review_bundle_ready"] is True
     assert action["snapshot_db_restore_review_bundle_status"] == (
