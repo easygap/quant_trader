@@ -11087,6 +11087,154 @@ def test_current_blockers_execution_guard_blocks_stale_operational_report(
     assert guard["reason"] == "target_weight_current_blockers_not_fresh: STALE"
 
 
+def test_current_blockers_execution_guard_allows_ready_paper_order_action(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True)
+    execute_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        f"--candidate-id {plan.candidate_id} --as-of-date {plan.trade_day} "
+        "--execute --collect-evidence"
+    )
+    (reports_dir / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "current_go_live_blockers",
+                "schema_version": 3,
+                "promotion_artifact_freshness": {"status": "FRESH"},
+                "next_actions": [
+                    {
+                        "priority": 1,
+                        "strategy": plan.candidate_id,
+                        "daily_ops_trade_day": plan.trade_day,
+                        "daily_ops_status": "READY_TO_EXECUTE",
+                        "order_safety": "paper_order_only",
+                        "desc": "READY_TO_EXECUTE capped paper 실행",
+                        "command": execute_command,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    guard = twp.load_current_blockers_execution_guard(
+        plan,
+        output_dir=reports_dir / "paper_runtime",
+    )
+
+    assert guard["required"] is True
+    assert guard["checked"] is True
+    assert guard["allowed"] is True
+    assert guard["reason"] == "current blockers action allows execution"
+    assert guard["guards"]["daily_ops_status"] == "READY_TO_EXECUTE"
+    assert guard["guards"]["order_safety"] == "paper_order_only"
+
+
+def test_current_blockers_execution_guard_blocks_no_order_action(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "current_go_live_blockers",
+                "schema_version": 3,
+                "promotion_artifact_freshness": {"status": "FRESH"},
+                "next_actions": [
+                    {
+                        "priority": 1,
+                        "strategy": plan.candidate_id,
+                        "daily_ops_trade_day": plan.trade_day,
+                        "daily_ops_status": "READY_TO_EXECUTE",
+                        "order_safety": "no_order",
+                        "desc": "DB 복구 진행상태 점검",
+                        "command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            f"--candidate-id {plan.candidate_id} "
+                            "--execute --collect-evidence"
+                        ),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    guard = twp.load_current_blockers_execution_guard(
+        plan,
+        output_dir=reports_dir / "paper_runtime",
+    )
+
+    assert guard["required"] is True
+    assert guard["checked"] is True
+    assert guard["allowed"] is False
+    assert guard["guards"]["order_safety"] == "no_order"
+    assert guard["reason"] == (
+        "target_weight_current_blockers_order_safety_not_paper_order_only: no_order"
+    )
+
+
+def test_current_blockers_execution_guard_blocks_non_ready_daily_ops_action(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "artifact_type": "current_go_live_blockers",
+                "schema_version": 3,
+                "promotion_artifact_freshness": {"status": "FRESH"},
+                "next_actions": [
+                    {
+                        "priority": 1,
+                        "strategy": plan.candidate_id,
+                        "daily_ops_trade_day": plan.trade_day,
+                        "daily_ops_status": "PILOT_EVIDENCE_INVALID",
+                        "order_safety": "paper_order_only",
+                        "desc": "pilot evidence 복구",
+                        "command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            f"--candidate-id {plan.candidate_id} "
+                            "--execute --collect-evidence"
+                        ),
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    guard = twp.load_current_blockers_execution_guard(
+        plan,
+        output_dir=reports_dir / "paper_runtime",
+    )
+
+    assert guard["required"] is True
+    assert guard["checked"] is True
+    assert guard["allowed"] is False
+    assert guard["guards"]["daily_ops_status"] == "PILOT_EVIDENCE_INVALID"
+    assert guard["reason"] == (
+        "target_weight_current_blockers_not_ready_to_execute: "
+        "PILOT_EVIDENCE_INVALID"
+    )
+
+
 def test_run_pilot_blocks_execute_when_current_blockers_requires_db_restore(
     monkeypatch,
     tmp_path,
