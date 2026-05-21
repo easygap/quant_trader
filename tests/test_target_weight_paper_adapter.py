@@ -2362,6 +2362,119 @@ def test_paper_pilot_control_status_prints_target_weight_daily_ops(tmp_path, mon
     assert summary_path.as_posix() in output
 
 
+def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-12")
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    summary_path = summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json"
+    summary_path.write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "next_step": "DB 저장 증거 불완전",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "shadow_days": 2,
+                    "invalid_execution_days": 1,
+                },
+                "decision": {"blocking_reasons": ["db persistence missing"]},
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: DB persistence proof incomplete",
+                    "enable_suggested_caps": "# blocked: DB persistence proof incomplete",
+                    "daily_ops_summary": (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--candidate-id target_weight_candidate --daily-ops-summary"
+                    ),
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "current_priority_action": {
+                        "strategy": strategy,
+                        "desc": "DB 저장 증거 복구",
+                        "command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--candidate-id target_weight_candidate "
+                            "--diagnose-portfolio-snapshot --snapshot-date 2026-04-10"
+                        ),
+                        "order_safety": "no_order",
+                        "db_persistence_guard": (
+                            "target_weight_db_persistence_proof_required"
+                        ),
+                        "verified_pilot_days": 0,
+                        "target_days": 60,
+                        "shadow_days": 2,
+                        "invalid_execution_days": 1,
+                        "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
+                        "snapshot_db_restore_status": "restore_required",
+                        "snapshot_db_restore_required": True,
+                        "snapshot_db_restore_trade_rows_expected": 4,
+                        "snapshot_db_restore_trade_rows_current": 0,
+                        "snapshot_db_restore_position_symbols_expected": 4,
+                        "snapshot_db_restore_positions_current": 0,
+                        "snapshot_db_restore_missing_or_unverified_symbols": [
+                            "AAA",
+                            "BBB",
+                        ],
+                        "snapshot_db_restore_package_verify_command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--verify-db-restore-package --restore-manifest restore.json"
+                        ),
+                        "snapshot_db_restore_verification_status": "blocked",
+                        "snapshot_db_restore_verification_ready": False,
+                        "snapshot_db_restore_verification_blockers": [
+                            "authoritative_trade_history_csv_required"
+                        ],
+                        "snapshot_db_restore_authoritative_trade_history_match": False,
+                        "snapshot_db_restore_authoritative_positions_match": False,
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert "DB persistence guard: trade_history/positions proof required" in output
+    assert "Snapshot diagnostics status: blocked_missing_snapshot_history" in output
+    assert (
+        "Snapshot DB restore checklist: status=restore_required required=True "
+        "trade_rows=0/4 positions=0/4"
+    ) in output
+    assert "Snapshot DB restore missing symbols: AAA, BBB" in output
+    assert "Snapshot DB restore verify command:" in output
+    assert "Snapshot DB restore verification: status=blocked ready=False" in output
+    assert (
+        "Snapshot DB restore verification blockers: "
+        "authoritative_trade_history_csv_required"
+    ) in output
+    assert (
+        "Snapshot DB restore authoritative match: "
+        "trade_history=False positions=False"
+    ) in output
+
+
 def test_paper_pilot_control_status_uses_repaired_summary_run_guard_without_blockers(
     tmp_path,
     monkeypatch,
