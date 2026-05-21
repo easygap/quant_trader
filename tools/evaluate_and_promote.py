@@ -2014,6 +2014,27 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
+def _text_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _db_restore_authoritative_csv_action_fields(
+    prefix: str,
+    evidence: dict,
+) -> dict[str, object]:
+    expected_rows = evidence.get("expected_rows")
+    if expected_rows is None:
+        expected_rows = evidence.get("candidate_rows")
+    return {
+        f"{prefix}_row_count": _safe_int(evidence.get("row_count")),
+        f"{prefix}_expected_rows": _safe_int(expected_rows),
+        f"{prefix}_empty_template": bool(evidence.get("empty_template")),
+        f"{prefix}_missing_columns": _text_list(evidence.get("missing_columns")),
+    }
+
+
 def _first_text(items) -> str | None:
     if not isinstance(items, list):
         return None
@@ -2385,6 +2406,14 @@ def _target_weight_ops_priority_action(
                     ),
                     "snapshot_db_restore_authoritative_positions_match": bool(
                         verification_positions.get("match")
+                    ),
+                    **_db_restore_authoritative_csv_action_fields(
+                        "snapshot_db_restore_authoritative_trade_history",
+                        verification_trade,
+                    ),
+                    **_db_restore_authoritative_csv_action_fields(
+                        "snapshot_db_restore_authoritative_positions",
+                        verification_positions,
                     ),
                     "snapshot_db_restore_verification_db_trade_rows_on_date": _safe_int(
                         verification_current_db.get("trade_count_on_date")
@@ -2959,6 +2988,14 @@ def _target_weight_ops_priority_action(
                         ),
                         "snapshot_db_restore_authoritative_positions_match": bool(
                             verification_positions.get("match")
+                        ),
+                        **_db_restore_authoritative_csv_action_fields(
+                            "snapshot_db_restore_authoritative_trade_history",
+                            verification_trade,
+                        ),
+                        **_db_restore_authoritative_csv_action_fields(
+                            "snapshot_db_restore_authoritative_positions",
+                            verification_positions,
                         ),
                         "snapshot_db_restore_verification_db_trade_rows_on_date": _safe_int(
                             verification_db.get("trade_count_on_date")
