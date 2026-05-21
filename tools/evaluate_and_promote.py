@@ -2630,10 +2630,27 @@ def _target_weight_ops_priority_action(
                 )
                 if not isinstance(verification_current_db, dict):
                     verification_current_db = {}
+                verification_commands = (
+                    latest_db_restore_verification.get("operator_commands") or {}
+                )
+                if not isinstance(verification_commands, dict):
+                    verification_commands = {}
+                verification_source = str(
+                    latest_db_restore_verification.get("source_path")
+                    or latest_db_restore_verification.get("artifact_path")
+                    or ""
+                )
+                apply_plan_command = str(
+                    verification_commands.get("plan_manual_db_apply") or ""
+                ).strip()
+                if not apply_plan_command and verification_source:
+                    apply_plan_command = (
+                        "python tools/target_weight_rotation_pilot.py "
+                        "--plan-db-restore-apply "
+                        f"--restore-verification {verification_source}"
+                    )
                 action.update({
-                    "snapshot_db_restore_verification_source": str(
-                        latest_db_restore_verification.get("source_path") or ""
-                    ),
+                    "snapshot_db_restore_verification_source": verification_source,
                     "snapshot_db_restore_verification_generated_at": str(
                         latest_db_restore_verification.get("generated_at") or ""
                     ),
@@ -2683,6 +2700,7 @@ def _target_weight_ops_priority_action(
                     "snapshot_db_restore_verification_db_positions": _safe_int(
                         verification_current_db.get("position_count")
                     ),
+                    "snapshot_db_restore_apply_plan_command": apply_plan_command,
                 })
             verify_command = str(
                 action.get("snapshot_db_restore_package_verify_command") or ""
@@ -2925,26 +2943,31 @@ def _target_weight_ops_priority_action(
                     ),
                 })
             elif package_generated and verification_ready:
+                apply_plan_command = str(
+                    action.get("snapshot_db_restore_apply_plan_command") or ""
+                ).strip()
                 action.update({
                     "desc": (
-                        "target-weight DB 복구 패키지 검증 완료, authoritative DB "
-                        "복구 반영 후 daily ops 재점검"
+                        "target-weight DB 복구 패키지 검증 완료, no-write 적용 "
+                        "계획 생성 후 authoritative DB 복구 반영"
                     ),
                     "command": (
-                        "# manual step required: restore verified authoritative "
-                        "DB trade_history/positions proof before daily ops"
+                        apply_plan_command
+                        or "# manual step required: prepare no-write DB restore "
+                        "apply plan before manual DB restore"
                     ),
+                    "scheduled_command": apply_plan_command,
                     "scheduled_follow_up": follow_up,
-                    "requires": "manual authoritative DB restore",
+                    "requires": "no-write DB restore apply plan",
                     "db_restore_review_guard": (
-                        "target_weight_authoritative_db_restore_ready_manual_db_write"
+                        "target_weight_authoritative_db_restore_apply_plan_required"
                     ),
                     "blocked_finalize_command": (
-                        "# blocked: verified authoritative DB restore must be applied "
+                        "# blocked: no-write DB restore apply plan required "
                         "before finalize"
                     ),
                     "blocked_repair_command": (
-                        "# blocked: verified authoritative DB restore must be applied "
+                        "# blocked: no-write DB restore apply plan required "
                         "before repair"
                     ),
                 })
