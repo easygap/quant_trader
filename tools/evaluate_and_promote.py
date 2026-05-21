@@ -16,7 +16,8 @@ invalid paper evidence 격리: python tools/evaluate_and_promote.py --paper-evid
   - promotion_result.json  (최종 상태 계산 결과)
   - promotion_blocker_summary.json/md (운영자용 차단 사유 요약)
 """
-import sys, os, json, hashlib, subprocess, csv
+import sys, os, json, hashlib, subprocess, csv, math
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from core.target_weight_commands import (
     command_scope_issues as target_weight_command_scope_issues,
     next_check_command_or_default as target_weight_next_check_command_or_default,
 )
+from core.target_weight_rotation import normalize_symbol
 
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
@@ -62,6 +64,27 @@ TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS = [
     "avg_price",
     "total_invested",
     "strategy",
+]
+TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
+    "price",
+    "total_amount",
+    "commission",
+    "tax",
+    "slippage",
+    "avg_price",
+    "total_invested",
+}
+TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS = [
+    "symbol",
+    "action",
+    "quantity",
+    "price",
+    "order_id",
+]
+TARGET_WEIGHT_RESTORE_POSITION_SAMPLE_COLUMNS = [
+    "symbol",
+    "quantity",
+    "avg_price",
 ]
 TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES = 30
 TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS = frozenset({
@@ -2052,6 +2075,89 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _normalize_restore_compare_value(column: str, value) -> str:
+    raw = "" if value is None else str(value).strip()
+    if column == "symbol":
+        return normalize_symbol(raw)
+    if column == "action":
+        return raw.upper()
+    if column == "quantity":
+        try:
+            return str(int(float(raw)))
+        except (TypeError, ValueError):
+            return "0"
+    if column in TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS:
+        if raw == "":
+            return ""
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return raw
+        if not math.isfinite(number):
+            return raw
+        return f"{number:.8f}".rstrip("0").rstrip(".")
+    return raw
+
+
+def _restore_row_counter(
+    rows: list[dict[str, object]],
+    columns: list[str],
+) -> Counter[tuple[tuple[str, str], ...]]:
+    return Counter(
+        tuple(
+            (column, _normalize_restore_compare_value(column, row.get(column)))
+            for column in columns
+        )
+        for row in rows
+    )
+
+
+def _restore_counter_sample(
+    counter: Counter[tuple[tuple[str, str], ...]],
+    *,
+    sample_columns: list[str],
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    sample: list[dict[str, str]] = []
+    for key, count in counter.items():
+        row = {column: value for column, value in key}
+        sampled = {
+            column: str(row.get(column) or "")
+            for column in sample_columns
+            if str(row.get(column) or "")
+        }
+        sampled["_count"] = str(count)
+        sample.append(sampled)
+        if len(sample) >= limit:
+            break
+    return sample
+
+
+def _compare_review_csv_rows(
+    *,
+    candidate_rows: list[dict[str, object]],
+    authoritative_rows: list[dict[str, object]],
+    columns: list[str],
+    sample_columns: list[str],
+) -> dict[str, object]:
+    candidate_counter = _restore_row_counter(candidate_rows, columns)
+    authoritative_counter = _restore_row_counter(authoritative_rows, columns)
+    missing = candidate_counter - authoritative_counter
+    unexpected = authoritative_counter - candidate_counter
+    return {
+        "missing_row_count": sum(missing.values()),
+        "unexpected_row_count": sum(unexpected.values()),
+        "missing_row_sample": _restore_counter_sample(
+            missing,
+            sample_columns=sample_columns,
+        ),
+        "unexpected_row_sample": _restore_counter_sample(
+            unexpected,
+            sample_columns=sample_columns,
+        ),
+    }
+
+
 def _db_restore_authoritative_csv_action_fields(
     prefix: str,
     evidence: dict,
@@ -2076,6 +2182,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "row_count": 0,
             "missing_columns": [],
             "sha256": "",
+            "rows": [],
         }
     path = Path(path_text)
     if not path.exists():
@@ -2085,6 +2192,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
             "sha256": "",
+            "rows": [],
         }
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -2101,6 +2209,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
             "sha256": "",
+            "rows": [],
         }
     missing_columns = [
         column for column in expected_columns if column not in fieldnames
@@ -2111,6 +2220,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
         "row_count": len(rows),
         "missing_columns": missing_columns,
         "sha256": sha256,
+        "rows": rows,
     }
 
 
@@ -2118,8 +2228,10 @@ def _db_restore_review_template_action_fields(
     prefix: str,
     *,
     path_value: object,
+    candidate_path_value: object = "",
     expected_rows: int,
     expected_columns: list[str],
+    sample_columns: list[str] | None = None,
     verification_sha256: object = "",
 ) -> dict[str, object]:
     progress = _read_csv_progress(path_value, expected_columns)
@@ -2129,6 +2241,23 @@ def _db_restore_review_template_action_fields(
     verification_stale = bool(
         current_sha256 and verified_sha256 and current_sha256 != verified_sha256
     )
+    row_gap = {
+        "missing_row_count": 0,
+        "unexpected_row_count": 0,
+        "missing_row_sample": [],
+        "unexpected_row_sample": [],
+    }
+    if progress.get("exists") and not progress.get("missing_columns"):
+        candidate_progress = _read_csv_progress(candidate_path_value, expected_columns)
+        if candidate_progress.get("exists") and not candidate_progress.get(
+            "missing_columns"
+        ):
+            row_gap = _compare_review_csv_rows(
+                candidate_rows=list(candidate_progress.get("rows") or []),
+                authoritative_rows=list(progress.get("rows") or []),
+                columns=expected_columns,
+                sample_columns=sample_columns or expected_columns,
+            )
     return {
         f"{prefix}_provided": bool(progress.get("provided")),
         f"{prefix}_row_count": row_count,
@@ -2140,6 +2269,12 @@ def _db_restore_review_template_action_fields(
         f"{prefix}_current_sha256": current_sha256,
         f"{prefix}_verified_sha256": verified_sha256,
         f"{prefix}_verification_stale": verification_stale,
+        f"{prefix}_missing_row_count": _safe_int(row_gap.get("missing_row_count")),
+        f"{prefix}_unexpected_row_count": _safe_int(
+            row_gap.get("unexpected_row_count")
+        ),
+        f"{prefix}_missing_row_sample": row_gap.get("missing_row_sample") or [],
+        f"{prefix}_unexpected_row_sample": row_gap.get("unexpected_row_sample") or [],
     }
 
 
@@ -2626,6 +2761,9 @@ def _target_weight_ops_priority_action(
                         path_value=review_files.get(
                             "authoritative_trade_history_template_csv"
                         ),
+                        candidate_path_value=review_files.get(
+                            "candidate_trade_history_csv"
+                        ),
                         expected_rows=_safe_int(
                             review_trade.get("row_count")
                             or review_trade.get("expected_rows")
@@ -2634,6 +2772,7 @@ def _target_weight_ops_priority_action(
                             )
                         ),
                         expected_columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+                        sample_columns=TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS,
                         verification_sha256=verification_trade.get("sha256")
                         if isinstance(verification_trade, dict)
                         else "",
@@ -2645,6 +2784,9 @@ def _target_weight_ops_priority_action(
                         path_value=review_files.get(
                             "authoritative_positions_template_csv"
                         ),
+                        candidate_path_value=review_files.get(
+                            "candidate_positions_csv"
+                        ),
                         expected_rows=_safe_int(
                             review_positions.get("row_count")
                             or review_positions.get("expected_rows")
@@ -2653,6 +2795,7 @@ def _target_weight_ops_priority_action(
                             )
                         ),
                         expected_columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+                        sample_columns=TARGET_WEIGHT_RESTORE_POSITION_SAMPLE_COLUMNS,
                         verification_sha256=verification_positions.get("sha256")
                         if isinstance(verification_positions, dict)
                         else "",
