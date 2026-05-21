@@ -16,7 +16,7 @@ invalid paper evidence 격리: python tools/evaluate_and_promote.py --paper-evid
   - promotion_result.json  (최종 상태 계산 결과)
   - promotion_blocker_summary.json/md (운영자용 차단 사유 요약)
 """
-import sys, os, json, hashlib, subprocess
+import sys, os, json, hashlib, subprocess, csv
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -39,6 +39,30 @@ TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_STATUSES = frozenset({
     "READY_TO_ENABLE_CAPS",
     "WAITING_FOR_MARKET_SESSION",
 })
+TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS = [
+    "account_key",
+    "symbol",
+    "action",
+    "price",
+    "quantity",
+    "total_amount",
+    "commission",
+    "tax",
+    "slippage",
+    "strategy",
+    "mode",
+    "executed_at",
+    "execution_session_id",
+    "order_id",
+]
+TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS = [
+    "account_key",
+    "symbol",
+    "quantity",
+    "avg_price",
+    "total_invested",
+    "strategy",
+]
 TARGET_WEIGHT_DAILY_OPS_ACTIONABLE_MAX_AGE_MINUTES = 30
 TARGET_WEIGHT_FINALIZE_FIRST_INVALID_REASONS = frozenset({
     "target_weight_benchmark_status_not_final",
@@ -2035,6 +2059,68 @@ def _db_restore_authoritative_csv_action_fields(
     }
 
 
+def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[str, object]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return {
+            "provided": False,
+            "exists": False,
+            "row_count": 0,
+            "missing_columns": [],
+        }
+    path = Path(path_text)
+    if not path.exists():
+        return {
+            "provided": True,
+            "exists": False,
+            "row_count": 0,
+            "missing_columns": expected_columns.copy(),
+        }
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = [dict(row) for row in reader]
+            fieldnames = [
+                str(column or "").strip() for column in reader.fieldnames or []
+            ]
+    except OSError:
+        return {
+            "provided": True,
+            "exists": False,
+            "row_count": 0,
+            "missing_columns": expected_columns.copy(),
+        }
+    missing_columns = [
+        column for column in expected_columns if column not in fieldnames
+    ]
+    return {
+        "provided": True,
+        "exists": True,
+        "row_count": len(rows),
+        "missing_columns": missing_columns,
+    }
+
+
+def _db_restore_review_template_action_fields(
+    prefix: str,
+    *,
+    path_value: object,
+    expected_rows: int,
+    expected_columns: list[str],
+) -> dict[str, object]:
+    progress = _read_csv_progress(path_value, expected_columns)
+    row_count = _safe_int(progress.get("row_count"))
+    return {
+        f"{prefix}_provided": bool(progress.get("provided")),
+        f"{prefix}_row_count": row_count,
+        f"{prefix}_expected_rows": expected_rows,
+        f"{prefix}_empty_template": bool(progress.get("exists"))
+        and expected_rows > 0
+        and row_count == 0,
+        f"{prefix}_missing_columns": _text_list(progress.get("missing_columns")),
+    }
+
+
 def _first_text(items) -> str | None:
     if not isinstance(items, list):
         return None
@@ -2453,6 +2539,17 @@ def _target_weight_ops_priority_action(
                 )
                 if not isinstance(review_commands, dict):
                     review_commands = {}
+                review_candidate = (
+                    latest_db_restore_review_bundle.get("candidate_package") or {}
+                )
+                if not isinstance(review_candidate, dict):
+                    review_candidate = {}
+                review_trade = review_candidate.get("trade_history") or {}
+                if not isinstance(review_trade, dict):
+                    review_trade = {}
+                review_positions = review_candidate.get("positions") or {}
+                if not isinstance(review_positions, dict):
+                    review_positions = {}
                 review_bundle_ready = bool(
                     latest_db_restore_review_bundle.get("review_bundle_ready")
                 )
@@ -2499,6 +2596,38 @@ def _target_weight_ops_priority_action(
                         review_bundle_verify_command
                     ),
                 })
+                action.update(
+                    _db_restore_review_template_action_fields(
+                        "snapshot_db_restore_authoritative_trade_history",
+                        path_value=review_files.get(
+                            "authoritative_trade_history_template_csv"
+                        ),
+                        expected_rows=_safe_int(
+                            review_trade.get("row_count")
+                            or review_trade.get("expected_rows")
+                            or action.get(
+                                "snapshot_db_restore_trade_history_candidate_rows"
+                            )
+                        ),
+                        expected_columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+                    )
+                )
+                action.update(
+                    _db_restore_review_template_action_fields(
+                        "snapshot_db_restore_authoritative_positions",
+                        path_value=review_files.get(
+                            "authoritative_positions_template_csv"
+                        ),
+                        expected_rows=_safe_int(
+                            review_positions.get("row_count")
+                            or review_positions.get("expected_rows")
+                            or action.get(
+                                "snapshot_db_restore_position_candidate_rows"
+                            )
+                        ),
+                        expected_columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+                    )
+                )
             verification_ready = bool(
                 action.get("snapshot_db_restore_verification_ready")
             )
