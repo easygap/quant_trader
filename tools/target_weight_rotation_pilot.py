@@ -3576,6 +3576,9 @@ def _verify_authoritative_restore_csv(
         "path": str(path_value or ""),
         "provided": bool(path_value),
         "exists": False,
+        "row_count": 0,
+        "expected_rows": len(candidate_rows),
+        "empty_template": False,
         "match": False,
     }
     if not path_value:
@@ -3598,7 +3601,10 @@ def _verify_authoritative_restore_csv(
         "sha256": _file_sha256(path),
         **comparison,
     })
-    if not comparison["match"]:
+    if candidate_rows and not rows:
+        info["empty_template"] = True
+        blockers.append(f"authoritative_{kind}_csv_empty_template")
+    elif not comparison["match"]:
         blockers.append(f"authoritative_{kind}_csv_mismatch")
     return info
 
@@ -4067,6 +4073,14 @@ def render_target_weight_db_restore_package_verification_markdown(
     authoritative_trade = authoritative.get("trade_history") or {}
     authoritative_positions = authoritative.get("positions") or {}
     db_state = report.get("current_db_state") or {}
+    authoritative_trade_expected_rows = authoritative_trade.get(
+        "expected_rows",
+        authoritative_trade.get("candidate_rows", 0),
+    )
+    authoritative_positions_expected_rows = authoritative_positions.get(
+        "expected_rows",
+        authoritative_positions.get("candidate_rows", 0),
+    )
     lines = [
         "# Target-weight DB Restore Package Verification",
         "",
@@ -4100,8 +4114,12 @@ def render_target_weight_db_restore_package_verification_markdown(
         "",
         "## Authoritative Evidence",
         f"- Trade history CSV provided: `{authoritative_trade.get('provided', False)}`",
+        "- Trade history authoritative rows: "
+        f"`{authoritative_trade.get('row_count', 0)}/{authoritative_trade_expected_rows}`",
         f"- Trade history match: `{authoritative_trade.get('match', False)}`",
         f"- Positions CSV provided: `{authoritative_positions.get('provided', False)}`",
+        "- Positions authoritative rows: "
+        f"`{authoritative_positions.get('row_count', 0)}/{authoritative_positions_expected_rows}`",
         f"- Positions match: `{authoritative_positions.get('match', False)}`",
         "",
         "## Current DB State",
@@ -4149,6 +4167,14 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
     authoritative_trade = authoritative.get("trade_history") or {}
     authoritative_positions = authoritative.get("positions") or {}
     db_state = report.get("current_db_state") or {}
+    authoritative_trade_expected_rows = authoritative_trade.get(
+        "expected_rows",
+        authoritative_trade.get("candidate_rows", 0),
+    )
+    authoritative_positions_expected_rows = authoritative_positions.get(
+        "expected_rows",
+        authoritative_positions.get("candidate_rows", 0),
+    )
     print(f"  status: {report.get('status')}")
     print(f"  restore_ready: {bool(report.get('restore_ready'))}")
     if report.get("blockers"):
@@ -4172,11 +4198,15 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
     print(
         "  authoritative_trade_history: "
         f"provided={bool(authoritative_trade.get('provided'))} "
+        f"rows={authoritative_trade.get('row_count', 0)}/"
+        f"{authoritative_trade_expected_rows} "
         f"match={bool(authoritative_trade.get('match'))}"
     )
     print(
         "  authoritative_positions: "
         f"provided={bool(authoritative_positions.get('provided'))} "
+        f"rows={authoritative_positions.get('row_count', 0)}/"
+        f"{authoritative_positions_expected_rows} "
         f"match={bool(authoritative_positions.get('match'))}"
     )
     print(
