@@ -3243,6 +3243,22 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
             )
         },
     }
+    latest_db_restore_review_progress = {
+        "artifact_type": "target_weight_db_restore_review_progress",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "source_path": "reports/paper_runtime/review_progress.json",
+        "generated_at": "2026-05-20T16:30:00",
+        "status": "review_incomplete",
+        "review_worklist": {
+            "generated": True,
+            "path": "reports/paper_runtime/review_worklist.csv",
+            "row_count": 3,
+            "trade_history_missing_row_count": 1,
+            "positions_missing_row_count": 2,
+            "not_authoritative": True,
+        },
+    }
 
     report = build_current_blockers_report(
         blocker_summary,
@@ -3250,6 +3266,7 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         latest_db_restore_verification=latest_db_restore_verification,
         latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+        latest_db_restore_review_progress=latest_db_restore_review_progress,
     )
 
     action = report["next_actions"][0]
@@ -3279,6 +3296,15 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
     assert action["snapshot_db_restore_review_bundle_manual_review_files_upgraded"] == [
         "authoritative_trade_history_template_csv"
     ]
+    assert action["snapshot_db_restore_review_progress_status"] == "review_incomplete"
+    assert action["snapshot_db_restore_review_worklist_generated"] is True
+    assert action["snapshot_db_restore_review_worklist_csv"].endswith(
+        "review_worklist.csv"
+    )
+    assert action["snapshot_db_restore_review_worklist_row_count"] == 3
+    assert action["snapshot_db_restore_review_worklist_trade_history_missing"] == 1
+    assert action["snapshot_db_restore_review_worklist_positions_missing"] == 2
+    assert action["snapshot_db_restore_review_worklist_not_authoritative"] is True
     assert action["snapshot_db_restore_review_bundle_dir"].endswith("review_bundle")
     assert action[
         "snapshot_db_restore_authoritative_trade_history_template_csv"
