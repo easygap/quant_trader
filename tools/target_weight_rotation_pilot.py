@@ -3948,6 +3948,16 @@ def _target_weight_db_restore_verify_with_templates_command(
     )
 
 
+def _target_weight_db_restore_apply_plan_command(
+    verification_report_path: str | Path,
+) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        "--plan-db-restore-apply "
+        f"--restore-verification {verification_report_path}"
+    )
+
+
 def prepare_target_weight_db_restore_review_bundle(
     *,
     manifest_path: str | Path,
@@ -4494,6 +4504,10 @@ def write_target_weight_db_restore_package_verification_report(
     md_path = output_dir / f"{stem}.md"
     report["artifact_path"] = json_path.as_posix()
     report["report_path"] = md_path.as_posix()
+    if bool(report.get("restore_ready")):
+        report.setdefault("operator_commands", {})["plan_manual_db_apply"] = (
+            _target_weight_db_restore_apply_plan_command(json_path.as_posix())
+        )
     json_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
         encoding="utf-8",
@@ -4575,6 +4589,401 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"trades_on_date={db_state.get('trade_count_on_date', 0)} "
         f"positions={db_state.get('position_count', 0)} "
         f"current_snapshot={bool(db_state.get('current_snapshot_found'))}"
+    )
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
+
+
+def _db_restore_apply_plan_authoritative_csv_info(
+    *,
+    evidence: dict[str, Any],
+    kind: str,
+    columns: list[str],
+    blockers: list[str],
+) -> dict[str, Any]:
+    path_text = str(evidence.get("path") or "")
+    verified_sha = str(evidence.get("sha256") or "")
+    info: dict[str, Any] = {
+        "kind": kind,
+        "path": path_text,
+        "provided": bool(evidence.get("provided")),
+        "verified_sha256": verified_sha,
+        "current_sha256": "",
+        "sha256_matches_verification": False,
+        "verified_match": bool(evidence.get("match")),
+        "candidate_source_rejected": bool(evidence.get("candidate_source_rejected")),
+        "candidate_marker_rejected": bool(evidence.get("candidate_marker_rejected")),
+        "empty_template": bool(evidence.get("empty_template")),
+        "expected_rows": _coerce_int_or_zero(evidence.get("row_count")),
+        "row_count": 0,
+        "fieldnames": [],
+        "missing_columns": [],
+        "candidate_marker_row_count": 0,
+        "rows": [],
+    }
+    if not info["provided"] or not path_text:
+        blockers.append(f"authoritative_{kind}_csv_required_for_apply_plan")
+        return info
+    if not info["verified_match"]:
+        blockers.append(f"authoritative_{kind}_csv_not_verified_match")
+    if info["candidate_source_rejected"]:
+        blockers.append(f"authoritative_{kind}_csv_candidate_source_rejected")
+    if info["candidate_marker_rejected"]:
+        blockers.append(f"authoritative_{kind}_csv_candidate_marker_rejected")
+    if info["empty_template"]:
+        blockers.append(f"authoritative_{kind}_csv_empty_template")
+
+    path = Path(path_text)
+    if not path.exists():
+        blockers.append(f"authoritative_{kind}_csv_missing_for_apply_plan")
+        return info
+
+    current_sha = _file_sha256(path)
+    rows, fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+    missing_columns = [column for column in columns if column not in fieldnames]
+    candidate_marker_row_count = _restore_authoritative_candidate_marker_count(rows)
+    info.update({
+        "current_sha256": current_sha,
+        "sha256_matches_verification": bool(verified_sha)
+        and current_sha == verified_sha,
+        "row_count": len(rows),
+        "fieldnames": fieldnames,
+        "missing_columns": missing_columns,
+        "candidate_marker_row_count": candidate_marker_row_count,
+        "rows": [{column: row.get(column, "") for column in columns} for row in rows],
+    })
+    if not verified_sha:
+        blockers.append(f"authoritative_{kind}_csv_verified_sha_missing")
+    elif current_sha != verified_sha:
+        blockers.append(f"authoritative_{kind}_csv_changed_after_verification")
+    if missing_columns:
+        blockers.append(f"authoritative_{kind}_csv_columns_missing_for_apply_plan")
+    if candidate_marker_row_count:
+        blockers.append(f"authoritative_{kind}_csv_candidate_marker_rejected")
+    if len(rows) != info["expected_rows"]:
+        blockers.append(f"authoritative_{kind}_csv_row_count_changed_after_verification")
+    return info
+
+
+def _db_restore_apply_plan_idempotency_keys(
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> list[str]:
+    keys = []
+    for row in rows:
+        parts = [
+            _normalize_restore_compare_value(column, row.get(column))
+            for column in columns
+        ]
+        keys.append("|".join(parts))
+    return keys
+
+
+def plan_target_weight_db_restore_apply(
+    *,
+    verification_report_path: str | Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """검증된 authoritative CSV를 실제 DB에 넣기 전 no-write 적용 계획을 만든다."""
+    verification_file = Path(verification_report_path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    verification: dict[str, Any] = {}
+    if not verification_file.exists():
+        blockers.append("restore_verification_report_missing")
+    else:
+        try:
+            verification = json.loads(verification_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"restore_verification_report_invalid_json:{exc}")
+            verification = {}
+
+    if verification.get("artifact_type") != "target_weight_db_restore_package_verification":
+        blockers.append("restore_verification_artifact_type_invalid")
+    if verification.get("status") != "ready_for_authoritative_db_restore":
+        blockers.append("restore_verification_status_not_ready")
+    if not bool(verification.get("restore_ready")):
+        blockers.append("restore_verification_not_ready")
+    verification_blockers = verification.get("blockers") or []
+    if verification_blockers:
+        blockers.append("restore_verification_blockers_present")
+
+    candidate_id = str(verification.get("candidate_id") or "")
+    snapshot_date = str(verification.get("snapshot_date") or "")
+    if not candidate_id or not snapshot_date:
+        blockers.append("restore_verification_candidate_or_snapshot_date_missing")
+
+    safety = verification.get("no_write_safety") or {}
+    if not isinstance(safety, dict):
+        safety = {}
+    if bool(safety.get("db_write_enabled")):
+        blockers.append("restore_verification_db_write_enabled_must_be_false")
+    if bool(safety.get("portfolio_snapshot_write_enabled")):
+        blockers.append("restore_verification_snapshot_write_enabled_must_be_false")
+    if bool(safety.get("restore_applied")):
+        blockers.append("restore_verification_already_applied")
+    if safety.get("dry_run_only") is not True:
+        blockers.append("restore_verification_no_write_safety_not_dry_run_only")
+
+    candidate = verification.get("candidate_package") or {}
+    if not isinstance(candidate, dict):
+        candidate = {}
+    if not bool(candidate.get("candidate_only")):
+        blockers.append("restore_verification_candidate_only_required")
+    if bool(candidate.get("db_write_enabled")):
+        blockers.append("restore_verification_candidate_db_write_enabled")
+    if bool(candidate.get("portfolio_snapshot_write_enabled")):
+        blockers.append("restore_verification_candidate_snapshot_write_enabled")
+    if not bool(candidate.get("requires_authoritative_confirmation")):
+        blockers.append("restore_verification_authoritative_confirmation_required")
+    if not bool((candidate.get("trade_history") or {}).get("hash_ok")):
+        blockers.append("restore_verification_trade_history_candidate_hash_unverified")
+    if not bool((candidate.get("positions") or {}).get("hash_ok")):
+        blockers.append("restore_verification_positions_candidate_hash_unverified")
+
+    authoritative = verification.get("authoritative_evidence") or {}
+    if not isinstance(authoritative, dict):
+        authoritative = {}
+    authoritative_trade = authoritative.get("trade_history") or {}
+    if not isinstance(authoritative_trade, dict):
+        authoritative_trade = {}
+    authoritative_positions = authoritative.get("positions") or {}
+    if not isinstance(authoritative_positions, dict):
+        authoritative_positions = {}
+
+    trade_info = _db_restore_apply_plan_authoritative_csv_info(
+        evidence=authoritative_trade,
+        kind="trade_history",
+        columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        blockers=blockers,
+    )
+    position_info = _db_restore_apply_plan_authoritative_csv_info(
+        evidence=authoritative_positions,
+        kind="positions",
+        columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        blockers=blockers,
+    )
+
+    current_db_state: dict[str, Any] = {
+        "checked": False,
+        "reason": "candidate_id or snapshot_date missing",
+    }
+    if candidate_id and snapshot_date:
+        current_db_state = _target_weight_snapshot_database_state(
+            account_key=candidate_id,
+            snapshot_date=snapshot_date,
+        )
+        if not current_db_state.get("checked"):
+            blockers.append("current_db_state_unavailable_for_apply_plan")
+        elif (
+            _coerce_int_or_zero(current_db_state.get("trade_count_on_date")) > 0
+            or _coerce_int_or_zero(current_db_state.get("position_count")) > 0
+        ):
+            blockers.append("current_db_state_not_empty_reconcile_before_apply")
+
+    apply_ready = not blockers
+    status = "ready_for_manual_db_apply" if apply_ready else "blocked"
+    verification_commands = verification.get("operator_commands") or {}
+    if not isinstance(verification_commands, dict):
+        verification_commands = {}
+    post_apply_command = str(
+        verification_commands.get("rerun_snapshot_diagnostics_after_manual_restore")
+        or ""
+    )
+    report = {
+        "artifact_type": "target_weight_db_restore_apply_plan",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": status,
+        "apply_ready": apply_ready,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "verification_report_path": verification_file.as_posix(),
+        "verification_report_hash": (
+            _file_sha256(verification_file) if verification_file.exists() else ""
+        ),
+        "verification_generated_at": str(verification.get("generated_at") or ""),
+        "verification_status": str(verification.get("status") or ""),
+        "verification_restore_ready": bool(verification.get("restore_ready")),
+        "verification_blockers": verification_blockers,
+        "authoritative_evidence": {
+            "trade_history": {
+                key: value for key, value in trade_info.items() if key != "rows"
+            },
+            "positions": {
+                key: value for key, value in position_info.items() if key != "rows"
+            },
+        },
+        "current_db_state_recheck": current_db_state,
+        "restore_operations": {
+            "trade_history": {
+                "table": "trade_history",
+                "operation": "insert_manual_after_backup",
+                "row_count": len(trade_info.get("rows") or []),
+                "rows": trade_info.get("rows") or [],
+                "idempotency_columns": TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
+                "idempotency_keys": _db_restore_apply_plan_idempotency_keys(
+                    trade_info.get("rows") or [],
+                    TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
+                ),
+            },
+            "positions": {
+                "table": "positions",
+                "operation": "replace_absolute_manual",
+                "row_count": len(position_info.get("rows") or []),
+                "rows": position_info.get("rows") or [],
+                "idempotency_columns": TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
+                "idempotency_keys": _db_restore_apply_plan_idempotency_keys(
+                    position_info.get("rows") or [],
+                    TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
+                ),
+            },
+        },
+        "manual_apply_checklist": [
+            "DB 백업을 먼저 만든다",
+            "current_db_state_recheck가 checked=true이고 trade/position count가 0인지 확인한다",
+            "trade_history는 idempotency key 중복 없이 insert한다",
+            "positions는 save_position 누적 경로가 아니라 절대값 보정/교체로 반영한다",
+            "반영 뒤 snapshot diagnostics와 daily ops summary를 재실행한다",
+        ],
+        "no_write_safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "restore_applied": False,
+            "dry_run_only": True,
+            "manual_db_apply_required": True,
+        },
+        "operator_commands": {
+            "post_apply_snapshot_diagnostics": post_apply_command,
+            "manual_apply_guard": (
+                "# manual step required: review this no-write DB apply plan "
+                "before applying authoritative rows"
+            ),
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_apply_plan_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    return report
+
+
+def render_target_weight_db_restore_apply_plan_markdown(
+    report: dict[str, Any],
+) -> str:
+    authoritative = report.get("authoritative_evidence") or {}
+    trade = authoritative.get("trade_history") or {}
+    positions = authoritative.get("positions") or {}
+    db_state = report.get("current_db_state_recheck") or {}
+    operations = report.get("restore_operations") or {}
+    trade_ops = operations.get("trade_history") or {}
+    position_ops = operations.get("positions") or {}
+    lines = [
+        "# Target-weight DB Restore Apply Plan",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        f"- Apply ready: `{bool(report.get('apply_ready'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        "- Verification report: "
+        f"`{report.get('verification_report_path') or 'none'}`",
+        "",
+        "## No-write Safety",
+        "- DB write enabled: `False`",
+        "- Portfolio snapshot write enabled: `False`",
+        "- Restore applied: `False`",
+        "- Dry run only: `True`",
+        "",
+        "## Authoritative CSV Guard",
+        f"- Trade history CSV: `{trade.get('path') or 'none'}`",
+        "- Trade history SHA unchanged: "
+        f"`{bool(trade.get('sha256_matches_verification'))}`",
+        "- Trade history rows: "
+        f"`{trade.get('row_count', 0)}/{trade.get('expected_rows', 0)}`",
+        f"- Positions CSV: `{positions.get('path') or 'none'}`",
+        "- Positions SHA unchanged: "
+        f"`{bool(positions.get('sha256_matches_verification'))}`",
+        "- Positions rows: "
+        f"`{positions.get('row_count', 0)}/{positions.get('expected_rows', 0)}`",
+        "",
+        "## Current DB Recheck",
+        f"- Checked: `{db_state.get('checked', False)}`",
+        f"- Trade rows on date: `{db_state.get('trade_count_on_date', 0)}`",
+        f"- Positions: `{db_state.get('position_count', 0)}`",
+        f"- Current snapshot found: `{db_state.get('current_snapshot_found', False)}`",
+        "",
+        "## Planned Manual Operations",
+        f"- TradeHistory apply mode: `{trade_ops.get('operation') or 'none'}`",
+        f"- TradeHistory rows: `{trade_ops.get('row_count', 0)}`",
+        f"- Position apply mode: `{position_ops.get('operation') or 'none'}`",
+        f"- Position rows: `{position_ops.get('row_count', 0)}`",
+        "",
+        "## Manual Checklist",
+    ]
+    for item in report.get("manual_apply_checklist") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Operator Commands"])
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_apply_plan_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_apply_plan_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_apply_plan_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_apply_plan(report: dict[str, Any]) -> None:
+    operations = report.get("restore_operations") or {}
+    trade_ops = operations.get("trade_history") or {}
+    position_ops = operations.get("positions") or {}
+    db_state = report.get("current_db_state_recheck") or {}
+    print(f"  status: {report.get('status')}")
+    print(f"  apply_ready: {bool(report.get('apply_ready'))}")
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    if report.get("warnings"):
+        print(f"  warnings: {', '.join(report.get('warnings') or [])}")
+    print("  no_write_safety: db_write=False snapshot_write=False restore_applied=False")
+    print(
+        "  current_db_state_recheck: "
+        f"checked={bool(db_state.get('checked'))} "
+        f"trades_on_date={db_state.get('trade_count_on_date', 0)} "
+        f"positions={db_state.get('position_count', 0)} "
+        f"current_snapshot={bool(db_state.get('current_snapshot_found'))}"
+    )
+    print(
+        "  planned_trade_history: "
+        f"operation={trade_ops.get('operation')} rows={trade_ops.get('row_count', 0)}"
+    )
+    print(
+        "  planned_positions: "
+        f"operation={position_ops.get('operation')} rows={position_ops.get('row_count', 0)}"
     )
     print(f"  artifact: {report.get('artifact_path')}")
     print(f"  report: {report.get('report_path')}")
@@ -9449,11 +9858,20 @@ def main() -> None:
         help="Prepare a no-write manual authoritative CSV review bundle for a DB restore package.",
     )
     parser.add_argument(
+        "--plan-db-restore-apply",
+        action="store_true",
+        help="Create a no-write manual DB restore apply plan from a ready verification report.",
+    )
+    parser.add_argument(
         "--restore-manifest",
         help=(
             "Candidate package manifest path for --verify-db-restore-package or "
             "--prepare-db-restore-review-bundle."
         ),
+    )
+    parser.add_argument(
+        "--restore-verification",
+        help="Ready DB restore verification report path for --plan-db-restore-apply.",
     )
     parser.add_argument(
         "--authoritative-trade-history-csv",
@@ -9535,6 +9953,8 @@ def main() -> None:
             cash_blocked_modes.append("--verify-db-restore-package")
         if args.prepare_db_restore_review_bundle:
             cash_blocked_modes.append("--prepare-db-restore-review-bundle")
+        if args.plan_db_restore_apply:
+            cash_blocked_modes.append("--plan-db-restore-apply")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -9548,12 +9968,14 @@ def main() -> None:
         args.diagnose_portfolio_snapshot,
         args.verify_db_restore_package,
         args.prepare_db_restore_review_bundle,
+        args.plan_db_restore_apply,
     ]
     if sum(1 for enabled in evidence_maintenance_modes if enabled) > 1:
         parser.error(
             "--repair-pilot-evidence, --finalize-pilot-evidence, "
             "--diagnose-portfolio-snapshot, --verify-db-restore-package, "
-            "and --prepare-db-restore-review-bundle are mutually exclusive"
+            "--prepare-db-restore-review-bundle, and --plan-db-restore-apply "
+            "are mutually exclusive"
         )
     if (
         args.repair_pilot_evidence
@@ -9561,6 +9983,7 @@ def main() -> None:
         or args.diagnose_portfolio_snapshot
         or args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
+        or args.plan_db_restore_apply
     ) and (
         args.readiness_audit
         or args.daily_ops_summary
@@ -9608,6 +10031,10 @@ def main() -> None:
             "--restore-manifest is only used with --verify-db-restore-package "
             "or --prepare-db-restore-review-bundle"
         )
+    if args.plan_db_restore_apply and not args.restore_verification:
+        parser.error("--restore-verification is required with --plan-db-restore-apply")
+    if args.restore_verification and not args.plan_db_restore_apply:
+        parser.error("--restore-verification is only used with --plan-db-restore-apply")
     if (
         args.authoritative_trade_history_csv or args.authoritative_positions_csv
     ) and not args.verify_db_restore_package:
@@ -9794,6 +10221,20 @@ def main() -> None:
         print(f"  manifest: {result.get('manifest_path')}")
         _print_target_weight_db_restore_package_verification(result)
         if result["status"] != "ready_for_authoritative_db_restore":
+            raise SystemExit(1)
+        return
+
+    if args.plan_db_restore_apply:
+        result = plan_target_weight_db_restore_apply(
+            verification_report_path=args.restore_verification,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore apply plan")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  verification: {result.get('verification_report_path')}")
+        _print_target_weight_db_restore_apply_plan(result)
+        if result["status"] != "ready_for_manual_db_apply":
             raise SystemExit(1)
         return
 
