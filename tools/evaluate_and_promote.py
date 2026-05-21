@@ -2829,6 +2829,42 @@ def _target_weight_ops_priority_action(
             verification_ready = bool(
                 action.get("snapshot_db_restore_verification_ready")
             )
+            verification_stale_after_review_edit = bool(
+                action.get("snapshot_db_restore_verification_stale_after_review_edit")
+            )
+            if (
+                package_generated
+                and verify_command
+                and verification_ready
+                and verification_stale_after_review_edit
+            ):
+                action.update({
+                    "desc": (
+                        "target-weight DB 복구 reviewed CSV 수정 감지, "
+                        "authoritative 검증 재실행"
+                    ),
+                    "command": (
+                        "# blocked: reviewed authoritative DB restore "
+                        "verification stale after CSV edit"
+                    ),
+                    "scheduled_command": (
+                        review_bundle_verify_command or verify_command
+                    ),
+                    "scheduled_follow_up": follow_up,
+                    "requires": "rerun DB restore verification after reviewed CSV edit",
+                    "db_restore_review_guard": (
+                        "target_weight_authoritative_db_restore_verification_stale_after_review_edit"
+                    ),
+                    "blocked_finalize_command": (
+                        "# blocked: reviewed authoritative DB restore "
+                        "verification stale after CSV edit"
+                    ),
+                    "blocked_repair_command": (
+                        "# blocked: reviewed authoritative DB restore "
+                        "verification stale after CSV edit"
+                    ),
+                })
+                return action
             if package_generated and verify_command and not verification_ready:
                 if review_bundle_ready:
                     action.update({
