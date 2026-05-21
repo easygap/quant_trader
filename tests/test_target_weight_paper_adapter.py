@@ -6482,6 +6482,74 @@ def _write_reviewed_authoritative_csvs_from_package(twp, package, output_dir: Pa
     return trade_path, positions_path
 
 
+def test_plan_target_weight_db_restore_apply_is_no_write_and_sha_guarded(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "verification_ready",
+    )
+
+    assert verified["restore_ready"] is True
+    assert "--plan-db-restore-apply" in verified["operator_commands"][
+        "plan_manual_db_apply"
+    ]
+
+    plan = twp.plan_target_weight_db_restore_apply(
+        verification_report_path=verified["artifact_path"],
+        output_dir=tmp_path / "apply_plan_ready",
+    )
+
+    assert plan["status"] == "ready_for_manual_db_apply"
+    assert plan["apply_ready"] is True
+    assert plan["blockers"] == []
+    assert plan["no_write_safety"]["db_write_enabled"] is False
+    assert plan["no_write_safety"]["restore_applied"] is False
+    assert plan["current_db_state_recheck"]["trade_count_on_date"] == 0
+    assert plan["restore_operations"]["trade_history"]["row_count"] == 2
+    assert plan["restore_operations"]["positions"]["row_count"] == 2
+    assert (
+        plan["restore_operations"]["positions"]["operation"]
+        == "replace_absolute_manual"
+    )
+    assert Path(plan["artifact_path"]).exists()
+    assert "Apply ready: `True`" in Path(plan["report_path"]).read_text(
+        encoding="utf-8"
+    )
+
+    reviewed_trade.write_text(
+        reviewed_trade.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+    blocked = twp.plan_target_weight_db_restore_apply(
+        verification_report_path=verified["artifact_path"],
+        output_dir=tmp_path / "apply_plan_blocked",
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["apply_ready"] is False
+    assert (
+        "authoritative_trade_history_csv_changed_after_verification"
+        in blocked["blockers"]
+    )
+    assert blocked["no_write_safety"]["restore_applied"] is False
+
+
 def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_columns(
     monkeypatch,
     tmp_path,
