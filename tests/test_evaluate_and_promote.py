@@ -2486,8 +2486,22 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
             "positions": {"hash_ok": True},
         },
         "authoritative_evidence": {
-            "trade_history": {"provided": False, "match": False},
-            "positions": {"provided": False, "match": False},
+            "trade_history": {
+                "provided": False,
+                "match": False,
+                "row_count": 0,
+                "expected_rows": 4,
+                "empty_template": False,
+                "missing_columns": [],
+            },
+            "positions": {
+                "provided": False,
+                "match": False,
+                "row_count": 0,
+                "expected_rows": 4,
+                "empty_template": False,
+                "missing_columns": [],
+            },
         },
         "current_db_state": {
             "checked": True,
@@ -2605,8 +2619,19 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
     assert action["snapshot_db_restore_verification_positions_hash_ok"] is True
     assert action["snapshot_db_restore_authoritative_trade_history_provided"] is False
     assert action["snapshot_db_restore_authoritative_trade_history_match"] is False
+    assert action["snapshot_db_restore_authoritative_trade_history_row_count"] == 0
+    assert action["snapshot_db_restore_authoritative_trade_history_expected_rows"] == 4
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_empty_template"]
+        is False
+    )
+    assert action["snapshot_db_restore_authoritative_trade_history_missing_columns"] == []
     assert action["snapshot_db_restore_authoritative_positions_provided"] is False
     assert action["snapshot_db_restore_authoritative_positions_match"] is False
+    assert action["snapshot_db_restore_authoritative_positions_row_count"] == 0
+    assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
+    assert action["snapshot_db_restore_authoritative_positions_empty_template"] is False
+    assert action["snapshot_db_restore_authoritative_positions_missing_columns"] == []
     assert action["snapshot_db_restore_verification_db_trade_rows_on_date"] == 0
     assert action["snapshot_db_restore_verification_db_positions"] == 0
     assert (
