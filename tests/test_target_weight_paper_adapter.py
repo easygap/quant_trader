@@ -6185,6 +6185,65 @@ def test_target_weight_db_restore_candidate_package_is_reconciliation_only(
     assert not no_restore_dir.exists()
 
 
+def test_target_weight_db_restore_candidate_package_enriches_price_fields(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    plan = _adapter_plan()
+    record = _repairable_invalid_pilot_evidence_record(plan)
+    checklist = twp._target_weight_db_restore_checklist(
+        record,
+        database_state={
+            "checked": True,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+        artifact_execution_state={
+            "db_persistence_complete": False,
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+        },
+    )
+
+    first_trade = checklist["trade_history"]["rows"][0]
+    assert first_trade["price"] == plan.orders[0].price
+    assert first_trade["total_amount"] == plan.orders[0].notional
+    assert first_trade["commission"] == 100.0
+    assert first_trade["tax"] == 0.0
+    assert first_trade["slippage"] == 0.0
+    assert first_trade["price_source"] == (
+        "target_weight_execution.pre_trade_risk_check.order_costs"
+    )
+
+    package = twp._target_weight_db_restore_candidate_package(
+        {
+            "candidate_id": plan.candidate_id,
+            "snapshot_date": plan.trade_day,
+            "db_restore_checklist": checklist,
+        },
+        output_dir=tmp_path / "paper_runtime",
+    )
+    trade_rows = list(
+        csv.DictReader(
+            Path(package["trade_history_candidate_csv"]).open(encoding="utf-8-sig")
+        )
+    )
+    position_rows = list(
+        csv.DictReader(
+            Path(package["positions_candidate_csv"]).open(encoding="utf-8-sig")
+        )
+    )
+
+    assert trade_rows[0]["price"] == "100.0"
+    assert trade_rows[0]["total_amount"] == "1100000.0"
+    assert trade_rows[0]["commission"] == "100.0"
+    assert trade_rows[0]["price_source"] == (
+        "target_weight_execution.pre_trade_risk_check.order_costs"
+    )
+    assert position_rows[0]["avg_price"] == "100.0"
+    assert position_rows[0]["total_invested"] == "1100000.0"
+
+
 def test_verify_target_weight_db_restore_package_requires_authoritative_match(
     monkeypatch,
     tmp_path,
