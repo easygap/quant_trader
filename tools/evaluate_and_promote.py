@@ -3205,6 +3205,18 @@ def _target_weight_ops_priority_action(
                     "snapshot_db_restore_review_bundle_warnings": (
                         latest_db_restore_review_bundle.get("warnings") or []
                     ),
+                    "snapshot_db_restore_review_bundle_manual_review_files_created": (
+                        latest_db_restore_review_bundle.get(
+                            "manual_review_files_created"
+                        )
+                        or []
+                    ),
+                    "snapshot_db_restore_review_bundle_manual_review_files_preserved": (
+                        latest_db_restore_review_bundle.get(
+                            "manual_review_files_preserved"
+                        )
+                        or []
+                    ),
                     "snapshot_db_restore_review_bundle_dir": str(
                         latest_db_restore_review_bundle.get("bundle_dir") or ""
                     ),
@@ -3238,6 +3250,13 @@ def _target_weight_ops_priority_action(
                     "snapshot_db_restore_authoritative_positions_template_csv": str(
                         review_files.get("authoritative_positions_template_csv")
                         or ""
+                    ),
+                    "snapshot_db_restore_trade_history_review_checklist_csv": str(
+                        review_files.get("trade_history_review_checklist_csv")
+                        or ""
+                    ),
+                    "snapshot_db_restore_positions_review_checklist_csv": str(
+                        review_files.get("positions_review_checklist_csv") or ""
                     ),
                     "snapshot_db_restore_verify_after_manual_review_command": (
                         review_bundle_verify_command
