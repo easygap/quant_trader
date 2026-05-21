@@ -3734,6 +3734,49 @@ def test_target_weight_operator_next_action_guides_db_restore_backup():
     )
 
 
+def test_target_weight_operator_next_action_guides_stale_review_bundle():
+    import tools.paper_pilot_control as ppc
+
+    bundle_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--prepare-db-restore-review-bundle --restore-manifest reports/restore_manifest.json"
+    )
+
+    action = ppc._target_weight_operator_next_action(
+        {"status": "PILOT_EVIDENCE_INVALID"},
+        not_before_date=None,
+        premature_run_guard=None,
+        priority_command=bundle_command,
+        priority_scheduled_command=bundle_command,
+        priority_failure_reason="",
+        priority_wait_guard="",
+        priority_db_guard="target_weight_db_persistence_proof_required",
+        priority_db_restore_review_guard=(
+            "target_weight_authoritative_db_restore_review_bundle_stale"
+        ),
+        priority_db_restore_review_bundle_command=bundle_command,
+        priority_db_restore_review_bundle_ready=True,
+        priority_db_restore_verify_after_manual_review_command="",
+        priority_db_restore_verify_command="",
+        priority_db_restore_verification_blockers=[],
+        priority_diagnostics_status="",
+        priority_probe_status="",
+        priority_recovery_hint="",
+        priority_snapshot_diagnostics_command="",
+        priority_snapshot_recovery_guard="",
+        priority_snapshot_recovery_blockers=[],
+        enable_command="# blocked: evidence invalid",
+        execute_command="# blocked: evidence invalid",
+        next_daily_ops_command="",
+        next_readiness_command="",
+    )
+
+    assert action == (
+        "REGENERATE DB restore review bundle before filling CSV: "
+        f"{bundle_command}"
+    )
+
+
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
     import core.paper_pilot as paper_pilot
     import tools.paper_pilot_control as ppc
