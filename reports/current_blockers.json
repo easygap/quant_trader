@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T14:50:49.960322",
+  "generated_at": "2026-05-21T15:02:50.729036",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T14:50:49.960322",
-    "age_days": 1.9,
+    "checked_at": "2026-05-21T15:02:50.729036",
+    "age_days": 1.91,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -164,11 +164,13 @@
       "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": false,
       "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at"
       ],
       "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
+      "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_placeholder_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_invalid_reviewed_at_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_future_reviewed_at_row_count": 0,
@@ -187,11 +189,13 @@
       "snapshot_db_restore_authoritative_positions_review_metadata_ok": false,
       "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at"
       ],
       "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
+      "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_placeholder_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_invalid_reviewed_at_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_future_reviewed_at_row_count": 0,
@@ -354,8 +358,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T14:50:49.960322",
-      "age_days": 1.9,
+      "checked_at": "2026-05-21T15:02:50.729036",
+      "age_days": 1.91,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -667,7 +671,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T14:50:49.960322",
+      "checked_at": "2026-05-21T15:02:50.729036",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -1239,11 +1243,13 @@
       "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": false,
       "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at"
       ],
       "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
+      "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_placeholder_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_invalid_reviewed_at_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_future_reviewed_at_row_count": 0,
@@ -1262,11 +1268,13 @@
       "snapshot_db_restore_authoritative_positions_review_metadata_ok": false,
       "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
         "authoritative_source",
+        "authoritative_evidence_ref",
         "reviewed_by",
         "reviewed_at"
       ],
       "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
+      "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_placeholder_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_invalid_reviewed_at_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_future_reviewed_at_row_count": 0,
