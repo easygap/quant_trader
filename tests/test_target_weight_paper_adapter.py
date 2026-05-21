@@ -6259,6 +6259,217 @@ def test_verify_target_weight_db_restore_package_requires_authoritative_match(
     assert "DB write enabled: `False`" in report_md
 
 
+def _target_weight_db_restore_report_with_two_rows():
+    return {
+        "candidate_id": "target_weight_candidate",
+        "snapshot_date": "2026-04-10",
+        "db_restore_checklist": {
+            "checked": True,
+            "status": "restore_required",
+            "restore_required": True,
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "trade_history": {
+                "expected_row_count": 2,
+                "rows": [
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "005930",
+                        "action": "BUY",
+                        "price": 70000,
+                        "quantity": 10,
+                        "total_amount": 700000,
+                        "commission": 100,
+                        "tax": 0,
+                        "slippage": 0,
+                        "strategy": "target_weight_candidate",
+                        "mode": "paper",
+                        "executed_at": "2026-04-10 09:00:00",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                        "order_id": "ORD-TW-001",
+                    },
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "000660",
+                        "action": "BUY",
+                        "price": 140000,
+                        "quantity": 3,
+                        "total_amount": 420000,
+                        "commission": 80,
+                        "tax": 0,
+                        "slippage": 0,
+                        "strategy": "target_weight_candidate",
+                        "mode": "paper",
+                        "executed_at": "2026-04-10 09:01:00",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                        "order_id": "ORD-TW-002",
+                    },
+                ],
+            },
+            "positions": {
+                "expected_symbol_count": 2,
+                "expected_quantities": {"005930": 10, "000660": 3},
+            },
+        },
+    }
+
+
+def _patch_empty_target_weight_db_state(monkeypatch, twp) -> None:
+    monkeypatch.setattr(
+        twp,
+        "_target_weight_snapshot_database_state",
+        lambda **kwargs: {
+            "checked": True,
+            "account_key": kwargs["account_key"],
+            "snapshot_date": kwargs["snapshot_date"],
+            "snapshot_count": 0,
+            "current_snapshot_found": False,
+            "trade_count_total": 0,
+            "trade_count_on_date": 0,
+            "position_count": 0,
+        },
+    )
+
+
+def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_columns(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    candidate_trade_rows = twp._read_csv_dict_rows(
+        Path(package["trade_history_candidate_csv"])
+    )
+    missing_order_id_csv = tmp_path / "authoritative_missing_order_id.csv"
+    trade_columns_without_order_id = [
+        column
+        for column in twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        if column != "order_id"
+    ]
+    twp._write_csv_rows(
+        missing_order_id_csv,
+        candidate_trade_rows,
+        trade_columns_without_order_id,
+    )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=missing_order_id_csv,
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_missing_columns",
+    )
+
+    assert verified["status"] == "blocked"
+    assert (
+        "authoritative_trade_history_csv_columns_missing"
+        in verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_content_mismatch" not in (
+        verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    assert trade_evidence["missing_columns"] == ["order_id"]
+    assert trade_evidence["row_count"] == 2
+    assert trade_evidence["expected_rows"] == 2
+
+
+def test_verify_target_weight_db_restore_package_blocks_authoritative_row_count_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    candidate_trade_rows = twp._read_csv_dict_rows(
+        Path(package["trade_history_candidate_csv"])
+    )
+    one_row_trade_csv = tmp_path / "authoritative_one_trade.csv"
+    twp._write_csv_rows(
+        one_row_trade_csv,
+        candidate_trade_rows[:1],
+        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+    )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=one_row_trade_csv,
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_row_count",
+    )
+
+    assert verified["status"] == "blocked"
+    assert (
+        "authoritative_trade_history_csv_row_count_mismatch"
+        in verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_empty_template" not in (
+        verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_content_mismatch" not in (
+        verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    assert trade_evidence["row_count"] == 1
+    assert trade_evidence["expected_rows"] == 2
+    assert trade_evidence["missing_from_authoritative_count"] == 1
+
+
+def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    candidate_trade_rows = twp._read_csv_dict_rows(
+        Path(package["trade_history_candidate_csv"])
+    )
+    changed_trade_rows = [dict(row) for row in candidate_trade_rows]
+    changed_trade_rows[0]["quantity"] = "11"
+    changed_trade_csv = tmp_path / "authoritative_changed_trade.csv"
+    twp._write_csv_rows(
+        changed_trade_csv,
+        changed_trade_rows,
+        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+    )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=changed_trade_csv,
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_content",
+    )
+
+    assert verified["status"] == "blocked"
+    assert (
+        "authoritative_trade_history_csv_content_mismatch"
+        in verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_row_count_mismatch" not in (
+        verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_columns_missing" not in (
+        verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    assert trade_evidence["row_count"] == 2
+    assert trade_evidence["expected_rows"] == 2
+    assert trade_evidence["missing_from_authoritative_count"] == 1
+    assert trade_evidence["unexpected_authoritative_count"] == 1
+
+
 def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     tmp_path,
     monkeypatch,
