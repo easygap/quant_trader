@@ -6539,6 +6539,13 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mi
         "authoritative_trade_history_csv_content_mismatch"
         in verified["blockers"]
     )
+    assert (
+        "authoritative_trade_history_csv_identity_mismatch"
+        in verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_economic_mismatch" not in (
+        verified["blockers"]
+    )
     assert "authoritative_trade_history_csv_row_count_mismatch" not in (
         verified["blockers"]
     )
@@ -6548,8 +6555,62 @@ def test_verify_target_weight_db_restore_package_blocks_authoritative_content_mi
     trade_evidence = verified["authoritative_evidence"]["trade_history"]
     assert trade_evidence["row_count"] == 2
     assert trade_evidence["expected_rows"] == 2
+    assert trade_evidence["identity_match"] is False
+    assert trade_evidence["economic_match"] is False
+    assert trade_evidence["content_mismatch_scope"] == "identity"
+    assert trade_evidence["identity_missing_from_authoritative_count"] == 1
+    assert trade_evidence["identity_unexpected_authoritative_count"] == 1
     assert trade_evidence["missing_from_authoritative_count"] == 1
     assert trade_evidence["unexpected_authoritative_count"] == 1
+
+
+def test_verify_target_weight_db_restore_package_separates_economic_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    candidate_trade_rows = twp._read_csv_dict_rows(
+        Path(package["trade_history_candidate_csv"])
+    )
+    changed_trade_rows = [dict(row) for row in candidate_trade_rows]
+    changed_trade_rows[0]["price"] = "70001"
+    economic_mismatch_csv = tmp_path / "authoritative_economic_mismatch.csv"
+    twp._write_csv_rows(
+        economic_mismatch_csv,
+        changed_trade_rows,
+        twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+    )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=economic_mismatch_csv,
+        authoritative_positions_csv=package["positions_candidate_csv"],
+        output_dir=tmp_path / "verification_economic_mismatch",
+    )
+
+    assert verified["status"] == "blocked"
+    assert (
+        "authoritative_trade_history_csv_content_mismatch"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_trade_history_csv_economic_mismatch"
+        in verified["blockers"]
+    )
+    assert "authoritative_trade_history_csv_identity_mismatch" not in (
+        verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    assert trade_evidence["identity_match"] is True
+    assert trade_evidence["economic_match"] is False
+    assert trade_evidence["content_mismatch_scope"] == "economic"
+    assert trade_evidence["economic_difference_count"] == 2
 
 
 def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
