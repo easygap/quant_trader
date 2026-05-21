@@ -2352,6 +2352,64 @@ def _target_weight_ops_priority_action(
                         verification_current_db.get("position_count")
                     ),
                 })
+            verify_command = str(
+                action.get("snapshot_db_restore_package_verify_command") or ""
+            ).strip()
+            package_generated = bool(
+                action.get("snapshot_db_restore_candidate_package_generated")
+            )
+            verification_ready = bool(
+                action.get("snapshot_db_restore_verification_ready")
+            )
+            if package_generated and verify_command and not verification_ready:
+                action.update({
+                    "desc": (
+                        "target-weight DB 복구 패키지 authoritative CSV 검토 후 "
+                        "verify 실행"
+                    ),
+                    "command": (
+                        "# blocked: reviewed authoritative trade_history/positions "
+                        "CSV required before DB restore verification"
+                    ),
+                    "scheduled_command": verify_command,
+                    "scheduled_follow_up": follow_up,
+                    "requires": "reviewed authoritative trade_history/positions CSV",
+                    "db_restore_review_guard": (
+                        "target_weight_authoritative_db_restore_csv_required"
+                    ),
+                    "blocked_finalize_command": (
+                        "# blocked: reviewed authoritative DB restore verification "
+                        "required before finalize"
+                    ),
+                    "blocked_repair_command": (
+                        "# blocked: reviewed authoritative DB restore verification "
+                        "required before repair"
+                    ),
+                })
+            elif package_generated and verification_ready:
+                action.update({
+                    "desc": (
+                        "target-weight DB 복구 패키지 검증 완료, authoritative DB "
+                        "복구 반영 후 daily ops 재점검"
+                    ),
+                    "command": (
+                        "# manual step required: restore verified authoritative "
+                        "DB trade_history/positions proof before daily ops"
+                    ),
+                    "scheduled_follow_up": follow_up,
+                    "requires": "manual authoritative DB restore",
+                    "db_restore_review_guard": (
+                        "target_weight_authoritative_db_restore_ready_manual_db_write"
+                    ),
+                    "blocked_finalize_command": (
+                        "# blocked: verified authoritative DB restore must be applied "
+                        "before finalize"
+                    ),
+                    "blocked_repair_command": (
+                        "# blocked: verified authoritative DB restore must be applied "
+                        "before repair"
+                    ),
+                })
             return action
         if _target_weight_non_repairable_invalid_reasons(invalid_reasons):
             next_trade_day = latest_daily_ops.get("next_operator_trade_day")
