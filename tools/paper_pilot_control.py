@@ -882,6 +882,8 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             f"{prefix}_expected_rows",
             f"{prefix}_empty_template",
             f"{prefix}_missing_columns",
+            f"{prefix}_missing_row_count",
+            f"{prefix}_unexpected_row_count",
         }
         if not any(key in priority_action for key in detail_keys):
             continue
@@ -895,6 +897,8 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             f"{priority_action.get(f'{prefix}_expected_rows', 0)} "
             f"empty_template={bool(priority_action.get(f'{prefix}_empty_template'))} "
             f"verify_stale={bool(priority_action.get(f'{prefix}_verification_stale'))} "
+            f"missing_rows={priority_action.get(f'{prefix}_missing_row_count', 0)} "
+            f"unexpected_rows={priority_action.get(f'{prefix}_unexpected_row_count', 0)} "
             "missing_columns="
             f"{', '.join(str(column) for column in missing_columns) or 'none'}"
         )
