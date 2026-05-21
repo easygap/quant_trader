@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T16:34:41.886164",
+  "generated_at": "2026-05-21T17:00:16.726748",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T16:34:41.886164",
-    "age_days": 1.97,
+    "checked_at": "2026-05-21T17:00:16.726748",
+    "age_days": 1.99,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -134,10 +134,10 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T13:23:39.668244",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T17:00:00.875638",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_raw_ready": false,
-      "snapshot_db_restore_verification_metadata_ready": false,
+      "snapshot_db_restore_verification_metadata_ready": true,
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
         "authoritative_trade_history_csv_empty_template",
@@ -161,13 +161,8 @@
       "snapshot_db_restore_authoritative_trade_history_economic_match": false,
       "snapshot_db_restore_authoritative_trade_history_economic_difference_count": 0,
       "snapshot_db_restore_authoritative_trade_history_content_mismatch_scope": "",
-      "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": false,
-      "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
-        "authoritative_source",
-        "authoritative_evidence_ref",
-        "reviewed_by",
-        "reviewed_at"
-      ],
+      "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": true,
+      "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [],
       "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count": 0,
@@ -186,13 +181,8 @@
       "snapshot_db_restore_authoritative_positions_economic_match": false,
       "snapshot_db_restore_authoritative_positions_economic_difference_count": 0,
       "snapshot_db_restore_authoritative_positions_content_mismatch_scope": "",
-      "snapshot_db_restore_authoritative_positions_review_metadata_ok": false,
-      "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
-        "authoritative_source",
-        "authoritative_evidence_ref",
-        "reviewed_by",
-        "reviewed_at"
-      ],
+      "snapshot_db_restore_authoritative_positions_review_metadata_ok": true,
+      "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [],
       "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count": 0,
@@ -205,16 +195,17 @@
       "snapshot_db_restore_apply_plan_command": "python tools/target_weight_rotation_pilot.py --plan-db-restore-apply --restore-verification reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "snapshot_db_restore_review_bundle_source": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T16:06:34.984132",
+      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T16:56:58.533012",
       "snapshot_db_restore_review_bundle_status": "ready_for_manual_authoritative_review",
       "snapshot_db_restore_review_bundle_ready": true,
       "snapshot_db_restore_review_bundle_blockers": [],
       "snapshot_db_restore_review_bundle_warnings": [],
-      "snapshot_db_restore_review_bundle_manual_review_files_created": [
+      "snapshot_db_restore_review_bundle_manual_review_files_created": [],
+      "snapshot_db_restore_review_bundle_manual_review_files_preserved": [
         "trade_history_review_checklist_csv",
         "positions_review_checklist_csv"
       ],
-      "snapshot_db_restore_review_bundle_manual_review_files_preserved": [
+      "snapshot_db_restore_review_bundle_manual_review_files_upgraded": [
         "authoritative_trade_history_template_csv",
         "authoritative_positions_template_csv"
       ],
@@ -232,8 +223,8 @@
       "snapshot_db_restore_positions_review_checklist_csv": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/manual_review_positions_checklist.csv",
       "snapshot_db_restore_verify_after_manual_review_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_trade_history.csv --authoritative-positions-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_positions.csv",
       "snapshot_db_restore_inspect_review_progress_command": "python tools/target_weight_rotation_pilot.py --inspect-db-restore-review-progress --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_trade_history.csv --authoritative-positions-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_positions.csv",
-      "snapshot_db_restore_authoritative_trade_history_current_sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
-      "snapshot_db_restore_authoritative_trade_history_verified_sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
+      "snapshot_db_restore_authoritative_trade_history_current_sha256": "c9622d0debc1fed2acdadb21182c8d25c1eed691e9ef4f71677f440c504fb5b5",
+      "snapshot_db_restore_authoritative_trade_history_verified_sha256": "c9622d0debc1fed2acdadb21182c8d25c1eed691e9ef4f71677f440c504fb5b5",
       "snapshot_db_restore_authoritative_trade_history_verification_stale": false,
       "snapshot_db_restore_authoritative_trade_history_missing_row_count": 4,
       "snapshot_db_restore_authoritative_trade_history_unexpected_row_count": 0,
@@ -264,8 +255,8 @@
         }
       ],
       "snapshot_db_restore_authoritative_trade_history_unexpected_row_sample": [],
-      "snapshot_db_restore_authoritative_positions_current_sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
-      "snapshot_db_restore_authoritative_positions_verified_sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
+      "snapshot_db_restore_authoritative_positions_current_sha256": "b4bcdcdf21366782b3bba289b8454f1e519a7112a8bb850295698fbd96a2e7ac",
+      "snapshot_db_restore_authoritative_positions_verified_sha256": "b4bcdcdf21366782b3bba289b8454f1e519a7112a8bb850295698fbd96a2e7ac",
       "snapshot_db_restore_authoritative_positions_verification_stale": false,
       "snapshot_db_restore_authoritative_positions_missing_row_count": 4,
       "snapshot_db_restore_authoritative_positions_unexpected_row_count": 0,
@@ -369,8 +360,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T16:34:41.886164",
-      "age_days": 1.97,
+      "checked_at": "2026-05-21T17:00:16.726748",
+      "age_days": 1.99,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -682,7 +673,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T16:34:41.886164",
+      "checked_at": "2026-05-21T17:00:16.726748",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -697,7 +688,7 @@
     "latest_db_restore_verification": {
       "artifact_type": "target_weight_db_restore_package_verification",
       "schema_version": 1,
-      "generated_at": "2026-05-21T13:23:39.668244",
+      "generated_at": "2026-05-21T17:00:00.875638",
       "status": "blocked",
       "restore_ready": false,
       "blockers": [
@@ -772,9 +763,28 @@
             "mode",
             "executed_at",
             "execution_session_id",
-            "order_id"
+            "order_id",
+            "authoritative_source",
+            "authoritative_evidence_ref",
+            "reviewed_by",
+            "reviewed_at"
           ],
           "missing_columns": [],
+          "metadata_columns": [
+            "authoritative_source",
+            "authoritative_evidence_ref",
+            "reviewed_by",
+            "reviewed_at"
+          ],
+          "metadata_missing_columns": [],
+          "metadata_incomplete_row_count": 0,
+          "metadata_candidate_source_row_count": 0,
+          "metadata_candidate_evidence_ref_row_count": 0,
+          "metadata_placeholder_row_count": 0,
+          "metadata_invalid_reviewed_at_row_count": 0,
+          "metadata_future_reviewed_at_row_count": 0,
+          "metadata_reviewed_at_before_source_row_count": 0,
+          "review_metadata_ok": true,
           "match": false,
           "identity_match": false,
           "economic_match": false,
@@ -851,7 +861,7 @@
             "slippage"
           ],
           "content_mismatch_scope": "",
-          "sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
+          "sha256": "c9622d0debc1fed2acdadb21182c8d25c1eed691e9ef4f71677f440c504fb5b5",
           "candidate_rows": 4,
           "authoritative_rows": 0,
           "missing_from_authoritative_count": 4,
@@ -962,9 +972,28 @@
             "quantity",
             "avg_price",
             "total_invested",
-            "strategy"
+            "strategy",
+            "authoritative_source",
+            "authoritative_evidence_ref",
+            "reviewed_by",
+            "reviewed_at"
           ],
           "missing_columns": [],
+          "metadata_columns": [
+            "authoritative_source",
+            "authoritative_evidence_ref",
+            "reviewed_by",
+            "reviewed_at"
+          ],
+          "metadata_missing_columns": [],
+          "metadata_incomplete_row_count": 0,
+          "metadata_candidate_source_row_count": 0,
+          "metadata_candidate_evidence_ref_row_count": 0,
+          "metadata_placeholder_row_count": 0,
+          "metadata_invalid_reviewed_at_row_count": 0,
+          "metadata_future_reviewed_at_row_count": 0,
+          "metadata_reviewed_at_before_source_row_count": 0,
+          "review_metadata_ok": true,
           "match": false,
           "identity_match": false,
           "economic_match": false,
@@ -1013,7 +1042,7 @@
             "total_invested"
           ],
           "content_mismatch_scope": "",
-          "sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
+          "sha256": "b4bcdcdf21366782b3bba289b8454f1e519a7112a8bb850295698fbd96a2e7ac",
           "candidate_rows": 4,
           "authoritative_rows": 0,
           "missing_from_authoritative_count": 4,
@@ -1094,12 +1123,12 @@
       "artifact_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "report_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
       "source_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "source_mtime": 1779337419.6702485
+      "source_mtime": 1779350400.8766396
     },
     "latest_db_restore_review_bundle": {
       "artifact_type": "target_weight_db_restore_review_bundle",
       "schema_version": 1,
-      "generated_at": "2026-05-21T16:06:34.984132",
+      "generated_at": "2026-05-21T16:56:58.533012",
       "status": "ready_for_manual_authoritative_review",
       "review_bundle_ready": true,
       "blockers": [],
@@ -1150,11 +1179,12 @@
         "positions_review_checklist_csv": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/manual_review_positions_checklist.csv"
       },
       "manual_review_required": true,
-      "manual_review_files_created": [
+      "manual_review_files_created": [],
+      "manual_review_files_preserved": [
         "trade_history_review_checklist_csv",
         "positions_review_checklist_csv"
       ],
-      "manual_review_files_preserved": [
+      "manual_review_files_upgraded": [
         "authoritative_trade_history_template_csv",
         "authoritative_positions_template_csv"
       ],
@@ -1164,8 +1194,12 @@
         "restore_applied": false,
         "dry_run_only": true,
         "authoritative_csv_auto_generated": false,
-        "review_checklist_auto_generated": true,
+        "review_checklist_auto_generated": false,
         "manual_review_files_preserved": [
+          "trade_history_review_checklist_csv",
+          "positions_review_checklist_csv"
+        ],
+        "manual_review_files_upgraded": [
           "authoritative_trade_history_template_csv",
           "authoritative_positions_template_csv"
         ]
@@ -1178,7 +1212,7 @@
       "artifact_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "report_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
       "source_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "source_mtime": 1779347194.9855256
+      "source_mtime": 1779350218.5330122
     },
     "current_priority_action": {
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
@@ -1240,10 +1274,10 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T13:23:39.668244",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T17:00:00.875638",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_raw_ready": false,
-      "snapshot_db_restore_verification_metadata_ready": false,
+      "snapshot_db_restore_verification_metadata_ready": true,
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
         "authoritative_trade_history_csv_empty_template",
@@ -1267,13 +1301,8 @@
       "snapshot_db_restore_authoritative_trade_history_economic_match": false,
       "snapshot_db_restore_authoritative_trade_history_economic_difference_count": 0,
       "snapshot_db_restore_authoritative_trade_history_content_mismatch_scope": "",
-      "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": false,
-      "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [
-        "authoritative_source",
-        "authoritative_evidence_ref",
-        "reviewed_by",
-        "reviewed_at"
-      ],
+      "snapshot_db_restore_authoritative_trade_history_review_metadata_ok": true,
+      "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns": [],
       "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_source_row_count": 0,
       "snapshot_db_restore_authoritative_trade_history_metadata_candidate_evidence_ref_row_count": 0,
@@ -1292,13 +1321,8 @@
       "snapshot_db_restore_authoritative_positions_economic_match": false,
       "snapshot_db_restore_authoritative_positions_economic_difference_count": 0,
       "snapshot_db_restore_authoritative_positions_content_mismatch_scope": "",
-      "snapshot_db_restore_authoritative_positions_review_metadata_ok": false,
-      "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [
-        "authoritative_source",
-        "authoritative_evidence_ref",
-        "reviewed_by",
-        "reviewed_at"
-      ],
+      "snapshot_db_restore_authoritative_positions_review_metadata_ok": true,
+      "snapshot_db_restore_authoritative_positions_metadata_missing_columns": [],
       "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count": 0,
       "snapshot_db_restore_authoritative_positions_metadata_candidate_evidence_ref_row_count": 0,
@@ -1311,16 +1335,17 @@
       "snapshot_db_restore_apply_plan_command": "python tools/target_weight_rotation_pilot.py --plan-db-restore-apply --restore-verification reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "snapshot_db_restore_review_bundle_source": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T16:06:34.984132",
+      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T16:56:58.533012",
       "snapshot_db_restore_review_bundle_status": "ready_for_manual_authoritative_review",
       "snapshot_db_restore_review_bundle_ready": true,
       "snapshot_db_restore_review_bundle_blockers": [],
       "snapshot_db_restore_review_bundle_warnings": [],
-      "snapshot_db_restore_review_bundle_manual_review_files_created": [
+      "snapshot_db_restore_review_bundle_manual_review_files_created": [],
+      "snapshot_db_restore_review_bundle_manual_review_files_preserved": [
         "trade_history_review_checklist_csv",
         "positions_review_checklist_csv"
       ],
-      "snapshot_db_restore_review_bundle_manual_review_files_preserved": [
+      "snapshot_db_restore_review_bundle_manual_review_files_upgraded": [
         "authoritative_trade_history_template_csv",
         "authoritative_positions_template_csv"
       ],
@@ -1338,8 +1363,8 @@
       "snapshot_db_restore_positions_review_checklist_csv": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/manual_review_positions_checklist.csv",
       "snapshot_db_restore_verify_after_manual_review_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_trade_history.csv --authoritative-positions-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_positions.csv",
       "snapshot_db_restore_inspect_review_progress_command": "python tools/target_weight_rotation_pilot.py --inspect-db-restore-review-progress --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_trade_history.csv --authoritative-positions-csv reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20/reviewed_authoritative_positions.csv",
-      "snapshot_db_restore_authoritative_trade_history_current_sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
-      "snapshot_db_restore_authoritative_trade_history_verified_sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
+      "snapshot_db_restore_authoritative_trade_history_current_sha256": "c9622d0debc1fed2acdadb21182c8d25c1eed691e9ef4f71677f440c504fb5b5",
+      "snapshot_db_restore_authoritative_trade_history_verified_sha256": "c9622d0debc1fed2acdadb21182c8d25c1eed691e9ef4f71677f440c504fb5b5",
       "snapshot_db_restore_authoritative_trade_history_verification_stale": false,
       "snapshot_db_restore_authoritative_trade_history_missing_row_count": 4,
       "snapshot_db_restore_authoritative_trade_history_unexpected_row_count": 0,
@@ -1370,8 +1395,8 @@
         }
       ],
       "snapshot_db_restore_authoritative_trade_history_unexpected_row_sample": [],
-      "snapshot_db_restore_authoritative_positions_current_sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
-      "snapshot_db_restore_authoritative_positions_verified_sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
+      "snapshot_db_restore_authoritative_positions_current_sha256": "b4bcdcdf21366782b3bba289b8454f1e519a7112a8bb850295698fbd96a2e7ac",
+      "snapshot_db_restore_authoritative_positions_verified_sha256": "b4bcdcdf21366782b3bba289b8454f1e519a7112a8bb850295698fbd96a2e7ac",
       "snapshot_db_restore_authoritative_positions_verification_stale": false,
       "snapshot_db_restore_authoritative_positions_missing_row_count": 4,
       "snapshot_db_restore_authoritative_positions_unexpected_row_count": 0,
