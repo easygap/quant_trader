@@ -2999,20 +2999,20 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
 
     review_dir = tmp_path / "review_bundle"
     review_dir.mkdir()
+    candidate_trade = review_dir / "candidate_trade_history.csv"
+    candidate_positions = review_dir / "candidate_positions.csv"
     trade_template = review_dir / "reviewed_authoritative_trade_history.csv"
     positions_template = review_dir / "reviewed_authoritative_positions.csv"
-    with trade_template.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
-        )
-        writer.writeheader()
-        writer.writerow({
+    trade_rows = []
+    symbols = ("005930", "000660", "009150", "402340")
+    for index, symbol in enumerate(symbols, start=1):
+        trade_rows.append({
             "account_key": "target_weight_best",
-            "symbol": "005930",
+            "symbol": symbol,
             "action": "BUY",
             "price": "70000",
-            "quantity": "1",
-            "total_amount": "70000",
+            "quantity": str(index),
+            "total_amount": str(70000 * index),
             "commission": "0",
             "tax": "0",
             "slippage": "0",
@@ -3020,8 +3020,37 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
             "mode": "paper",
             "executed_at": "2026-05-20 09:00:00",
             "execution_session_id": "session",
-            "order_id": "ORD-1",
+            "order_id": f"ORD-{index}",
         })
+    with candidate_trade.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerows(trade_rows)
+    position_rows = [
+        {
+            "account_key": "target_weight_best",
+            "symbol": symbol,
+            "quantity": str(index),
+            "avg_price": "70000",
+            "total_invested": str(70000 * index),
+            "strategy": "target_weight_best",
+        }
+        for index, symbol in enumerate(symbols, start=1)
+    ]
+    with candidate_positions.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerows(position_rows)
+    with trade_template.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+        )
+        writer.writeheader()
+        writer.writerow(trade_rows[0])
     with positions_template.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(
             handle, fieldnames=ep.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
@@ -3126,8 +3155,8 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         "review_bundle_ready": True,
         "bundle_dir": review_dir.as_posix(),
         "review_files": {
-            "candidate_trade_history_csv": (review_dir / "candidate_trade_history.csv").as_posix(),
-            "candidate_positions_csv": (review_dir / "candidate_positions.csv").as_posix(),
+            "candidate_trade_history_csv": candidate_trade.as_posix(),
+            "candidate_positions_csv": candidate_positions.as_posix(),
             "authoritative_trade_history_template_csv": trade_template.as_posix(),
             "authoritative_positions_template_csv": positions_template.as_posix(),
         },
@@ -3188,6 +3217,17 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         action["snapshot_db_restore_authoritative_trade_history_verification_stale"]
         is True
     )
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_missing_row_count"]
+        == 3
+    )
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_unexpected_row_count"]
+        == 0
+    )
+    assert action["snapshot_db_restore_authoritative_trade_history_missing_row_sample"][0][
+        "symbol"
+    ] == "000660"
     assert action["snapshot_db_restore_authoritative_positions_provided"] is True
     assert action["snapshot_db_restore_authoritative_positions_row_count"] == 0
     assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
@@ -3197,6 +3237,15 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         action["snapshot_db_restore_authoritative_positions_verification_stale"]
         is False
     )
+    assert (
+        action["snapshot_db_restore_authoritative_positions_missing_row_count"] == 4
+    )
+    assert (
+        action["snapshot_db_restore_authoritative_positions_unexpected_row_count"] == 0
+    )
+    assert action["snapshot_db_restore_authoritative_positions_missing_row_sample"][0][
+        "symbol"
+    ] == "005930"
     assert action["snapshot_db_restore_verification_stale_after_review_edit"] is True
     assert action["scheduled_command"] == action[
         "snapshot_db_restore_verify_after_manual_review_command"
