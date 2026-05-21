@@ -10906,6 +10906,8 @@ def load_current_blockers_execution_guard(
         "snapshot_recovery_guard": str(
             matched_action.get("snapshot_recovery_guard") or ""
         ).strip(),
+        "daily_ops_status": str(matched_action.get("daily_ops_status") or "").strip(),
+        "order_safety": str(matched_action.get("order_safety") or "").strip(),
         "command": str(matched_action.get("command") or "").strip(),
     }
     result = {
@@ -10915,6 +10917,8 @@ def load_current_blockers_execution_guard(
             "priority": matched_action.get("priority"),
             "strategy": matched_action.get("strategy"),
             "daily_ops_trade_day": matched_action.get("daily_ops_trade_day"),
+            "daily_ops_status": matched_action.get("daily_ops_status"),
+            "order_safety": matched_action.get("order_safety"),
             "desc": matched_action.get("desc"),
         },
         "guards": guards,
@@ -10936,6 +10940,30 @@ def load_current_blockers_execution_guard(
                 "target_weight_current_blockers_execution_blocked: "
                 + ", ".join(blocking_guards or [guards["command"]])
             ),
+        }
+    if guards["daily_ops_status"] != "READY_TO_EXECUTE":
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_current_blockers_not_ready_to_execute: "
+                f"{guards['daily_ops_status'] or 'missing'}"
+            ),
+        }
+    if guards["order_safety"] != "paper_order_only":
+        return {
+            **result,
+            "allowed": False,
+            "reason": (
+                "target_weight_current_blockers_order_safety_not_paper_order_only: "
+                f"{guards['order_safety'] or 'missing'}"
+            ),
+        }
+    if "--execute" not in guards["command"]:
+        return {
+            **result,
+            "allowed": False,
+            "reason": "target_weight_current_blockers_execute_command_missing",
         }
     return result
 
