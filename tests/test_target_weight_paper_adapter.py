@@ -6550,6 +6550,154 @@ def test_plan_target_weight_db_restore_apply_is_no_write_and_sha_guarded(
     assert blocked["no_write_safety"]["restore_applied"] is False
 
 
+def _install_temp_restore_db(tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import scoped_session, sessionmaker
+    import database.models as db_models
+
+    old_state = (
+        db_models._engine,
+        db_models._SessionFactory,
+        db_models._ScopedSession,
+    )
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'restore_apply.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    db_models.Base.metadata.create_all(engine)
+    db_models._engine = engine
+    db_models._SessionFactory = sessionmaker(bind=engine)
+    db_models._ScopedSession = scoped_session(db_models._SessionFactory)
+    return db_models, old_state, engine
+
+
+def _restore_temp_restore_db(db_models, old_state, engine) -> None:
+    if db_models._ScopedSession is not None:
+        db_models._ScopedSession.remove()
+    engine.dispose()
+    (
+        db_models._engine,
+        db_models._SessionFactory,
+        db_models._ScopedSession,
+    ) = old_state
+
+
+def test_apply_target_weight_db_restore_plan_requires_confirmations(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "verification_ready",
+    )
+    plan = twp.plan_target_weight_db_restore_apply(
+        verification_report_path=verified["artifact_path"],
+        output_dir=tmp_path / "apply_plan_ready",
+    )
+
+    blocked = twp.apply_target_weight_db_restore_plan(
+        apply_plan_path=plan["artifact_path"],
+        output_dir=tmp_path / "apply_result_blocked",
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["applied"] is False
+    assert "restore_apply_db_backup_confirmation_required" in blocked["blockers"]
+    assert "restore_apply_explicit_confirmation_required" in blocked["blockers"]
+    assert blocked["applied_rows"] == {"trade_history": 0, "positions": 0}
+
+
+def test_apply_target_weight_db_restore_plan_writes_once_in_transaction(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "verification_ready",
+    )
+    plan = twp.plan_target_weight_db_restore_apply(
+        verification_report_path=verified["artifact_path"],
+        output_dir=tmp_path / "apply_plan_ready",
+    )
+    db_models, old_state, engine = _install_temp_restore_db(tmp_path)
+    try:
+        applied = twp.apply_target_weight_db_restore_plan(
+            apply_plan_path=plan["artifact_path"],
+            backup_confirmed=True,
+            confirm_db_restore_apply=True,
+            output_dir=tmp_path / "apply_result",
+        )
+
+        assert applied["status"] == "applied"
+        assert applied["applied"] is True
+        assert applied["applied_rows"] == {"trade_history": 2, "positions": 2}
+        assert len(applied["inserted_trade_ids"]) == 2
+        assert sorted(applied["inserted_position_symbols"]) == ["000660", "005930"]
+
+        session = db_models.get_session()
+        try:
+            trades = session.query(db_models.TradeHistory).order_by(
+                db_models.TradeHistory.symbol
+            ).all()
+            positions = session.query(db_models.Position).order_by(
+                db_models.Position.symbol
+            ).all()
+            assert len(trades) == 2
+            assert len(positions) == 2
+            assert trades[0].account_key == "target_weight_candidate"
+            assert trades[0].mode == "paper"
+            assert trades[0].reason == "target_weight_authoritative_db_restore"
+            assert positions[0].account_key == "target_weight_candidate"
+            assert positions[0].quantity == 3
+        finally:
+            session.close()
+
+        duplicate = twp.apply_target_weight_db_restore_plan(
+            apply_plan_path=plan["artifact_path"],
+            backup_confirmed=True,
+            confirm_db_restore_apply=True,
+            output_dir=tmp_path / "apply_result_duplicate",
+        )
+
+        assert duplicate["status"] == "blocked"
+        assert duplicate["applied"] is False
+        assert (
+            "restore_apply_current_db_state_not_empty_reconcile_before_apply"
+            in duplicate["blockers"]
+        )
+        assert duplicate["applied_rows"] == {"trade_history": 0, "positions": 0}
+    finally:
+        _restore_temp_restore_db(db_models, old_state, engine)
+
+
 def test_verify_target_weight_db_restore_package_blocks_authoritative_missing_columns(
     monkeypatch,
     tmp_path,
