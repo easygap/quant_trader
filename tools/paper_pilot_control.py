@@ -893,6 +893,7 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             f"{prefix}_metadata_placeholder_row_count",
             f"{prefix}_metadata_invalid_reviewed_at_row_count",
             f"{prefix}_metadata_future_reviewed_at_row_count",
+            f"{prefix}_metadata_reviewed_at_before_source_row_count",
         }
         if not any(key in priority_action for key in detail_keys):
             continue
@@ -931,7 +932,9 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
                 "invalid_reviewed_at_rows="
                 f"{priority_action.get(f'{prefix}_metadata_invalid_reviewed_at_row_count', 0)} "
                 "future_reviewed_at_rows="
-                f"{priority_action.get(f'{prefix}_metadata_future_reviewed_at_row_count', 0)}"
+                f"{priority_action.get(f'{prefix}_metadata_future_reviewed_at_row_count', 0)} "
+                "before_source_reviewed_at_rows="
+                f"{priority_action.get(f'{prefix}_metadata_reviewed_at_before_source_row_count', 0)}"
             )
 
 

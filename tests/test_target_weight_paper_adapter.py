@@ -2724,7 +2724,8 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "Snapshot DB restore authoritative trade history metadata: "
         "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
         "incomplete_rows=0 candidate_source_rows=0 placeholder_rows=0 "
-        "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0"
+        "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0 "
+        "before_source_reviewed_at_rows=0"
     ) in output
     assert (
         "Snapshot DB restore authoritative positions CSV: "
@@ -2735,7 +2736,8 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "Snapshot DB restore authoritative positions metadata: "
         "ok=False missing_columns=authoritative_source, reviewed_by, reviewed_at "
         "incomplete_rows=0 candidate_source_rows=0 placeholder_rows=0 "
-        "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0"
+        "invalid_reviewed_at_rows=0 future_reviewed_at_rows=0 "
+        "before_source_reviewed_at_rows=0"
     ) in output
     assert (
         "Operator next action: FILL reviewed authoritative "
@@ -6586,7 +6588,7 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
             **trade_rows[1],
             "authoritative_source": "broker_statement",
             "reviewed_by": "unknown",
-            "reviewed_at": "2099-01-01T00:00:00",
+            "reviewed_at": "2026-04-10T08:30:00",
         },
     ]
     bad_position_rows = [
@@ -6594,7 +6596,7 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
             **position_rows[0],
             "authoritative_source": "candidate_csv",
             "reviewed_by": "operator",
-            "reviewed_at": "2026-04-10T16:00:00",
+            "reviewed_at": "2026-04-09T23:59:00",
         },
         {
             **position_rows[1],
@@ -6638,7 +6640,7 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
         in verified["blockers"]
     )
     assert (
-        "authoritative_trade_history_csv_review_metadata_future_reviewed_at"
+        "authoritative_trade_history_csv_review_metadata_reviewed_at_before_source"
         in verified["blockers"]
     )
     assert (
@@ -6653,6 +6655,10 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
         "authoritative_positions_csv_review_metadata_future_reviewed_at"
         in verified["blockers"]
     )
+    assert (
+        "authoritative_positions_csv_review_metadata_reviewed_at_before_source"
+        in verified["blockers"]
+    )
     trade_evidence = verified["authoritative_evidence"]["trade_history"]
     positions_evidence = verified["authoritative_evidence"]["positions"]
     assert trade_evidence["match"] is True
@@ -6660,11 +6666,13 @@ def test_verify_target_weight_db_restore_package_rejects_review_metadata_placeho
     assert trade_evidence["review_metadata_ok"] is False
     assert trade_evidence["metadata_placeholder_row_count"] == 2
     assert trade_evidence["metadata_invalid_reviewed_at_row_count"] == 1
-    assert trade_evidence["metadata_future_reviewed_at_row_count"] == 1
+    assert trade_evidence["metadata_future_reviewed_at_row_count"] == 0
+    assert trade_evidence["metadata_reviewed_at_before_source_row_count"] == 1
     assert positions_evidence["review_metadata_ok"] is False
     assert positions_evidence["metadata_candidate_source_row_count"] == 1
     assert positions_evidence["metadata_placeholder_row_count"] == 1
     assert positions_evidence["metadata_future_reviewed_at_row_count"] == 1
+    assert positions_evidence["metadata_reviewed_at_before_source_row_count"] == 1
 
 
 def _target_weight_db_restore_report_with_two_rows():
