@@ -1565,6 +1565,59 @@ def _print_target_weight_daily_ops_status(
                 print(f"    Priority follow-up: {priority_follow_up}")
         if priority_db_guard == "target_weight_db_persistence_proof_required":
             print("    DB persistence guard: trade_history/positions proof required")
+            if priority_action.get("snapshot_diagnostics_status"):
+                print(
+                    "    Snapshot diagnostics status: "
+                    f"{priority_action.get('snapshot_diagnostics_status')}"
+                )
+            if priority_action.get("snapshot_db_restore_status"):
+                print(
+                    "    Snapshot DB restore checklist: "
+                    f"status={priority_action.get('snapshot_db_restore_status')} "
+                    f"required={bool(priority_action.get('snapshot_db_restore_required'))} "
+                    "trade_rows="
+                    f"{priority_action.get('snapshot_db_restore_trade_rows_current', 0)}/"
+                    f"{priority_action.get('snapshot_db_restore_trade_rows_expected', 0)} "
+                    "positions="
+                    f"{priority_action.get('snapshot_db_restore_positions_current', 0)}/"
+                    f"{priority_action.get('snapshot_db_restore_position_symbols_expected', 0)}"
+                )
+            missing_symbols = (
+                priority_action.get("snapshot_db_restore_missing_or_unverified_symbols")
+                or []
+            )
+            if missing_symbols:
+                print(
+                    "    Snapshot DB restore missing symbols: "
+                    + ", ".join(str(symbol) for symbol in missing_symbols)
+                )
+            if priority_action.get("snapshot_db_restore_package_verify_command"):
+                print(
+                    "    Snapshot DB restore verify command: "
+                    f"{priority_action.get('snapshot_db_restore_package_verify_command')}"
+                )
+            if priority_action.get("snapshot_db_restore_verification_status"):
+                print(
+                    "    Snapshot DB restore verification: "
+                    f"status={priority_action.get('snapshot_db_restore_verification_status')} "
+                    f"ready={bool(priority_action.get('snapshot_db_restore_verification_ready'))}"
+                )
+                verification_blockers = (
+                    priority_action.get("snapshot_db_restore_verification_blockers")
+                    or []
+                )
+                if verification_blockers:
+                    print(
+                        "    Snapshot DB restore verification blockers: "
+                        + ", ".join(str(blocker) for blocker in verification_blockers)
+                    )
+                print(
+                    "    Snapshot DB restore authoritative match: "
+                    "trade_history="
+                    f"{bool(priority_action.get('snapshot_db_restore_authoritative_trade_history_match'))} "
+                    "positions="
+                    f"{bool(priority_action.get('snapshot_db_restore_authoritative_positions_match'))}"
+                )
             if priority_blocked_finalize_command:
                 print(
                     "    Finalize command guard: "
