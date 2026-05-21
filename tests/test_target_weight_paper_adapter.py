@@ -6519,6 +6519,68 @@ def test_verify_target_weight_db_restore_package_rejects_candidate_csv_as_author
     assert positions_evidence["candidate_marker_row_count"] == 2
 
 
+def test_verify_target_weight_db_restore_package_rejects_review_checklist_as_authoritative(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    bundle = twp.prepare_target_weight_db_restore_review_bundle(
+        manifest_path=package["manifest_path"],
+        output_dir=tmp_path / "review_runtime",
+    )
+    review_files = bundle["review_files"]
+    trade_checklist = Path(review_files["trade_history_review_checklist_csv"])
+    positions_checklist = Path(review_files["positions_review_checklist_csv"])
+
+    metadata = {
+        "authoritative_source": "broker_statement",
+        "authoritative_evidence_ref": "broker_statement:2026-04-10:page=1",
+        "reviewed_by": "operator",
+        "reviewed_at": "2026-04-10T16:00:00",
+    }
+    for path in (trade_checklist, positions_checklist):
+        rows, fieldnames = twp._read_csv_dict_rows_with_fieldnames(path)
+        twp._write_csv_rows(
+            path,
+            [{**row, **metadata, "review_status": "reviewed"} for row in rows],
+            fieldnames,
+        )
+
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=trade_checklist,
+        authoritative_positions_csv=positions_checklist,
+        output_dir=tmp_path / "verification_checklist_rejected",
+    )
+
+    assert verified["status"] == "blocked"
+    assert verified["restore_ready"] is False
+    assert (
+        "authoritative_trade_history_csv_candidate_marker_rejected"
+        in verified["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_candidate_marker_rejected"
+        in verified["blockers"]
+    )
+    trade_evidence = verified["authoritative_evidence"]["trade_history"]
+    positions_evidence = verified["authoritative_evidence"]["positions"]
+    assert trade_evidence["match"] is True
+    assert positions_evidence["match"] is True
+    assert trade_evidence["review_metadata_ok"] is True
+    assert positions_evidence["review_metadata_ok"] is True
+    assert trade_evidence["candidate_marker_rejected"] is True
+    assert positions_evidence["candidate_marker_rejected"] is True
+    assert trade_evidence["candidate_marker_row_count"] == 2
+    assert positions_evidence["candidate_marker_row_count"] == 2
+
+
 def test_verify_target_weight_db_restore_package_requires_review_metadata(
     monkeypatch,
     tmp_path,
