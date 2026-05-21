@@ -3691,6 +3691,49 @@ def test_target_weight_effective_execution_status_labels_ready_and_blockers():
     assert cap_reason == "daily ops requires cap approval before execution"
 
 
+def test_target_weight_operator_next_action_guides_db_restore_backup():
+    import tools.paper_pilot_control as ppc
+
+    backup_command = (
+        "python tools/target_weight_rotation_pilot.py --backup-db-restore-state "
+        "--restore-apply-plan reports/paper_runtime/apply_plan.json"
+    )
+
+    action = ppc._target_weight_operator_next_action(
+        {"status": "PILOT_EVIDENCE_INVALID"},
+        not_before_date=None,
+        premature_run_guard=None,
+        priority_command="# blocked: DB restore pre-apply backup required",
+        priority_scheduled_command=backup_command,
+        priority_failure_reason="",
+        priority_wait_guard="",
+        priority_db_guard="target_weight_db_persistence_proof_required",
+        priority_db_restore_review_guard=(
+            "target_weight_authoritative_db_restore_backup_required"
+        ),
+        priority_db_restore_review_bundle_command="",
+        priority_db_restore_review_bundle_ready=False,
+        priority_db_restore_verify_after_manual_review_command="",
+        priority_db_restore_verify_command="",
+        priority_db_restore_verification_blockers=[],
+        priority_diagnostics_status="",
+        priority_probe_status="",
+        priority_recovery_hint="",
+        priority_snapshot_diagnostics_command="",
+        priority_snapshot_recovery_guard="",
+        priority_snapshot_recovery_blockers=[],
+        enable_command="# blocked: evidence invalid",
+        execute_command="# blocked: evidence invalid",
+        next_daily_ops_command="",
+        next_readiness_command="",
+    )
+
+    assert action == (
+        "BACKUP DB restore state before guarded apply: "
+        f"{backup_command}"
+    )
+
+
 def test_paper_pilot_control_status_labels_target_weight_entry_as_core(monkeypatch, capsys):
     import core.paper_pilot as paper_pilot
     import tools.paper_pilot_control as ppc
@@ -6618,7 +6661,63 @@ def test_apply_target_weight_db_restore_plan_requires_confirmations(
     assert blocked["applied"] is False
     assert "restore_apply_db_backup_confirmation_required" in blocked["blockers"]
     assert "restore_apply_explicit_confirmation_required" in blocked["blockers"]
+    assert "restore_apply_backup_artifact_required" in blocked["blockers"]
     assert blocked["applied_rows"] == {"trade_history": 0, "positions": 0}
+
+
+def test_backup_target_weight_db_restore_state_creates_guarded_apply_artifact(
+    monkeypatch,
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    package = twp._target_weight_db_restore_candidate_package(
+        _target_weight_db_restore_report_with_two_rows(),
+        output_dir=tmp_path / "paper_runtime",
+    )
+    _patch_empty_target_weight_db_state(monkeypatch, twp)
+    reviewed_trade, reviewed_positions = _write_reviewed_authoritative_csvs_from_package(
+        twp,
+        package,
+        tmp_path / "reviewed_authoritative",
+    )
+    verified = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=reviewed_trade,
+        authoritative_positions_csv=reviewed_positions,
+        output_dir=tmp_path / "verification_ready",
+    )
+    plan = twp.plan_target_weight_db_restore_apply(
+        verification_report_path=verified["artifact_path"],
+        output_dir=tmp_path / "apply_plan_ready",
+    )
+
+    db_models, old_state, engine = _install_temp_restore_db(tmp_path)
+    try:
+        backup = twp.backup_target_weight_db_restore_state(
+            apply_plan_path=plan["artifact_path"],
+            output_dir=tmp_path / "restore_backup",
+        )
+
+        assert backup["status"] == "ready_for_guarded_apply"
+        assert backup["backup_ready"] is True
+        assert backup["blockers"] == []
+        assert backup["current_db_state"]["checked"] is True
+        assert backup["current_db_state"]["trade_count_on_date"] == 0
+        assert backup["current_db_state"]["position_count"] == 0
+        assert backup["logical_backup"]["trade_history"]["row_count"] == 0
+        assert backup["logical_backup"]["positions"]["row_count"] == 0
+        assert backup["no_write_safety"]["db_write_enabled"] is False
+        apply_command = backup["operator_commands"]["apply_guarded_db_restore"]
+        assert "--apply-db-restore" in apply_command
+        assert "--restore-backup" in apply_command
+        assert backup["artifact_path"] in apply_command
+        assert Path(backup["artifact_path"]).exists()
+        assert "Backup ready: `True`" in Path(backup["report_path"]).read_text(
+            encoding="utf-8"
+        )
+    finally:
+        _restore_temp_restore_db(db_models, old_state, engine)
 
 
 def test_apply_target_weight_db_restore_plan_writes_once_in_transaction(
@@ -6649,8 +6748,14 @@ def test_apply_target_weight_db_restore_plan_writes_once_in_transaction(
     )
     db_models, old_state, engine = _install_temp_restore_db(tmp_path)
     try:
+        backup = twp.backup_target_weight_db_restore_state(
+            apply_plan_path=plan["artifact_path"],
+            output_dir=tmp_path / "restore_backup",
+        )
+
         applied = twp.apply_target_weight_db_restore_plan(
             apply_plan_path=plan["artifact_path"],
+            restore_backup_path=backup["artifact_path"],
             backup_confirmed=True,
             confirm_db_restore_apply=True,
             output_dir=tmp_path / "apply_result",
@@ -6682,6 +6787,7 @@ def test_apply_target_weight_db_restore_plan_writes_once_in_transaction(
 
         duplicate = twp.apply_target_weight_db_restore_plan(
             apply_plan_path=plan["artifact_path"],
+            restore_backup_path=backup["artifact_path"],
             backup_confirmed=True,
             confirm_db_restore_apply=True,
             output_dir=tmp_path / "apply_result_duplicate",
