@@ -871,6 +871,34 @@ def _command_is_blocked(command: object) -> bool:
     return str(command or "").lstrip().startswith("# blocked:")
 
 
+def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
+    for label, prefix in (
+        ("trade history", "snapshot_db_restore_authoritative_trade_history"),
+        ("positions", "snapshot_db_restore_authoritative_positions"),
+    ):
+        detail_keys = {
+            f"{prefix}_provided",
+            f"{prefix}_row_count",
+            f"{prefix}_expected_rows",
+            f"{prefix}_empty_template",
+            f"{prefix}_missing_columns",
+        }
+        if not any(key in priority_action for key in detail_keys):
+            continue
+        missing_columns = priority_action.get(f"{prefix}_missing_columns") or []
+        if not isinstance(missing_columns, list):
+            missing_columns = []
+        print(
+            f"    Snapshot DB restore authoritative {label} CSV: "
+            f"provided={bool(priority_action.get(f'{prefix}_provided'))} "
+            f"rows={priority_action.get(f'{prefix}_row_count', 0)}/"
+            f"{priority_action.get(f'{prefix}_expected_rows', 0)} "
+            f"empty_template={bool(priority_action.get(f'{prefix}_empty_template'))} "
+            "missing_columns="
+            f"{', '.join(str(column) for column in missing_columns) or 'none'}"
+        )
+
+
 def _target_weight_invalid_requires_fresh_evidence(payload: dict) -> bool:
     if str(payload.get("status") or "").strip() != "PILOT_EVIDENCE_INVALID":
         return False
@@ -1771,6 +1799,7 @@ def _print_target_weight_daily_ops_status(
                     "positions="
                     f"{bool(priority_action.get('snapshot_db_restore_authoritative_positions_match'))}"
                 )
+                _print_db_restore_authoritative_csv_status(priority_action)
             if priority_blocked_finalize_command:
                 print(
                     "    Finalize command guard: "
@@ -1999,6 +2028,7 @@ def _print_target_weight_daily_ops_status(
                                 "positions="
                                 f"{bool(priority_action.get('snapshot_db_restore_authoritative_positions_match'))}"
                             )
+                            _print_db_restore_authoritative_csv_status(priority_action)
                 print(
                     "    Portfolio metrics snapshot found: "
                     f"current={bool(priority_action.get('finalize_portfolio_metrics_current_snapshot_found'))} "
