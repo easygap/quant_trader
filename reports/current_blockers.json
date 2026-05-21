@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T10:55:52.978653",
+  "generated_at": "2026-05-21T11:09:16.053034",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T10:55:52.978653",
-    "age_days": 1.74,
+    "checked_at": "2026-05-21T11:09:16.053034",
+    "age_days": 1.75,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -106,7 +106,7 @@
       "finalize_report_status": "blocked",
       "finalize_report_reason": "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T17:48:59.979391",
+      "snapshot_diagnostics_generated_at": "2026-05-21T11:08:25.311008",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_db_restore_status": "restore_required",
       "snapshot_db_restore_required": true,
@@ -134,7 +134,7 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:59:51.436276",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T11:09:03.660130",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
@@ -160,7 +160,7 @@
       "snapshot_db_restore_verification_db_positions": 0,
       "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "snapshot_db_restore_review_bundle_source": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T09:33:20.083399",
+      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T11:08:50.899119",
       "snapshot_db_restore_review_bundle_status": "ready_for_manual_authoritative_review",
       "snapshot_db_restore_review_bundle_ready": true,
       "snapshot_db_restore_review_bundle_blockers": [],
@@ -181,6 +181,7 @@
           "symbol": "402340",
           "action": "BUY",
           "quantity": "1",
+          "price": "1015000",
           "order_id": "ORD-20260520101654-8e27bb",
           "_count": "1"
         },
@@ -188,6 +189,7 @@
           "symbol": "009150",
           "action": "BUY",
           "quantity": "1",
+          "price": "970000",
           "order_id": "ORD-20260520101654-a26a4c",
           "_count": "1"
         },
@@ -195,6 +197,7 @@
           "symbol": "005935",
           "action": "BUY",
           "quantity": "8",
+          "price": "179700",
           "order_id": "ORD-20260520101654-221c03",
           "_count": "1"
         }
@@ -209,16 +212,19 @@
         {
           "symbol": "005930",
           "quantity": "5",
+          "avg_price": "276500",
           "_count": "1"
         },
         {
           "symbol": "005935",
           "quantity": "8",
+          "avg_price": "179700",
           "_count": "1"
         },
         {
           "symbol": "009150",
           "quantity": "1",
+          "avg_price": "970000",
           "_count": "1"
         }
       ],
@@ -302,8 +308,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T10:55:52.978653",
-      "age_days": 1.74,
+      "checked_at": "2026-05-21T11:09:16.053034",
+      "age_days": 1.75,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -615,7 +621,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T10:55:52.978653",
+      "checked_at": "2026-05-21T11:09:16.053034",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -630,7 +636,7 @@
     "latest_db_restore_verification": {
       "artifact_type": "target_weight_db_restore_package_verification",
       "schema_version": 1,
-      "generated_at": "2026-05-21T09:59:51.436276",
+      "generated_at": "2026-05-21T11:09:03.660130",
       "status": "blocked",
       "restore_ready": false,
       "blockers": [
@@ -641,8 +647,8 @@
       "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "snapshot_date": "2026-05-20",
       "manifest_path": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
-      "manifest_hash": "be3c3aacf3e9bb3e7dcf535923ba57cca366eab3e58cf0b5a4fc7a3dd571bf8b",
-      "candidate_manifest_hash": "9d3880a1a4c78f5961dd2d0c67587473418dd243152bbfc760474798adc5985a",
+      "manifest_hash": "366f6c60159447c99b476a893a695dea53cbca1c08cdebb1b680a14433669fca",
+      "candidate_manifest_hash": "21a39e4e4d4f0c242cd569a6f8cc4ae3809ecc28c77d5f298470b4be381f042a",
       "candidate_package": {
         "candidate_only": true,
         "db_write_enabled": false,
@@ -657,8 +663,8 @@
           "expected_rows": 4,
           "candidate_only_rows": 4,
           "requires_authoritative_confirmation_rows": 4,
-          "hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
-          "expected_hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
+          "hash": "11d3f8581c7de32f9fa2b2890498e7977e51e9718abb72e1dbc9edce81a9d9e4",
+          "expected_hash": "11d3f8581c7de32f9fa2b2890498e7977e51e9718abb72e1dbc9edce81a9d9e4",
           "zero_quantity_symbols": []
         },
         "positions": {
@@ -670,8 +676,8 @@
           "expected_rows": 4,
           "candidate_only_rows": 4,
           "requires_authoritative_confirmation_rows": 4,
-          "hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
-          "expected_hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
+          "hash": "80d9b9a3c6014117d2fe2428079e986680aaf8b254a70eb4659a2da25a2ff697",
+          "expected_hash": "80d9b9a3c6014117d2fe2428079e986680aaf8b254a70eb4659a2da25a2ff697",
           "zero_quantity_symbols": []
         },
         "position_candidate_skipped_zero_quantity_symbols": [
@@ -715,12 +721,12 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "402340",
               "action": "BUY",
-              "price": "",
+              "price": "1015000",
               "quantity": "1",
-              "total_amount": "",
-              "commission": "0",
+              "total_amount": "1015000",
+              "commission": "152",
               "tax": "0",
-              "slippage": "0",
+              "slippage": "1000",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "mode": "paper",
               "executed_at": "2026-05-20 10:16:54.397767",
@@ -732,12 +738,12 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "009150",
               "action": "BUY",
-              "price": "",
+              "price": "970000",
               "quantity": "1",
-              "total_amount": "",
-              "commission": "0",
+              "total_amount": "970000",
+              "commission": "145",
               "tax": "0",
-              "slippage": "0",
+              "slippage": "1000",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "mode": "paper",
               "executed_at": "2026-05-20 10:16:54.349512",
@@ -749,12 +755,12 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "005935",
               "action": "BUY",
-              "price": "",
+              "price": "179700",
               "quantity": "8",
-              "total_amount": "",
-              "commission": "0",
+              "total_amount": "1437600",
+              "commission": "216",
               "tax": "0",
-              "slippage": "0",
+              "slippage": "800",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "mode": "paper",
               "executed_at": "2026-05-20 10:16:54.309306",
@@ -766,12 +772,12 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "005930",
               "action": "BUY",
-              "price": "",
+              "price": "276500",
               "quantity": "5",
-              "total_amount": "",
-              "commission": "0",
+              "total_amount": "1382500",
+              "commission": "207",
               "tax": "0",
-              "slippage": "0",
+              "slippage": "2500",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "mode": "paper",
               "executed_at": "2026-05-20 10:16:54.270022",
@@ -826,8 +832,8 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "005930",
               "quantity": "5",
-              "avg_price": "",
-              "total_invested": "",
+              "avg_price": "276500",
+              "total_invested": "1382500",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "_count": "1"
             },
@@ -835,8 +841,8 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "005935",
               "quantity": "8",
-              "avg_price": "",
-              "total_invested": "",
+              "avg_price": "179700",
+              "total_invested": "1437600",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "_count": "1"
             },
@@ -844,8 +850,8 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "009150",
               "quantity": "1",
-              "avg_price": "",
-              "total_invested": "",
+              "avg_price": "970000",
+              "total_invested": "970000",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "_count": "1"
             },
@@ -853,8 +859,8 @@
               "account_key": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "symbol": "402340",
               "quantity": "1",
-              "avg_price": "",
-              "total_invested": "",
+              "avg_price": "1015000",
+              "total_invested": "1015000",
               "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
               "_count": "1"
             }
@@ -897,12 +903,12 @@
       "artifact_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "report_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
       "source_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "source_mtime": 1779325191.4382737
+      "source_mtime": 1779329343.66013
     },
     "latest_db_restore_review_bundle": {
       "artifact_type": "target_weight_db_restore_review_bundle",
       "schema_version": 1,
-      "generated_at": "2026-05-21T09:33:20.083399",
+      "generated_at": "2026-05-21T11:08:50.899119",
       "status": "ready_for_manual_authoritative_review",
       "review_bundle_ready": true,
       "blockers": [],
@@ -910,7 +916,7 @@
       "candidate_id": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
       "snapshot_date": "2026-05-20",
       "manifest_path": "reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
-      "manifest_hash": "be3c3aacf3e9bb3e7dcf535923ba57cca366eab3e58cf0b5a4fc7a3dd571bf8b",
+      "manifest_hash": "366f6c60159447c99b476a893a695dea53cbca1c08cdebb1b680a14433669fca",
       "bundle_dir": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20",
       "candidate_package": {
         "candidate_only": true,
@@ -926,8 +932,8 @@
           "expected_rows": 4,
           "candidate_only_rows": 4,
           "requires_authoritative_confirmation_rows": 4,
-          "hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
-          "expected_hash": "dfcef4d28e705826cf8c0262f1507df6e4ee3c722db4d8232ed202596509f182",
+          "hash": "11d3f8581c7de32f9fa2b2890498e7977e51e9718abb72e1dbc9edce81a9d9e4",
+          "expected_hash": "11d3f8581c7de32f9fa2b2890498e7977e51e9718abb72e1dbc9edce81a9d9e4",
           "zero_quantity_symbols": []
         },
         "positions": {
@@ -939,8 +945,8 @@
           "expected_rows": 4,
           "candidate_only_rows": 4,
           "requires_authoritative_confirmation_rows": 4,
-          "hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
-          "expected_hash": "57f6e10128f8aae79d52f620eda067767ad861a00014decbdeb39c7748c15e0e",
+          "hash": "80d9b9a3c6014117d2fe2428079e986680aaf8b254a70eb4659a2da25a2ff697",
+          "expected_hash": "80d9b9a3c6014117d2fe2428079e986680aaf8b254a70eb4659a2da25a2ff697",
           "zero_quantity_symbols": []
         }
       },
@@ -965,7 +971,7 @@
       "artifact_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "report_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
       "source_path": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "source_mtime": 1779323600.0834
+      "source_mtime": 1779329330.915284
     },
     "current_priority_action": {
       "strategy": "target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1",
@@ -999,7 +1005,7 @@
       "finalize_report_status": "blocked",
       "finalize_report_reason": "target_weight_pilot_evidence_finalize_missing_performance: total_value/daily_return unavailable",
       "snapshot_diagnostics_source": "reports/paper_runtime/target_weight_portfolio_snapshot_diagnostics_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_diagnostics_generated_at": "2026-05-20T17:48:59.979391",
+      "snapshot_diagnostics_generated_at": "2026-05-21T11:08:25.311008",
       "snapshot_diagnostics_status": "blocked_missing_snapshot_history",
       "snapshot_db_restore_status": "restore_required",
       "snapshot_db_restore_required": true,
@@ -1027,7 +1033,7 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:59:51.436276",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T11:09:03.660130",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
@@ -1053,7 +1059,7 @@
       "snapshot_db_restore_verification_db_positions": 0,
       "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "snapshot_db_restore_review_bundle_source": "reports/paper_runtime/target_weight_db_restore_review_bundle_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T09:33:20.083399",
+      "snapshot_db_restore_review_bundle_generated_at": "2026-05-21T11:08:50.899119",
       "snapshot_db_restore_review_bundle_status": "ready_for_manual_authoritative_review",
       "snapshot_db_restore_review_bundle_ready": true,
       "snapshot_db_restore_review_bundle_blockers": [],
@@ -1074,6 +1080,7 @@
           "symbol": "402340",
           "action": "BUY",
           "quantity": "1",
+          "price": "1015000",
           "order_id": "ORD-20260520101654-8e27bb",
           "_count": "1"
         },
@@ -1081,6 +1088,7 @@
           "symbol": "009150",
           "action": "BUY",
           "quantity": "1",
+          "price": "970000",
           "order_id": "ORD-20260520101654-a26a4c",
           "_count": "1"
         },
@@ -1088,6 +1096,7 @@
           "symbol": "005935",
           "action": "BUY",
           "quantity": "8",
+          "price": "179700",
           "order_id": "ORD-20260520101654-221c03",
           "_count": "1"
         }
@@ -1102,16 +1111,19 @@
         {
           "symbol": "005930",
           "quantity": "5",
+          "avg_price": "276500",
           "_count": "1"
         },
         {
           "symbol": "005935",
           "quantity": "8",
+          "avg_price": "179700",
           "_count": "1"
         },
         {
           "symbol": "009150",
           "quantity": "1",
+          "avg_price": "970000",
           "_count": "1"
         }
       ],
