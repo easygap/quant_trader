@@ -2326,6 +2326,9 @@ def _db_restore_authoritative_csv_action_fields(
         f"{prefix}_metadata_future_reviewed_at_row_count": _safe_int(
             evidence.get("metadata_future_reviewed_at_row_count")
         ),
+        f"{prefix}_metadata_reviewed_at_before_source_row_count": _safe_int(
+            evidence.get("metadata_reviewed_at_before_source_row_count")
+        ),
     }
 
 
@@ -2382,10 +2385,41 @@ def _parse_restore_reviewed_at(value: object) -> datetime | None:
     return reviewed_at.astimezone(KST)
 
 
+def _restore_review_min_timestamp(
+    *,
+    candidate_rows: list[dict[str, object]],
+    snapshot_date: str = "",
+    timestamp_column: str = "executed_at",
+) -> datetime | None:
+    timestamps: list[datetime] = []
+    for row in candidate_rows:
+        parsed = _parse_restore_reviewed_at(row.get(timestamp_column))
+        if parsed is not None:
+            timestamps.append(parsed)
+    try:
+        snapshot_day = datetime.strptime(
+            str(snapshot_date or "").strip(),
+            "%Y-%m-%d",
+        ).date()
+    except ValueError:
+        snapshot_day = None
+    if snapshot_day is not None:
+        timestamps.append(
+            datetime(
+                snapshot_day.year,
+                snapshot_day.month,
+                snapshot_day.day,
+                tzinfo=KST,
+            )
+        )
+    return max(timestamps) if timestamps else None
+
+
 def _db_restore_authoritative_metadata_status(
     *,
     rows: list[dict[str, object]],
     fieldnames: list[str],
+    min_reviewed_at: datetime | None = None,
 ) -> dict[str, object]:
     missing_columns = [
         column
@@ -2397,6 +2431,7 @@ def _db_restore_authoritative_metadata_status(
     placeholder_count = 0
     invalid_reviewed_at_count = 0
     future_reviewed_at_count = 0
+    reviewed_at_before_source_count = 0
     now = datetime.now(KST)
     for row in rows:
         if any(
@@ -2425,6 +2460,12 @@ def _db_restore_authoritative_metadata_status(
             and reviewed_at > now + TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE
         ):
             future_reviewed_at_count += 1
+        if (
+            reviewed_at is not None
+            and min_reviewed_at is not None
+            and reviewed_at < min_reviewed_at
+        ):
+            reviewed_at_before_source_count += 1
     return {
         "review_metadata_ok": (
             not missing_columns
@@ -2433,6 +2474,7 @@ def _db_restore_authoritative_metadata_status(
             and placeholder_count == 0
             and invalid_reviewed_at_count == 0
             and future_reviewed_at_count == 0
+            and reviewed_at_before_source_count == 0
         ),
         "metadata_missing_columns": missing_columns,
         "metadata_incomplete_row_count": incomplete_count,
@@ -2440,6 +2482,9 @@ def _db_restore_authoritative_metadata_status(
         "metadata_placeholder_row_count": placeholder_count,
         "metadata_invalid_reviewed_at_row_count": invalid_reviewed_at_count,
         "metadata_future_reviewed_at_row_count": future_reviewed_at_count,
+        "metadata_reviewed_at_before_source_row_count": (
+            reviewed_at_before_source_count
+        ),
     }
 
 
@@ -2507,8 +2552,10 @@ def _db_restore_review_template_action_fields(
     expected_columns: list[str],
     sample_columns: list[str] | None = None,
     verification_sha256: object = "",
+    snapshot_date: str = "",
 ) -> dict[str, object]:
     progress = _read_csv_progress(path_value, expected_columns)
+    candidate_progress = _read_csv_progress(candidate_path_value, expected_columns)
     row_count = _safe_int(progress.get("row_count"))
     current_sha256 = str(progress.get("sha256") or "").strip()
     verified_sha256 = str(verification_sha256 or "").strip()
@@ -2522,7 +2569,6 @@ def _db_restore_review_template_action_fields(
         "unexpected_row_sample": [],
     }
     if progress.get("exists") and not progress.get("missing_columns"):
-        candidate_progress = _read_csv_progress(candidate_path_value, expected_columns)
         if candidate_progress.get("exists") and not candidate_progress.get(
             "missing_columns"
         ):
@@ -2540,11 +2586,17 @@ def _db_restore_review_template_action_fields(
         "metadata_placeholder_row_count": 0,
         "metadata_invalid_reviewed_at_row_count": 0,
         "metadata_future_reviewed_at_row_count": 0,
+        "metadata_reviewed_at_before_source_row_count": 0,
     }
     if progress.get("exists"):
         metadata_status = _db_restore_authoritative_metadata_status(
             rows=list(progress.get("rows") or []),
             fieldnames=list(progress.get("fieldnames") or []),
+            min_reviewed_at=_restore_review_min_timestamp(
+                candidate_rows=list(candidate_progress.get("rows") or []),
+                snapshot_date=snapshot_date,
+                timestamp_column="executed_at",
+            ),
         )
     return {
         f"{prefix}_provided": bool(progress.get("provided")),
@@ -2583,6 +2635,9 @@ def _db_restore_review_template_action_fields(
         ),
         f"{prefix}_metadata_future_reviewed_at_row_count": _safe_int(
             metadata_status.get("metadata_future_reviewed_at_row_count")
+        ),
+        f"{prefix}_metadata_reviewed_at_before_source_row_count": _safe_int(
+            metadata_status.get("metadata_reviewed_at_before_source_row_count")
         ),
     }
 
@@ -3141,6 +3196,13 @@ def _target_weight_ops_priority_action(
                         verification_sha256=verification_trade.get("sha256")
                         if isinstance(verification_trade, dict)
                         else "",
+                        snapshot_date=str(
+                            latest_db_restore_review_bundle.get("snapshot_date")
+                            or (latest_snapshot_diagnostics or {}).get(
+                                "snapshot_date"
+                            )
+                            or ""
+                        ),
                     )
                 )
                 action.update(
@@ -3164,6 +3226,13 @@ def _target_weight_ops_priority_action(
                         verification_sha256=verification_positions.get("sha256")
                         if isinstance(verification_positions, dict)
                         else "",
+                        snapshot_date=str(
+                            latest_db_restore_review_bundle.get("snapshot_date")
+                            or (latest_snapshot_diagnostics or {}).get(
+                                "snapshot_date"
+                            )
+                            or ""
+                        ),
                     )
                 )
                 action["snapshot_db_restore_verification_stale_after_review_edit"] = bool(
