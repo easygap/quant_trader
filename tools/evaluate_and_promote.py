@@ -79,6 +79,19 @@ TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS = [
     "reviewed_by",
     "reviewed_at",
 ]
+TARGET_WEIGHT_RESTORE_METADATA_PLACEHOLDER_VALUES = {
+    "-",
+    "--",
+    "fill_me",
+    "n/a",
+    "na",
+    "none",
+    "placeholder",
+    "tbd",
+    "todo",
+    "unknown",
+}
+TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE = timedelta(minutes=5)
 TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS = [
     "symbol",
     "action",
@@ -2304,6 +2317,15 @@ def _db_restore_authoritative_csv_action_fields(
         f"{prefix}_metadata_candidate_source_row_count": _safe_int(
             evidence.get("metadata_candidate_source_row_count")
         ),
+        f"{prefix}_metadata_placeholder_row_count": _safe_int(
+            evidence.get("metadata_placeholder_row_count")
+        ),
+        f"{prefix}_metadata_invalid_reviewed_at_row_count": _safe_int(
+            evidence.get("metadata_invalid_reviewed_at_row_count")
+        ),
+        f"{prefix}_metadata_future_reviewed_at_row_count": _safe_int(
+            evidence.get("metadata_future_reviewed_at_row_count")
+        ),
     }
 
 
@@ -2337,6 +2359,29 @@ def _db_restore_verification_blockers_with_metadata(
     return list(dict.fromkeys(blockers))
 
 
+def _restore_metadata_value_is_placeholder(value: object) -> bool:
+    text = str(value or "").strip()
+    normalized = text.lower()
+    return (
+        normalized in TARGET_WEIGHT_RESTORE_METADATA_PLACEHOLDER_VALUES
+        or (normalized.startswith("<") and normalized.endswith(">"))
+    )
+
+
+def _parse_restore_reviewed_at(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text or _restore_metadata_value_is_placeholder(text):
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        reviewed_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if reviewed_at.tzinfo is None:
+        return reviewed_at.replace(tzinfo=KST)
+    return reviewed_at.astimezone(KST)
+
+
 def _db_restore_authoritative_metadata_status(
     *,
     rows: list[dict[str, object]],
@@ -2349,12 +2394,21 @@ def _db_restore_authoritative_metadata_status(
     ]
     incomplete_count = 0
     candidate_source_count = 0
+    placeholder_count = 0
+    invalid_reviewed_at_count = 0
+    future_reviewed_at_count = 0
+    now = datetime.now(KST)
     for row in rows:
         if any(
             not str(row.get(column) or "").strip()
             for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
         ):
             incomplete_count += 1
+        if any(
+            _restore_metadata_value_is_placeholder(row.get(column))
+            for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        ):
+            placeholder_count += 1
         source = str(row.get("authoritative_source") or "").strip().lower()
         if source.startswith("artifact_candidate") or source in {
             "artifact",
@@ -2363,15 +2417,29 @@ def _db_restore_authoritative_metadata_status(
             "candidate-only",
         }:
             candidate_source_count += 1
+        reviewed_at = _parse_restore_reviewed_at(row.get("reviewed_at"))
+        if str(row.get("reviewed_at") or "").strip() and reviewed_at is None:
+            invalid_reviewed_at_count += 1
+        elif (
+            reviewed_at is not None
+            and reviewed_at > now + TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE
+        ):
+            future_reviewed_at_count += 1
     return {
         "review_metadata_ok": (
             not missing_columns
             and incomplete_count == 0
             and candidate_source_count == 0
+            and placeholder_count == 0
+            and invalid_reviewed_at_count == 0
+            and future_reviewed_at_count == 0
         ),
         "metadata_missing_columns": missing_columns,
         "metadata_incomplete_row_count": incomplete_count,
         "metadata_candidate_source_row_count": candidate_source_count,
+        "metadata_placeholder_row_count": placeholder_count,
+        "metadata_invalid_reviewed_at_row_count": invalid_reviewed_at_count,
+        "metadata_future_reviewed_at_row_count": future_reviewed_at_count,
     }
 
 
@@ -2469,6 +2537,9 @@ def _db_restore_review_template_action_fields(
         "metadata_missing_columns": [],
         "metadata_incomplete_row_count": 0,
         "metadata_candidate_source_row_count": 0,
+        "metadata_placeholder_row_count": 0,
+        "metadata_invalid_reviewed_at_row_count": 0,
+        "metadata_future_reviewed_at_row_count": 0,
     }
     if progress.get("exists"):
         metadata_status = _db_restore_authoritative_metadata_status(
@@ -2503,6 +2574,15 @@ def _db_restore_review_template_action_fields(
         ),
         f"{prefix}_metadata_candidate_source_row_count": _safe_int(
             metadata_status.get("metadata_candidate_source_row_count")
+        ),
+        f"{prefix}_metadata_placeholder_row_count": _safe_int(
+            metadata_status.get("metadata_placeholder_row_count")
+        ),
+        f"{prefix}_metadata_invalid_reviewed_at_row_count": _safe_int(
+            metadata_status.get("metadata_invalid_reviewed_at_row_count")
+        ),
+        f"{prefix}_metadata_future_reviewed_at_row_count": _safe_int(
+            metadata_status.get("metadata_future_reviewed_at_row_count")
         ),
     }
 
