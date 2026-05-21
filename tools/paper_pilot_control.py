@@ -1730,6 +1730,10 @@ def _print_target_weight_daily_ops_status(
         priority_action.get("snapshot_db_restore_verify_after_manual_review_command")
         or ""
     ).strip()
+    priority_db_restore_inspect_review_progress_command = str(
+        priority_action.get("snapshot_db_restore_inspect_review_progress_command")
+        or ""
+    ).strip()
     priority_db_restore_verify_command = str(
         priority_action.get("snapshot_db_restore_package_verify_command") or ""
     ).strip()
@@ -1908,6 +1912,11 @@ def _print_target_weight_daily_ops_status(
                     print(
                         "    Snapshot DB restore verify after manual review: "
                         f"{priority_db_restore_verify_after_manual_review_command}"
+                    )
+                if priority_db_restore_inspect_review_progress_command:
+                    print(
+                        "    Snapshot DB restore inspect review progress: "
+                        f"{priority_db_restore_inspect_review_progress_command}"
                     )
             if priority_db_restore_review_guard:
                 print(
