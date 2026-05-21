@@ -3784,9 +3784,38 @@ def _parse_restore_reviewed_at(value: Any) -> datetime | None:
     return reviewed_at.astimezone(KST)
 
 
+def _restore_review_min_timestamp(
+    *,
+    candidate_rows: list[dict[str, Any]],
+    snapshot_date: str,
+    timestamp_column: str = "executed_at",
+) -> datetime | None:
+    timestamps: list[datetime] = []
+    for row in candidate_rows:
+        parsed = _parse_restore_reviewed_at(row.get(timestamp_column))
+        if parsed is not None:
+            timestamps.append(parsed)
+    try:
+        snapshot_day = date.fromisoformat(str(snapshot_date or "").strip())
+    except ValueError:
+        snapshot_day = None
+    if snapshot_day is not None:
+        timestamps.append(
+            datetime(
+                snapshot_day.year,
+                snapshot_day.month,
+                snapshot_day.day,
+                tzinfo=KST,
+            )
+        )
+    return max(timestamps) if timestamps else None
+
+
 def _restore_authoritative_metadata_status(
     rows: list[dict[str, Any]],
     fieldnames: list[str],
+    *,
+    min_reviewed_at: datetime | None = None,
 ) -> dict[str, Any]:
     missing_columns = [
         column
@@ -3798,6 +3827,7 @@ def _restore_authoritative_metadata_status(
     placeholder_count = 0
     invalid_reviewed_at_count = 0
     future_reviewed_at_count = 0
+    reviewed_at_before_source_count = 0
     now = datetime.now(KST)
     for row in rows:
         if any(
@@ -3826,6 +3856,12 @@ def _restore_authoritative_metadata_status(
             and reviewed_at > now + TARGET_WEIGHT_RESTORE_REVIEWED_AT_FUTURE_TOLERANCE
         ):
             future_reviewed_at_count += 1
+        if (
+            reviewed_at is not None
+            and min_reviewed_at is not None
+            and reviewed_at < min_reviewed_at
+        ):
+            reviewed_at_before_source_count += 1
     return {
         "metadata_columns": TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS,
         "metadata_missing_columns": missing_columns,
@@ -3834,6 +3870,9 @@ def _restore_authoritative_metadata_status(
         "metadata_placeholder_row_count": placeholder_count,
         "metadata_invalid_reviewed_at_row_count": invalid_reviewed_at_count,
         "metadata_future_reviewed_at_row_count": future_reviewed_at_count,
+        "metadata_reviewed_at_before_source_row_count": (
+            reviewed_at_before_source_count
+        ),
         "review_metadata_ok": (
             not missing_columns
             and incomplete_count == 0
@@ -3841,6 +3880,7 @@ def _restore_authoritative_metadata_status(
             and placeholder_count == 0
             and invalid_reviewed_at_count == 0
             and future_reviewed_at_count == 0
+            and reviewed_at_before_source_count == 0
         ),
     }
 
@@ -3923,6 +3963,7 @@ def _verify_authoritative_restore_csv(
     path_value: str | None,
     candidate_source_path: str | Path | None,
     candidate_rows: list[dict[str, Any]],
+    min_reviewed_at: datetime | None,
     columns: list[str],
     identity_columns: list[str],
     economic_columns: list[str],
@@ -3950,6 +3991,7 @@ def _verify_authoritative_restore_csv(
         "metadata_placeholder_row_count": 0,
         "metadata_invalid_reviewed_at_row_count": 0,
         "metadata_future_reviewed_at_row_count": 0,
+        "metadata_reviewed_at_before_source_row_count": 0,
         "review_metadata_ok": False,
         "match": False,
         "identity_match": False,
@@ -3981,7 +4023,11 @@ def _verify_authoritative_restore_csv(
         info["candidate_marker_rejected"] = True
         blockers.append(f"authoritative_{kind}_csv_candidate_marker_rejected")
     missing_columns = [column for column in columns if column not in fieldnames]
-    metadata_status = _restore_authoritative_metadata_status(rows, fieldnames)
+    metadata_status = _restore_authoritative_metadata_status(
+        rows,
+        fieldnames,
+        min_reviewed_at=min_reviewed_at,
+    )
     comparison = _compare_restore_rows(
         candidate_rows=candidate_rows,
         authoritative_rows=rows,
@@ -4045,6 +4091,10 @@ def _verify_authoritative_restore_csv(
         blockers.append(f"authoritative_{kind}_csv_review_metadata_invalid_reviewed_at")
     if metadata_status["metadata_future_reviewed_at_row_count"]:
         blockers.append(f"authoritative_{kind}_csv_review_metadata_future_reviewed_at")
+    if metadata_status["metadata_reviewed_at_before_source_row_count"]:
+        blockers.append(
+            f"authoritative_{kind}_csv_review_metadata_reviewed_at_before_source"
+        )
     if not missing_columns:
         if candidate_rows and not rows:
             info["empty_template"] = True
@@ -4448,6 +4498,11 @@ def verify_target_weight_db_restore_package(
         else None,
         candidate_source_path=manifest.get("trade_history_candidate_csv"),
         candidate_rows=trade_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=trade_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+            timestamp_column="executed_at",
+        ),
         columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
         identity_columns=TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
         economic_columns=TARGET_WEIGHT_RESTORE_TRADE_ECONOMIC_COLUMNS,
@@ -4460,6 +4515,10 @@ def verify_target_weight_db_restore_package(
         else None,
         candidate_source_path=manifest.get("positions_candidate_csv"),
         candidate_rows=position_info.get("rows") or [],
+        min_reviewed_at=_restore_review_min_timestamp(
+            candidate_rows=position_info.get("rows") or [],
+            snapshot_date=snapshot_date,
+        ),
         columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
         identity_columns=TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
         economic_columns=TARGET_WEIGHT_RESTORE_POSITION_ECONOMIC_COLUMNS,
@@ -4636,6 +4695,8 @@ def render_target_weight_db_restore_package_verification_markdown(
         f"`{authoritative_trade.get('metadata_invalid_reviewed_at_row_count', 0)}`",
         "- Trade history review metadata future reviewed_at rows: "
         f"`{authoritative_trade.get('metadata_future_reviewed_at_row_count', 0)}`",
+        "- Trade history review metadata reviewed_at before source rows: "
+        f"`{authoritative_trade.get('metadata_reviewed_at_before_source_row_count', 0)}`",
         f"- Trade history identity match: `{authoritative_trade.get('identity_match', False)}`",
         f"- Trade history economic match: `{authoritative_trade.get('economic_match', False)}`",
         "- Trade history economic differences: "
@@ -4665,6 +4726,8 @@ def render_target_weight_db_restore_package_verification_markdown(
         f"`{authoritative_positions.get('metadata_invalid_reviewed_at_row_count', 0)}`",
         "- Positions review metadata future reviewed_at rows: "
         f"`{authoritative_positions.get('metadata_future_reviewed_at_row_count', 0)}`",
+        "- Positions review metadata reviewed_at before source rows: "
+        f"`{authoritative_positions.get('metadata_reviewed_at_before_source_row_count', 0)}`",
         f"- Positions identity match: `{authoritative_positions.get('identity_match', False)}`",
         f"- Positions economic match: `{authoritative_positions.get('economic_match', False)}`",
         "- Positions economic differences: "
@@ -4766,6 +4829,8 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"{authoritative_trade.get('metadata_invalid_reviewed_at_row_count', 0)} "
         "future_reviewed_at="
         f"{authoritative_trade.get('metadata_future_reviewed_at_row_count', 0)} "
+        "before_source_reviewed_at="
+        f"{authoritative_trade.get('metadata_reviewed_at_before_source_row_count', 0)} "
         f"identity_match={bool(authoritative_trade.get('identity_match'))} "
         f"economic_match={bool(authoritative_trade.get('economic_match'))} "
         f"scope={authoritative_trade.get('content_mismatch_scope') or 'none'}"
@@ -4787,6 +4852,8 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"{authoritative_positions.get('metadata_invalid_reviewed_at_row_count', 0)} "
         "future_reviewed_at="
         f"{authoritative_positions.get('metadata_future_reviewed_at_row_count', 0)} "
+        "before_source_reviewed_at="
+        f"{authoritative_positions.get('metadata_reviewed_at_before_source_row_count', 0)} "
         f"identity_match={bool(authoritative_positions.get('identity_match'))} "
         f"economic_match={bool(authoritative_positions.get('economic_match'))} "
         f"scope={authoritative_positions.get('content_mismatch_scope') or 'none'}"

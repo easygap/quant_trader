@@ -3917,7 +3917,7 @@ def test_current_blockers_review_template_fields_report_metadata_quality(tmp_pat
         **candidate_row,
         "authoritative_source": "unknown",
         "reviewed_by": "<reviewer>",
-        "reviewed_at": "2099-01-01T00:00:00",
+        "reviewed_at": "2026-05-20T08:30:00",
     }
     reviewed_columns = (
         ep.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
@@ -3957,6 +3957,12 @@ def test_current_blockers_review_template_fields_report_metadata_quality(tmp_pat
     assert (
         fields[
             "snapshot_db_restore_authoritative_trade_history_metadata_future_reviewed_at_row_count"
+        ]
+        == 0
+    )
+    assert (
+        fields[
+            "snapshot_db_restore_authoritative_trade_history_metadata_reviewed_at_before_source_row_count"
         ]
         == 1
     )
