@@ -2654,8 +2654,21 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                         "snapshot_db_restore_verification_status": "blocked",
                         "snapshot_db_restore_verification_ready": False,
                         "snapshot_db_restore_verification_blockers": [
-                            "authoritative_trade_history_csv_required"
+                            "authoritative_trade_history_csv_empty_template",
+                            "authoritative_positions_csv_empty_template",
                         ],
+                        "snapshot_db_restore_authoritative_trade_history_provided": True,
+                        "snapshot_db_restore_authoritative_trade_history_match": False,
+                        "snapshot_db_restore_authoritative_trade_history_row_count": 0,
+                        "snapshot_db_restore_authoritative_trade_history_expected_rows": 4,
+                        "snapshot_db_restore_authoritative_trade_history_empty_template": True,
+                        "snapshot_db_restore_authoritative_trade_history_missing_columns": [],
+                        "snapshot_db_restore_authoritative_positions_provided": True,
+                        "snapshot_db_restore_authoritative_positions_match": False,
+                        "snapshot_db_restore_authoritative_positions_row_count": 0,
+                        "snapshot_db_restore_authoritative_positions_expected_rows": 4,
+                        "snapshot_db_restore_authoritative_positions_empty_template": True,
+                        "snapshot_db_restore_authoritative_positions_missing_columns": [],
                     },
                 },
             },
@@ -2681,6 +2694,14 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "review/reviewed_authoritative_positions.csv"
     ) in output
     assert "Snapshot DB restore verify after manual review:" in output
+    assert (
+        "Snapshot DB restore authoritative trade history CSV: "
+        "provided=True rows=0/4 empty_template=True missing_columns=none"
+    ) in output
+    assert (
+        "Snapshot DB restore authoritative positions CSV: "
+        "provided=True rows=0/4 empty_template=True missing_columns=none"
+    ) in output
     assert (
         "Operator next action: FILL reviewed authoritative "
         "trade_history/positions CSV templates, then run DB restore verification:"
