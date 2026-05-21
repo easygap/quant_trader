@@ -894,6 +894,7 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             f"rows={priority_action.get(f'{prefix}_row_count', 0)}/"
             f"{priority_action.get(f'{prefix}_expected_rows', 0)} "
             f"empty_template={bool(priority_action.get(f'{prefix}_empty_template'))} "
+            f"verify_stale={bool(priority_action.get(f'{prefix}_verification_stale'))} "
             "missing_columns="
             f"{', '.join(str(column) for column in missing_columns) or 'none'}"
         )
