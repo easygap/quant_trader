@@ -1024,6 +1024,7 @@ def _target_weight_operator_next_action(
     execute_command: str,
     next_daily_ops_command: str,
     next_readiness_command: str,
+    priority_db_restore_inspect_review_progress_command: str = "",
 ) -> str | None:
     status = str(summary.get("status") or "").strip()
     if _not_before_date_pending(not_before_date):
@@ -1158,6 +1159,26 @@ def _target_weight_operator_next_action(
                 "then rerun daily ops"
             )
         if priority_db_restore_review_bundle_ready:
+            if (
+                priority_db_restore_review_guard
+                == "target_weight_authoritative_db_restore_csv_fill_required"
+                and priority_db_restore_inspect_review_progress_command
+            ):
+                verify_after_manual_review = (
+                    priority_db_restore_verify_after_manual_review_command
+                    or verify_command
+                )
+                suffix = (
+                    f"; verify when complete: {verify_after_manual_review}"
+                    if verify_after_manual_review
+                    else ""
+                )
+                return (
+                    "RUN no-order DB restore review progress check, then fill "
+                    "reviewed authoritative CSV and verify: "
+                    f"{priority_db_restore_inspect_review_progress_command}"
+                    f"{suffix}"
+                )
             verify_after_manual_review = (
                 priority_db_restore_verify_after_manual_review_command
                 or verify_command
@@ -2257,6 +2278,9 @@ def _print_target_weight_daily_ops_status(
         priority_db_restore_verify_after_manual_review_command=priority_db_restore_verify_after_manual_review_command,
         priority_db_restore_verify_command=priority_db_restore_verify_command,
         priority_db_restore_verification_blockers=priority_db_restore_verification_blockers,
+        priority_db_restore_inspect_review_progress_command=(
+            priority_db_restore_inspect_review_progress_command
+        ),
         priority_diagnostics_status=priority_diagnostics_status,
         priority_probe_status=priority_probe_status,
         priority_recovery_hint=priority_recovery_hint,
