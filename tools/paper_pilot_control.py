@@ -1084,6 +1084,16 @@ def _target_weight_operator_next_action(
             return "PREPARE no-write DB restore apply plan before manual DB restore"
         if (
             priority_db_restore_review_guard
+            == "target_weight_authoritative_db_restore_backup_required"
+        ):
+            if priority_scheduled_command:
+                return (
+                    "BACKUP DB restore state before guarded apply: "
+                    f"{priority_scheduled_command}"
+                )
+            return "BACKUP DB restore state before guarded apply"
+        if (
+            priority_db_restore_review_guard
             == "target_weight_authoritative_db_restore_apply_ready_manual_confirm_required"
         ):
             if priority_scheduled_command:
