@@ -1743,6 +1743,46 @@ def _load_target_weight_db_restore_verification_report(
     return None
 
 
+def _load_target_weight_db_restore_review_bundle_report(
+    strategy: str,
+    snapshot_date: str | None,
+    reports_dir: str | Path = "reports",
+) -> dict | None:
+    if not strategy or not snapshot_date:
+        return None
+    base = Path(reports_dir)
+    paths = [
+        base
+        / f"target_weight_db_restore_review_bundle_{strategy}_{snapshot_date}.json",
+        base
+        / "paper_runtime"
+        / f"target_weight_db_restore_review_bundle_{strategy}_{snapshot_date}.json",
+    ]
+    candidates: list[tuple[tuple[float, float], dict]] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "target_weight_db_restore_review_bundle":
+            continue
+        if payload.get("candidate_id") != strategy:
+            continue
+        if payload.get("snapshot_date") != snapshot_date:
+            continue
+        payload = dict(payload)
+        payload["source_path"] = _artifact_source_path(path)
+        payload["source_mtime"] = path.stat().st_mtime
+        candidates.append((_artifact_time_key(payload), payload))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
 def _load_target_weight_finalize_report(
     strategy: str,
     finalize_date: str | None,
@@ -2026,6 +2066,7 @@ def _target_weight_ops_priority_action(
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
+    latest_db_restore_review_bundle: dict | None = None,
 ) -> dict | None:
     if not latest_daily_ops:
         return None
@@ -2372,10 +2413,98 @@ def _target_weight_ops_priority_action(
                 action["snapshot_db_restore_review_bundle_command"] = (
                     review_bundle_command
                 )
+            review_bundle_ready = False
+            review_bundle_verify_command = ""
+            if isinstance(latest_db_restore_review_bundle, dict):
+                review_files = latest_db_restore_review_bundle.get("review_files") or {}
+                if not isinstance(review_files, dict):
+                    review_files = {}
+                review_commands = (
+                    latest_db_restore_review_bundle.get("operator_commands") or {}
+                )
+                if not isinstance(review_commands, dict):
+                    review_commands = {}
+                review_bundle_ready = bool(
+                    latest_db_restore_review_bundle.get("review_bundle_ready")
+                )
+                review_bundle_verify_command = str(
+                    review_commands.get("verify_after_manual_review") or ""
+                ).strip()
+                action.update({
+                    "snapshot_db_restore_review_bundle_source": str(
+                        latest_db_restore_review_bundle.get("source_path") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_generated_at": str(
+                        latest_db_restore_review_bundle.get("generated_at") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_status": str(
+                        latest_db_restore_review_bundle.get("status") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_ready": review_bundle_ready,
+                    "snapshot_db_restore_review_bundle_blockers": (
+                        latest_db_restore_review_bundle.get("blockers") or []
+                    ),
+                    "snapshot_db_restore_review_bundle_warnings": (
+                        latest_db_restore_review_bundle.get("warnings") or []
+                    ),
+                    "snapshot_db_restore_review_bundle_dir": str(
+                        latest_db_restore_review_bundle.get("bundle_dir") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_candidate_trade_history_csv": str(
+                        review_files.get("candidate_trade_history_csv") or ""
+                    ),
+                    "snapshot_db_restore_review_bundle_candidate_positions_csv": str(
+                        review_files.get("candidate_positions_csv") or ""
+                    ),
+                    "snapshot_db_restore_authoritative_trade_history_template_csv": str(
+                        review_files.get(
+                            "authoritative_trade_history_template_csv"
+                        )
+                        or ""
+                    ),
+                    "snapshot_db_restore_authoritative_positions_template_csv": str(
+                        review_files.get("authoritative_positions_template_csv")
+                        or ""
+                    ),
+                    "snapshot_db_restore_verify_after_manual_review_command": (
+                        review_bundle_verify_command
+                    ),
+                })
             verification_ready = bool(
                 action.get("snapshot_db_restore_verification_ready")
             )
             if package_generated and verify_command and not verification_ready:
+                if review_bundle_ready:
+                    action.update({
+                        "desc": (
+                            "target-weight DB 복구 authoritative CSV 템플릿 작성 후 "
+                            "verify 실행"
+                        ),
+                        "command": (
+                            "# blocked: fill reviewed authoritative "
+                            "trade_history/positions CSV templates before DB "
+                            "restore verification"
+                        ),
+                        "scheduled_command": (
+                            review_bundle_verify_command or verify_command
+                        ),
+                        "scheduled_follow_up": follow_up,
+                        "requires": (
+                            "filled reviewed authoritative trade_history/positions CSV"
+                        ),
+                        "db_restore_review_guard": (
+                            "target_weight_authoritative_db_restore_csv_fill_required"
+                        ),
+                        "blocked_finalize_command": (
+                            "# blocked: reviewed authoritative DB restore "
+                            "verification required before finalize"
+                        ),
+                        "blocked_repair_command": (
+                            "# blocked: reviewed authoritative DB restore "
+                            "verification required before repair"
+                        ),
+                    })
+                    return action
                 action.update({
                     "desc": (
                         "target-weight DB 복구 패키지 authoritative CSV 검토 후 "
@@ -3042,6 +3171,7 @@ def _build_current_blockers_operator_runbook(
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
+    latest_db_restore_review_bundle: dict | None = None,
     promotion_artifact_freshness: dict | None = None,
 ) -> dict:
     primary_strategy = provisional_candidates[0] if provisional_candidates else None
@@ -3088,6 +3218,7 @@ def _build_current_blockers_operator_runbook(
                 latest_finalize_report=latest_finalize_report,
                 latest_snapshot_diagnostics=latest_snapshot_diagnostics,
                 latest_db_restore_verification=latest_db_restore_verification,
+                latest_db_restore_review_bundle=latest_db_restore_review_bundle,
             )
         sequence = [
             {
@@ -3199,6 +3330,8 @@ def _build_current_blockers_operator_runbook(
             runbook["core_entry_action"] = core_entry_action
         if latest_db_restore_verification:
             runbook["latest_db_restore_verification"] = latest_db_restore_verification
+        if latest_db_restore_review_bundle:
+            runbook["latest_db_restore_review_bundle"] = latest_db_restore_review_bundle
         if ops_priority_action:
             runbook["current_priority_action"] = ops_priority_action
         return runbook
@@ -3246,6 +3379,7 @@ def build_current_blockers_report(
     latest_finalize_report: dict | None = None,
     latest_snapshot_diagnostics: dict | None = None,
     latest_db_restore_verification: dict | None = None,
+    latest_db_restore_review_bundle: dict | None = None,
     generated_at: str | None = None,
 ) -> dict:
     """promotion blocker summary에서 현재 go-live blocker 운영 파일을 생성한다."""
@@ -3311,6 +3445,7 @@ def build_current_blockers_report(
         latest_finalize_report=latest_finalize_report,
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         latest_db_restore_verification=latest_db_restore_verification,
+        latest_db_restore_review_bundle=latest_db_restore_review_bundle,
         promotion_artifact_freshness=promotion_artifact_freshness,
     )
     runbook_commands = operator_runbook.get("commands") or {}
@@ -3482,6 +3617,15 @@ def _build_current_blockers_report_with_latest_ops(
         if provisional_candidates
         else None
     )
+    latest_db_restore_review_bundle = (
+        _load_target_weight_db_restore_review_bundle_report(
+            provisional_candidates[0],
+            latest_daily_ops.get("trade_day") if latest_daily_ops else None,
+            reports_dir,
+        )
+        if provisional_candidates
+        else None
+    )
     return build_current_blockers_report(
         blocker_summary,
         latest_daily_ops=latest_daily_ops,
@@ -3489,6 +3633,7 @@ def _build_current_blockers_report_with_latest_ops(
         latest_finalize_report=latest_finalize_report,
         latest_snapshot_diagnostics=latest_snapshot_diagnostics,
         latest_db_restore_verification=latest_db_restore_verification,
+        latest_db_restore_review_bundle=latest_db_restore_review_bundle,
         generated_at=generated_at,
     )
 
