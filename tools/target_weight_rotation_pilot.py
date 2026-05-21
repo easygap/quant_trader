@@ -3625,6 +3625,19 @@ TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
     "avg_price",
     "total_invested",
 }
+TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS = [
+    "authoritative_source",
+    "reviewed_by",
+    "reviewed_at",
+]
+
+
+def _target_weight_restore_authoritative_columns(columns: list[str]) -> list[str]:
+    return columns + [
+        column
+        for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        if column not in columns
+    ]
 
 
 def _read_csv_dict_rows(path: Path) -> list[dict[str, Any]]:
@@ -3735,6 +3748,44 @@ def _restore_authoritative_candidate_marker_count(
     )
 
 
+def _restore_authoritative_metadata_status(
+    rows: list[dict[str, Any]],
+    fieldnames: list[str],
+) -> dict[str, Any]:
+    missing_columns = [
+        column
+        for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        if column not in fieldnames
+    ]
+    incomplete_count = 0
+    candidate_source_count = 0
+    for row in rows:
+        if any(
+            not str(row.get(column) or "").strip()
+            for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        ):
+            incomplete_count += 1
+        source = str(row.get("authoritative_source") or "").strip().lower()
+        if source.startswith("artifact_candidate") or source in {
+            "artifact",
+            "candidate",
+            "candidate_csv",
+            "candidate-only",
+        }:
+            candidate_source_count += 1
+    return {
+        "metadata_columns": TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS,
+        "metadata_missing_columns": missing_columns,
+        "metadata_incomplete_row_count": incomplete_count,
+        "metadata_candidate_source_row_count": candidate_source_count,
+        "review_metadata_ok": (
+            not missing_columns
+            and incomplete_count == 0
+            and candidate_source_count == 0
+        ),
+    }
+
+
 def _verify_restore_csv_file(
     *,
     path_value: Any,
@@ -3833,6 +3884,11 @@ def _verify_authoritative_restore_csv(
         "empty_template": False,
         "fieldnames": [],
         "missing_columns": [],
+        "metadata_columns": TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS,
+        "metadata_missing_columns": [],
+        "metadata_incomplete_row_count": 0,
+        "metadata_candidate_source_row_count": 0,
+        "review_metadata_ok": False,
         "match": False,
         "identity_match": False,
         "economic_match": False,
@@ -3863,6 +3919,7 @@ def _verify_authoritative_restore_csv(
         info["candidate_marker_rejected"] = True
         blockers.append(f"authoritative_{kind}_csv_candidate_marker_rejected")
     missing_columns = [column for column in columns if column not in fieldnames]
+    metadata_status = _restore_authoritative_metadata_status(rows, fieldnames)
     comparison = _compare_restore_rows(
         candidate_rows=candidate_rows,
         authoritative_rows=rows,
@@ -3890,6 +3947,7 @@ def _verify_authoritative_restore_csv(
         "sha256": _file_sha256(path),
         "fieldnames": fieldnames,
         "missing_columns": missing_columns,
+        **metadata_status,
         "candidate_source_rejected": bool(info["candidate_source_rejected"]),
         "candidate_marker_rejected": bool(info["candidate_marker_rejected"]),
         "candidate_marker_row_count": candidate_marker_row_count,
@@ -3913,17 +3971,24 @@ def _verify_authoritative_restore_csv(
     })
     if missing_columns:
         blockers.append(f"authoritative_{kind}_csv_columns_missing")
-    elif candidate_rows and not rows:
-        info["empty_template"] = True
-        blockers.append(f"authoritative_{kind}_csv_empty_template")
-    elif len(rows) != len(candidate_rows):
-        blockers.append(f"authoritative_{kind}_csv_row_count_mismatch")
-    elif not comparison["match"]:
-        if identity_match:
-            blockers.append(f"authoritative_{kind}_csv_economic_mismatch")
-        else:
-            blockers.append(f"authoritative_{kind}_csv_identity_mismatch")
-        blockers.append(f"authoritative_{kind}_csv_content_mismatch")
+    if metadata_status["metadata_missing_columns"]:
+        blockers.append(f"authoritative_{kind}_csv_review_metadata_columns_missing")
+    elif rows and metadata_status["metadata_incomplete_row_count"]:
+        blockers.append(f"authoritative_{kind}_csv_review_metadata_incomplete")
+    if metadata_status["metadata_candidate_source_row_count"]:
+        blockers.append(f"authoritative_{kind}_csv_review_metadata_candidate_source")
+    if not missing_columns:
+        if candidate_rows and not rows:
+            info["empty_template"] = True
+            blockers.append(f"authoritative_{kind}_csv_empty_template")
+        elif len(rows) != len(candidate_rows):
+            blockers.append(f"authoritative_{kind}_csv_row_count_mismatch")
+        elif not comparison["match"]:
+            if identity_match:
+                blockers.append(f"authoritative_{kind}_csv_economic_mismatch")
+            else:
+                blockers.append(f"authoritative_{kind}_csv_identity_mismatch")
+            blockers.append(f"authoritative_{kind}_csv_content_mismatch")
     return info
 
 
@@ -4058,12 +4123,16 @@ def prepare_target_weight_db_restore_review_bundle(
         _write_csv_rows(
             authoritative_trade_template,
             [],
-            TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+            _target_weight_restore_authoritative_columns(
+                TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS
+            ),
         )
         _write_csv_rows(
             authoritative_positions_template,
             [],
-            TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            _target_weight_restore_authoritative_columns(
+                TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS
+            ),
         )
 
     verify_command = _target_weight_db_restore_verify_with_templates_command(
@@ -4175,6 +4244,8 @@ def render_target_weight_db_restore_review_bundle_markdown(
         f"`{files.get('authoritative_trade_history_template_csv') or 'none'}`",
         "- Reviewed authoritative positions template: "
         f"`{files.get('authoritative_positions_template_csv') or 'none'}`",
+        "- Required authoritative metadata columns: "
+        f"`{', '.join(TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS)}`",
         "",
         "## Candidate Summary",
         f"- Candidate only: `{candidate.get('candidate_only', False)}`",
@@ -4185,7 +4256,8 @@ def render_target_weight_db_restore_review_bundle_markdown(
         "## Manual Review Steps",
         "1. Open the candidate CSV files and compare them against broker/DB evidence.",
         "2. Fill the reviewed authoritative template CSV files from the external authoritative source.",
-        "3. Run the verification command below. Do not use artifact-only candidate rows as authoritative evidence.",
+        "3. Fill `authoritative_source`, `reviewed_by`, and `reviewed_at` for every reviewed row.",
+        "4. Run the verification command below. Do not use artifact-only candidate rows as authoritative evidence.",
         "",
         "## Operator Commands",
     ]
@@ -4482,6 +4554,14 @@ def render_target_weight_db_restore_package_verification_markdown(
         "- Trade history candidate markers rejected: "
         f"`{authoritative_trade.get('candidate_marker_rejected', False)}` "
         f"({authoritative_trade.get('candidate_marker_row_count', 0)} rows)",
+        "- Trade history review metadata ok: "
+        f"`{authoritative_trade.get('review_metadata_ok', False)}`",
+        "- Trade history review metadata missing columns: "
+        f"`{', '.join(authoritative_trade.get('metadata_missing_columns') or []) or 'none'}`",
+        "- Trade history review metadata incomplete rows: "
+        f"`{authoritative_trade.get('metadata_incomplete_row_count', 0)}`",
+        "- Trade history review metadata candidate-source rows: "
+        f"`{authoritative_trade.get('metadata_candidate_source_row_count', 0)}`",
         f"- Trade history identity match: `{authoritative_trade.get('identity_match', False)}`",
         f"- Trade history economic match: `{authoritative_trade.get('economic_match', False)}`",
         "- Trade history economic differences: "
@@ -4497,6 +4577,14 @@ def render_target_weight_db_restore_package_verification_markdown(
         "- Positions candidate markers rejected: "
         f"`{authoritative_positions.get('candidate_marker_rejected', False)}` "
         f"({authoritative_positions.get('candidate_marker_row_count', 0)} rows)",
+        "- Positions review metadata ok: "
+        f"`{authoritative_positions.get('review_metadata_ok', False)}`",
+        "- Positions review metadata missing columns: "
+        f"`{', '.join(authoritative_positions.get('metadata_missing_columns') or []) or 'none'}`",
+        "- Positions review metadata incomplete rows: "
+        f"`{authoritative_positions.get('metadata_incomplete_row_count', 0)}`",
+        "- Positions review metadata candidate-source rows: "
+        f"`{authoritative_positions.get('metadata_candidate_source_row_count', 0)}`",
         f"- Positions identity match: `{authoritative_positions.get('identity_match', False)}`",
         f"- Positions economic match: `{authoritative_positions.get('economic_match', False)}`",
         "- Positions economic differences: "
@@ -4591,6 +4679,7 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"{bool(authoritative_trade.get('candidate_source_rejected'))} "
         f"candidate_marker_rejected="
         f"{bool(authoritative_trade.get('candidate_marker_rejected'))} "
+        f"metadata_ok={bool(authoritative_trade.get('review_metadata_ok'))} "
         f"identity_match={bool(authoritative_trade.get('identity_match'))} "
         f"economic_match={bool(authoritative_trade.get('economic_match'))} "
         f"scope={authoritative_trade.get('content_mismatch_scope') or 'none'}"
@@ -4605,6 +4694,7 @@ def _print_target_weight_db_restore_package_verification(report: dict[str, Any])
         f"{bool(authoritative_positions.get('candidate_source_rejected'))} "
         f"candidate_marker_rejected="
         f"{bool(authoritative_positions.get('candidate_marker_rejected'))} "
+        f"metadata_ok={bool(authoritative_positions.get('review_metadata_ok'))} "
         f"identity_match={bool(authoritative_positions.get('identity_match'))} "
         f"economic_match={bool(authoritative_positions.get('economic_match'))} "
         f"scope={authoritative_positions.get('content_mismatch_scope') or 'none'}"
