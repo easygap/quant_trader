@@ -3958,6 +3958,17 @@ def _target_weight_db_restore_apply_plan_command(
     )
 
 
+def _target_weight_db_restore_apply_command(
+    apply_plan_path: str | Path,
+) -> str:
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        "--apply-db-restore "
+        f"--restore-apply-plan {apply_plan_path} "
+        "--backup-confirmed --confirm-db-restore-apply"
+    )
+
+
 def prepare_target_weight_db_restore_review_bundle(
     *,
     manifest_path: str | Path,
@@ -4947,6 +4958,10 @@ def write_target_weight_db_restore_apply_plan_report(
     md_path = output_dir / f"{stem}.md"
     report["artifact_path"] = json_path.as_posix()
     report["report_path"] = md_path.as_posix()
+    if bool(report.get("apply_ready")):
+        report.setdefault("operator_commands", {})["apply_manual_db_restore"] = (
+            _target_weight_db_restore_apply_command(json_path.as_posix())
+        )
     json_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
         encoding="utf-8",
@@ -4984,6 +4999,394 @@ def _print_target_weight_db_restore_apply_plan(report: dict[str, Any]) -> None:
     print(
         "  planned_positions: "
         f"operation={position_ops.get('operation')} rows={position_ops.get('row_count', 0)}"
+    )
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
+
+
+def _parse_restore_datetime(value: Any, *, fallback_date: str) -> datetime:
+    text = str(value or "").strip()
+    if not text:
+        text = fallback_date
+    clean = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(clean)
+    except ValueError:
+        parsed = datetime.strptime(text[:10], "%Y-%m-%d")
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(KST).replace(tzinfo=None)
+    return parsed
+
+
+def _required_restore_float(
+    row: dict[str, Any],
+    field: str,
+    blockers: list[str],
+    *,
+    prefix: str,
+    allow_zero: bool = False,
+) -> float:
+    value = _coerce_float_or_none(row.get(field))
+    valid = value is not None and (value > 0 or (allow_zero and value >= 0))
+    if not valid:
+        blockers.append(f"{prefix}_{field}_invalid")
+        return 0.0
+    return float(value)
+
+
+def _required_restore_int(
+    row: dict[str, Any],
+    field: str,
+    blockers: list[str],
+    *,
+    prefix: str,
+) -> int:
+    value = _coerce_int_or_zero(row.get(field))
+    if value <= 0:
+        blockers.append(f"{prefix}_{field}_invalid")
+        return 0
+    return value
+
+
+def _validate_restore_apply_rows(
+    *,
+    candidate_id: str,
+    trade_rows: list[dict[str, Any]],
+    position_rows: list[dict[str, Any]],
+) -> list[str]:
+    blockers: list[str] = []
+    if not trade_rows:
+        blockers.append("restore_apply_trade_history_rows_empty")
+    if not position_rows:
+        blockers.append("restore_apply_position_rows_empty")
+
+    trade_keys = _db_restore_apply_plan_idempotency_keys(
+        trade_rows,
+        TARGET_WEIGHT_RESTORE_TRADE_IDENTITY_COLUMNS,
+    )
+    if len(trade_keys) != len(set(trade_keys)):
+        blockers.append("restore_apply_trade_history_duplicate_idempotency_key")
+    position_keys = _db_restore_apply_plan_idempotency_keys(
+        position_rows,
+        TARGET_WEIGHT_RESTORE_POSITION_IDENTITY_COLUMNS,
+    )
+    if len(position_keys) != len(set(position_keys)):
+        blockers.append("restore_apply_position_duplicate_idempotency_key")
+
+    for index, row in enumerate(trade_rows, start=1):
+        prefix = f"restore_apply_trade_history_row_{index}"
+        symbol = normalize_symbol(str(row.get("symbol") or ""))
+        action = str(row.get("action") or "").upper()
+        if str(row.get("account_key") or "") != candidate_id:
+            blockers.append(f"{prefix}_account_key_mismatch")
+        if not symbol:
+            blockers.append(f"{prefix}_symbol_missing")
+        if action not in {"BUY", "SELL"}:
+            blockers.append(f"{prefix}_action_invalid")
+        if str(row.get("mode") or "").lower() != "paper":
+            blockers.append(f"{prefix}_mode_must_be_paper")
+        if not str(row.get("executed_at") or "").strip():
+            blockers.append(f"{prefix}_executed_at_missing")
+        _required_restore_int(row, "quantity", blockers, prefix=prefix)
+        _required_restore_float(row, "price", blockers, prefix=prefix)
+        _required_restore_float(row, "total_amount", blockers, prefix=prefix)
+        _required_restore_float(
+            row,
+            "commission",
+            blockers,
+            prefix=prefix,
+            allow_zero=True,
+        )
+        _required_restore_float(row, "tax", blockers, prefix=prefix, allow_zero=True)
+        _required_restore_float(
+            row,
+            "slippage",
+            blockers,
+            prefix=prefix,
+            allow_zero=True,
+        )
+
+    for index, row in enumerate(position_rows, start=1):
+        prefix = f"restore_apply_position_row_{index}"
+        symbol = normalize_symbol(str(row.get("symbol") or ""))
+        if str(row.get("account_key") or "") != candidate_id:
+            blockers.append(f"{prefix}_account_key_mismatch")
+        if not symbol:
+            blockers.append(f"{prefix}_symbol_missing")
+        _required_restore_int(row, "quantity", blockers, prefix=prefix)
+        _required_restore_float(row, "avg_price", blockers, prefix=prefix)
+        _required_restore_float(row, "total_invested", blockers, prefix=prefix)
+    return blockers
+
+
+def apply_target_weight_db_restore_plan(
+    *,
+    apply_plan_path: str | Path,
+    backup_confirmed: bool = False,
+    confirm_db_restore_apply: bool = False,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """명시 확인된 ready apply plan을 단일 트랜잭션으로 DB에 반영한다."""
+    plan_file = Path(apply_plan_path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    plan: dict[str, Any] = {}
+    if not plan_file.exists():
+        blockers.append("restore_apply_plan_missing")
+    else:
+        try:
+            plan = json.loads(plan_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"restore_apply_plan_invalid_json:{exc}")
+            plan = {}
+
+    if not backup_confirmed:
+        blockers.append("restore_apply_db_backup_confirmation_required")
+    if not confirm_db_restore_apply:
+        blockers.append("restore_apply_explicit_confirmation_required")
+    if plan.get("artifact_type") != "target_weight_db_restore_apply_plan":
+        blockers.append("restore_apply_plan_artifact_type_invalid")
+    if plan.get("status") != "ready_for_manual_db_apply":
+        blockers.append("restore_apply_plan_status_not_ready")
+    if not bool(plan.get("apply_ready")):
+        blockers.append("restore_apply_plan_not_ready")
+    if plan.get("blockers"):
+        blockers.append("restore_apply_plan_blockers_present")
+
+    candidate_id = str(plan.get("candidate_id") or "")
+    snapshot_date = str(plan.get("snapshot_date") or "")
+    if not candidate_id or not snapshot_date:
+        blockers.append("restore_apply_candidate_or_snapshot_date_missing")
+
+    verification_path = str(plan.get("verification_report_path") or "")
+    if not verification_path:
+        blockers.append("restore_apply_verification_report_missing")
+        fresh_plan = {}
+    else:
+        fresh_plan = plan_target_weight_db_restore_apply(
+            verification_report_path=verification_path,
+            output_dir=output_dir,
+        )
+        if not bool(fresh_plan.get("apply_ready")):
+            blockers.append("restore_apply_fresh_plan_not_ready")
+        fresh_hash = str(fresh_plan.get("verification_report_hash") or "")
+        plan_hash = str(plan.get("verification_report_hash") or "")
+        if fresh_hash and plan_hash and fresh_hash != plan_hash:
+            blockers.append("restore_apply_verification_report_changed_after_plan")
+
+    operations = plan.get("restore_operations") or {}
+    if not isinstance(operations, dict):
+        operations = {}
+    trade_ops = operations.get("trade_history") or {}
+    if not isinstance(trade_ops, dict):
+        trade_ops = {}
+    position_ops = operations.get("positions") or {}
+    if not isinstance(position_ops, dict):
+        position_ops = {}
+    trade_rows = [
+        row for row in (trade_ops.get("rows") or []) if isinstance(row, dict)
+    ]
+    position_rows = [
+        row for row in (position_ops.get("rows") or []) if isinstance(row, dict)
+    ]
+    blockers.extend(
+        _validate_restore_apply_rows(
+            candidate_id=candidate_id,
+            trade_rows=trade_rows,
+            position_rows=position_rows,
+        )
+    )
+    if _coerce_int_or_zero(trade_ops.get("row_count")) != len(trade_rows):
+        blockers.append("restore_apply_trade_history_plan_row_count_mismatch")
+    if _coerce_int_or_zero(position_ops.get("row_count")) != len(position_rows):
+        blockers.append("restore_apply_position_plan_row_count_mismatch")
+
+    inserted_trade_ids: list[int] = []
+    inserted_position_symbols: list[str] = []
+    db_precondition: dict[str, Any] = {"checked": False}
+    applied = False
+
+    if not blockers:
+        from database.models import Position, TradeHistory, db_session
+
+        day_start = datetime.strptime(snapshot_date, "%Y-%m-%d")
+        day_end = day_start + timedelta(days=1)
+        with db_session() as session:
+            existing_trades = (
+                session.query(TradeHistory)
+                .filter(
+                    TradeHistory.account_key == candidate_id,
+                    TradeHistory.executed_at >= day_start,
+                    TradeHistory.executed_at < day_end,
+                )
+                .count()
+            )
+            existing_positions = (
+                session.query(Position)
+                .filter(Position.account_key == candidate_id)
+                .count()
+            )
+            db_precondition = {
+                "checked": True,
+                "trade_count_on_date": existing_trades,
+                "position_count": existing_positions,
+            }
+            if existing_trades or existing_positions:
+                blockers.append(
+                    "restore_apply_current_db_state_not_empty_reconcile_before_apply"
+                )
+            else:
+                for row in trade_rows:
+                    executed_at = _parse_restore_datetime(
+                        row.get("executed_at"),
+                        fallback_date=snapshot_date,
+                    )
+                    trade = TradeHistory(
+                        account_key=candidate_id,
+                        symbol=normalize_symbol(str(row.get("symbol") or "")),
+                        action=str(row.get("action") or "").upper(),
+                        price=float(row.get("price")),
+                        quantity=_coerce_int_or_zero(row.get("quantity")),
+                        total_amount=float(row.get("total_amount")),
+                        commission=float(row.get("commission") or 0),
+                        tax=float(row.get("tax") or 0),
+                        slippage=float(row.get("slippage") or 0),
+                        execution_session_id=str(
+                            row.get("execution_session_id") or ""
+                        ),
+                        order_id=str(row.get("order_id") or ""),
+                        strategy=str(row.get("strategy") or candidate_id),
+                        mode=str(row.get("mode") or "paper"),
+                        order_at=executed_at,
+                        executed_at=executed_at,
+                        reason="target_weight_authoritative_db_restore",
+                    )
+                    session.add(trade)
+                    session.flush()
+                    inserted_trade_ids.append(int(trade.id))
+
+                for row in position_rows:
+                    avg_price = float(row.get("avg_price"))
+                    position = Position(
+                        account_key=candidate_id,
+                        symbol=normalize_symbol(str(row.get("symbol") or "")),
+                        avg_price=avg_price,
+                        quantity=_coerce_int_or_zero(row.get("quantity")),
+                        total_invested=float(row.get("total_invested")),
+                        highest_price=avg_price,
+                        strategy=str(row.get("strategy") or candidate_id),
+                    )
+                    session.add(position)
+                    inserted_position_symbols.append(position.symbol)
+                applied = True
+
+    status = "applied" if applied else "blocked"
+    report = {
+        "artifact_type": "target_weight_db_restore_apply_result",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": status,
+        "applied": applied,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "apply_plan_path": plan_file.as_posix(),
+        "apply_plan_hash": _file_sha256(plan_file) if plan_file.exists() else "",
+        "backup_confirmed": backup_confirmed,
+        "explicit_confirmation": confirm_db_restore_apply,
+        "db_precondition": db_precondition,
+        "applied_rows": {
+            "trade_history": len(inserted_trade_ids),
+            "positions": len(inserted_position_symbols),
+        },
+        "inserted_trade_ids": inserted_trade_ids,
+        "inserted_position_symbols": inserted_position_symbols,
+        "operator_commands": {
+            "post_apply_snapshot_diagnostics": str(
+                (plan.get("operator_commands") or {}).get(
+                    "post_apply_snapshot_diagnostics"
+                )
+                or ""
+            ),
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_apply_result_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    return report
+
+
+def render_target_weight_db_restore_apply_result_markdown(report: dict[str, Any]) -> str:
+    applied_rows = report.get("applied_rows") or {}
+    lines = [
+        "# Target-weight DB Restore Apply Result",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        f"- Applied: `{bool(report.get('applied'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        f"- Apply plan: `{report.get('apply_plan_path') or 'none'}`",
+        "",
+        "## Confirmation",
+        f"- Backup confirmed: `{bool(report.get('backup_confirmed'))}`",
+        f"- Explicit confirmation: `{bool(report.get('explicit_confirmation'))}`",
+        "",
+        "## Applied Rows",
+        f"- TradeHistory: `{applied_rows.get('trade_history', 0)}`",
+        f"- Positions: `{applied_rows.get('positions', 0)}`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_apply_result_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_apply_result_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_apply_result_markdown(report),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_apply_result(report: dict[str, Any]) -> None:
+    applied_rows = report.get("applied_rows") or {}
+    print(f"  status: {report.get('status')}")
+    print(f"  applied: {bool(report.get('applied'))}")
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    print(
+        "  confirmations: "
+        f"backup={bool(report.get('backup_confirmed'))} "
+        f"explicit={bool(report.get('explicit_confirmation'))}"
+    )
+    print(
+        "  applied_rows: "
+        f"trade_history={applied_rows.get('trade_history', 0)} "
+        f"positions={applied_rows.get('positions', 0)}"
     )
     print(f"  artifact: {report.get('artifact_path')}")
     print(f"  report: {report.get('report_path')}")
@@ -9863,6 +10266,11 @@ def main() -> None:
         help="Create a no-write manual DB restore apply plan from a ready verification report.",
     )
     parser.add_argument(
+        "--apply-db-restore",
+        action="store_true",
+        help="Apply a ready DB restore apply plan after explicit backup and restore confirmation.",
+    )
+    parser.add_argument(
         "--restore-manifest",
         help=(
             "Candidate package manifest path for --verify-db-restore-package or "
@@ -9872,6 +10280,20 @@ def main() -> None:
     parser.add_argument(
         "--restore-verification",
         help="Ready DB restore verification report path for --plan-db-restore-apply.",
+    )
+    parser.add_argument(
+        "--restore-apply-plan",
+        help="Ready DB restore apply plan path for --apply-db-restore.",
+    )
+    parser.add_argument(
+        "--backup-confirmed",
+        action="store_true",
+        help="Confirm that a DB backup exists before --apply-db-restore writes rows.",
+    )
+    parser.add_argument(
+        "--confirm-db-restore-apply",
+        action="store_true",
+        help="Explicit confirmation required before --apply-db-restore writes rows.",
     )
     parser.add_argument(
         "--authoritative-trade-history-csv",
@@ -9955,6 +10377,8 @@ def main() -> None:
             cash_blocked_modes.append("--prepare-db-restore-review-bundle")
         if args.plan_db_restore_apply:
             cash_blocked_modes.append("--plan-db-restore-apply")
+        if args.apply_db_restore:
+            cash_blocked_modes.append("--apply-db-restore")
         if cash_blocked_modes:
             parser.error(
                 "--cash cannot be combined with "
@@ -9969,13 +10393,14 @@ def main() -> None:
         args.verify_db_restore_package,
         args.prepare_db_restore_review_bundle,
         args.plan_db_restore_apply,
+        args.apply_db_restore,
     ]
     if sum(1 for enabled in evidence_maintenance_modes if enabled) > 1:
         parser.error(
             "--repair-pilot-evidence, --finalize-pilot-evidence, "
             "--diagnose-portfolio-snapshot, --verify-db-restore-package, "
-            "--prepare-db-restore-review-bundle, and --plan-db-restore-apply "
-            "are mutually exclusive"
+            "--prepare-db-restore-review-bundle, --plan-db-restore-apply, "
+            "and --apply-db-restore are mutually exclusive"
         )
     if (
         args.repair_pilot_evidence
@@ -9984,6 +10409,7 @@ def main() -> None:
         or args.verify_db_restore_package
         or args.prepare_db_restore_review_bundle
         or args.plan_db_restore_apply
+        or args.apply_db_restore
     ) and (
         args.readiness_audit
         or args.daily_ops_summary
@@ -10035,6 +10461,15 @@ def main() -> None:
         parser.error("--restore-verification is required with --plan-db-restore-apply")
     if args.restore_verification and not args.plan_db_restore_apply:
         parser.error("--restore-verification is only used with --plan-db-restore-apply")
+    if args.apply_db_restore and not args.restore_apply_plan:
+        parser.error("--restore-apply-plan is required with --apply-db-restore")
+    if args.restore_apply_plan and not args.apply_db_restore:
+        parser.error("--restore-apply-plan is only used with --apply-db-restore")
+    if (args.backup_confirmed or args.confirm_db_restore_apply) and not args.apply_db_restore:
+        parser.error(
+            "--backup-confirmed and --confirm-db-restore-apply are only used "
+            "with --apply-db-restore"
+        )
     if (
         args.authoritative_trade_history_csv or args.authoritative_positions_csv
     ) and not args.verify_db_restore_package:
@@ -10235,6 +10670,22 @@ def main() -> None:
         print(f"  verification: {result.get('verification_report_path')}")
         _print_target_weight_db_restore_apply_plan(result)
         if result["status"] != "ready_for_manual_db_apply":
+            raise SystemExit(1)
+        return
+
+    if args.apply_db_restore:
+        result = apply_target_weight_db_restore_plan(
+            apply_plan_path=args.restore_apply_plan,
+            backup_confirmed=args.backup_confirmed,
+            confirm_db_restore_apply=args.confirm_db_restore_apply,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore apply")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  apply_plan: {result.get('apply_plan_path')}")
+        _print_target_weight_db_restore_apply_result(result)
+        if result["status"] != "applied":
             raise SystemExit(1)
         return
 

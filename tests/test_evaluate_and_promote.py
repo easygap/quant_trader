@@ -3562,6 +3562,126 @@ def test_current_blockers_routes_restore_ready_to_no_write_apply_plan():
     )
 
 
+def test_current_blockers_routes_ready_apply_plan_to_guarded_apply():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    apply_command = (
+        "python tools/target_weight_rotation_pilot.py --apply-db-restore "
+        "--restore-apply-plan reports/paper_runtime/apply_plan.json "
+        "--backup-confirmed --confirm-db-restore-apply"
+    )
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+            },
+        },
+    }
+    latest_daily_ops = {
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+        },
+    }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json"
+            )
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "source_path": "reports/paper_runtime/verification.json",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "ready_for_authoritative_db_restore",
+        "restore_ready": True,
+        "blockers": [],
+        "candidate_package": {
+            "trade_history": {"hash_ok": True},
+            "positions": {"hash_ok": True},
+        },
+        "authoritative_evidence": {
+            "trade_history": {"provided": True, "match": True},
+            "positions": {"provided": True, "match": True},
+        },
+        "operator_commands": {
+            "plan_manual_db_apply": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--plan-db-restore-apply --restore-verification reports/paper_runtime/verification.json"
+            ),
+        },
+    }
+    latest_db_restore_apply_plan = {
+        "artifact_type": "target_weight_db_restore_apply_plan",
+        "source_path": "reports/paper_runtime/apply_plan.json",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "ready_for_manual_db_apply",
+        "apply_ready": True,
+        "blockers": [],
+        "operator_commands": {
+            "apply_manual_db_restore": apply_command,
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
+        latest_db_restore_apply_plan=latest_db_restore_apply_plan,
+    )
+
+    action = report["next_actions"][0]
+    assert action["snapshot_db_restore_apply_plan_ready"] is True
+    assert action["command"] == apply_command
+    assert action["scheduled_command"] == apply_command
+    assert action["requires"] == "confirmed DB backup and guarded DB restore apply"
+    assert (
+        action["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_apply_ready_manual_confirm_required"
+    )
+    assert action["blocked_finalize_command"] == (
+        "# blocked: guarded DB restore apply required before finalize"
+    )
+
+
 def test_current_blockers_routes_db_persistence_gap_to_diagnostics_before_restore_package():
     from tools.evaluate_and_promote import build_current_blockers_report
 
