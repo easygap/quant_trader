@@ -74,6 +74,11 @@ TARGET_WEIGHT_RESTORE_NUMERIC_COLUMNS = {
     "avg_price",
     "total_invested",
 }
+TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS = [
+    "authoritative_source",
+    "reviewed_by",
+    "reviewed_at",
+]
 TARGET_WEIGHT_RESTORE_TRADE_SAMPLE_COLUMNS = [
     "symbol",
     "action",
@@ -2289,6 +2294,84 @@ def _db_restore_authoritative_csv_action_fields(
         f"{prefix}_content_mismatch_scope": str(
             evidence.get("content_mismatch_scope") or ""
         ),
+        f"{prefix}_review_metadata_ok": bool(evidence.get("review_metadata_ok")),
+        f"{prefix}_metadata_missing_columns": _text_list(
+            evidence.get("metadata_missing_columns")
+        ),
+        f"{prefix}_metadata_incomplete_row_count": _safe_int(
+            evidence.get("metadata_incomplete_row_count")
+        ),
+        f"{prefix}_metadata_candidate_source_row_count": _safe_int(
+            evidence.get("metadata_candidate_source_row_count")
+        ),
+    }
+
+
+def _db_restore_verification_metadata_ready(
+    trade_evidence: dict,
+    positions_evidence: dict,
+) -> bool:
+    return bool(
+        trade_evidence.get("review_metadata_ok")
+        and positions_evidence.get("review_metadata_ok")
+    )
+
+
+def _db_restore_verification_blockers_with_metadata(
+    verification: dict,
+    *,
+    trade_evidence: dict,
+    positions_evidence: dict,
+) -> list[str]:
+    blockers = [
+        str(blocker)
+        for blocker in (verification.get("blockers") or [])
+        if str(blocker).strip()
+    ]
+    if not verification.get("restore_ready"):
+        return blockers
+    if trade_evidence.get("review_metadata_ok") is not True:
+        blockers.append("authoritative_trade_history_csv_review_metadata_required")
+    if positions_evidence.get("review_metadata_ok") is not True:
+        blockers.append("authoritative_positions_csv_review_metadata_required")
+    return list(dict.fromkeys(blockers))
+
+
+def _db_restore_authoritative_metadata_status(
+    *,
+    rows: list[dict[str, object]],
+    fieldnames: list[str],
+) -> dict[str, object]:
+    missing_columns = [
+        column
+        for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        if column not in fieldnames
+    ]
+    incomplete_count = 0
+    candidate_source_count = 0
+    for row in rows:
+        if any(
+            not str(row.get(column) or "").strip()
+            for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        ):
+            incomplete_count += 1
+        source = str(row.get("authoritative_source") or "").strip().lower()
+        if source.startswith("artifact_candidate") or source in {
+            "artifact",
+            "candidate",
+            "candidate_csv",
+            "candidate-only",
+        }:
+            candidate_source_count += 1
+    return {
+        "review_metadata_ok": (
+            not missing_columns
+            and incomplete_count == 0
+            and candidate_source_count == 0
+        ),
+        "metadata_missing_columns": missing_columns,
+        "metadata_incomplete_row_count": incomplete_count,
+        "metadata_candidate_source_row_count": candidate_source_count,
     }
 
 
@@ -2300,6 +2383,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "exists": False,
             "row_count": 0,
             "missing_columns": [],
+            "fieldnames": [],
             "sha256": "",
             "rows": [],
         }
@@ -2310,6 +2394,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "exists": False,
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
+            "fieldnames": [],
             "sha256": "",
             "rows": [],
         }
@@ -2327,6 +2412,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
             "exists": False,
             "row_count": 0,
             "missing_columns": expected_columns.copy(),
+            "fieldnames": [],
             "sha256": "",
             "rows": [],
         }
@@ -2338,6 +2424,7 @@ def _read_csv_progress(path_value: object, expected_columns: list[str]) -> dict[
         "exists": True,
         "row_count": len(rows),
         "missing_columns": missing_columns,
+        "fieldnames": fieldnames,
         "sha256": sha256,
         "rows": rows,
     }
@@ -2377,6 +2464,17 @@ def _db_restore_review_template_action_fields(
                 columns=expected_columns,
                 sample_columns=sample_columns or expected_columns,
             )
+    metadata_status = {
+        "review_metadata_ok": False,
+        "metadata_missing_columns": [],
+        "metadata_incomplete_row_count": 0,
+        "metadata_candidate_source_row_count": 0,
+    }
+    if progress.get("exists"):
+        metadata_status = _db_restore_authoritative_metadata_status(
+            rows=list(progress.get("rows") or []),
+            fieldnames=list(progress.get("fieldnames") or []),
+        )
     return {
         f"{prefix}_provided": bool(progress.get("provided")),
         f"{prefix}_row_count": row_count,
@@ -2394,6 +2492,18 @@ def _db_restore_review_template_action_fields(
         ),
         f"{prefix}_missing_row_sample": row_gap.get("missing_row_sample") or [],
         f"{prefix}_unexpected_row_sample": row_gap.get("unexpected_row_sample") or [],
+        f"{prefix}_review_metadata_ok": bool(
+            metadata_status.get("review_metadata_ok")
+        ),
+        f"{prefix}_metadata_missing_columns": _text_list(
+            metadata_status.get("metadata_missing_columns")
+        ),
+        f"{prefix}_metadata_incomplete_row_count": _safe_int(
+            metadata_status.get("metadata_incomplete_row_count")
+        ),
+        f"{prefix}_metadata_candidate_source_row_count": _safe_int(
+            metadata_status.get("metadata_candidate_source_row_count")
+        ),
     }
 
 
@@ -2753,6 +2863,18 @@ def _target_weight_ops_priority_action(
                         "--plan-db-restore-apply "
                         f"--restore-verification {verification_source}"
                     )
+                verification_raw_ready = bool(
+                    latest_db_restore_verification.get("restore_ready")
+                )
+                verification_metadata_ready = _db_restore_verification_metadata_ready(
+                    verification_trade,
+                    verification_positions,
+                )
+                verification_blockers = _db_restore_verification_blockers_with_metadata(
+                    latest_db_restore_verification,
+                    trade_evidence=verification_trade,
+                    positions_evidence=verification_positions,
+                )
                 action.update({
                     "snapshot_db_restore_verification_source": verification_source,
                     "snapshot_db_restore_verification_generated_at": str(
@@ -2761,12 +2883,14 @@ def _target_weight_ops_priority_action(
                     "snapshot_db_restore_verification_status": str(
                         latest_db_restore_verification.get("status") or ""
                     ),
+                    "snapshot_db_restore_verification_raw_ready": verification_raw_ready,
+                    "snapshot_db_restore_verification_metadata_ready": (
+                        verification_metadata_ready
+                    ),
                     "snapshot_db_restore_verification_ready": bool(
-                        latest_db_restore_verification.get("restore_ready")
+                        verification_raw_ready and verification_metadata_ready
                     ),
-                    "snapshot_db_restore_verification_blockers": (
-                        latest_db_restore_verification.get("blockers") or []
-                    ),
+                    "snapshot_db_restore_verification_blockers": verification_blockers,
                     "snapshot_db_restore_verification_warnings": (
                         latest_db_restore_verification.get("warnings") or []
                     ),
@@ -3603,6 +3727,22 @@ def _target_weight_ops_priority_action(
                     verification_db = (
                         latest_db_restore_verification.get("current_db_state") or {}
                     )
+                    verification_raw_ready = bool(
+                        latest_db_restore_verification.get("restore_ready")
+                    )
+                    verification_metadata_ready = (
+                        _db_restore_verification_metadata_ready(
+                            verification_trade,
+                            verification_positions,
+                        )
+                    )
+                    verification_blockers = (
+                        _db_restore_verification_blockers_with_metadata(
+                            latest_db_restore_verification,
+                            trade_evidence=verification_trade,
+                            positions_evidence=verification_positions,
+                        )
+                    )
                     action.update({
                         "snapshot_db_restore_verification_source": str(
                             latest_db_restore_verification.get("source_path") or ""
@@ -3613,12 +3753,16 @@ def _target_weight_ops_priority_action(
                         "snapshot_db_restore_verification_status": str(
                             latest_db_restore_verification.get("status") or ""
                         ),
+                        "snapshot_db_restore_verification_raw_ready": (
+                            verification_raw_ready
+                        ),
+                        "snapshot_db_restore_verification_metadata_ready": (
+                            verification_metadata_ready
+                        ),
                         "snapshot_db_restore_verification_ready": bool(
-                            latest_db_restore_verification.get("restore_ready")
+                            verification_raw_ready and verification_metadata_ready
                         ),
-                        "snapshot_db_restore_verification_blockers": (
-                            latest_db_restore_verification.get("blockers") or []
-                        ),
+                        "snapshot_db_restore_verification_blockers": verification_blockers,
                         "snapshot_db_restore_verification_warnings": (
                             latest_db_restore_verification.get("warnings") or []
                         ),

@@ -2494,6 +2494,10 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
                 "expected_rows": 4,
                 "empty_template": False,
                 "missing_columns": [],
+                "review_metadata_ok": False,
+                "metadata_missing_columns": ["authoritative_source"],
+                "metadata_incomplete_row_count": 0,
+                "metadata_candidate_source_row_count": 0,
             },
             "positions": {
                 "provided": False,
@@ -2502,6 +2506,13 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
                 "expected_rows": 4,
                 "empty_template": False,
                 "missing_columns": [],
+                "review_metadata_ok": False,
+                "metadata_missing_columns": [
+                    "authoritative_source",
+                    "reviewed_by",
+                ],
+                "metadata_incomplete_row_count": 2,
+                "metadata_candidate_source_row_count": 1,
             },
         },
         "current_db_state": {
@@ -2627,12 +2638,44 @@ def test_current_blockers_embeds_snapshot_recovery_diagnostics():
         is False
     )
     assert action["snapshot_db_restore_authoritative_trade_history_missing_columns"] == []
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_review_metadata_ok"]
+        is False
+    )
+    assert action[
+        "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns"
+    ] == ["authoritative_source"]
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count"
+        ]
+        == 0
+    )
     assert action["snapshot_db_restore_authoritative_positions_provided"] is False
     assert action["snapshot_db_restore_authoritative_positions_match"] is False
     assert action["snapshot_db_restore_authoritative_positions_row_count"] == 0
     assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
     assert action["snapshot_db_restore_authoritative_positions_empty_template"] is False
     assert action["snapshot_db_restore_authoritative_positions_missing_columns"] == []
+    assert (
+        action["snapshot_db_restore_authoritative_positions_review_metadata_ok"]
+        is False
+    )
+    assert action[
+        "snapshot_db_restore_authoritative_positions_metadata_missing_columns"
+    ] == ["authoritative_source", "reviewed_by"]
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count"
+        ]
+        == 2
+    )
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_positions_metadata_candidate_source_row_count"
+        ]
+        == 1
+    )
     assert action["snapshot_db_restore_verification_db_trade_rows_on_date"] == 0
     assert action["snapshot_db_restore_verification_db_positions"] == 0
     assert (
@@ -3208,6 +3251,23 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
         is False
     )
     assert action["snapshot_db_restore_authoritative_trade_history_missing_columns"] == []
+    assert (
+        action["snapshot_db_restore_authoritative_trade_history_review_metadata_ok"]
+        is False
+    )
+    assert action[
+        "snapshot_db_restore_authoritative_trade_history_metadata_missing_columns"
+    ] == [
+        "authoritative_source",
+        "reviewed_by",
+        "reviewed_at",
+    ]
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_trade_history_metadata_incomplete_row_count"
+        ]
+        == 1
+    )
     assert action["snapshot_db_restore_authoritative_trade_history_current_sha256"]
     assert (
         action["snapshot_db_restore_authoritative_trade_history_verified_sha256"]
@@ -3233,6 +3293,23 @@ def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready(tmp
     assert action["snapshot_db_restore_authoritative_positions_expected_rows"] == 4
     assert action["snapshot_db_restore_authoritative_positions_empty_template"] is True
     assert action["snapshot_db_restore_authoritative_positions_missing_columns"] == []
+    assert (
+        action["snapshot_db_restore_authoritative_positions_review_metadata_ok"]
+        is False
+    )
+    assert action[
+        "snapshot_db_restore_authoritative_positions_metadata_missing_columns"
+    ] == [
+        "authoritative_source",
+        "reviewed_by",
+        "reviewed_at",
+    ]
+    assert (
+        action[
+            "snapshot_db_restore_authoritative_positions_metadata_incomplete_row_count"
+        ]
+        == 0
+    )
     assert (
         action["snapshot_db_restore_authoritative_positions_verification_stale"]
         is False
@@ -3526,11 +3603,13 @@ def test_current_blockers_requires_reverify_when_ready_restore_csv_becomes_stale
                 "provided": True,
                 "match": True,
                 "sha256": "verified-before-review-edit",
+                "review_metadata_ok": True,
             },
             "positions": {
                 "provided": True,
                 "match": True,
                 "sha256": ep._file_sha256(positions_template),
+                "review_metadata_ok": True,
             },
         },
     }
@@ -3667,8 +3746,16 @@ def test_current_blockers_routes_restore_ready_to_no_write_apply_plan():
             "positions": {"hash_ok": True},
         },
         "authoritative_evidence": {
-            "trade_history": {"provided": True, "match": True},
-            "positions": {"provided": True, "match": True},
+            "trade_history": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
+            "positions": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
         },
         "operator_commands": {
             "plan_manual_db_apply": apply_plan_command,
@@ -3693,6 +3780,115 @@ def test_current_blockers_routes_restore_ready_to_no_write_apply_plan():
     )
     assert action["blocked_finalize_command"] == (
         "# blocked: no-write DB restore apply plan required before finalize"
+    )
+
+
+def test_current_blockers_requires_reverify_for_legacy_ready_restore_without_review_metadata():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    apply_plan_command = (
+        "python tools/target_weight_rotation_pilot.py --plan-db-restore-apply "
+        "--restore-verification reports/paper_runtime/verification.json"
+    )
+    verify_command = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json"
+    )
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+            },
+        },
+    }
+    latest_daily_ops = {
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+        },
+    }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": verify_command,
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "source_path": "reports/paper_runtime/verification.json",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "ready_for_authoritative_db_restore",
+        "restore_ready": True,
+        "blockers": [],
+        "candidate_package": {
+            "trade_history": {"hash_ok": True},
+            "positions": {"hash_ok": True},
+        },
+        "authoritative_evidence": {
+            "trade_history": {"provided": True, "match": True},
+            "positions": {"provided": True, "match": True},
+        },
+        "operator_commands": {
+            "plan_manual_db_apply": apply_plan_command,
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
+    )
+
+    action = report["next_actions"][0]
+    assert action["snapshot_db_restore_verification_raw_ready"] is True
+    assert action["snapshot_db_restore_verification_metadata_ready"] is False
+    assert action["snapshot_db_restore_verification_ready"] is False
+    assert action["snapshot_db_restore_verification_blockers"] == [
+        "authoritative_trade_history_csv_review_metadata_required",
+        "authoritative_positions_csv_review_metadata_required",
+    ]
+    assert action["command"].startswith(
+        "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle"
+    )
+    assert action["command"] != apply_plan_command
+    assert action["scheduled_command"] == verify_command
+    assert (
+        action["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_csv_required"
     )
 
 
@@ -3776,8 +3972,16 @@ def test_current_blockers_routes_ready_apply_plan_to_pre_apply_backup():
             "positions": {"hash_ok": True},
         },
         "authoritative_evidence": {
-            "trade_history": {"provided": True, "match": True},
-            "positions": {"provided": True, "match": True},
+            "trade_history": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
+            "positions": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
         },
         "operator_commands": {
             "plan_manual_db_apply": (
@@ -3893,8 +4097,16 @@ def test_current_blockers_routes_ready_backup_to_guarded_apply():
             "positions": {"hash_ok": True},
         },
         "authoritative_evidence": {
-            "trade_history": {"provided": True, "match": True},
-            "positions": {"provided": True, "match": True},
+            "trade_history": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
+            "positions": {
+                "provided": True,
+                "match": True,
+                "review_metadata_ok": True,
+            },
         },
         "operator_commands": {
             "plan_manual_db_apply": (

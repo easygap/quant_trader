@@ -885,6 +885,12 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             f"{prefix}_missing_row_count",
             f"{prefix}_unexpected_row_count",
         }
+        metadata_keys = {
+            f"{prefix}_review_metadata_ok",
+            f"{prefix}_metadata_missing_columns",
+            f"{prefix}_metadata_incomplete_row_count",
+            f"{prefix}_metadata_candidate_source_row_count",
+        }
         if not any(key in priority_action for key in detail_keys):
             continue
         missing_columns = priority_action.get(f"{prefix}_missing_columns") or []
@@ -902,6 +908,22 @@ def _print_db_restore_authoritative_csv_status(priority_action: dict) -> None:
             "missing_columns="
             f"{', '.join(str(column) for column in missing_columns) or 'none'}"
         )
+        if any(key in priority_action for key in metadata_keys):
+            metadata_missing_columns = (
+                priority_action.get(f"{prefix}_metadata_missing_columns") or []
+            )
+            if not isinstance(metadata_missing_columns, list):
+                metadata_missing_columns = []
+            print(
+                f"    Snapshot DB restore authoritative {label} metadata: "
+                f"ok={bool(priority_action.get(f'{prefix}_review_metadata_ok'))} "
+                "missing_columns="
+                f"{', '.join(str(column) for column in metadata_missing_columns) or 'none'} "
+                "incomplete_rows="
+                f"{priority_action.get(f'{prefix}_metadata_incomplete_row_count', 0)} "
+                "candidate_source_rows="
+                f"{priority_action.get(f'{prefix}_metadata_candidate_source_row_count', 0)}"
+            )
 
 
 def _target_weight_invalid_requires_fresh_evidence(payload: dict) -> bool:
