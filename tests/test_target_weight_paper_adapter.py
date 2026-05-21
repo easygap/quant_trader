@@ -2594,6 +2594,12 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "--authoritative-trade-history-csv review/reviewed_authoritative_trade_history.csv "
         "--authoritative-positions-csv review/reviewed_authoritative_positions.csv"
     )
+    inspect_review_progress = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--inspect-db-restore-review-progress --restore-manifest restore.json "
+        "--authoritative-trade-history-csv review/reviewed_authoritative_trade_history.csv "
+        "--authoritative-positions-csv review/reviewed_authoritative_positions.csv"
+    )
     (tmp_path / "current_blockers.json").write_text(
         json.dumps(
             {
@@ -2602,14 +2608,10 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                     "current_priority_action": {
                         "strategy": strategy,
                         "desc": (
-                            "target-weight DB 복구 authoritative CSV 템플릿 작성 후 "
-                            "verify 실행"
+                            "target-weight DB 복구 reviewed CSV 진행상태 점검 후 "
+                            "authoritative verify 준비"
                         ),
-                        "command": (
-                            "# blocked: fill reviewed authoritative "
-                            "trade_history/positions CSV templates before DB "
-                            "restore verification"
-                        ),
+                        "command": inspect_review_progress,
                         "scheduled_command": verify_after_review,
                         "order_safety": "no_order",
                         "db_persistence_guard": (
@@ -2650,6 +2652,9 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
                         ),
                         "snapshot_db_restore_verify_after_manual_review_command": (
                             verify_after_review
+                        ),
+                        "snapshot_db_restore_inspect_review_progress_command": (
+                            inspect_review_progress
                         ),
                         "snapshot_db_restore_verification_status": "blocked",
                         "snapshot_db_restore_verification_ready": False,
@@ -2718,7 +2723,12 @@ def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
         "Snapshot DB restore authoritative positions template: "
         "review/reviewed_authoritative_positions.csv"
     ) in output
+    assert f"Priority command: {inspect_review_progress}" in output
     assert "Snapshot DB restore verify after manual review:" in output
+    assert (
+        "Snapshot DB restore inspect review progress: "
+        f"{inspect_review_progress}"
+    ) in output
     assert (
         "Snapshot DB restore authoritative trade history CSV: "
         "provided=True rows=0/4 empty_template=True verify_stale=False "
