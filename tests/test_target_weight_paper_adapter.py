@@ -7523,6 +7523,7 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
         "trade_history_review_checklist_csv",
         "positions_review_checklist_csv",
     ]
+    assert bundle["manual_review_files_upgraded"] == []
     assert bundle["manual_review_files_preserved"] == []
     files = bundle["review_files"]
     candidate_trade = Path(files["candidate_trade_history_csv"])
@@ -7657,9 +7658,69 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert "Authoritative CSV auto-generated: `False`" in report_md
     assert "Review checklist auto-generated: `True`" in report_md
     assert "Manual review files created" in report_md
+    assert "Manual review files upgraded" in report_md
     assert "manual review checklist" in report_md
     assert "Required authoritative metadata columns" in report_md
     assert "Do not use artifact-only candidate rows as authoritative evidence" in report_md
+
+    with authoritative_trade.open("w", encoding="utf-8-sig", newline="") as handle:
+        csv.DictWriter(
+            handle,
+            fieldnames=twp.TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        ).writeheader()
+    with authoritative_positions.open("w", encoding="utf-8-sig", newline="") as handle:
+        csv.DictWriter(
+            handle,
+            fieldnames=twp.TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        ).writeheader()
+
+    legacy_upgrade_bundle = twp.prepare_target_weight_db_restore_review_bundle(
+        manifest_path=package["manifest_path"],
+        output_dir=tmp_path / "review_runtime",
+    )
+    assert legacy_upgrade_bundle["manual_review_files_created"] == []
+    assert legacy_upgrade_bundle["manual_review_files_upgraded"] == [
+        "authoritative_trade_history_template_csv",
+        "authoritative_positions_template_csv",
+    ]
+    assert "trade_history_review_checklist_csv" in (
+        legacy_upgrade_bundle["manual_review_files_preserved"]
+    )
+    assert "positions_review_checklist_csv" in (
+        legacy_upgrade_bundle["manual_review_files_preserved"]
+    )
+    upgraded_trade_reader = csv.DictReader(
+        authoritative_trade.open(encoding="utf-8-sig")
+    )
+    upgraded_positions_reader = csv.DictReader(
+        authoritative_positions.open(encoding="utf-8-sig")
+    )
+    assert list(upgraded_trade_reader) == []
+    assert list(upgraded_positions_reader) == []
+    assert set(twp.TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS).issubset(
+        set(upgraded_trade_reader.fieldnames or [])
+    )
+    assert set(twp.TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS).issubset(
+        set(upgraded_positions_reader.fieldnames or [])
+    )
+    legacy_progress = twp.inspect_target_weight_db_restore_review_progress(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=authoritative_trade,
+        authoritative_positions_csv=authoritative_positions,
+        output_dir=tmp_path / "review_progress_legacy_headers",
+    )
+    assert (
+        "authoritative_trade_history_csv_review_metadata_columns_missing"
+        not in legacy_progress["blockers"]
+    )
+    assert (
+        "authoritative_positions_csv_review_metadata_columns_missing"
+        not in legacy_progress["blockers"]
+    )
+    assert "authoritative_trade_history_csv_empty_template" in (
+        legacy_progress["blockers"]
+    )
+    assert "authoritative_positions_csv_empty_template" in legacy_progress["blockers"]
 
     edited_trade_template = "manual,edit\nkeep,1\n"
     authoritative_trade.write_text(edited_trade_template, encoding="utf-8")
@@ -7675,6 +7736,7 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert "trade_history_review_checklist_csv" in (
         rerun_bundle["manual_review_files_preserved"]
     )
+    assert rerun_bundle["manual_review_files_upgraded"] == []
     assert authoritative_trade.read_text(encoding="utf-8") == edited_trade_template
     assert trade_checklist.read_text(encoding="utf-8") == edited_trade_checklist
 

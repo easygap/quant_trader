@@ -1937,6 +1937,17 @@ def _print_target_weight_daily_ops_status(
                         "    Snapshot DB restore manual review files preserved: "
                         + ", ".join(str(item) for item in preserved_review_files)
                     )
+                upgraded_review_files = (
+                    priority_action.get(
+                        "snapshot_db_restore_review_bundle_manual_review_files_upgraded"
+                    )
+                    or []
+                )
+                if upgraded_review_files:
+                    print(
+                        "    Snapshot DB restore manual review files upgraded: "
+                        + ", ".join(str(item) for item in upgraded_review_files)
+                    )
                 if priority_action.get(
                     "snapshot_db_restore_authoritative_trade_history_template_csv"
                 ):
