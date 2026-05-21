@@ -2554,6 +2554,140 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
     ) in output
 
 
+def test_paper_pilot_control_status_promotes_csv_fill_after_review_bundle_ready(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import tools.paper_pilot_control as ppc
+
+    monkeypatch.setattr(ppc, "_current_kst_date", lambda: "2026-04-12")
+    strategy = "target_weight_candidate"
+    summary_dir = tmp_path / "paper_runtime"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / f"target_weight_daily_ops_summary_{strategy}_2026-04-10.json").write_text(
+        json.dumps(
+            _daily_ops_with_summary_hash({
+                "artifact_type": "target_weight_daily_ops_summary",
+                "candidate_id": strategy,
+                "trade_day": "2026-04-10",
+                "status": "PILOT_EVIDENCE_INVALID",
+                "next_step": "DB 저장 증거 불완전",
+                "evidence_progress": {
+                    "verified_pilot_days": 0,
+                    "target_days": 60,
+                    "shadow_days": 2,
+                    "invalid_execution_days": 1,
+                },
+                "operator_commands": {
+                    "execute_capped_paper": "# blocked: DB persistence proof incomplete",
+                    "enable_suggested_caps": "# blocked: DB persistence proof incomplete",
+                },
+            }),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    verify_after_review = (
+        "python tools/target_weight_rotation_pilot.py "
+        "--verify-db-restore-package --restore-manifest restore.json "
+        "--authoritative-trade-history-csv review/reviewed_authoritative_trade_history.csv "
+        "--authoritative-positions-csv review/reviewed_authoritative_positions.csv"
+    )
+    (tmp_path / "current_blockers.json").write_text(
+        json.dumps(
+            {
+                "operator_runbook": {
+                    "primary_strategy": strategy,
+                    "current_priority_action": {
+                        "strategy": strategy,
+                        "desc": (
+                            "target-weight DB 복구 authoritative CSV 템플릿 작성 후 "
+                            "verify 실행"
+                        ),
+                        "command": (
+                            "# blocked: fill reviewed authoritative "
+                            "trade_history/positions CSV templates before DB "
+                            "restore verification"
+                        ),
+                        "scheduled_command": verify_after_review,
+                        "order_safety": "no_order",
+                        "db_persistence_guard": (
+                            "target_weight_db_persistence_proof_required"
+                        ),
+                        "db_restore_review_guard": (
+                            "target_weight_authoritative_db_restore_csv_fill_required"
+                        ),
+                        "verified_pilot_days": 0,
+                        "target_days": 60,
+                        "shadow_days": 2,
+                        "invalid_execution_days": 1,
+                        "snapshot_db_restore_status": "restore_required",
+                        "snapshot_db_restore_required": True,
+                        "snapshot_db_restore_trade_rows_expected": 4,
+                        "snapshot_db_restore_trade_rows_current": 0,
+                        "snapshot_db_restore_position_symbols_expected": 4,
+                        "snapshot_db_restore_positions_current": 0,
+                        "snapshot_db_restore_package_verify_command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--verify-db-restore-package --restore-manifest restore.json"
+                        ),
+                        "snapshot_db_restore_review_bundle_command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--prepare-db-restore-review-bundle "
+                            "--restore-manifest restore.json"
+                        ),
+                        "snapshot_db_restore_review_bundle_status": (
+                            "ready_for_manual_authoritative_review"
+                        ),
+                        "snapshot_db_restore_review_bundle_ready": True,
+                        "snapshot_db_restore_review_bundle_dir": "review",
+                        "snapshot_db_restore_authoritative_trade_history_template_csv": (
+                            "review/reviewed_authoritative_trade_history.csv"
+                        ),
+                        "snapshot_db_restore_authoritative_positions_template_csv": (
+                            "review/reviewed_authoritative_positions.csv"
+                        ),
+                        "snapshot_db_restore_verify_after_manual_review_command": (
+                            verify_after_review
+                        ),
+                        "snapshot_db_restore_verification_status": "blocked",
+                        "snapshot_db_restore_verification_ready": False,
+                        "snapshot_db_restore_verification_blockers": [
+                            "authoritative_trade_history_csv_required"
+                        ],
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ppc._print_target_weight_daily_ops_status(strategy, reports_dir=tmp_path)
+
+    output = capsys.readouterr().out
+    assert (
+        "Snapshot DB restore review bundle: "
+        "status=ready_for_manual_authoritative_review ready=True"
+    ) in output
+    assert "Snapshot DB restore review bundle dir: review" in output
+    assert (
+        "Snapshot DB restore authoritative trade history template: "
+        "review/reviewed_authoritative_trade_history.csv"
+    ) in output
+    assert (
+        "Snapshot DB restore authoritative positions template: "
+        "review/reviewed_authoritative_positions.csv"
+    ) in output
+    assert "Snapshot DB restore verify after manual review:" in output
+    assert (
+        "Operator next action: FILL reviewed authoritative "
+        "trade_history/positions CSV templates, then run DB restore verification:"
+    ) in output
+    assert verify_after_review in output
+
+
 def test_paper_pilot_control_status_uses_repaired_summary_run_guard_without_blockers(
     tmp_path,
     monkeypatch,

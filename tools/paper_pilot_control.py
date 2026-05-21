@@ -940,6 +940,8 @@ def _target_weight_operator_next_action(
     priority_db_guard: str,
     priority_db_restore_review_guard: str,
     priority_db_restore_review_bundle_command: str,
+    priority_db_restore_review_bundle_ready: bool,
+    priority_db_restore_verify_after_manual_review_command: str,
     priority_db_restore_verify_command: str,
     priority_db_restore_verification_blockers: list,
     priority_diagnostics_status: str,
@@ -1044,6 +1046,21 @@ def _target_weight_operator_next_action(
             return (
                 "RESTORE verified authoritative DB trade_history/positions proof, "
                 "then rerun daily ops"
+            )
+        if priority_db_restore_review_bundle_ready:
+            verify_after_manual_review = (
+                priority_db_restore_verify_after_manual_review_command
+                or verify_command
+            )
+            if verify_after_manual_review:
+                return (
+                    "FILL reviewed authoritative trade_history/positions CSV "
+                    "templates, then run DB restore verification: "
+                    f"{verify_after_manual_review}"
+                )
+            return (
+                "FILL reviewed authoritative trade_history/positions CSV "
+                "templates before DB restore verification"
             )
         if priority_db_restore_review_bundle_command:
             return (
@@ -1541,6 +1558,13 @@ def _print_target_weight_daily_ops_status(
     priority_db_restore_review_bundle_command = str(
         priority_action.get("snapshot_db_restore_review_bundle_command") or ""
     ).strip()
+    priority_db_restore_review_bundle_ready = bool(
+        priority_action.get("snapshot_db_restore_review_bundle_ready")
+    )
+    priority_db_restore_verify_after_manual_review_command = str(
+        priority_action.get("snapshot_db_restore_verify_after_manual_review_command")
+        or ""
+    ).strip()
     priority_db_restore_verify_command = str(
         priority_action.get("snapshot_db_restore_package_verify_command") or ""
     ).strip()
@@ -1690,6 +1714,36 @@ def _print_target_weight_daily_ops_status(
                     "    Snapshot DB restore review bundle command: "
                     f"{priority_db_restore_review_bundle_command}"
                 )
+            if priority_action.get("snapshot_db_restore_review_bundle_status"):
+                print(
+                    "    Snapshot DB restore review bundle: "
+                    f"status={priority_action.get('snapshot_db_restore_review_bundle_status')} "
+                    f"ready={priority_db_restore_review_bundle_ready}"
+                )
+                if priority_action.get("snapshot_db_restore_review_bundle_dir"):
+                    print(
+                        "    Snapshot DB restore review bundle dir: "
+                        f"{priority_action.get('snapshot_db_restore_review_bundle_dir')}"
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_authoritative_trade_history_template_csv"
+                ):
+                    print(
+                        "    Snapshot DB restore authoritative trade history template: "
+                        f"{priority_action.get('snapshot_db_restore_authoritative_trade_history_template_csv')}"
+                    )
+                if priority_action.get(
+                    "snapshot_db_restore_authoritative_positions_template_csv"
+                ):
+                    print(
+                        "    Snapshot DB restore authoritative positions template: "
+                        f"{priority_action.get('snapshot_db_restore_authoritative_positions_template_csv')}"
+                    )
+                if priority_db_restore_verify_after_manual_review_command:
+                    print(
+                        "    Snapshot DB restore verify after manual review: "
+                        f"{priority_db_restore_verify_after_manual_review_command}"
+                    )
             if priority_db_restore_review_guard:
                 print(
                     "    Snapshot DB restore review guard: "
@@ -1987,6 +2041,8 @@ def _print_target_weight_daily_ops_status(
         priority_db_guard=priority_db_guard,
         priority_db_restore_review_guard=priority_db_restore_review_guard,
         priority_db_restore_review_bundle_command=priority_db_restore_review_bundle_command,
+        priority_db_restore_review_bundle_ready=priority_db_restore_review_bundle_ready,
+        priority_db_restore_verify_after_manual_review_command=priority_db_restore_verify_after_manual_review_command,
         priority_db_restore_verify_command=priority_db_restore_verify_command,
         priority_db_restore_verification_blockers=priority_db_restore_verification_blockers,
         priority_diagnostics_status=priority_diagnostics_status,

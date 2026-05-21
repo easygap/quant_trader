@@ -2967,6 +2967,151 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["follow_up"].endswith("--daily-ops-summary")
 
 
+def test_current_blockers_promotes_manual_csv_fill_after_review_bundle_ready():
+    from tools.evaluate_and_promote import build_current_blockers_report
+
+    blocker_summary = {
+        "artifact_type": "promotion_blocker_summary",
+        "schema_version": 1,
+        "generated_at": "2026-05-13T14:07:37",
+        "source_artifact_hash": "e" * 64,
+        "summary": {
+            "total_strategies": 1,
+            "status_counts": {"provisional_paper_candidate": 1},
+            "live_ready_count": 0,
+            "blocked_from_live_count": 1,
+        },
+        "strategies": {
+            "target_weight_best": {
+                "status": "provisional_paper_candidate",
+                "allowed_modes": ["backtest", "paper"],
+            },
+        },
+    }
+    latest_daily_ops = {
+        "trade_day": "2026-05-20",
+        "status": "PILOT_EVIDENCE_INVALID",
+        "evidence_progress": {
+            "verified_pilot_days": 0,
+            "shadow_days": 2,
+            "invalid_execution_days": 1,
+            "invalid_reasons": {"target_weight_db_persistence_complete_false": 1},
+        },
+        "operator_commands": {
+            "daily_ops_summary": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--candidate-id target_weight_best --daily-ops-summary"
+            ),
+        },
+    }
+    latest_snapshot_diagnostics = {
+        "artifact_type": "target_weight_portfolio_snapshot_diagnostics",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked_missing_snapshot_history",
+        "db_restore_checklist": {
+            "status": "restore_required",
+            "restore_required": True,
+            "trade_history": {
+                "expected_row_count": 4,
+                "current_db_rows_on_date": 0,
+            },
+            "positions": {
+                "expected_symbol_count": 4,
+                "current_db_position_count": 0,
+                "missing_or_unverified_symbols": ["AAA", "BBB"],
+            },
+        },
+        "db_restore_candidate_package": {
+            "generated": True,
+            "manifest_path": "reports/paper_runtime/restore_manifest.json",
+            "trade_history_candidate_csv": "reports/paper_runtime/trades.csv",
+            "positions_candidate_csv": "reports/paper_runtime/positions.csv",
+            "trade_history_candidate_rows": 4,
+            "position_candidate_rows": 4,
+            "requires_authoritative_confirmation": True,
+        },
+        "operator_commands": {
+            "verify_db_restore_package": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json "
+                "--authoritative-trade-history-csv <reviewed_trade_history_csv> "
+                "--authoritative-positions-csv <reviewed_positions_csv>"
+            )
+        },
+    }
+    latest_db_restore_verification = {
+        "artifact_type": "target_weight_db_restore_package_verification",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "status": "blocked",
+        "restore_ready": False,
+        "blockers": ["authoritative_trade_history_csv_required"],
+    }
+    latest_db_restore_review_bundle = {
+        "artifact_type": "target_weight_db_restore_review_bundle",
+        "candidate_id": "target_weight_best",
+        "snapshot_date": "2026-05-20",
+        "generated_at": "2026-05-20T16:00:00",
+        "status": "ready_for_manual_authoritative_review",
+        "review_bundle_ready": True,
+        "bundle_dir": "reports/paper_runtime/review_bundle",
+        "review_files": {
+            "candidate_trade_history_csv": "reports/paper_runtime/review_bundle/candidate_trade_history.csv",
+            "candidate_positions_csv": "reports/paper_runtime/review_bundle/candidate_positions.csv",
+            "authoritative_trade_history_template_csv": "reports/paper_runtime/review_bundle/reviewed_authoritative_trade_history.csv",
+            "authoritative_positions_template_csv": "reports/paper_runtime/review_bundle/reviewed_authoritative_positions.csv",
+        },
+        "operator_commands": {
+            "verify_after_manual_review": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--verify-db-restore-package --restore-manifest reports/paper_runtime/restore_manifest.json "
+                "--authoritative-trade-history-csv reports/paper_runtime/review_bundle/reviewed_authoritative_trade_history.csv "
+                "--authoritative-positions-csv reports/paper_runtime/review_bundle/reviewed_authoritative_positions.csv"
+            )
+        },
+    }
+
+    report = build_current_blockers_report(
+        blocker_summary,
+        latest_daily_ops=latest_daily_ops,
+        latest_snapshot_diagnostics=latest_snapshot_diagnostics,
+        latest_db_restore_verification=latest_db_restore_verification,
+        latest_db_restore_review_bundle=latest_db_restore_review_bundle,
+    )
+
+    action = report["next_actions"][0]
+    assert action["command"].startswith(
+        "# blocked: fill reviewed authoritative trade_history/positions CSV templates"
+    )
+    assert action["requires"] == (
+        "filled reviewed authoritative trade_history/positions CSV"
+    )
+    assert (
+        action["db_restore_review_guard"]
+        == "target_weight_authoritative_db_restore_csv_fill_required"
+    )
+    assert action["snapshot_db_restore_review_bundle_ready"] is True
+    assert action["snapshot_db_restore_review_bundle_status"] == (
+        "ready_for_manual_authoritative_review"
+    )
+    assert action["snapshot_db_restore_review_bundle_dir"].endswith("review_bundle")
+    assert action[
+        "snapshot_db_restore_authoritative_trade_history_template_csv"
+    ].endswith("reviewed_authoritative_trade_history.csv")
+    assert action[
+        "snapshot_db_restore_authoritative_positions_template_csv"
+    ].endswith("reviewed_authoritative_positions.csv")
+    assert action["scheduled_command"] == action[
+        "snapshot_db_restore_verify_after_manual_review_command"
+    ]
+    assert "reviewed_authoritative_trade_history.csv" in action["scheduled_command"]
+    assert (
+        report["operator_runbook"]["latest_db_restore_review_bundle"]["status"]
+        == "ready_for_manual_authoritative_review"
+    )
+
+
 def test_current_blockers_routes_db_persistence_gap_to_diagnostics_before_restore_package():
     from tools.evaluate_and_promote import build_current_blockers_report
 
