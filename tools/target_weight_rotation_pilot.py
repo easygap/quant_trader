@@ -3366,6 +3366,26 @@ def _write_csv_rows(path: Path, rows: list[dict[str, Any]], columns: list[str]) 
             writer.writerow({column: row.get(column, "") for column in columns})
 
 
+def _can_upgrade_empty_manual_review_csv_header(
+    path: Path,
+    *,
+    rows: list[dict[str, Any]],
+    fieldnames: list[str],
+    target_columns: list[str],
+) -> bool:
+    if rows:
+        return False
+    if not fieldnames:
+        return path.stat().st_size == 0
+    known_columns = (
+        set(TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS)
+        | set(TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS)
+        | set(TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS)
+        | set(target_columns)
+    )
+    return all(column in known_columns for column in fieldnames)
+
+
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as handle:
@@ -4282,8 +4302,23 @@ def _write_manual_review_csv_if_missing(
     file_key: str,
     created_files: list[str],
     preserved_files: list[str],
+    upgraded_files: list[str] | None = None,
+    upgrade_empty_header: bool = False,
 ) -> None:
     if path.exists():
+        if upgrade_empty_header:
+            existing_rows, fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+            missing_columns = [column for column in columns if column not in fieldnames]
+            if missing_columns and _can_upgrade_empty_manual_review_csv_header(
+                path,
+                rows=existing_rows,
+                fieldnames=fieldnames,
+                target_columns=columns,
+            ):
+                _write_csv_rows(path, [], columns)
+                if upgraded_files is not None:
+                    upgraded_files.append(file_key)
+                return
         preserved_files.append(file_key)
         return
     _write_csv_rows(path, rows, columns)
@@ -4361,6 +4396,7 @@ def prepare_target_weight_db_restore_review_bundle(
     bundle_ready = not blockers
     manual_review_files_created: list[str] = []
     manual_review_files_preserved: list[str] = []
+    manual_review_files_upgraded: list[str] = []
     if bundle_ready:
         bundle_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(Path(str(trade_info.get("path"))), candidate_trade_path)
@@ -4374,6 +4410,8 @@ def prepare_target_weight_db_restore_review_bundle(
             file_key="authoritative_trade_history_template_csv",
             created_files=manual_review_files_created,
             preserved_files=manual_review_files_preserved,
+            upgraded_files=manual_review_files_upgraded,
+            upgrade_empty_header=True,
         )
         _write_manual_review_csv_if_missing(
             authoritative_positions_template,
@@ -4384,6 +4422,8 @@ def prepare_target_weight_db_restore_review_bundle(
             file_key="authoritative_positions_template_csv",
             created_files=manual_review_files_created,
             preserved_files=manual_review_files_preserved,
+            upgraded_files=manual_review_files_upgraded,
+            upgrade_empty_header=True,
         )
         _write_manual_review_csv_if_missing(
             trade_review_checklist_path,
@@ -4480,6 +4520,7 @@ def prepare_target_weight_db_restore_review_bundle(
         "manual_review_required": True,
         "manual_review_files_created": manual_review_files_created,
         "manual_review_files_preserved": manual_review_files_preserved,
+        "manual_review_files_upgraded": manual_review_files_upgraded,
         "no_write_safety": {
             "db_write_enabled": False,
             "portfolio_snapshot_write_enabled": False,
@@ -4496,6 +4537,7 @@ def prepare_target_weight_db_restore_review_bundle(
                 )
             ),
             "manual_review_files_preserved": manual_review_files_preserved,
+            "manual_review_files_upgraded": manual_review_files_upgraded,
         },
         "operator_commands": {
             "inspect_review_progress": inspect_command,
@@ -4524,6 +4566,7 @@ def render_target_weight_db_restore_review_bundle_markdown(
     files = report.get("review_files") or {}
     created_files = report.get("manual_review_files_created") or []
     preserved_files = report.get("manual_review_files_preserved") or []
+    upgraded_files = report.get("manual_review_files_upgraded") or []
     lines = [
         "# Target-weight DB Restore Review Bundle",
         "",
@@ -4556,6 +4599,8 @@ def render_target_weight_db_restore_review_bundle_markdown(
         f"`{files.get('positions_review_checklist_csv') or 'none'}`",
         "- Manual review files created: "
         f"`{', '.join(created_files) or 'none'}`",
+        "- Manual review files upgraded: "
+        f"`{', '.join(upgraded_files) or 'none'}`",
         "- Manual review files preserved: "
         f"`{', '.join(preserved_files) or 'none'}`",
         "- Required authoritative metadata columns: "
@@ -4642,6 +4687,11 @@ def _print_target_weight_db_restore_review_bundle(report: dict[str, Any]) -> Non
         print(
             "  manual_review_files_preserved: "
             f"{', '.join(report.get('manual_review_files_preserved') or [])}"
+        )
+    if report.get("manual_review_files_upgraded"):
+        print(
+            "  manual_review_files_upgraded: "
+            f"{', '.join(report.get('manual_review_files_upgraded') or [])}"
         )
     verify_command = (report.get("operator_commands") or {}).get(
         "verify_after_manual_review"
