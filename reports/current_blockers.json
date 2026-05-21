@@ -1,13 +1,13 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T09:12:12.384633",
+  "generated_at": "2026-05-21T09:23:35.851762",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T09:12:12.384633",
+    "checked_at": "2026-05-21T09:23:35.851762",
     "age_days": 1.67,
     "max_age_days": 7,
     "status": "FRESH",
@@ -94,9 +94,9 @@
         "target_weight_db_persistence_complete_false": 1
       },
       "desc": "target-weight DB 복구 패키지 authoritative CSV 검토 후 verify 실행",
-      "command": "# blocked: reviewed authoritative trade_history/positions CSV required before DB restore verification",
+      "command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "order_safety": "no_order",
-      "requires": "reviewed authoritative trade_history/positions CSV",
+      "requires": "manual authoritative review bundle and reviewed CSV",
       "db_persistence_guard": "target_weight_db_persistence_proof_required",
       "blocked_finalize_command": "# blocked: reviewed authoritative DB restore verification required before finalize",
       "blocked_repair_command": "# blocked: reviewed authoritative DB restore verification required before repair",
@@ -150,6 +150,7 @@
       "snapshot_db_restore_authoritative_positions_match": false,
       "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
       "snapshot_db_restore_verification_db_positions": 0,
+      "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "db_restore_review_guard": "target_weight_authoritative_db_restore_csv_required"
@@ -200,9 +201,9 @@
       {
         "step": 3,
         "desc": "target-weight DB 복구 패키지 authoritative CSV 검토 후 verify 실행",
-        "command": "# blocked: reviewed authoritative trade_history/positions CSV required before DB restore verification",
+        "command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
         "order_safety": "no_order",
-        "requires": "reviewed authoritative trade_history/positions CSV",
+        "requires": "manual authoritative review bundle and reviewed CSV",
         "follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
         "scheduled_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
         "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary"
@@ -228,7 +229,7 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T09:12:12.384633",
+      "checked_at": "2026-05-21T09:23:35.851762",
       "age_days": 1.67,
       "max_age_days": 7,
       "status": "FRESH",
@@ -541,7 +542,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T09:12:12.384633",
+      "checked_at": "2026-05-21T09:23:35.851762",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -668,9 +669,9 @@
         "target_weight_db_persistence_complete_false": 1
       },
       "desc": "target-weight DB 복구 패키지 authoritative CSV 검토 후 verify 실행",
-      "command": "# blocked: reviewed authoritative trade_history/positions CSV required before DB restore verification",
+      "command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "order_safety": "no_order",
-      "requires": "reviewed authoritative trade_history/positions CSV",
+      "requires": "manual authoritative review bundle and reviewed CSV",
       "db_persistence_guard": "target_weight_db_persistence_proof_required",
       "blocked_finalize_command": "# blocked: reviewed authoritative DB restore verification required before finalize",
       "blocked_repair_command": "# blocked: reviewed authoritative DB restore verification required before repair",
@@ -724,6 +725,7 @@
       "snapshot_db_restore_authoritative_positions_match": false,
       "snapshot_db_restore_verification_db_trade_rows_on_date": 0,
       "snapshot_db_restore_verification_db_positions": 0,
+      "snapshot_db_restore_review_bundle_command": "python tools/target_weight_rotation_pilot.py --prepare-db-restore-review-bundle --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json",
       "scheduled_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "scheduled_follow_up": "python tools/target_weight_rotation_pilot.py --candidate-id target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --daily-ops-summary",
       "db_restore_review_guard": "target_weight_authoritative_db_restore_csv_required"
