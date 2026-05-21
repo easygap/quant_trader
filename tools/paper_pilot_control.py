@@ -939,6 +939,7 @@ def _target_weight_operator_next_action(
     priority_wait_guard: str,
     priority_db_guard: str,
     priority_db_restore_review_guard: str,
+    priority_db_restore_review_bundle_command: str,
     priority_db_restore_verify_command: str,
     priority_db_restore_verification_blockers: list,
     priority_diagnostics_status: str,
@@ -1043,6 +1044,11 @@ def _target_weight_operator_next_action(
             return (
                 "RESTORE verified authoritative DB trade_history/positions proof, "
                 "then rerun daily ops"
+            )
+        if priority_db_restore_review_bundle_command:
+            return (
+                "RUN no-order DB restore review bundle, then fill authoritative "
+                f"CSV and verify: {priority_db_restore_review_bundle_command}"
             )
         if verify_command:
             suffix = f"; blockers={blockers}" if blockers else ""
@@ -1532,6 +1538,9 @@ def _print_target_weight_daily_ops_status(
     priority_db_restore_review_guard = str(
         priority_action.get("db_restore_review_guard") or ""
     ).strip()
+    priority_db_restore_review_bundle_command = str(
+        priority_action.get("snapshot_db_restore_review_bundle_command") or ""
+    ).strip()
     priority_db_restore_verify_command = str(
         priority_action.get("snapshot_db_restore_package_verify_command") or ""
     ).strip()
@@ -1675,6 +1684,11 @@ def _print_target_weight_daily_ops_status(
                 print(
                     "    Snapshot DB restore verify command: "
                     f"{priority_action.get('snapshot_db_restore_package_verify_command')}"
+                )
+            if priority_db_restore_review_bundle_command:
+                print(
+                    "    Snapshot DB restore review bundle command: "
+                    f"{priority_db_restore_review_bundle_command}"
                 )
             if priority_db_restore_review_guard:
                 print(
@@ -1972,6 +1986,7 @@ def _print_target_weight_daily_ops_status(
         priority_wait_guard=priority_wait_guard,
         priority_db_guard=priority_db_guard,
         priority_db_restore_review_guard=priority_db_restore_review_guard,
+        priority_db_restore_review_bundle_command=priority_db_restore_review_bundle_command,
         priority_db_restore_verify_command=priority_db_restore_verify_command,
         priority_db_restore_verification_blockers=priority_db_restore_verification_blockers,
         priority_diagnostics_status=priority_diagnostics_status,
