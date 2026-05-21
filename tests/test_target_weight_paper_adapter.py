@@ -2424,8 +2424,9 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                             "verify 실행"
                         ),
                         "command": (
-                            "# blocked: reviewed authoritative trade_history/positions "
-                            "CSV required before DB restore verification"
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--prepare-db-restore-review-bundle "
+                            "--restore-manifest restore.json"
                         ),
                         "scheduled_command": (
                             "python tools/target_weight_rotation_pilot.py "
@@ -2441,6 +2442,9 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                         ),
                         "db_restore_review_guard": (
                             "target_weight_authoritative_db_restore_csv_required"
+                        ),
+                        "requires": (
+                            "manual authoritative review bundle and reviewed CSV"
                         ),
                         "verified_pilot_days": 0,
                         "target_days": 60,
@@ -2469,6 +2473,11 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
                         "snapshot_db_restore_package_verify_command": (
                             "python tools/target_weight_rotation_pilot.py "
                             "--verify-db-restore-package --restore-manifest restore.json"
+                        ),
+                        "snapshot_db_restore_review_bundle_command": (
+                            "python tools/target_weight_rotation_pilot.py "
+                            "--prepare-db-restore-review-bundle "
+                            "--restore-manifest restore.json"
                         ),
                         "snapshot_db_restore_verification_status": "blocked",
                         "snapshot_db_restore_verification_ready": False,
@@ -2515,6 +2524,8 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
         in output
     )
     assert "Snapshot DB restore verify command:" in output
+    assert "Snapshot DB restore review bundle command:" in output
+    assert "--prepare-db-restore-review-bundle --restore-manifest restore.json" in output
     assert (
         "Snapshot DB restore review guard: "
         "target_weight_authoritative_db_restore_csv_required"
@@ -2529,10 +2540,10 @@ def test_paper_pilot_control_status_prints_db_restore_verification_for_db_guard(
         "trade_history=False positions=False"
     ) in output
     assert (
-        "Operator next action: REVIEW authoritative trade_history/positions CSV, "
-        "then run DB restore verification:"
+        "Operator next action: RUN no-order DB restore review bundle, then fill "
+        "authoritative CSV and verify:"
     ) in output
-    assert "blockers=authoritative_trade_history_csv_required" in output
+    assert "--prepare-db-restore-review-bundle" in output
     assert (
         "Finalize evidence command: # blocked: reviewed authoritative DB restore "
         "verification required before finalize"
@@ -6112,6 +6123,88 @@ def test_verify_target_weight_db_restore_package_requires_authoritative_match(
     assert "Target-weight DB Restore Package Verification" in report_md
     assert "Restore ready: `True`" in report_md
     assert "DB write enabled: `False`" in report_md
+
+
+def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
+    tmp_path,
+):
+    import tools.target_weight_rotation_pilot as twp
+
+    report = {
+        "candidate_id": "target_weight_candidate",
+        "snapshot_date": "2026-04-10",
+        "db_restore_checklist": {
+            "checked": True,
+            "status": "restore_required",
+            "restore_required": True,
+            "execution_session_id": TEST_EXECUTION_SESSION_ID,
+            "trade_history": {
+                "expected_row_count": 1,
+                "rows": [
+                    {
+                        "account_key": "target_weight_candidate",
+                        "symbol": "005930",
+                        "action": "BUY",
+                        "price": 70000,
+                        "quantity": 10,
+                        "total_amount": 700000,
+                        "commission": 100,
+                        "tax": 0,
+                        "slippage": 0,
+                        "strategy": "target_weight_candidate",
+                        "mode": "paper",
+                        "executed_at": "2026-04-10 09:00:00",
+                        "execution_session_id": TEST_EXECUTION_SESSION_ID,
+                        "order_id": "ORD-TW-001",
+                    },
+                ],
+            },
+            "positions": {
+                "expected_symbol_count": 1,
+                "expected_quantities": {"005930": 10},
+            },
+        },
+    }
+    package = twp._target_weight_db_restore_candidate_package(
+        report,
+        output_dir=tmp_path / "paper_runtime",
+    )
+
+    bundle = twp.prepare_target_weight_db_restore_review_bundle(
+        manifest_path=package["manifest_path"],
+        output_dir=tmp_path / "review_runtime",
+    )
+
+    assert bundle["status"] == "ready_for_manual_authoritative_review"
+    assert bundle["review_bundle_ready"] is True
+    assert bundle["manual_review_required"] is True
+    assert bundle["no_write_safety"]["restore_applied"] is False
+    assert bundle["no_write_safety"]["authoritative_csv_auto_generated"] is False
+    files = bundle["review_files"]
+    candidate_trade = Path(files["candidate_trade_history_csv"])
+    candidate_positions = Path(files["candidate_positions_csv"])
+    authoritative_trade = Path(files["authoritative_trade_history_template_csv"])
+    authoritative_positions = Path(files["authoritative_positions_template_csv"])
+    assert candidate_trade.exists()
+    assert candidate_positions.exists()
+    assert authoritative_trade.exists()
+    assert authoritative_positions.exists()
+    assert len(list(csv.DictReader(candidate_trade.open(encoding="utf-8-sig")))) == 1
+    assert len(list(csv.DictReader(candidate_positions.open(encoding="utf-8-sig")))) == 1
+    assert list(csv.DictReader(authoritative_trade.open(encoding="utf-8-sig"))) == []
+    assert list(csv.DictReader(authoritative_positions.open(encoding="utf-8-sig"))) == []
+    assert (
+        "verify_after_manual_review"
+        in bundle["operator_commands"]
+    )
+    assert "--prepare-db-restore-review-bundle" not in (
+        bundle["operator_commands"]["verify_after_manual_review"]
+    )
+    assert Path(bundle["artifact_path"]).exists()
+    assert Path(bundle["report_path"]).exists()
+    report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")
+    assert "Authoritative CSV auto-generated: `False`" in report_md
+    assert "Do not use artifact-only candidate rows as authoritative evidence" in report_md
 
 
 def test_diagnose_target_weight_portfolio_snapshot_accepts_db_persistence_proof(

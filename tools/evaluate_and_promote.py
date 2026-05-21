@@ -2358,6 +2358,20 @@ def _target_weight_ops_priority_action(
             package_generated = bool(
                 action.get("snapshot_db_restore_candidate_package_generated")
             )
+            restore_manifest = str(
+                action.get("snapshot_db_restore_candidate_manifest") or ""
+            ).strip()
+            review_bundle_command = (
+                "python tools/target_weight_rotation_pilot.py "
+                "--prepare-db-restore-review-bundle "
+                f"--restore-manifest {restore_manifest}"
+                if package_generated and restore_manifest
+                else ""
+            )
+            if review_bundle_command:
+                action["snapshot_db_restore_review_bundle_command"] = (
+                    review_bundle_command
+                )
             verification_ready = bool(
                 action.get("snapshot_db_restore_verification_ready")
             )
@@ -2368,12 +2382,15 @@ def _target_weight_ops_priority_action(
                         "verify 실행"
                     ),
                     "command": (
-                        "# blocked: reviewed authoritative trade_history/positions "
+                        review_bundle_command
+                        or "# blocked: reviewed authoritative trade_history/positions "
                         "CSV required before DB restore verification"
                     ),
                     "scheduled_command": verify_command,
                     "scheduled_follow_up": follow_up,
-                    "requires": "reviewed authoritative trade_history/positions CSV",
+                    "requires": (
+                        "manual authoritative review bundle and reviewed CSV"
+                    ),
                     "db_restore_review_guard": (
                         "target_weight_authoritative_db_restore_csv_required"
                     ),

@@ -2917,8 +2917,10 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     )
 
     action = report["next_actions"][0]
-    assert action["command"].startswith(
-        "# blocked: reviewed authoritative trade_history/positions CSV required"
+    assert action["command"] == (
+        "python tools/target_weight_rotation_pilot.py "
+        "--prepare-db-restore-review-bundle "
+        "--restore-manifest reports/paper_runtime/restore_manifest.json"
     )
     assert action["scheduled_command"].startswith(
         "python tools/target_weight_rotation_pilot.py --verify-db-restore-package"
@@ -2926,12 +2928,15 @@ def test_current_blockers_routes_db_persistence_gap_to_diagnostics():
     assert action["scheduled_command"] != diagnose_command
     assert action["command"] != repair_command
     assert action["order_safety"] == "no_order"
-    assert action["requires"] == "reviewed authoritative trade_history/positions CSV"
+    assert action["requires"] == (
+        "manual authoritative review bundle and reviewed CSV"
+    )
     assert action["db_persistence_guard"] == "target_weight_db_persistence_proof_required"
     assert (
         action["db_restore_review_guard"]
         == "target_weight_authoritative_db_restore_csv_required"
     )
+    assert action["snapshot_db_restore_review_bundle_command"] == action["command"]
     assert action["snapshot_diagnostics_status"] == "blocked_missing_snapshot_history"
     assert action["snapshot_db_restore_status"] == "restore_required"
     assert action["snapshot_db_restore_trade_rows_expected"] == 4
