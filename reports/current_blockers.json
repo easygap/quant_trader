@@ -1,14 +1,14 @@
 {
   "artifact_type": "current_go_live_blockers",
   "schema_version": 3,
-  "generated_at": "2026-05-21T09:42:39.965648",
+  "generated_at": "2026-05-21T10:00:02.466854",
   "source": "reports/promotion/promotion_blocker_summary.json",
   "source_generated_at": "2026-05-19T17:12:49.816814",
   "source_artifact_hash": "dd844e41c6ad3e466460492921dbbab772ce95196faf82d4638840f1efdee414",
   "promotion_artifact_freshness": {
     "canonical_generated_at": "2026-05-19T17:12:49.816814",
-    "checked_at": "2026-05-21T09:42:39.965648",
-    "age_days": 1.69,
+    "checked_at": "2026-05-21T10:00:02.466854",
+    "age_days": 1.7,
     "max_age_days": 7,
     "status": "FRESH",
     "warning": "",
@@ -134,7 +134,7 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:42:09.937248",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:59:51.436276",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
@@ -241,8 +241,8 @@
     ],
     "promotion_artifact_freshness": {
       "canonical_generated_at": "2026-05-19T17:12:49.816814",
-      "checked_at": "2026-05-21T09:42:39.965648",
-      "age_days": 1.69,
+      "checked_at": "2026-05-21T10:00:02.466854",
+      "age_days": 1.7,
       "max_age_days": 7,
       "status": "FRESH",
       "warning": "",
@@ -554,7 +554,7 @@
       "status": "ALLOWED",
       "allowed": true,
       "reason": "pilot authorized",
-      "checked_at": "2026-05-21T09:42:39.965648",
+      "checked_at": "2026-05-21T10:00:02.466854",
       "check_command": "python tools/paper_pilot_control.py --strategy target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1 --status",
       "order_safety": "no_order",
       "remaining_orders": 4,
@@ -569,7 +569,7 @@
     "latest_db_restore_verification": {
       "artifact_type": "target_weight_db_restore_package_verification",
       "schema_version": 1,
-      "generated_at": "2026-05-21T09:42:09.937248",
+      "generated_at": "2026-05-21T09:59:51.436276",
       "status": "blocked",
       "restore_ready": false,
       "blockers": [
@@ -626,6 +626,23 @@
           "row_count": 0,
           "expected_rows": 4,
           "empty_template": true,
+          "fieldnames": [
+            "account_key",
+            "symbol",
+            "action",
+            "price",
+            "quantity",
+            "total_amount",
+            "commission",
+            "tax",
+            "slippage",
+            "strategy",
+            "mode",
+            "executed_at",
+            "execution_session_id",
+            "order_id"
+          ],
+          "missing_columns": [],
           "match": false,
           "sha256": "3dd6f3e88532c2f2ba09deb871af49d9ab4e41286fbd97a1a8f8798753224f76",
           "candidate_rows": 4,
@@ -728,6 +745,15 @@
           "row_count": 0,
           "expected_rows": 4,
           "empty_template": true,
+          "fieldnames": [
+            "account_key",
+            "symbol",
+            "quantity",
+            "avg_price",
+            "total_invested",
+            "strategy"
+          ],
+          "missing_columns": [],
           "match": false,
           "sha256": "a32da97a76f1443e64f336e238bc6cf1037ff05478e4b3406018d5c41f52d900",
           "candidate_rows": 4,
@@ -810,7 +836,7 @@
       "artifact_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
       "report_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.md",
       "source_path": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "source_mtime": 1779324129.9382522
+      "source_mtime": 1779325191.4382737
     },
     "latest_db_restore_review_bundle": {
       "artifact_type": "target_weight_db_restore_review_bundle",
@@ -940,7 +966,7 @@
       "snapshot_db_restore_candidate_requires_authoritative_confirmation": true,
       "snapshot_db_restore_package_verify_command": "python tools/target_weight_rotation_pilot.py --verify-db-restore-package --restore-manifest reports/paper_runtime/target_weight_db_restore_candidates_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20_manifest.json --authoritative-trade-history-csv <reviewed_trade_history_csv> --authoritative-positions-csv <reviewed_positions_csv>",
       "snapshot_db_restore_verification_source": "reports/paper_runtime/target_weight_db_restore_package_verification_target_weight_rotation_top5_60_120_floor0_exp75_rankrisk90_tol5_sectorcap2_posloss8_frac50_pdd10_floor40_cd1_2026-05-20.json",
-      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:42:09.937248",
+      "snapshot_db_restore_verification_generated_at": "2026-05-21T09:59:51.436276",
       "snapshot_db_restore_verification_status": "blocked",
       "snapshot_db_restore_verification_ready": false,
       "snapshot_db_restore_verification_blockers": [
