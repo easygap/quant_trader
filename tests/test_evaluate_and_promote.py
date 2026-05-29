@@ -3280,6 +3280,13 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
             "trade_history": {"pending_status_count": 1},
             "positions": {"pending_status_count": 2},
         },
+        "operator_commands": {
+            "write_authoritative_csv_from_worklist": (
+                "python tools/target_weight_rotation_pilot.py "
+                "--write-db-restore-authoritative-csv-from-worklist "
+                "--review-worklist-validation reports/paper_runtime/worklist_validation.json"
+            )
+        },
     }
 
     report = build_current_blockers_report(
@@ -3342,6 +3349,9 @@ def test_current_blockers_promotes_review_progress_inspect_after_review_bundle_r
     ] == ["review_worklist_trade_history_review_status_pending"]
     assert action["snapshot_db_restore_review_worklist_validation_trade_pending"] == 1
     assert action["snapshot_db_restore_review_worklist_validation_positions_pending"] == 2
+    assert "--write-db-restore-authoritative-csv-from-worklist" in action[
+        "snapshot_db_restore_authoritative_csv_from_worklist_command"
+    ]
     assert action["snapshot_db_restore_review_bundle_dir"].endswith("review_bundle")
     assert action[
         "snapshot_db_restore_authoritative_trade_history_template_csv"
