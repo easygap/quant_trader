@@ -1490,7 +1490,7 @@ def main():
     )
     parser.add_argument(
         "--max-mdd", type=float, default=-20.0,
-        help="전략 검증 최대 허용 MDD(%, 음수값, 기본: -20)",
+        help="전략 검증 최대 허용 MDD(%%, 음수값, 기본: -20)",
     )
     parser.add_argument(
         "--walk-forward", action="store_true",
