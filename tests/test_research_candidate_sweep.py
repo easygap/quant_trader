@@ -118,12 +118,109 @@ def test_select_canonical_universe_scans_past_legacy_100_for_large_top_n(monkeyp
     monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
     monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
 
-    universe = select_canonical_universe(120)
+    # current 모드를 명시해 현재-상장 스캔 동작을 결정적으로 검증(설정 의존 제거).
+    universe = select_canonical_universe(120, universe_mode="current")
 
     assert len(fetched) == 150
     assert len(universe) == 120
     assert "001500" in universe
     assert "001000" in universe
+
+
+def test_select_canonical_universe_historical_mode_controls_survivorship(monkeypatch):
+    """historical 모드: as_of 시점 상장 목록(상폐 포함)을 후보 풀로 쓰고 메타에 정직히 기록."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    # 현재 상장 목록(생존자만) — historical 모드면 이 경로는 쓰이면 안 된다.
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({
+            "Code": ["005930", "000660"],
+            "Marcap": [200_000_000_000, 200_000_000_000],
+        })
+    )
+
+    # as_of 시점 상장 목록: 이후 상장폐지된 "999990"을 포함(생존자 편향 완화의 핵심).
+    historical_df = pd.DataFrame({
+        "Code": ["005930", "000660", "999990"],
+        "Name": ["삼성전자", "SK하이닉스", "상폐예정"],
+        "Market": ["KOSPI", "KOSPI", "KOSPI"],
+        "Marcap": [0, 0, 0],
+    })
+
+    calls = {}
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        @staticmethod
+        def get_krx_stock_list(as_of_date=None, exclude_administrative=True, universe_mode="current"):
+            calls["universe_mode"] = universe_mode
+            calls["as_of_date"] = as_of_date
+            return historical_df
+
+        def fetch_korean_stock(self, symbol, start, end):
+            # 거래대금 = close*volume. 상폐주가 후보 풀에 포함됨을 보장하려고 모두 양수.
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", True)
+
+    meta = {}
+    universe = select_canonical_universe(
+        3, universe_mode="historical", as_of_date="2022-12-31", meta_out=meta,
+    )
+
+    # historical 경로가 실제로 사용됐는지
+    assert calls["universe_mode"] == "historical"
+    assert calls["as_of_date"] == "2022-12-31"
+    # 상폐 종목이 후보 풀에 포함됨 → 생존자 편향 완화
+    assert "999990" in universe
+    # 메타에 정직하게 기록
+    assert meta["universe_mode"] == "historical"
+    assert meta["survivorship_controlled"] is True
+    assert meta["candidate_source"].startswith("krx_historical")
+
+
+def test_select_canonical_universe_current_mode_flags_survivorship_bias(monkeypatch):
+    """current 모드: 생존자 편향이 통제되지 않음을 메타에 정직히 기록."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({
+            "Code": ["005930", "000660"],
+            "Marcap": [200_000_000_000, 200_000_000_000],
+        })
+    )
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+
+    meta = {}
+    universe = select_canonical_universe(2, universe_mode="current", meta_out=meta)
+
+    assert len(universe) == 2
+    assert meta["universe_mode"] == "current"
+    assert meta["survivorship_controlled"] is False
+    assert meta["candidate_source"] == "fdr_current_kospi"
 
 
 def test_build_candidate_specs_supports_all_families():
