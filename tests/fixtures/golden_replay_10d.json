@@ -1,0 +1,274 @@
+{
+  "description": "10 영업일 positive-path golden dataset. benchmark 데이터 존재, excess non-null, provisional→final 승격, partial fill, STARTUP_RECOVERY, clean day 포함.",
+  "strategy": "golden_test",
+  "account_key": "golden_test",
+  "watchlist": ["005930", "000660", "035420", "051910", "006400"],
+  "initial_capital": 10000000,
+  "days": [
+    {
+      "label": "Day01_clean_normal",
+      "date": "2026-03-23",
+      "portfolio": {
+        "total_value": 10050000, "cash": 3015000, "invested": 7035000,
+        "daily_return": 0.50, "cumulative_return": 0.50, "mdd": -0.10, "position_count": 3
+      },
+      "trades": {
+        "buys": [
+          {"symbol": "005930", "price": 62000, "quantity": 50, "amount": 3100000},
+          {"symbol": "000660", "price": 120000, "quantity": 20, "amount": 2400000}
+        ],
+        "sells": [
+          {"symbol": "035420", "price": 45000, "quantity": 30, "amount": 1350000, "pnl": 15000}
+        ]
+      },
+      "ops": {"rejects": 0, "signals": 3, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.32, "000660": 0.15, "035420": -0.20, "051910": 0.45, "006400": 0.10},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 3, "realized_pnl": 15000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day02_provisional_then_finalize",
+      "date": "2026-03-24",
+      "portfolio": {
+        "total_value": 10120000, "cash": 2836000, "invested": 7284000,
+        "daily_return": 0.70, "cumulative_return": 1.20, "mdd": -0.10, "position_count": 3
+      },
+      "trades": {
+        "buys": [{"symbol": "051910", "price": 85000, "quantity": 20, "amount": 1700000}],
+        "sells": []
+      },
+      "ops": {"rejects": 0, "signals": 2, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.50, "000660": -0.30},
+        "completeness": 0.4,
+        "expected_status": "provisional",
+        "finalize_returns": {"005930": 0.50, "000660": -0.30, "035420": 0.10, "051910": 0.60, "006400": 0.25},
+        "finalize_completeness": 1.0,
+        "finalize_expected_status": "final"
+      },
+      "daily_report": {"total_trades": 1, "realized_pnl": 0},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "provisional",
+        "excess_non_null": true,
+        "anomaly_count": 0,
+        "finalize_benchmark_status": "final",
+        "finalize_excess_non_null": true,
+        "finalize_record_version": 2
+      }
+    },
+    {
+      "label": "Day03_partial_fill",
+      "date": "2026-03-25",
+      "portfolio": {
+        "total_value": 10090000, "cash": 2536000, "invested": 7554000,
+        "daily_return": -0.30, "cumulative_return": 0.90, "mdd": -0.40, "position_count": 4
+      },
+      "trades": {
+        "buys": [{"symbol": "006400", "price": 70000, "quantity": 10, "amount": 700000}],
+        "sells": [{"symbol": "005930", "price": 61500, "quantity": 20, "amount": 1230000, "pnl": -10000}]
+      },
+      "ops": {"rejects": 2, "signals": 4, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": -0.48, "000660": 0.25, "035420": 0.15, "051910": -0.10, "006400": 0.30},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 2, "realized_pnl": -10000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day04_startup_recovery",
+      "date": "2026-03-26",
+      "portfolio": {
+        "total_value": 10150000, "cash": 2236000, "invested": 7914000,
+        "daily_return": 0.59, "cumulative_return": 1.50, "mdd": -0.40, "position_count": 4
+      },
+      "trades": {
+        "buys": [{"symbol": "035420", "price": 44000, "quantity": 15, "amount": 660000}],
+        "sells": [{"symbol": "000660", "price": 121000, "quantity": 10, "amount": 1210000, "pnl": 10000}]
+      },
+      "ops": {"rejects": 0, "signals": 2, "recovery": true, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.80, "000660": 0.42, "035420": -0.45, "051910": 0.30, "006400": 0.55},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 2, "realized_pnl": 10000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0,
+        "restart_recovery_count": 1
+      }
+    },
+    {
+      "label": "Day05_clean_no_trade",
+      "date": "2026-03-27",
+      "portfolio": {
+        "total_value": 10180000, "cash": 2236000, "invested": 7944000,
+        "daily_return": 0.30, "cumulative_return": 1.80, "mdd": -0.40, "position_count": 4
+      },
+      "trades": {"buys": [], "sells": []},
+      "ops": {"rejects": 0, "signals": 1, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.10, "000660": 0.05, "035420": 0.20, "051910": 0.15, "006400": -0.05},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 0, "realized_pnl": 0},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day06_minor_drawdown",
+      "date": "2026-03-30",
+      "portfolio": {
+        "total_value": 10020000, "cash": 2236000, "invested": 7784000,
+        "daily_return": -1.57, "cumulative_return": 0.20, "mdd": -1.97, "position_count": 4
+      },
+      "trades": {
+        "buys": [],
+        "sells": [{"symbol": "006400", "price": 68000, "quantity": 10, "amount": 680000, "pnl": -20000}]
+      },
+      "ops": {"rejects": 0, "signals": 2, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": -1.20, "000660": -0.80, "035420": -1.50, "051910": -0.60, "006400": -2.00},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 1, "realized_pnl": -20000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day07_recovery_bounce",
+      "date": "2026-03-31",
+      "portfolio": {
+        "total_value": 10200000, "cash": 2036000, "invested": 8164000,
+        "daily_return": 1.80, "cumulative_return": 2.00, "mdd": -1.97, "position_count": 4
+      },
+      "trades": {
+        "buys": [{"symbol": "000660", "price": 119000, "quantity": 10, "amount": 1190000}],
+        "sells": [{"symbol": "051910", "price": 87000, "quantity": 10, "amount": 870000, "pnl": 20000}]
+      },
+      "ops": {"rejects": 1, "signals": 3, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 1.50, "000660": 1.20, "035420": 0.80, "051910": 2.00, "006400": 0.60},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 2, "realized_pnl": 20000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day08_high_volume",
+      "date": "2026-04-01",
+      "portfolio": {
+        "total_value": 10350000, "cash": 1536000, "invested": 8814000,
+        "daily_return": 1.47, "cumulative_return": 3.50, "mdd": -1.97, "position_count": 5
+      },
+      "trades": {
+        "buys": [
+          {"symbol": "005930", "price": 63000, "quantity": 30, "amount": 1890000},
+          {"symbol": "035420", "price": 45500, "quantity": 20, "amount": 910000}
+        ],
+        "sells": [
+          {"symbol": "006400", "price": 71000, "quantity": 10, "amount": 710000, "pnl": 10000},
+          {"symbol": "000660", "price": 122000, "quantity": 5, "amount": 610000, "pnl": 15000}
+        ]
+      },
+      "ops": {"rejects": 0, "signals": 5, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.95, "000660": 0.70, "035420": 1.10, "051910": 0.50, "006400": 1.30},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 4, "realized_pnl": 25000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    },
+    {
+      "label": "Day09_degraded_reject",
+      "date": "2026-04-02",
+      "portfolio": {
+        "total_value": 10300000, "cash": 1536000, "invested": 8764000,
+        "daily_return": -0.48, "cumulative_return": 3.00, "mdd": -1.97, "position_count": 5
+      },
+      "trades": {
+        "buys": [],
+        "sells": [{"symbol": "035420", "price": 44500, "quantity": 10, "amount": 445000, "pnl": -5000}]
+      },
+      "ops": {"rejects": 5, "signals": 4, "recovery": false, "stale_pending": true, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": -0.30, "000660": -0.50, "035420": -0.70, "051910": 0.10, "006400": -0.20},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 1, "realized_pnl": -5000},
+      "expected": {
+        "status": "degraded",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count_gte": 1
+      }
+    },
+    {
+      "label": "Day10_clean_finish",
+      "date": "2026-04-03",
+      "portfolio": {
+        "total_value": 10400000, "cash": 1836000, "invested": 8564000,
+        "daily_return": 0.97, "cumulative_return": 4.00, "mdd": -1.97, "position_count": 4
+      },
+      "trades": {
+        "buys": [{"symbol": "051910", "price": 86000, "quantity": 10, "amount": 860000}],
+        "sells": [{"symbol": "005930", "price": 64000, "quantity": 20, "amount": 1280000, "pnl": 20000}]
+      },
+      "ops": {"rejects": 0, "signals": 3, "recovery": false, "stale_pending": false, "phantom": false, "duplicate_blocked": 0},
+      "benchmark": {
+        "returns": {"005930": 0.60, "000660": 0.40, "035420": 0.55, "051910": 0.80, "006400": 0.35},
+        "completeness": 1.0,
+        "expected_status": "final"
+      },
+      "daily_report": {"total_trades": 2, "realized_pnl": 20000},
+      "expected": {
+        "status": "normal",
+        "benchmark_status": "final",
+        "excess_non_null": true,
+        "anomaly_count": 0
+      }
+    }
+  ]
+}
