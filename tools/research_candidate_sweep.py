@@ -2029,10 +2029,22 @@ def select_canonical_universe(
     top_n: int = DEFAULT_TOP_N,
     *,
     scan_limit: int | None = None,
+    as_of_date: str | None = None,
+    universe_mode: str | None = None,
+    liquidity_window: tuple[str, str] = ("2022-10-01", "2022-12-31"),
+    meta_out: dict | None = None,
 ) -> list[str]:
-    """Use the same liquidity proxy as canonical promotion evaluation."""
-    from core.data_collector import DataCollector
-    import FinanceDataReader as fdr
+    """Use the same liquidity proxy as canonical promotion evaluation.
+
+    universe_mode (None이면 risk_params.backtest_universe.mode 사용):
+      - "current": 현재 상장 KOSPI (FDR). **생존자 편향 있음** — 상폐 종목이 빠져 수익률 과대평가.
+      - "historical"/"kospi200": as_of 시점에 상장돼 있던 종목(pykrx, 상폐 포함)을 후보 풀로 사용
+        → 생존자 편향 완화. 백테스트 권장(risk_params 기본값).
+
+    meta_out가 주어지면 universe_mode / survivorship_controlled / candidate_source 등
+    선택 메타데이터를 채워, 산출물이 어떤 유니버스로 만들어졌는지 정직하게 드러낸다.
+    """
+    from core.data_collector import DataCollector, HAS_PYKRX
 
     requested_top_n = max(1, int(top_n))
     requested_scan_limit = (
@@ -2040,18 +2052,74 @@ def select_canonical_universe(
         if scan_limit is None
         else max(requested_top_n, int(scan_limit))
     )
+
+    # 유니버스 모드: 명시값 > risk_params.backtest_universe.mode > "current"
+    exclude_admin = True
+    if universe_mode is None:
+        try:
+            from config.config_loader import Config
+            uni_cfg = (Config.get().risk_params or {}).get("backtest_universe") or {}
+            universe_mode = str(uni_cfg.get("mode") or "current").strip().lower()
+            exclude_admin = bool(uni_cfg.get("exclude_administrative", True))
+        except Exception:
+            universe_mode = "current"
+    else:
+        universe_mode = str(universe_mode).strip().lower()
+
+    win_start, win_end = liquidity_window
+    listing_as_of = as_of_date or win_end  # 유동성 창 끝을 상장 기준일로 사용
+
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
-    stocks = fdr.StockListing("KOSPI")
-    common = stocks[~stocks["Code"].str.match(r"^\d{5}[5-9KL]$")]
-    if "Marcap" in common.columns:
-        common = common[common["Marcap"] > 1e11]
+
+    # ── 후보 풀 선정 (핵심: historical 모드면 as_of 시점 상장 목록으로 생존자 편향 완화) ──
+    common = None
+    candidate_source = ""
+    if universe_mode in ("historical", "kospi200"):
+        try:
+            listing = DataCollector.get_krx_stock_list(
+                as_of_date=listing_as_of,
+                exclude_administrative=exclude_admin,
+                universe_mode=universe_mode,
+            )
+        except Exception as exc:
+            logger.warning(
+                "historical universe 조회 실패 (mode={}, as_of={}): {} — 현재 상장 목록으로 폴백",
+                universe_mode, listing_as_of, exc,
+            )
+            listing = None
+        if listing is not None and not listing.empty:
+            # 원래 canonical 유니버스는 KOSPI 중심이므로 KOSPI로 한정(가능 시).
+            if "Market" in listing.columns:
+                kospi = listing[listing["Market"].astype(str).str.upper().str.contains("KOSPI")]
+                listing = kospi if not kospi.empty else listing
+            common = listing
+            candidate_source = f"krx_{universe_mode}_as_of_{listing_as_of}"
+
+    if common is None:
+        import FinanceDataReader as fdr
+        stocks = fdr.StockListing("KOSPI")
+        common = stocks[~stocks["Code"].str.match(r"^\d{5}[5-9KL]$")]
+        if "Marcap" in common.columns:
+            common = common[common["Marcap"] > 1e11]
+        candidate_source = candidate_source or "fdr_current_kospi"
+    else:
+        # 우선주 등 제외 필터를 동일하게 적용.
+        common = common[~common["Code"].astype(str).str.match(r"^\d{5}[5-9KL]$")]
+
+    # historical/kospi200을 요청했고 pykrx 시점 데이터가 실제로 가능한 경우에만
+    # 생존자 편향이 통제됐다고 본다(미설치 시 내부적으로 현재 목록으로 폴백됨).
+    survivorship_controlled = (
+        universe_mode in ("historical", "kospi200")
+        and bool(HAS_PYKRX)
+        and candidate_source.startswith("krx_")
+    )
 
     amounts: dict[str, float] = {}
     candidates = common["Code"].tolist()[:requested_scan_limit]
     for sym in candidates:
         try:
-            df = dc.fetch_korean_stock(sym, "2022-10-01", "2022-12-31")
+            df = dc.fetch_korean_stock(sym, win_start, win_end)
             if df is not None and not df.empty:
                 if "date" in df.columns:
                     df = df.set_index("date")
@@ -2066,7 +2134,26 @@ def select_canonical_universe(
             requested_scan_limit,
             len(amounts),
         )
-    return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:requested_top_n])
+
+    selected = normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:requested_top_n])
+
+    if not survivorship_controlled and universe_mode == "current":
+        logger.warning(
+            "canonical universe가 현재 상장 목록(current)으로 생성됨 — 생존자 편향 주의. "
+            "백테스트 신뢰도를 높이려면 risk_params.backtest_universe.mode=historical + pykrx 사용."
+        )
+
+    if meta_out is not None:
+        meta_out.update({
+            "universe_mode": universe_mode,
+            "survivorship_controlled": survivorship_controlled,
+            "candidate_source": candidate_source,
+            "listing_as_of": listing_as_of,
+            "liquidity_window": [win_start, win_end],
+            "candidate_pool_size": int(len(common)),
+            "pykrx_available": bool(HAS_PYKRX),
+        })
+    return selected
 
 
 def apply_research_universe_liquidity_filter(
@@ -4824,6 +4911,8 @@ def run_candidate_sweep(
             input_universe = select_canonical_universe(
                 top_n,
                 scan_limit=universe_scan_limit,
+                as_of_date=start,
+                meta_out=universe_selection,
             )
         except Exception as exc:
             logger.warning("canonical universe selection failed: {}", exc)
