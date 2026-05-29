@@ -719,7 +719,10 @@ class DataCollector:
                         name = _pykrx_stock.get_market_ticker_name(t) or ""
                     except Exception:
                         name = ""
-                    rows.append({"Code": code, "Name": name, "Market": market_name, "Marcap": 0})
+                    rows.append({
+                        "Code": code, "Name": name, "Market": market_name,
+                        "Marcap": 0, "universe_source": "pykrx_pit",
+                    })
                 continue
 
             tab = _fdr_stock_listing_table(market_name, None)
@@ -734,6 +737,7 @@ class DataCollector:
                     "Name": str(r.get("Name") or ""),
                     "Market": market_name,
                     "Marcap": float(r.get("Marcap") or 0),
+                    "universe_source": "fdr_fallback",
                 })
 
         if not rows:
