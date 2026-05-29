@@ -269,6 +269,49 @@ def test_select_canonical_universe_current_mode_flags_survivorship_bias(monkeypa
     assert meta["candidate_source"] == "fdr_current_kospi"
 
 
+def test_annotate_multiple_testing_deflates_each_candidate():
+    """시행 집합 전체로 각 후보에 deflated Sharpe를 부여하고 다중검정으로 할인."""
+    from tools.research_candidate_sweep import annotate_multiple_testing
+
+    # 20개 변형, Sharpe가 0.4~1.4로 퍼져 있음(다중검정 상황).
+    records = [
+        {"candidate_id": f"v{i}", "metrics": {"sharpe": 0.4 + i * 0.05}}
+        for i in range(20)
+    ]
+    summary = annotate_multiple_testing(records, n_obs=750)
+
+    assert summary["n_trials"] == 20
+    assert summary["sharpe_variance_across_trials"] > 0
+    # 각 record에 deflated_sharpe 부여
+    for r in records:
+        ds = r["metrics"]["deflated_sharpe"]
+        assert set(["dsr", "psr_vs_zero", "expected_max_sharpe_annual", "passes"]).issubset(ds)
+        # 다중검정 기준선(expected_max>0)이 있으므로 dsr <= psr_vs_zero
+        assert ds["dsr"] <= ds["psr_vs_zero"] + 1e-9
+
+    # 단일 시행이면 할인 없음(expected_max=0 → dsr==psr_vs_zero)
+    single = [{"candidate_id": "only", "metrics": {"sharpe": 1.2}}]
+    annotate_multiple_testing(single, n_obs=750)
+    ds1 = single[0]["metrics"]["deflated_sharpe"]
+    assert ds1["expected_max_sharpe_annual"] == 0.0
+    assert abs(ds1["dsr"] - ds1["psr_vs_zero"]) < 1e-9
+
+
+def test_annotate_multiple_testing_handles_missing_sharpe():
+    """sharpe 없는 record가 섞여 있어도 안전하게 동작."""
+    from tools.research_candidate_sweep import annotate_multiple_testing
+
+    records = [
+        {"candidate_id": "a", "metrics": {"sharpe": 1.0}},
+        {"candidate_id": "b", "metrics": {}},          # sharpe 없음
+        {"candidate_id": "c", "metrics": {"sharpe": 0.5}},
+    ]
+    summary = annotate_multiple_testing(records, n_obs=500)
+    assert summary["n_trials"] == 3
+    assert "deflated_sharpe" in records[0]["metrics"]
+    assert "deflated_sharpe" not in records[1]["metrics"]  # 건너뜀
+
+
 def test_build_candidate_specs_supports_all_families():
     from tools.research_candidate_sweep import build_candidate_specs
 
