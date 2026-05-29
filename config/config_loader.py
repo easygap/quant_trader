@@ -91,6 +91,13 @@ def _override_with_env(settings: dict) -> dict:
     if "DART_API_KEY" in os.environ:
         dart["api_key"] = os.environ["DART_API_KEY"].strip()
 
+    # 데이터베이스 경로 오버라이드: 테스트 격리(운영 DB 보호) 및 배포 환경별 DB 분리에 사용.
+    # QUANT_DB_PATH가 설정되면 SQLite 경로를 강제로 덮어쓴다.
+    db = settings.setdefault("database", {})
+    db_path_override = os.environ.get("QUANT_DB_PATH")
+    if db_path_override:
+        db["sqlite_path"] = db_path_override
+
     return settings
 
 
