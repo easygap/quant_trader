@@ -4608,6 +4608,50 @@ def build_candidate_record(
     }
 
 
+def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int) -> dict[str, Any]:
+    """시행 집합(여러 변형) 전체의 Sharpe 분산으로 각 record에 deflated Sharpe를 부여한다.
+
+    한 패밀리에서 N개 변형을 탐색해 '최고'를 고르면 in-sample Sharpe가 다중검정으로
+    구조적으로 부풀려진다. Bailey & López de Prado의 Deflated Sharpe Ratio로 시행 횟수에
+    맞춰 할인하여 각 record.metrics['deflated_sharpe']에 기록한다(랭킹/승격은 변경하지
+    않고 보고만 — 과적합 신호 노출용). skew/kurt는 집계 단계에서 수익률 시계열이 없어
+    정규(0/3)로 가정하며, 다중검정 할인이 주효과다.
+    """
+    from backtest.statistical_validation import deflated_sharpe_ratio
+    import statistics
+
+    sharpes = [
+        float(r["metrics"]["sharpe"])
+        for r in records
+        if isinstance((r.get("metrics") or {}).get("sharpe"), (int, float))
+    ]
+    n_trials = len(records)
+    variance = statistics.pvariance(sharpes) if len(sharpes) >= 2 else 0.0
+    best_dsr = None
+    for r in records:
+        metrics = r.get("metrics") or {}
+        s = metrics.get("sharpe")
+        if not isinstance(s, (int, float)):
+            continue
+        dsr = deflated_sharpe_ratio(
+            float(s), n_obs=int(n_obs), n_trials=n_trials,
+            sharpe_variance_across_trials=variance,
+        )
+        metrics["deflated_sharpe"] = dsr
+        if best_dsr is None or float(s) > best_dsr.get("observed_sharpe_annual", float("-inf")):
+            best_dsr = dsr
+    return {
+        "n_trials": n_trials,
+        "sharpe_variance_across_trials": round(variance, 6),
+        "n_obs": int(n_obs),
+        "best_by_sharpe_deflated": best_dsr,
+        "note": (
+            "deflated Sharpe는 다중검정 보정 보고용이며 랭킹/승격 게이트를 바꾸지 않는다. "
+            "skew/kurt는 정규 가정."
+        ),
+    }
+
+
 def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not metrics.get("benchmark_coverage_complete", True):
@@ -5058,6 +5102,14 @@ def run_candidate_sweep(
         records.append(build_candidate_record(spec, metrics, benchmark))
 
     ranked = sort_candidate_records(records)
+    # 다중검정(여러 변형 탐색)으로 부풀려진 Sharpe를 deflated Sharpe로 보고(랭킹 불변).
+    try:
+        import pandas as _pd
+        _n_obs = int(len(_pd.bdate_range(start, end)))
+        multiple_testing = annotate_multiple_testing(ranked, _n_obs)
+    except Exception as exc:  # 보고용이므로 실패해도 스윕을 막지 않는다.
+        logger.warning("deflated sharpe 주석 실패(무시): {}", exc)
+        multiple_testing = {"error": str(exc)}
     family_slug = candidate_family.lower().strip()
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{family_slug}"
     eligible = [
@@ -5106,6 +5158,7 @@ def run_candidate_sweep(
             else {"enabled": False}
         ),
         "decision": decision,
+        "multiple_testing": multiple_testing,
         "rejection_summary": summarize_rejection_reasons(ranked),
         "candidates": ranked,
         "summary": {
