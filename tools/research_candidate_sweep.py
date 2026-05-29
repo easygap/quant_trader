@@ -2107,13 +2107,13 @@ def select_canonical_universe(
         # 우선주 등 제외 필터를 동일하게 적용.
         common = common[~common["Code"].astype(str).str.match(r"^\d{5}[5-9KL]$")]
 
-    # historical/kospi200을 요청했고 pykrx 시점 데이터가 실제로 가능한 경우에만
-    # 생존자 편향이 통제됐다고 본다(미설치 시 내부적으로 현재 목록으로 폴백됨).
-    survivorship_controlled = (
-        universe_mode in ("historical", "kospi200")
-        and bool(HAS_PYKRX)
-        and candidate_source.startswith("krx_")
-    )
+    # 후보 풀이 실제로 시점(point-in-time) pykrx 데이터로 만들어졌을 때만 생존자 편향이
+    # 통제됐다고 본다. pykrx 과거 목록 조회가 실패해 FDR 현재 목록으로 폴백되면
+    # (universe_source!=pykrx_pit) False — 설치 여부(HAS_PYKRX)만으로 판단하지 않는다.
+    survivorship_controlled = False
+    if universe_mode in ("historical", "kospi200") and candidate_source.startswith("krx_"):
+        if "universe_source" in getattr(common, "columns", []) and len(common):
+            survivorship_controlled = bool((common["universe_source"] == "pykrx_pit").all())
 
     amounts: dict[str, float] = {}
     candidates = common["Code"].tolist()[:requested_scan_limit]
