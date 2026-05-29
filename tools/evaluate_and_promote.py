@@ -3412,6 +3412,9 @@ def _target_weight_ops_priority_action(
                 ):
                     validation_payload = latest_db_restore_review_worklist_validation
                     validation = validation_payload.get("validation") or {}
+                    validation_commands = (
+                        validation_payload.get("operator_commands") or {}
+                    )
                     trade_validation = validation.get("trade_history") or {}
                     positions_validation = validation.get("positions") or {}
                     action.update({
@@ -3439,6 +3442,12 @@ def _target_weight_ops_priority_action(
                         ),
                         "snapshot_db_restore_review_worklist_validation_positions_pending": (
                             _safe_int(positions_validation.get("pending_status_count"))
+                        ),
+                        "snapshot_db_restore_authoritative_csv_from_worklist_command": str(
+                            validation_commands.get(
+                                "write_authoritative_csv_from_worklist"
+                            )
+                            or ""
                         ),
                     })
                 action.update(
