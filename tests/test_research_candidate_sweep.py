@@ -312,6 +312,37 @@ def test_annotate_multiple_testing_handles_missing_sharpe():
     assert "deflated_sharpe" not in records[1]["metrics"]  # 건너뜀
 
 
+def test_compute_validation_warnings_flags_survivorship_and_deflated():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    ranked = [{"candidate_id": "best", "metrics": {"sharpe": 0.8}}]
+    mt = {"n_trials": 100, "best_by_sharpe_deflated": {"dsr": 0.4, "passes": False}}
+    uni = {"source": "canonical_liquidity_universe", "survivorship_controlled": False,
+           "candidate_source": "fdr_current_kospi"}
+
+    warns = compute_validation_warnings(ranked, mt, uni)
+    joined = " ".join(warns)
+    assert any("survivorship_not_controlled" in w for w in warns)
+    assert any("deflated_sharpe_fail" in w for w in warns)
+
+
+def test_compute_validation_warnings_clean_when_controlled_and_passing():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    ranked = [{"candidate_id": "best", "metrics": {"sharpe": 2.0}}]
+    mt = {"n_trials": 3, "best_by_sharpe_deflated": {"dsr": 0.98, "passes": True}}
+    uni = {"source": "canonical_liquidity_universe", "survivorship_controlled": True,
+           "candidate_source": "krx_historical_as_of_2022-12-31"}
+
+    assert compute_validation_warnings(ranked, mt, uni) == []
+
+
+def test_compute_validation_warnings_empty_ranked():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    assert compute_validation_warnings([], {}, {}) == []
+
+
 def test_build_candidate_specs_supports_all_families():
     from tools.research_candidate_sweep import build_candidate_specs
 
