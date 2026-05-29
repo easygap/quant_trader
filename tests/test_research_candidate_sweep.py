@@ -146,11 +146,13 @@ def test_select_canonical_universe_historical_mode_controls_survivorship(monkeyp
     )
 
     # as_of 시점 상장 목록: 이후 상장폐지된 "999990"을 포함(생존자 편향 완화의 핵심).
+    # universe_source=pykrx_pit → 실제 시점 데이터(생존자 편향 통제됨).
     historical_df = pd.DataFrame({
         "Code": ["005930", "000660", "999990"],
         "Name": ["삼성전자", "SK하이닉스", "상폐예정"],
         "Market": ["KOSPI", "KOSPI", "KOSPI"],
         "Marcap": [0, 0, 0],
+        "universe_source": ["pykrx_pit", "pykrx_pit", "pykrx_pit"],
     })
 
     calls = {}
@@ -186,6 +188,50 @@ def test_select_canonical_universe_historical_mode_controls_survivorship(monkeyp
     assert meta["universe_mode"] == "historical"
     assert meta["survivorship_controlled"] is True
     assert meta["candidate_source"].startswith("krx_historical")
+
+
+def test_select_canonical_universe_historical_fallback_flags_not_controlled(monkeypatch):
+    """historical 요청이지만 pykrx 실패로 FDR 현재목록 폴백 시 survivorship_controlled=False (정직한 플래그)."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({"Code": ["005930"], "Marcap": [2e11]})
+    )
+
+    # pykrx 폴백으로 만들어진 목록: universe_source=fdr_fallback (시점 데이터 아님).
+    fallback_df = pd.DataFrame({
+        "Code": ["005930", "000660"],
+        "Name": ["삼성전자", "SK하이닉스"],
+        "Market": ["KOSPI", "KOSPI"],
+        "Marcap": [4e14, 1e14],
+        "universe_source": ["fdr_fallback", "fdr_fallback"],
+    })
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        @staticmethod
+        def get_krx_stock_list(as_of_date=None, exclude_administrative=True, universe_mode="current"):
+            return fallback_df
+
+        def fetch_korean_stock(self, symbol, start, end):
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", True)
+
+    meta = {}
+    select_canonical_universe(2, universe_mode="historical", as_of_date="2022-12-31", meta_out=meta)
+
+    # pykrx 설치돼 있어도 실제 시점 데이터가 아니므로 정직하게 False
+    assert meta["survivorship_controlled"] is False
 
 
 def test_select_canonical_universe_current_mode_flags_survivorship_bias(monkeypatch):
