@@ -4652,6 +4652,42 @@ def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int) -> dict
     }
 
 
+def compute_validation_warnings(
+    ranked: list[dict[str, Any]],
+    multiple_testing: dict[str, Any],
+    universe_selection: dict[str, Any],
+) -> list[str]:
+    """스윕 산출물의 과적합/생존자 편향 신호를 사람이 보는 경고 목록으로 모은다.
+
+    report-only — 랭킹/승격 게이트를 바꾸지 않고, 운영자가 best 후보의 신뢰도를
+    판단할 수 있게 결정 요약에 노출한다.
+    """
+    warnings: list[str] = []
+    if not ranked:
+        return warnings
+
+    # 1) 생존자 편향: canonical 유니버스인데 시점 통제가 안 됨(상폐 종목 누락 가능).
+    if (
+        universe_selection.get("source") == "canonical_liquidity_universe"
+        and not universe_selection.get("survivorship_controlled", False)
+    ):
+        warnings.append(
+            "survivorship_not_controlled: 후보 유니버스가 시점(point-in-time) 데이터가 "
+            "아니어서 상장폐지 종목이 빠졌을 수 있음 → 수익률 과대평가 위험 "
+            f"(candidate_source={universe_selection.get('candidate_source')})"
+        )
+
+    # 2) 다중검정: best 후보의 deflated Sharpe가 기준(0.95)을 통과하지 못함.
+    best_dsr = (multiple_testing or {}).get("best_by_sharpe_deflated") or {}
+    if best_dsr and not best_dsr.get("passes", True):
+        warnings.append(
+            "deflated_sharpe_fail: 최고 Sharpe 후보의 DSR="
+            f"{best_dsr.get('dsr')} < 0.95 — {multiple_testing.get('n_trials')}개 변형 탐색의 "
+            "다중검정 운으로 설명 가능(in-sample 과적합 위험)"
+        )
+    return warnings
+
+
 def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not metrics.get("benchmark_coverage_complete", True):
@@ -5121,6 +5157,10 @@ def run_candidate_sweep(
         walk_forward_enabled=include_walk_forward,
         benchmark=benchmark,
     )
+    validation_warnings = compute_validation_warnings(ranked, multiple_testing, universe_selection)
+    if validation_warnings:
+        for _w in validation_warnings:
+            logger.warning("validation warning: {}", _w)
     return {
         "schema_version": 1,
         "artifact_type": "research_candidate_sweep_bundle",
@@ -5159,6 +5199,7 @@ def run_candidate_sweep(
         ),
         "decision": decision,
         "multiple_testing": multiple_testing,
+        "validation_warnings": validation_warnings,
         "rejection_summary": summarize_rejection_reasons(ranked),
         "candidates": ranked,
         "summary": {

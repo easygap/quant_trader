@@ -12,6 +12,8 @@ __pycache__/
 *.so
 .mypy_cache/
 .pytest_cache/
+.test_tmp/
+tmp_pytest*/
 *.egg-info/
 *.egg
 dist/
