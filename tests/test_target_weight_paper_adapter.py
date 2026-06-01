@@ -8398,8 +8398,10 @@ def test_pilot_plan_validation_uses_net_exposure_increase_for_existing_positions
 
 def test_pilot_valid_to_counts_inclusive_krx_business_days(monkeypatch):
     import tools.target_weight_rotation_pilot as twp
+    import tools.pilot_calendar as pc
 
-    monkeypatch.setattr(twp, "_load_kr_market_holidays", lambda: {"2026-04-14"})
+    # 날짜 헬퍼는 tools/pilot_calendar로 분리됨 — 휴장일 로더는 그 모듈에서 조회한다.
+    monkeypatch.setattr(pc, "load_kr_market_holidays", lambda: {"2026-04-14"})
 
     assert twp._pilot_valid_to("2026-04-10", target_pilot_days=3) == "2026-04-15"
 
@@ -9416,7 +9418,9 @@ def test_build_target_weight_daily_ops_summary_marks_today_recorded(tmp_path, mo
         write_target_weight_daily_ops_summary,
     )
 
-    monkeypatch.setattr(twp, "_load_kr_market_holidays", lambda: {"2026-04-13"})
+    import tools.pilot_calendar as pc
+    # 날짜 헬퍼는 tools/pilot_calendar로 분리됨 — 휴장일 로더는 그 모듈에서 조회한다.
+    monkeypatch.setattr(pc, "load_kr_market_holidays", lambda: {"2026-04-13"})
     plan = _adapter_plan()
     cap_recommendation = recommend_pilot_caps(plan)
     pass_check = {
