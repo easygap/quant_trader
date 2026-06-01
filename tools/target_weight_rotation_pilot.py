@@ -50,6 +50,13 @@ from tools.pilot_calendar import (
     _coerce_kst_datetime,
     _execution_day,
 )
+# 순수 유틸(해시·수치 변환·근사 비교)은 tools/pilot_util.py로 분리. 하위 호환 위해 re-import.
+from tools.pilot_util import (
+    _stable_manifest_hash,
+    _numbers_match,
+    _coerce_float_or_none,
+    _coerce_int_or_zero,
+)
 
 DEFAULT_OUTPUT_DIR = Path("reports/paper_runtime")
 DEFAULT_PILOT_PREVIEW_CAPS = {
@@ -89,17 +96,6 @@ DB_PERSISTENCE_TARGET_WEIGHT_EVIDENCE_REASONS = {
     "target_weight_db_trade_history_id_duplicate",
     "target_weight_db_position_quantity_mismatch",
 }
-
-
-def _stable_manifest_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _require_not_future_as_of_date(
@@ -356,18 +352,6 @@ def _authorization_portfolio_drawdown_guard(raw: Any) -> Any:
         for field in PORTFOLIO_DRAWDOWN_GUARD_AUTHORIZATION_FIELDS
         if field in raw
     }
-
-
-def _numbers_match(actual: Any, expected: Any, *, absolute_tolerance: float | None = None) -> bool:
-    try:
-        actual_num = float(actual)
-        expected_num = float(expected)
-    except (TypeError, ValueError):
-        return actual == expected
-    tolerance = max(1e-6, abs(expected_num) * 1e-9)
-    if absolute_tolerance is not None:
-        tolerance = max(tolerance, float(absolute_tolerance))
-    return abs(actual_num - expected_num) <= tolerance
 
 
 def _authorization_snapshot_money_tolerance(expected: Any) -> float:
@@ -2443,23 +2427,6 @@ def _latest_existing_evidence_record(plan: TargetWeightPlan) -> dict[str, Any] |
         if record.get("date") == plan.trade_day:
             latest_record = record
     return latest_record
-
-
-def _coerce_float_or_none(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number):
-        return None
-    return number
-
-
-def _coerce_int_or_zero(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _positive_float_from(*values: Any) -> float | None:
