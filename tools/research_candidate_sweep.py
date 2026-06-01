@@ -5450,6 +5450,36 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         )
     for action in bundle.get("decision", {}).get("next_actions", []):
         lines.append(f"- {action}")
+
+    # 과적합/생존자 편향 검증 신호를 운영자가 보는 Markdown에도 노출(report-only).
+    validation_warnings = bundle.get("validation_warnings") or []
+    multiple_testing = bundle.get("multiple_testing") or {}
+    oos_holdout = bundle.get("oos_holdout")
+    if validation_warnings or multiple_testing or oos_holdout:
+        lines.extend(["", "## Validation (과적합/편향 점검)"])
+        if validation_warnings:
+            for _w in validation_warnings:
+                lines.append(f"- ⚠️ {_w}")
+        else:
+            lines.append("- 경고 없음 (생존자 통제·deflated Sharpe 기준 통과)")
+        best_dsr = (multiple_testing or {}).get("best_by_sharpe_deflated") or {}
+        if best_dsr:
+            lines.append(
+                f"- Deflated Sharpe(best): DSR={best_dsr.get('dsr')} "
+                f"(시행 {multiple_testing.get('n_trials')}개, 기준 0.95, "
+                f"통과={best_dsr.get('passes')})"
+            )
+        if isinstance(oos_holdout, dict) and oos_holdout.get("status") == "ok":
+            lines.append(
+                f"- OOS holdout: 선택={oos_holdout.get('selected_candidate_id')} "
+                f"train_sharpe={oos_holdout.get('train_sharpe')} → "
+                f"test_sharpe={oos_holdout.get('test_sharpe')} "
+                f"(저하 {oos_holdout.get('sharpe_degradation')}, "
+                f"통과={oos_holdout.get('holdout_passes')}); "
+                f"선택구간={oos_holdout.get('selection_window')}, "
+                f"검증구간={oos_holdout.get('holdout_window')}"
+            )
+
     lines.extend([
         "",
         "## Ranking",
