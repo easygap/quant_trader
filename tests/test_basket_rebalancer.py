@@ -284,6 +284,47 @@ class TestExecute:
         executor_cls.assert_not_called()
 
 
+class TestShippedBasketsConfig:
+    """config/baskets.yaml에 실제로 배포되는 바스켓 정의가 올바른지 검증."""
+
+    @staticmethod
+    def _load():
+        import yaml
+        path = Path(__file__).parent.parent / "config" / "baskets.yaml"
+        with open(path, encoding="utf-8") as f:
+            return (yaml.safe_load(f) or {}).get("baskets", {})
+
+    def test_all_baskets_weights_sum_to_one(self):
+        baskets = self._load()
+        assert baskets, "baskets.yaml에 바스켓 정의가 없음"
+        for name, cfg in baskets.items():
+            holdings = cfg.get("holdings", {})
+            total = sum(float(w) for w in holdings.values())
+            assert abs(total - 1.0) < 1e-6, f"{name} 비중 합={total} (1.0 이어야 함)"
+
+    def test_diversified_hold_basket_is_low_turnover(self):
+        """수익성 결론 반영 바스켓: 저회전 buy&hold 설정인지 확인."""
+        baskets = self._load()
+        assert "kr_diversified_hold" in baskets, "분산 보유 바스켓 누락"
+        b = baskets["kr_diversified_hold"]
+        # 10종목 균등(각 10%)
+        assert len(b["holdings"]) == 10
+        assert all(abs(float(w) - 0.10) < 1e-9 for w in b["holdings"].values())
+        # 저회전: 넓은 드리프트 임계 + 낮은 회전 상한
+        rb = b["rebalance"]
+        assert rb["drift_threshold"] >= 0.08
+        assert rb["max_turnover_ratio"] <= 0.15
+        # 기본 비활성(운영자가 paper 검증 후 켠다)
+        assert b["enabled"] is False
+
+    def test_all_basket_symbols_are_6digit_kr_codes(self):
+        baskets = self._load()
+        for name, cfg in baskets.items():
+            for sym in cfg.get("holdings", {}):
+                assert isinstance(sym, str) and sym.isdigit() and len(sym) == 6, \
+                    f"{name}의 종목코드 {sym!r}가 6자리 숫자가 아님"
+
+
 class TestTargetStockWeight:
     """target_stock_weight(주식/현금 정적 배분) 기능 — docs/STATIC_ALLOCATION.md 실행 구현."""
 

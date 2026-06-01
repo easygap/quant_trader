@@ -75,6 +75,46 @@
   누적이 유효하려면 **DB가 보존되는 단일 서버에서 상시 구동**해야 한다(체크아웃/리셋·테스트가
   DB를 비우면 증거가 끊긴다 — 테스트發 wipe는 §1대로 이미 차단됨).
 
+## 4-B. 분산 대형주 buy&hold 운용 (수익성 결론의 배포 경로)
+
+`docs/PROFITABILITY_FINDINGS.md` 결론대로, 대형주에서 능동 alpha는 없고 **분산 보유(베타)가
+현실적 고수익 경로**다. 이걸 실제로 굴리는 경로는 바스켓 리밸런싱이다.
+
+```bash
+# 0) 배포 점검 한눈에 — 계획·예상비용·회전율·활성화 절차를 요약(가장 먼저 실행 권장)
+.venv\Scripts\python.exe main.py --mode deploy_check --basket kr_diversified_hold
+#    과거 기준일로 점검: --as-of 2025-12-30 / 스크립트용: --json
+
+# 1) 계획만 확인 (주문 없음) — 목표비중 vs 실제 드리프트, 매수/매도 계획 출력
+.venv\Scripts\python.exe main.py --mode rebalance --basket kr_diversified_hold --dry-run
+
+# 2) 실제 paper 실행 (config trading.mode=paper 일 때) — 드리프트 임계 초과분만 매매
+.venv\Scripts\python.exe main.py --mode rebalance --basket kr_diversified_hold
+```
+- `config/baskets.yaml`의 `kr_diversified_hold`는 섹터 분산 10종목 균등(각 10%), 드리프트 8%p,
+  회전 상한 15%로 **저회전 buy&hold**에 맞췄다(능동 리밸런싱은 비용이라 회전을 최소화). 기본
+  `enabled: false`이며, 운영자가 paper로 충분히 검증한 뒤 `enabled: true`로 켠다.
+- 실행 경로는 빈 포트폴리오에서 목표비중으로 진입 → 이후 드리프트 8%p 초과 시에만 부분 교정한다.
+  회전 상한 때문에 한 번에 전 종목이 안 채워질 수 있고, 다음 리밸런싱에서 채워진다(의도된 저비용 동작).
+- live 바스켓 리밸런싱은 §5의 게이트(바스켓별 canonical live gate + 계정/태그 일치 + KIS↔DB 동기화)를
+  모두 통과해야 실주문이 나간다. paper에서는 그 전 단계까지 안전하게 검증할 수 있다.
+
+**중요 — paper 실주문 게이트 구조(실측 확인 2026-06-01):**
+바스켓은 `config/baskets.yaml`에 정의된 포트폴리오라 `strategies/__init__.py`의 STRATEGY_STATUS
+레지스트리(=시그널 전략 목록)와는 별개다. 그래서:
+- `--dry-run`은 계정/전략 등록과 무관하게 항상 동작한다(계획 확인용).
+- **paper 신규 BUY 실주문**은 `OrderExecutor`의 paper-entry 가드를 통과해야 한다. 이 가드는
+  `account_key`로 전략을 식별해 preflight/runtime 상태를 본다. 바스켓을 paper로 "증거 축적"까지
+  하려면 두 경로 중 하나가 필요하다:
+  - (A) 바스켓을 능동 알파 전략처럼 취급하지 않는다 → buy&hold는 60일 evidence 승격이 목적이
+    아니므로, paper에서는 `--dry-run` + 계획/비용 점검으로 검증하고, 실거래는 §5의 **바스켓 전용
+    live gate**(`basket_rebalance:<name>`)로 바로 승격하는 게 설계 의도에 맞다.
+  - (B) 굳이 paper evidence를 쌓고 싶으면, 바스켓에 대응하는 전략명을 STRATEGY_STATUS에 paper
+    허용으로 등록하고 `tools/paper_bootstrap.py --mode shadow`로 bootstrap paradox를 푼 뒤
+    `tools/paper_preflight.py`로 preflight를 통과시킨다.
+- 요약: **buy&hold 바스켓의 정상 경로는 (A)** — paper는 dry-run 검증, 실거래는 바스켓 live gate.
+  preflight가 바스켓 실BUY를 막는 건 버그가 아니라 "전략 등록 없는 임의 paper 주문"을 막는 안전장치다.
+
 ## 5. Live 승격 (4중 안전 게이트)
 
 `current_blockers.go_live=true` + canonical live gate 통과 + 전략 상태 레지스트리 live 허용
