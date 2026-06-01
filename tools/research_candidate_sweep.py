@@ -1854,8 +1854,141 @@ def build_target_weight_volatility_budget_candidate_specs() -> list[CandidateSpe
     ]
 
 
+def build_target_weight_low_volatility_candidate_specs() -> list[CandidateSpec]:
+    """저변동성 팩터 후보군 (수익 추격이 아니라 변동성 낮은 종목 선택).
+
+    지금까지 실패한 후보는 전부 momentum/return-chaser였고 벤치마크(EW B&H)에 패배했다.
+    저변동성 팩터는 그 베타/모멘텀 틸트와 직교라, 절대수익은 비슷해도 변동성·낙폭이 낮아
+    risk-adjusted(초과 Sharpe) 개선 여지가 있는 유일한 축이다. 선택(low_volatility score)과
+    비중(equal vs inverse_volatility)을 조합해 검증한다.
+    """
+    common = {
+        "score_mode": "low_volatility",
+        "vol_lookback": 60,
+        "benchmark_symbol": "KS11",
+        "rebalance_frequency": "monthly",
+        "target_exposure": 0.90,
+        "target_tolerance_pct": 1.0,
+        "short_lookback": 60,
+        "long_lookback": 120,
+    }
+    return [
+        CandidateSpec(
+            candidate_id="low_vol_top5_60d_equal",
+            strategy="target_weight_rotation",
+            params={**common, "target_top_n": 5, "hold_rank_buffer": 3},
+            description="select 5 lowest-realized-vol names, equal weight (low-vol factor)",
+        ),
+        CandidateSpec(
+            candidate_id="low_vol_top5_60d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 5, "hold_rank_buffer": 3,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+            },
+            description="select 5 lowest-vol names AND weight inverse-vol (select low-vol, weight low-vol)",
+        ),
+        CandidateSpec(
+            candidate_id="low_vol_broad8_60d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 8, "hold_rank_buffer": 4,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+            },
+            description="broad 8-name hold (minimize selection bet), inverse-vol weighting for Sharpe",
+        ),
+        CandidateSpec(
+            candidate_id="low_vol_top5_120d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "vol_lookback": 120, "target_top_n": 5, "hold_rank_buffer": 3,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 120,
+            },
+            description="longer 120d vol estimate, top-5 low-vol, inverse-vol weighting",
+        ),
+        CandidateSpec(
+            candidate_id="low_vol_broad8_60d_invvol_sma120",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 8, "hold_rank_buffer": 4,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.50,
+            },
+            description="broad low-vol + inverse-vol + KS11 SMA120 risk-off de-risking",
+        ),
+        # ── Risk-parity 변형: 종목 선택 베팅을 0으로 만들고 비중만 바꾼다 ──
+        # 벤치마크가 동일비중이므로, 전체 유니버스를 다 보유하되(top_n을 유니버스보다 크게)
+        # 역변동성으로만 비중을 주면 "선택 효과"가 원천적으로 없어 좁은-유니버스 거짓 양성이
+        # 구조적으로 불가능하다. 순수하게 "동일비중 vs 역변동성 비중"만 비교하는 정직한 테스트.
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_60d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+            },
+            description="hold entire universe, weight inverse-vol only (risk-parity, zero selection bet)",
+        ),
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_120d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "vol_lookback": 120, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 120,
+            },
+            description="hold entire universe, 120d inverse-vol weighting (risk-parity)",
+        ),
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_60d_invvol_capped",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+                "allocation_max_sleeve_weight_pct": 15.0,
+            },
+            description="risk-parity hold-all with 15% per-name weight cap (avoid concentration)",
+        ),
+        # ── 방어형(defensive): EW B&H 자체에 risk-off 오버레이를 얹어 낙폭만 줄인다 ──
+        # 목표가 "벤치마크 초과"가 아니라 "절대수익 + 낙폭 관리(안정적 고수익)"라면, 동일비중
+        # 보유에 KS11 SMA120 risk-off를 거는 게 합리적이다. 강세장 노출은 유지하고 약세장만
+        # 줄여 같은 수익을 더 낮은 MDD로 얻는지(=Sharpe/Calmar 개선) 확인한다.
+        CandidateSpec(
+            candidate_id="ew_holdall_equal_baseline",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "equal", "target_exposure": 1.0,
+            },
+            description="equal-weight hold entire universe (EW B&H reproduction baseline)",
+        ),
+        CandidateSpec(
+            candidate_id="ew_holdall_riskoff_sma120",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "equal", "target_exposure": 1.0,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.40,
+            },
+            description="equal-weight hold-all + KS11 SMA120 risk-off (defensive: cut MDD, keep upside)",
+        ),
+    ]
+
+
 def build_candidate_specs(candidate_family: str = DEFAULT_CANDIDATE_FAMILY) -> list[CandidateSpec]:
     family = candidate_family.lower().strip()
+    if family in ("target_weight_low_volatility", "low_volatility", "low_vol", "lowvol"):
+        return build_target_weight_low_volatility_candidate_specs()
     if family in ("rotation", "relative_strength_rotation"):
         return build_rotation_candidate_specs()
     if family in ("momentum", "momentum_factor"):
@@ -2562,6 +2695,20 @@ def _target_weight_score_panel(
     long_lb = int(params.get("long_lookback", 120))
     short_w = float(params.get("short_weight", 0.6))
     score_mode = str(params.get("score_mode", "absolute")).lower().strip()
+
+    # low_volatility: 모멘텀(수익 추격)이 아니라 실현변동성이 낮은 종목을 선호한다.
+    # 지금까지 실패한 후보는 전부 return-chaser였고, 저변동성 팩터는 그 베타/모멘텀
+    # 틸트와 직교(orthogonal)라 risk-adjusted(초과 Sharpe) 개선 여지가 있는 유일한 축이다.
+    # 점수 = -(과거 vol_lookback일 일간수익률 표준편차) → 변동성 낮을수록 높은 점수.
+    if score_mode == "low_volatility":
+        vol_lb = int(params.get("vol_lookback", 60))
+        daily_ret = close_panel.pct_change()
+        realized_vol = daily_ret.rolling(vol_lb, min_periods=max(5, vol_lb // 2)).std()
+        score = -realized_vol
+        rank_penalty = _target_weight_rank_penalty_panel(close_panel, params)
+        if rank_penalty is None:
+            return score
+        return score - rank_penalty
 
     composite = (
         short_w * close_panel.pct_change(short_lb)
@@ -5608,6 +5755,8 @@ def main() -> None:
             "target_weight_churn_relief",
             "target_weight_drawdown_guard",
             "target_weight_volatility_budget",
+            "target_weight_low_volatility",
+            "low_volatility",
             "all",
         ],
         help="Research candidate family to evaluate.",

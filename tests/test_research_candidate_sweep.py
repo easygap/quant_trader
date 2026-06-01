@@ -464,6 +464,39 @@ def test_run_candidate_sweep_wires_oos_holdout(monkeypatch):
     assert oos["holdout_window"] == ["2025-01-01", "2025-12-31"]
 
 
+def test_low_volatility_score_mode_ranks_low_vol_highest():
+    """low_volatility score_mode는 실현변동성이 낮은 종목에 높은 점수를 준다."""
+    import numpy as np
+    import pandas as pd
+    from tools.research_candidate_sweep import _target_weight_score_panel
+
+    idx = pd.date_range("2023-01-01", periods=200, freq="D")
+    rng = np.random.RandomState(0)
+    low = 100 + np.cumsum(rng.randn(200) * 0.3)   # 저변동
+    high = 100 + np.cumsum(rng.randn(200) * 2.0)  # 고변동
+    panel = pd.DataFrame({"LOW": low, "HIGH": high}, index=idx)
+
+    score = _target_weight_score_panel(
+        panel, pd.Series(dtype=float),
+        {"score_mode": "low_volatility", "vol_lookback": 60},
+    )
+    last = score.iloc[-1].sort_values(ascending=False)
+    assert last.index[0] == "LOW"          # 저변동이 1등(선택 우선)
+    assert score["LOW"].iloc[-1] > score["HIGH"].iloc[-1]
+
+
+def test_low_volatility_candidate_family_builds():
+    """low_volatility 패밀리가 spec을 만들고 score_mode가 올바른지."""
+    from tools.research_candidate_sweep import build_candidate_specs
+
+    for alias in ("low_volatility", "target_weight_low_volatility", "low_vol"):
+        specs = build_candidate_specs(alias)
+        assert len(specs) >= 3
+        assert all(s.params.get("score_mode") == "low_volatility" for s in specs)
+        # 최소 하나는 inverse_volatility 비중을 쓴다(select low-vol + weight low-vol)
+        assert any(s.params.get("target_allocation_mode") == "inverse_volatility" for s in specs)
+
+
 def test_run_candidate_sweep_no_oos_when_split_absent(monkeypatch):
     """split을 안 주면 oos_holdout은 None."""
     import pandas as pd
