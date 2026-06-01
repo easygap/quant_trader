@@ -581,6 +581,77 @@ def _rebalance_live_strategy_id(basket_name: str) -> str:
     return rebalance_live_strategy_id(basket_name)
 
 
+def run_deploy_check(args) -> int:
+    """바스켓 배포 점검 — 계획·예상비용·회전율·활성화 절차를 한눈에.
+
+    수익성 결론(분산 보유 buy&hold)을 실제로 굴리기 전, 운영자가 한 명령으로
+    바스켓 상태를 확인하고 다음 활성화 절차를 받는다. 가격은 최근 거래일 종가를
+    주입해 "오늘" 시세가 없어도 동작한다. 반환: 0=점검가능, 1=확인 필요.
+    """
+    import json
+    from datetime import datetime, timedelta
+    from core.basket_rebalancer import BasketRebalancer
+    from core.basket_deploy import summarize_basket_deployment
+    from core.data_collector import DataCollector
+
+    config = Config.get()
+    basket_name = getattr(args, "basket", None) or "kr_diversified_hold"
+    as_of = getattr(args, "as_of", None)
+
+    baskets_cfg = BasketRebalancer._load_baskets_config()
+    if basket_name not in baskets_cfg:
+        logger.error("바스켓 '{}' 없음. 가능: {}", basket_name, ", ".join(baskets_cfg.keys()))
+        return 1
+    basket_cfg = baskets_cfg[basket_name]
+    holdings = basket_cfg.get("holdings", {})
+
+    # 최근 거래일 종가 주입(오늘 시세 없어도 동작)
+    dc = DataCollector()
+    end = as_of or datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=20)).strftime("%Y-%m-%d")
+    prices = {}
+    for sym in holdings:
+        try:
+            df = dc.fetch_stock(sym, start_date=start, end_date=end)
+            if df is not None and not df.empty:
+                prices[sym] = float(df["close"].iloc[-1])
+        except Exception as exc:
+            logger.debug("가격 조회 실패 {}: {}", sym, exc)
+
+    rb = BasketRebalancer(basket_name=basket_name, config=config)
+    orders = rb.plan_rebalance(prices=prices) if prices else []
+    summary = summarize_basket_deployment(
+        basket_name, basket_cfg, orders, prices,
+        portfolio_value=float(getattr(args, "initial_capital", None) or 10_000_000),
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0 if summary["ready_to_validate"] else 1
+
+    icon = "✅" if summary["ready_to_validate"] else "⚠️"
+    print(f"\n{'=' * 60}")
+    print(f"  {icon}  바스켓 배포 점검: {summary['display_name']} ({basket_name})")
+    print(f"{'=' * 60}")
+    print(f"  활성화: {'예' if summary['enabled'] else '아니오 (enabled=false)'} | "
+          f"종목 {summary['holdings_count']}개 | 비중합 정상: {summary['weights_sum_ok']}")
+    print(f"  리밸런싱: {summary['rebalance_trigger']} (드리프트 {summary['drift_threshold_pct']}%p, "
+          f"회전상한 {summary['max_turnover_ratio_pct']}%)")
+    c = summary["costs"]
+    print(f"\n  계획 주문: {c['order_count']}건 | 총 거래액 {c['total_trade_amount']:,.0f}원")
+    print(f"  예상 비용: 수수료 {c['est_commission']:,.0f} + 세금 {c['est_tax']:,.0f} = "
+          f"{c['est_total_cost']:,.0f}원 ({c['cost_bps_of_trade']}bp)")
+    if summary["turnover_pct_of_portfolio"] is not None:
+        print(f"  포트폴리오 대비 회전율: {summary['turnover_pct_of_portfolio']}%")
+    for p in summary["plan"][:10]:
+        print(f"    {p['action']:4} {p['symbol']} {p['quantity']}주 @ {p['price']:,.0f} = {p['amount']:,.0f}원")
+    print(f"\n  다음 절차:")
+    for i, s in enumerate(summary["next_steps"], 1):
+        print(f"    {i}. {s}")
+    print()
+    return 0 if summary["ready_to_validate"] else 1
+
+
 def run_rebalance(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from core.basket_rebalancer import BasketRebalancer
@@ -1486,8 +1557,9 @@ def main():
             "check_ensemble_correlation",
             "rebalance",
             "health",
+            "deploy_check",
         ],
-        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers).",
+        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers). deploy_check: 바스켓 배포 점검(계획·비용·활성화 절차).",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1577,6 +1649,14 @@ def main():
         help="[rebalance 모드] 실제 주문 없이 계획만 출력",
     )
     parser.add_argument(
+        "--as-of", type=str, default=None,
+        help="[deploy_check 모드] 가격 기준일(YYYY-MM-DD). 미지정 시 오늘",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="[deploy_check 모드] 결과를 JSON으로 출력",
+    )
+    parser.add_argument(
         "--rebalance-days", type=int, default=20,
         help="[backtest_momentum_top] 거래일 기준 리밸런싱 간격 (기본 20)",
     )
@@ -1661,6 +1741,8 @@ def main():
             run_rebalance(args)
         elif args.mode == "health":
             raise SystemExit(run_health_check())
+        elif args.mode == "deploy_check":
+            raise SystemExit(run_deploy_check(args))
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:
