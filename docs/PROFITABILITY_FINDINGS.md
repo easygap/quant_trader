@@ -38,12 +38,16 @@
 - [x] 전략 식별 (분산 보유 = 검증된 고수익 베타)
 - [x] 실행 경로 동작 (`main.py --mode rebalance --basket kr_diversified_hold` → 실제 주문 생성)
 - [x] 배포 config (`kr_diversified_hold`, `enabled:false`)
-- [x] 안전 게이트 확인 — paper preflight가 바스켓 BUY도 차단(fail-closed)함을 실측 확인.
-      즉 `tools/paper_preflight.py`로 preflight를 통과시켜야 실제 paper 주문이 나간다(의도된 안전).
-- [ ] **60영업일 paper 누적** — 달력 시간 필요(압축 불가). 운영자가 `enabled:true` + preflight 통과 후 상시 구동.
-- [ ] live 승격 — §5의 4중 게이트.
+- [x] 배포 경로 구조 규명(실측) — 바스켓은 능동 알파 전략과 다른 경로다. paper는 `--dry-run`으로
+      계획·비용을 검증하고(전략 등록 불필요), 실거래는 §5의 **바스켓 전용 live gate**
+      (`basket_rebalance:<name>` + 계정/태그 일치 + KIS↔DB 동기화)로 승격한다. 자세한 건 런북 §4-B.
+- [x] 안전 게이트 — preflight가 "전략 등록 없는 임의 paper BUY"를 막는 것까지 실측 확인(의도된 안전).
+- [ ] 운영자 검증 — paper `--dry-run`으로 며칠 계획/드리프트/비용을 관찰 후 `enabled:true`.
+- [ ] live 승격 — §5 게이트 통과 + `ENABLE_LIVE_TRADING=true` + `--confirm-live`.
 
-남은 건 본질적으로 **달력 시간(60영업일 paper)** 하나다. 그 외 전략·실행·config·안전게이트는 완비됐다.
+buy&hold 바스켓은 능동 알파 전략의 60일 evidence 승격 절차를 **거치지 않는다**(그건 연구 알파용).
+바스켓은 dry-run 검증 → 바스켓 live gate 승격이 정상 경로다. 즉 배포까지의 엔지니어링은 완비됐고,
+남은 건 운영자의 검증·활성화 결정이다.
 
 ## 전략별 현황
 

@@ -92,6 +92,22 @@
 - live 바스켓 리밸런싱은 §5의 게이트(바스켓별 canonical live gate + 계정/태그 일치 + KIS↔DB 동기화)를
   모두 통과해야 실주문이 나간다. paper에서는 그 전 단계까지 안전하게 검증할 수 있다.
 
+**중요 — paper 실주문 게이트 구조(실측 확인 2026-06-01):**
+바스켓은 `config/baskets.yaml`에 정의된 포트폴리오라 `strategies/__init__.py`의 STRATEGY_STATUS
+레지스트리(=시그널 전략 목록)와는 별개다. 그래서:
+- `--dry-run`은 계정/전략 등록과 무관하게 항상 동작한다(계획 확인용).
+- **paper 신규 BUY 실주문**은 `OrderExecutor`의 paper-entry 가드를 통과해야 한다. 이 가드는
+  `account_key`로 전략을 식별해 preflight/runtime 상태를 본다. 바스켓을 paper로 "증거 축적"까지
+  하려면 두 경로 중 하나가 필요하다:
+  - (A) 바스켓을 능동 알파 전략처럼 취급하지 않는다 → buy&hold는 60일 evidence 승격이 목적이
+    아니므로, paper에서는 `--dry-run` + 계획/비용 점검으로 검증하고, 실거래는 §5의 **바스켓 전용
+    live gate**(`basket_rebalance:<name>`)로 바로 승격하는 게 설계 의도에 맞다.
+  - (B) 굳이 paper evidence를 쌓고 싶으면, 바스켓에 대응하는 전략명을 STRATEGY_STATUS에 paper
+    허용으로 등록하고 `tools/paper_bootstrap.py --mode shadow`로 bootstrap paradox를 푼 뒤
+    `tools/paper_preflight.py`로 preflight를 통과시킨다.
+- 요약: **buy&hold 바스켓의 정상 경로는 (A)** — paper는 dry-run 검증, 실거래는 바스켓 live gate.
+  preflight가 바스켓 실BUY를 막는 건 버그가 아니라 "전략 등록 없는 임의 paper 주문"을 막는 안전장치다.
+
 ## 5. Live 승격 (4중 안전 게이트)
 
 `current_blockers.go_live=true` + canonical live gate 통과 + 전략 상태 레지스트리 live 허용
