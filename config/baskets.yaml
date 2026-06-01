@@ -29,6 +29,33 @@ baskets:
       "006400": 0.10    # 삼성SDI  10%
       # 합계 = 1.00 (현금 비중 = diversification.min_cash_ratio로 별도 관리)
 
+  # --- 분산 대형주 buy&hold (수익성 검증 결론 반영) ---
+  # docs/PROFITABILITY_FINDINGS.md 결론: 대형주에서 능동 alpha는 없고, 분산 보유(베타)가
+  # 현실적 고수익 경로다(실행 기준 ~22% CAGR, Sharpe ~1.0, MDD ~-20%). 능동 리밸런싱은
+  # 비용이라 수익을 깎으므로 회전을 최소화한다 — 그래서 분기(quarterly) + 넓은 드리프트
+  # 임계값(8%p) + 낮은 회전 상한으로 "사서 들고 있기"에 가깝게 운용한다.
+  # 활성화는 운영자 판단(enabled: true) + paper 검증 후.
+  kr_diversified_hold:
+    name: "분산 대형주 buy&hold (저회전)"
+    enabled: false
+    rebalance:
+      trigger: drift               # 분기 점검을 권장하나 drift로 큰 이탈만 교정
+      drift_threshold: 0.08        # 8%p 이상 이탈 시에만 리밸런싱(잦은 매매 억제)
+      min_trade_amount: 200000
+      max_turnover_ratio: 0.15     # 1회 회전 상한 15%(비용 최소화)
+    holdings:                      # 섹터 분산 10종목 균등(각 10%)
+      "005930": 0.10    # 삼성전자 (반도체)
+      "000660": 0.10    # SK하이닉스 (반도체)
+      "035420": 0.10    # NAVER (인터넷)
+      "005380": 0.10    # 현대차 (자동차)
+      "051910": 0.10    # LG화학 (화학/배터리)
+      "005490": 0.10    # POSCO홀딩스 (철강)
+      "055550": 0.10    # 신한지주 (금융)
+      "035720": 0.10    # 카카오 (인터넷)
+      "012330": 0.10    # 현대모비스 (자동차부품)
+      "105560": 0.10    # KB금융 (금융)
+      # 합계 = 1.00
+
   # --- 예시 2: 신호 가중 리밸런싱 바스켓 ---
   # signal_weighted: true 시, 스코어링 전략 점수에 따라 목표 비중을 동적 조정
   kr_signal_weighted:
