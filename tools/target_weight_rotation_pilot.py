@@ -36,6 +36,21 @@ from core.target_weight_rotation import (
     validate_plan_against_pilot,
 )
 
+# KRX 거래일·날짜 헬퍼는 tools/pilot_calendar.py로 분리(모놀리스 축소). 하위 호환 위해
+# _접두어 이름 그대로 re-import한다. KST / TARGET_WEIGHT_PILOT_TARGET_DAYS 도 여기서 온다.
+from tools.pilot_calendar import (
+    KST,
+    TARGET_WEIGHT_PILOT_TARGET_DAYS,
+    _split_symbols,
+    _date_range,
+    _load_kr_market_holidays,
+    _is_kr_market_business_day,
+    _pilot_valid_to,
+    _next_kr_market_business_day,
+    _coerce_kst_datetime,
+    _execution_day,
+)
+
 DEFAULT_OUTPUT_DIR = Path("reports/paper_runtime")
 DEFAULT_PILOT_PREVIEW_CAPS = {
     "max_orders_per_day": 2,
@@ -48,10 +63,9 @@ DEFAULT_CAP_ROUNDING_STEP = 10_000
 DEFAULT_SHADOW_SCAN_MULTIPLIER = 5
 DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 20
 DEFAULT_MAX_ORDER_ADV_PCT = 5.0
-TARGET_WEIGHT_PILOT_TARGET_DAYS = 60
+# TARGET_WEIGHT_PILOT_TARGET_DAYS, KST 는 tools/pilot_calendar.py에서 import (위 import 블록).
 AUTHORIZATION_SNAPSHOT_SCHEMA_VERSION = 1
 AUTHORIZATION_SNAPSHOT_TYPE = "target_weight_plan_authorization"
-KST = timezone(timedelta(hours=9))
 NO_ORDER_OPERATION_ERRORS = (ValueError, DataCollectionError)
 REPAIRABLE_TARGET_WEIGHT_EVIDENCE_REASONS = {
     "target_weight_benchmark_status_not_final",
@@ -86,83 +100,6 @@ def _stable_manifest_hash(payload: dict[str, Any]) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _split_symbols(raw: str | None) -> list[str] | None:
-    if raw is None:
-        return None
-    symbols = [part.strip() for part in raw.replace("\n", ",").split(",")]
-    return [symbol for symbol in symbols if symbol]
-
-
-def _date_range(start_date: str, end_date: str) -> list[str]:
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    if end < start:
-        raise ValueError("shadow end date must be on or after start date")
-
-    dates: list[str] = []
-    day = start
-    while day <= end:
-        if day.weekday() < 5:
-            dates.append(day.strftime("%Y-%m-%d"))
-        day += timedelta(days=1)
-    if not dates:
-        raise ValueError("shadow date range contains no weekdays")
-    return dates
-
-
-def _load_kr_market_holidays() -> set[str]:
-    try:
-        from core.trading_hours import _load_holidays
-
-        return {str(day).strip() for day in _load_holidays() if str(day).strip()}
-    except Exception as exc:
-        logger.debug("KRX holiday lookup skipped for pilot window calculation: {}", exc)
-        return set()
-
-
-def _is_kr_market_business_day(day: date, holidays: set[str]) -> bool:
-    return day.weekday() < 5 and day.isoformat() not in holidays
-
-
-def _pilot_valid_to(
-    valid_from: str,
-    target_pilot_days: int = TARGET_WEIGHT_PILOT_TARGET_DAYS,
-) -> str:
-    """Return an inclusive KRX business-day pilot window end date."""
-    if target_pilot_days <= 0:
-        raise ValueError("target_pilot_days must be positive")
-
-    current = datetime.strptime(valid_from, "%Y-%m-%d").date()
-    holidays = _load_kr_market_holidays()
-    counted_days = 0
-    while True:
-        if _is_kr_market_business_day(current, holidays):
-            counted_days += 1
-            if counted_days >= target_pilot_days:
-                return current.isoformat()
-        current += timedelta(days=1)
-
-
-def _next_kr_market_business_day(day: str) -> str:
-    current = datetime.strptime(day, "%Y-%m-%d").date() + timedelta(days=1)
-    holidays = _load_kr_market_holidays()
-    while not _is_kr_market_business_day(current, holidays):
-        current += timedelta(days=1)
-    return current.isoformat()
-
-
-def _coerce_kst_datetime(now: datetime | None = None) -> datetime:
-    current = now or datetime.now(KST)
-    if current.tzinfo is not None:
-        current = current.astimezone(KST).replace(tzinfo=None)
-    return current
-
-
-def _execution_day(now: datetime | None = None) -> str:
-    current = _coerce_kst_datetime(now)
-    return current.date().strftime("%Y-%m-%d")
 
 
 def _require_not_future_as_of_date(
