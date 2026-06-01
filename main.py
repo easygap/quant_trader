@@ -1360,6 +1360,53 @@ def _get_strategy(name: str):
     return create_strategy(name)
 
 
+def run_health_check() -> int:
+    """운영 통합 헬스 점검 — 전 전략 runtime state + current_blockers를 한 번에 요약.
+
+    tools/paper_runtime_status.py --health 와 동일한 로직. main.py 진입점에서도
+    바로 쓸 수 있게 노출한다. 반환 코드: 0=OK, 1=ATTENTION, 2=BLOCKED.
+    """
+    import json
+    from pathlib import Path
+    from database.models import init_database
+    from core.paper_runtime import get_paper_runtime_state
+    from core.strategy_universe import get_paper_strategy_names
+    from core.operator_health import build_operator_health
+
+    init_database()
+    strategies = sorted(get_paper_strategy_names() or [])
+    states = []
+    for strategy in strategies:
+        try:
+            states.append(get_paper_runtime_state(strategy))
+        except Exception as exc:
+            logger.warning("{} 상태 조회 실패: {}", strategy, exc)
+
+    blockers = None
+    blockers_path = Path(__file__).resolve().parent / "reports" / "current_blockers.json"
+    if blockers_path.exists():
+        try:
+            blockers = json.loads(blockers_path.read_text(encoding="utf-8"))
+        except Exception:
+            blockers = None
+
+    health = build_operator_health(states, blockers)
+    icon = {"OK": "✅", "ATTENTION": "⚠️", "BLOCKED": "⛔"}.get(health["verdict"], "❓")
+    logger.info("{} 운영 헬스: {} — {}", icon, health["verdict"], health["headline"])
+    b = health["blockers"]
+    logger.info(
+        "go_live={} | hard_blockers={} | artifact_stale={}",
+        b["go_live"], b["hard_blocker_count"], b["freshness_stale"],
+    )
+    for s in health["strategies"]:
+        extra = f" ({', '.join(s['notes'])})" if s["notes"] else ""
+        logger.info("  - {}: {}{}", s["strategy"], s["state"], extra)
+    for item in health["attention_items"]:
+        logger.info("  확인: {}", item)
+
+    return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
+
+
 def main():
     """메인 진입점"""
     parser = argparse.ArgumentParser(
@@ -1438,8 +1485,9 @@ def main():
             "check_correlation",
             "check_ensemble_correlation",
             "rebalance",
+            "health",
         ],
-        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱.",
+        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers).",
     )
     from strategies import get_strategy_names
     parser.add_argument(
@@ -1611,6 +1659,8 @@ def main():
             run_check_ensemble_correlation(args)
         elif args.mode == "rebalance":
             run_rebalance(args)
+        elif args.mode == "health":
+            raise SystemExit(run_health_check())
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:
