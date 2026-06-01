@@ -2113,6 +2113,40 @@ def test_write_sweep_artifact_surfaces_rejection_reasons(tmp_path):
     assert "turnover 1097.1%/y >= 1000.0%/y" in text
 
 
+def test_write_sweep_artifact_surfaces_validation_section(tmp_path):
+    """validation_warnings / multiple_testing / oos_holdout이 Markdown에 노출된다."""
+    from tools.research_candidate_sweep import write_candidate_artifacts
+
+    bundle = _minimal_bundle([
+        {"candidate_id": "c1", "rank_score": 5.0,
+         "promotion": {"status": "paper_only", "reason": ""}, "metrics": {"sharpe": 0.8}},
+    ])
+    bundle["validation_warnings"] = [
+        "deflated_sharpe_fail: 최고 Sharpe 후보의 DSR=0.4 < 0.95 — 50개 변형 탐색의 다중검정",
+    ]
+    bundle["multiple_testing"] = {
+        "n_trials": 50,
+        "best_by_sharpe_deflated": {"dsr": 0.4, "passes": False},
+    }
+    bundle["oos_holdout"] = {
+        "status": "ok", "selected_candidate_id": "c1",
+        "train_sharpe": 2.0, "test_sharpe": -0.3, "sharpe_degradation": 2.3,
+        "holdout_passes": False,
+        "selection_window": ["2023-01-01", "2024-12-31"],
+        "holdout_window": ["2025-01-01", "2025-12-31"],
+    }
+
+    _, md_path = write_candidate_artifacts(bundle, tmp_path)
+    text = md_path.read_text(encoding="utf-8")
+
+    assert "## Validation" in text
+    assert "deflated_sharpe_fail" in text
+    assert "DSR=0.4" in text
+    assert "OOS holdout" in text
+    assert "test_sharpe=-0.3" in text
+    assert "통과=False" in text
+
+
 def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):
     import pandas as pd
     import config.config_loader as config_loader
