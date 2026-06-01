@@ -1396,9 +1396,10 @@ class OrderExecutor:
                 from database.repositories import update_position_targets
                 tp_config = self.risk_manager.risk_params.get("take_profit", {})
                 final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
+                # 부분 익절 완료 표시를 영속화해 다음 모니터링 사이클에서 재발동되지 않게 한다.
                 update_position_targets(
                     symbol, take_profit_price=round(final_target, 0),
-                    account_key=self.account_key,
+                    account_key=self.account_key, partial_tp_done=True,
                 )
 
         # 매매 로그
@@ -1484,7 +1485,7 @@ class OrderExecutor:
             if (
                 current_price >= partial_target_price
                 and position.quantity >= 2  # 1주면 부분 매도 불가
-                and not getattr(position, "_partial_tp_done", False)
+                and not getattr(position, "partial_tp_done", False)
             ):
                 partial_qty = max(1, int(position.quantity * partial_ratio))
                 if partial_qty < position.quantity:
