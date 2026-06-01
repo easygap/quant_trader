@@ -14,6 +14,7 @@
   - "existing experiment"는 상태를 승격시키지 않음.
   - experiment_note 필드로 운영 사실을 분리 기록.
 """
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
@@ -147,11 +148,12 @@ def _check_provisional_candidate(m: StrategyMetrics) -> tuple[bool, str]:
     if m.turnover_per_year is not None and m.turnover_per_year >= MAX_PROVISIONAL_TURNOVER_PCT:
         fails.append(f"turnover {m.turnover_per_year}%/y >= {MAX_PROVISIONAL_TURNOVER_PCT}%/y")
     if m.canonical_benchmark_required:
-        if m.benchmark_excess_return is None:
+        # NaN은 (nan <= 0)이 False라 미달 검사를 조용히 통과하므로 명시적으로 막는다.
+        if m.benchmark_excess_return is None or not math.isfinite(m.benchmark_excess_return):
             fails.append("benchmark excess return missing")
         elif m.benchmark_excess_return <= 0:
             fails.append(f"benchmark excess return {m.benchmark_excess_return} <= 0")
-        if m.benchmark_excess_sharpe is None:
+        if m.benchmark_excess_sharpe is None or not math.isfinite(m.benchmark_excess_sharpe):
             fails.append("benchmark excess Sharpe missing")
         elif m.benchmark_excess_sharpe <= 0:
             fails.append(f"benchmark excess Sharpe {m.benchmark_excess_sharpe} <= 0")
@@ -316,9 +318,14 @@ def _as_float(value) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    # NaN/Inf는 임계값 비교를 모두 False로 만들어 게이트를 조용히 통과시키므로
+    # 비유한값은 None으로 처리해 fail-closed가 되게 한다.
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _parse_date_like(value) -> Optional[date]:
