@@ -1922,6 +1922,41 @@ def build_target_weight_low_volatility_candidate_specs() -> list[CandidateSpec]:
             },
             description="broad low-vol + inverse-vol + KS11 SMA120 risk-off de-risking",
         ),
+        # ── Risk-parity 변형: 종목 선택 베팅을 0으로 만들고 비중만 바꾼다 ──
+        # 벤치마크가 동일비중이므로, 전체 유니버스를 다 보유하되(top_n을 유니버스보다 크게)
+        # 역변동성으로만 비중을 주면 "선택 효과"가 원천적으로 없어 좁은-유니버스 거짓 양성이
+        # 구조적으로 불가능하다. 순수하게 "동일비중 vs 역변동성 비중"만 비교하는 정직한 테스트.
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_60d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+            },
+            description="hold entire universe, weight inverse-vol only (risk-parity, zero selection bet)",
+        ),
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_120d_invvol",
+            strategy="target_weight_rotation",
+            params={
+                **common, "vol_lookback": 120, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 120,
+            },
+            description="hold entire universe, 120d inverse-vol weighting (risk-parity)",
+        ),
+        CandidateSpec(
+            candidate_id="risk_parity_holdall_60d_invvol_capped",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "inverse_volatility",
+                "allocation_vol_lookback_days": 60,
+                "allocation_max_sleeve_weight_pct": 15.0,
+            },
+            description="risk-parity hold-all with 15% per-name weight cap (avoid concentration)",
+        ),
     ]
 
 
