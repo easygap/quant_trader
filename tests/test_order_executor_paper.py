@@ -1484,3 +1484,65 @@ def test_stop_loss_take_profit_ignores_invalid_price_without_trailing_update(fre
     assert result["price_invalid"] is True
     assert "현재가 확인 실패" in result["reason"]
     assert get_position("005930", account_key="invalid_exit_price_test").trailing_stop_price == 58_000
+
+
+def test_partial_take_profit_fires_once_not_every_cycle(fresh_db):
+    """1차 부분 익절은 한 번만 발동하고, partial_tp_done 영속화로 재발동을 막는다.
+
+    회귀 방지: 과거에는 set 되지 않는 `_partial_tp_done` 속성을 보던 탓에 1차 목표가와
+    최종 익절가 사이 구간에서 매 모니터링 사이클마다 부분 매도가 반복돼 보유 종목이
+    조각나고 수수료가 누수됐다.
+    """
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position, save_position
+
+    executor = OrderExecutor(account_key="partial_tp_once_test")
+    # 1차 4% 목표, 최종 8% 목표. 현재가는 그 사이(5%)로 둬 partial만 트리거되게 한다.
+    executor.config.risk_params["take_profit"] = {
+        "type": "fixed",
+        "fixed_rate": 0.08,
+        "partial_exit": True,
+        "partial_ratio": 0.5,
+        "partial_target": 0.04,
+    }
+    # 최소 보유 기간 때문에 당일 매도가 막히지 않도록 0으로 둔다(부분 익절 로직만 검증).
+    executor.config.risk_params.setdefault("position_limits", {})["min_holding_days"] = 0
+
+    save_position(
+        symbol="005930",
+        avg_price=60_000,
+        quantity=10,
+        stop_loss_price=55_000,
+        take_profit_price=64_800,  # 최종 익절가(8%) — 5%에선 전량 익절 안 됨
+        trailing_stop_price=50_000,
+        strategy="scoring",
+        account_key="partial_tp_once_test",
+    )
+
+    current_price = 63_000  # avg*1.05 → 1차(62,400) 초과, 최종(64,800) 미만
+
+    # 1) 첫 사이클: 부분 익절 발동
+    first = executor.check_stop_loss_take_profit("005930", current_price)
+    assert first["action"] == "TAKE_PROFIT_PARTIAL"
+    assert first["partial_qty"] == 5
+
+    # 실제 부분 매도 실행 → partial_tp_done 영속화
+    sell = executor.execute_sell(
+        "005930", current_price, reason="TAKE_PROFIT_PARTIAL",
+        quantity=first["partial_qty"], strategy="scoring",
+    )
+    assert sell["success"] is True
+    pos = get_position("005930", account_key="partial_tp_once_test")
+    assert pos.quantity == 5
+    assert pos.partial_tp_done is True
+
+    # 2) 다음 사이클(같은 가격대): 더 이상 부분 익절이 재발동되지 않아야 한다
+    second = executor.check_stop_loss_take_profit("005930", current_price)
+    assert second["action"] != "TAKE_PROFIT_PARTIAL"
+
+    # 3) 추가 매수로 평균단가가 바뀌면 부분 익절 플래그가 리셋된다
+    save_position(
+        symbol="005930", avg_price=66_000, quantity=5,
+        strategy="scoring", account_key="partial_tp_once_test",
+    )
+    assert get_position("005930", account_key="partial_tp_once_test").partial_tp_done is False

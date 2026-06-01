@@ -122,6 +122,7 @@ class Position(Base):
     take_profit_price = Column(Float)                           # 익절가
     trailing_stop_price = Column(Float)                         # 트레일링 스탑가
     highest_price = Column(Float)                               # 보유 중 최고가 (트레일링용)
+    partial_tp_done = Column(Boolean, default=False, nullable=False)  # 1차 부분 익절 수행 여부 (재발동 방지)
     strategy = Column(String(50))                               # 매수 시 사용 전략
     bought_at = Column(DateTime, default=datetime.now)          # 최초 매수 시점
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -535,6 +536,37 @@ def _migrate_trade_history_execution_link_columns(engine):
                     raise
 
 
+def _migrate_positions_partial_tp_done(engine):
+    """기존 DB의 positions 테이블에 partial_tp_done 컬럼 추가 (부분 익절 재발동 방지)."""
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    # SQLite는 BOOLEAN을 0/1로 저장. 기존 행은 미수행(0)으로 채운다.
+    col_type = "BOOLEAN DEFAULT 0 NOT NULL" if dialect == "sqlite" else "BOOLEAN DEFAULT FALSE NOT NULL"
+    with engine.connect() as conn:
+        try:
+            if dialect == "sqlite":
+                t_check = conn.execute(text(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='positions'"
+                ))
+                if not t_check.fetchone():
+                    return
+                r = conn.execute(text("PRAGMA table_info(positions)"))
+                if any(row[1] == "partial_tp_done" for row in r.fetchall()):
+                    return
+                conn.execute(text(f"ALTER TABLE positions ADD COLUMN partial_tp_done {col_type}"))
+            else:
+                conn.execute(text(
+                    f"ALTER TABLE positions ADD COLUMN IF NOT EXISTS partial_tp_done {col_type}"
+                ))
+            conn.commit()
+        except Exception as e:
+            if "duplicate column" in str(e).lower() or "already exists" in str(e).lower():
+                conn.rollback()
+            else:
+                conn.rollback()
+                raise
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -558,6 +590,10 @@ def init_database():
         pass
     try:
         _migrate_trade_history_execution_link_columns(engine)
+    except Exception:
+        pass
+    try:
+        _migrate_positions_partial_tp_done(engine)
     except Exception:
         pass
 
