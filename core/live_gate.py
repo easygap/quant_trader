@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -184,9 +185,14 @@ def _as_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return None
+    # NaN/Inf는 모든 임계값 비교(nan <= 0, nan < 1.1 등)가 False가 되어 게이트를
+    # 조용히 통과시킨다. 비유한값은 None으로 처리해 fail-closed가 되도록 한다.
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _as_int(value: Any) -> int | None:

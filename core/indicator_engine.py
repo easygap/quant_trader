@@ -201,9 +201,16 @@ class IndicatorEngine:
         if HAS_PANDAS_TA:
             adx_result = ta.adx(df["high"], df["low"], df["close"], length=period)
             if adx_result is not None and not adx_result.empty:
+                # pandas-ta 컬럼 순서는 [ADX, ADXR, DMP(+DI), DMN(-DI)]이다. 위치 인덱스로
+                # 1,2를 쓰면 di_plus에 ADXR이, di_minus에 +DI가 들어가 -DI가 누락된다.
+                # 컬럼명(DMP/DMN)으로 직접 집어 +DI/-DI를 정확히 매핑한다.
                 df["adx"] = adx_result.iloc[:, 0]        # ADX
-                df["di_plus"] = adx_result.iloc[:, 1]    # +DI
-                df["di_minus"] = adx_result.iloc[:, 2]   # -DI
+                dmp = adx_result.filter(like="DMP")
+                dmn = adx_result.filter(like="DMN")
+                if not dmp.empty:
+                    df["di_plus"] = dmp.iloc[:, 0]       # +DI
+                if not dmn.empty:
+                    df["di_minus"] = dmn.iloc[:, 0]      # -DI
         else:
             df["adx"] = self._calc_adx(df, period)
 
@@ -257,7 +264,9 @@ class IndicatorEngine:
         """
         avg_period = self.params.get("volume", {}).get("avg_period", 20)
         df["volume_avg"] = df["volume"].rolling(window=avg_period).mean()
-        df["volume_ratio"] = df["volume"] / df["volume_avg"]
+        # 평균 거래량이 0(장기 거래정지 후 재개 등)이면 0으로 나눠 inf가 되고,
+        # 이는 거짓 거래량 급증 신호로 이어진다. 0을 NaN으로 치환해 inf를 막는다.
+        df["volume_ratio"] = df["volume"] / df["volume_avg"].replace(0, np.nan)
 
         return df
 

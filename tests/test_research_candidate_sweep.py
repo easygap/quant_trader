@@ -118,12 +118,375 @@ def test_select_canonical_universe_scans_past_legacy_100_for_large_top_n(monkeyp
     monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
     monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
 
-    universe = select_canonical_universe(120)
+    # current 모드를 명시해 현재-상장 스캔 동작을 결정적으로 검증(설정 의존 제거).
+    universe = select_canonical_universe(120, universe_mode="current")
 
     assert len(fetched) == 150
     assert len(universe) == 120
     assert "001500" in universe
     assert "001000" in universe
+
+
+def test_select_canonical_universe_historical_mode_controls_survivorship(monkeypatch):
+    """historical 모드: as_of 시점 상장 목록(상폐 포함)을 후보 풀로 쓰고 메타에 정직히 기록."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    # 현재 상장 목록(생존자만) — historical 모드면 이 경로는 쓰이면 안 된다.
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({
+            "Code": ["005930", "000660"],
+            "Marcap": [200_000_000_000, 200_000_000_000],
+        })
+    )
+
+    # as_of 시점 상장 목록: 이후 상장폐지된 "999990"을 포함(생존자 편향 완화의 핵심).
+    # universe_source=pykrx_pit → 실제 시점 데이터(생존자 편향 통제됨).
+    historical_df = pd.DataFrame({
+        "Code": ["005930", "000660", "999990"],
+        "Name": ["삼성전자", "SK하이닉스", "상폐예정"],
+        "Market": ["KOSPI", "KOSPI", "KOSPI"],
+        "Marcap": [0, 0, 0],
+        "universe_source": ["pykrx_pit", "pykrx_pit", "pykrx_pit"],
+    })
+
+    calls = {}
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        @staticmethod
+        def get_krx_stock_list(as_of_date=None, exclude_administrative=True, universe_mode="current"):
+            calls["universe_mode"] = universe_mode
+            calls["as_of_date"] = as_of_date
+            return historical_df
+
+        def fetch_korean_stock(self, symbol, start, end):
+            # 거래대금 = close*volume. 상폐주가 후보 풀에 포함됨을 보장하려고 모두 양수.
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", True)
+
+    meta = {}
+    universe = select_canonical_universe(
+        3, universe_mode="historical", as_of_date="2022-12-31", meta_out=meta,
+    )
+
+    # historical 경로가 실제로 사용됐는지
+    assert calls["universe_mode"] == "historical"
+    assert calls["as_of_date"] == "2022-12-31"
+    # 상폐 종목이 후보 풀에 포함됨 → 생존자 편향 완화
+    assert "999990" in universe
+    # 메타에 정직하게 기록
+    assert meta["universe_mode"] == "historical"
+    assert meta["survivorship_controlled"] is True
+    assert meta["candidate_source"].startswith("krx_historical")
+
+
+def test_select_canonical_universe_historical_fallback_flags_not_controlled(monkeypatch):
+    """historical 요청이지만 pykrx 실패로 FDR 현재목록 폴백 시 survivorship_controlled=False (정직한 플래그)."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({"Code": ["005930"], "Marcap": [2e11]})
+    )
+
+    # pykrx 폴백으로 만들어진 목록: universe_source=fdr_fallback (시점 데이터 아님).
+    fallback_df = pd.DataFrame({
+        "Code": ["005930", "000660"],
+        "Name": ["삼성전자", "SK하이닉스"],
+        "Market": ["KOSPI", "KOSPI"],
+        "Marcap": [4e14, 1e14],
+        "universe_source": ["fdr_fallback", "fdr_fallback"],
+    })
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        @staticmethod
+        def get_krx_stock_list(as_of_date=None, exclude_administrative=True, universe_mode="current"):
+            return fallback_df
+
+        def fetch_korean_stock(self, symbol, start, end):
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+    monkeypatch.setattr(data_collector, "HAS_PYKRX", True)
+
+    meta = {}
+    select_canonical_universe(2, universe_mode="historical", as_of_date="2022-12-31", meta_out=meta)
+
+    # pykrx 설치돼 있어도 실제 시점 데이터가 아니므로 정직하게 False
+    assert meta["survivorship_controlled"] is False
+
+
+def test_select_canonical_universe_current_mode_flags_survivorship_bias(monkeypatch):
+    """current 모드: 생존자 편향이 통제되지 않음을 메타에 정직히 기록."""
+    import sys
+    import types
+
+    import pandas as pd
+
+    import core.data_collector as data_collector
+    from tools.research_candidate_sweep import select_canonical_universe
+
+    fake_fdr = types.SimpleNamespace(
+        StockListing=lambda market: pd.DataFrame({
+            "Code": ["005930", "000660"],
+            "Marcap": [200_000_000_000, 200_000_000_000],
+        })
+    )
+
+    class FakeCollector:
+        quiet_ohlcv_log = False
+
+        def fetch_korean_stock(self, symbol, start, end):
+            return pd.DataFrame({"close": [float(int(symbol))], "volume": [1.0]})
+
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", fake_fdr)
+    monkeypatch.setattr(data_collector, "DataCollector", FakeCollector)
+
+    meta = {}
+    universe = select_canonical_universe(2, universe_mode="current", meta_out=meta)
+
+    assert len(universe) == 2
+    assert meta["universe_mode"] == "current"
+    assert meta["survivorship_controlled"] is False
+    assert meta["candidate_source"] == "fdr_current_kospi"
+
+
+def test_annotate_multiple_testing_deflates_each_candidate():
+    """시행 집합 전체로 각 후보에 deflated Sharpe를 부여하고 다중검정으로 할인."""
+    from tools.research_candidate_sweep import annotate_multiple_testing
+
+    # 20개 변형, Sharpe가 0.4~1.4로 퍼져 있음(다중검정 상황).
+    records = [
+        {"candidate_id": f"v{i}", "metrics": {"sharpe": 0.4 + i * 0.05}}
+        for i in range(20)
+    ]
+    summary = annotate_multiple_testing(records, n_obs=750)
+
+    assert summary["n_trials"] == 20
+    assert summary["sharpe_variance_across_trials"] > 0
+    # 각 record에 deflated_sharpe 부여
+    for r in records:
+        ds = r["metrics"]["deflated_sharpe"]
+        assert set(["dsr", "psr_vs_zero", "expected_max_sharpe_annual", "passes"]).issubset(ds)
+        # 다중검정 기준선(expected_max>0)이 있으므로 dsr <= psr_vs_zero
+        assert ds["dsr"] <= ds["psr_vs_zero"] + 1e-9
+
+    # 단일 시행이면 할인 없음(expected_max=0 → dsr==psr_vs_zero)
+    single = [{"candidate_id": "only", "metrics": {"sharpe": 1.2}}]
+    annotate_multiple_testing(single, n_obs=750)
+    ds1 = single[0]["metrics"]["deflated_sharpe"]
+    assert ds1["expected_max_sharpe_annual"] == 0.0
+    assert abs(ds1["dsr"] - ds1["psr_vs_zero"]) < 1e-9
+
+
+def test_annotate_multiple_testing_handles_missing_sharpe():
+    """sharpe 없는 record가 섞여 있어도 안전하게 동작."""
+    from tools.research_candidate_sweep import annotate_multiple_testing
+
+    records = [
+        {"candidate_id": "a", "metrics": {"sharpe": 1.0}},
+        {"candidate_id": "b", "metrics": {}},          # sharpe 없음
+        {"candidate_id": "c", "metrics": {"sharpe": 0.5}},
+    ]
+    summary = annotate_multiple_testing(records, n_obs=500)
+    assert summary["n_trials"] == 3
+    assert "deflated_sharpe" in records[0]["metrics"]
+    assert "deflated_sharpe" not in records[1]["metrics"]  # 건너뜀
+
+
+def test_compute_validation_warnings_flags_survivorship_and_deflated():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    ranked = [{"candidate_id": "best", "metrics": {"sharpe": 0.8}}]
+    mt = {"n_trials": 100, "best_by_sharpe_deflated": {"dsr": 0.4, "passes": False}}
+    uni = {"source": "canonical_liquidity_universe", "survivorship_controlled": False,
+           "candidate_source": "fdr_current_kospi"}
+
+    warns = compute_validation_warnings(ranked, mt, uni)
+    joined = " ".join(warns)
+    assert any("survivorship_not_controlled" in w for w in warns)
+    assert any("deflated_sharpe_fail" in w for w in warns)
+
+
+def test_compute_validation_warnings_clean_when_controlled_and_passing():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    ranked = [{"candidate_id": "best", "metrics": {"sharpe": 2.0}}]
+    mt = {"n_trials": 3, "best_by_sharpe_deflated": {"dsr": 0.98, "passes": True}}
+    uni = {"source": "canonical_liquidity_universe", "survivorship_controlled": True,
+           "candidate_source": "krx_historical_as_of_2022-12-31"}
+
+    assert compute_validation_warnings(ranked, mt, uni) == []
+
+
+def test_compute_validation_warnings_empty_ranked():
+    from tools.research_candidate_sweep import compute_validation_warnings
+
+    assert compute_validation_warnings([], {}, {}) == []
+
+
+class _FakeSpec:
+    def __init__(self, candidate_id, strategy="scoring"):
+        self.candidate_id = candidate_id
+        self.strategy = strategy
+        self.params = {}
+        self.description = candidate_id
+
+
+def test_oos_holdout_selects_on_train_not_test():
+    """선택은 train 성과로만 — train 최고지만 test에서 무너지는 변형이 선택/보고되어야 한다."""
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    overfit = _FakeSpec("overfit")   # train 최고, test 붕괴
+    robust = _FakeSpec("robust")     # train 2등, test 양호
+
+    def fake_eval(spec, start, end):
+        is_train = start == "2023-01-01"
+        if spec.candidate_id == "overfit":
+            return {"sharpe": 2.5 if is_train else -0.4, "total_return": 80 if is_train else -10}
+        return {"sharpe": 1.2 if is_train else 1.0, "total_return": 30 if is_train else 18}
+
+    out = evaluate_oos_holdout(
+        [robust, overfit],
+        train_start="2023-01-01", train_end="2024-12-31",
+        test_start="2025-01-01", test_end="2025-12-31",
+        evaluate_fn=fake_eval,
+        rank_fn=lambda m: m.get("sharpe", 0),  # train sharpe로 랭킹
+    )
+    # train 최고는 overfit → 그게 선택되고, test 성과(음수)가 보고됨
+    assert out["selected_candidate_id"] == "overfit"
+    assert out["train_sharpe"] == 2.5
+    assert out["test_sharpe"] == -0.4
+    assert out["sharpe_degradation"] == 2.9
+    assert out["holdout_passes"] is False  # test에서 음의 Sharpe → 과적합 노출
+
+
+def test_oos_holdout_passes_for_robust_winner():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    def fake_eval(spec, start, end):
+        is_train = start == "2023-01-01"
+        return {"sharpe": 1.5 if is_train else 1.1, "total_return": 40 if is_train else 25}
+
+    out = evaluate_oos_holdout(
+        [_FakeSpec("a"), _FakeSpec("b")],
+        train_start="2023-01-01", train_end="2024-12-31",
+        test_start="2025-01-01", test_end="2025-12-31",
+        evaluate_fn=fake_eval,
+        rank_fn=lambda m: m.get("sharpe", 0),
+    )
+    assert out["status"] == "ok"
+    assert out["test_sharpe"] == 1.1
+    assert out["holdout_passes"] is True
+    assert out["selection_window"] == ["2023-01-01", "2024-12-31"]
+    assert out["holdout_window"] == ["2025-01-01", "2025-12-31"]
+
+
+def test_oos_holdout_empty_specs():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    out = evaluate_oos_holdout(
+        [], train_start="a", train_end="b", test_start="c", test_end="d",
+        evaluate_fn=lambda *a: {},
+    )
+    assert out["status"] == "no_specs"
+    assert out["trials"] == 0
+
+
+def test_run_candidate_sweep_wires_oos_holdout(monkeypatch):
+    """run_candidate_sweep에 --oos-holdout-split이 들어오면 artifact에 oos_holdout이 채워진다.
+
+    무거운 백테스트/유니버스 선택은 스텁으로 대체하고, 배선만 검증한다.
+    """
+    import pandas as pd
+    import tools.research_candidate_sweep as rcs
+
+    spec_a = _FakeSpec("a")
+    spec_b = _FakeSpec("b")
+
+    # 후보 빌드/유니버스/벤치마크/평가/아티팩트 기록을 가볍게 스텁.
+    monkeypatch.setattr(rcs, "filter_candidate_specs", lambda specs, ids: [spec_a, spec_b])
+    monkeypatch.setattr(rcs, "build_candidate_specs", lambda family: [spec_a, spec_b])
+    monkeypatch.setattr(rcs, "apply_research_universe_liquidity_filter",
+                        lambda universe, config, **kw: (["005930", "000660"], {"passed": 2}))
+    monkeypatch.setattr(rcs, "select_canonical_universe",
+                        lambda *a, **kw: ["005930", "000660"])
+    bench_idx = pd.date_range("2023-01-01", "2025-12-31", freq="D")
+    bench_returns = pd.Series([0.0001] * len(bench_idx), index=bench_idx)
+    monkeypatch.setattr(rcs, "buy_and_hold_benchmark_with_returns",
+                        lambda *a, **kw: ({"benchmark_usable": True, "total_return": 10.0}, bench_returns))
+    monkeypatch.setattr(rcs, "make_windows", lambda *a, **kw: [])
+
+    def fake_eval(spec, symbols, start, end, capital, bench, **kw):
+        is_train = start == "2023-01-01"
+        if getattr(spec, "candidate_id", None) == "a":
+            return {"sharpe": 2.0 if is_train else -0.3, "total_return": 50 if is_train else -5,
+                    "benchmark_excess_return": 5, "benchmark_excess_sharpe": 0.3, "total_trades": 40}
+        return {"sharpe": 1.1 if is_train else 0.9, "total_return": 25 if is_train else 15,
+                "benchmark_excess_return": 3, "benchmark_excess_sharpe": 0.2, "total_trades": 40}
+
+    monkeypatch.setattr(rcs, "evaluate_candidate", fake_eval)
+    monkeypatch.setattr(rcs, "diversification_for_spec", lambda spec: {})
+
+    bundle = rcs.run_candidate_sweep(
+        symbols=["005930", "000660"],
+        start="2023-01-01", end="2025-12-31",
+        include_walk_forward=False,
+        oos_holdout_split="2025-01-01",
+    )
+
+    oos = bundle.get("oos_holdout")
+    assert oos is not None and oos["status"] == "ok"
+    # train 최고는 a(sharpe 2.0)지만 test에서 무너짐(-0.3) → 그게 선택·보고됨
+    assert oos["selected_candidate_id"] == "a"
+    assert oos["train_sharpe"] == 2.0
+    assert oos["test_sharpe"] == -0.3
+    assert oos["holdout_passes"] is False
+    assert oos["selection_window"] == ["2023-01-01", "2024-12-31"]
+    assert oos["holdout_window"] == ["2025-01-01", "2025-12-31"]
+
+
+def test_run_candidate_sweep_no_oos_when_split_absent(monkeypatch):
+    """split을 안 주면 oos_holdout은 None."""
+    import pandas as pd
+    import tools.research_candidate_sweep as rcs
+
+    monkeypatch.setattr(rcs, "filter_candidate_specs", lambda specs, ids: [_FakeSpec("a")])
+    monkeypatch.setattr(rcs, "build_candidate_specs", lambda family: [_FakeSpec("a")])
+    monkeypatch.setattr(rcs, "apply_research_universe_liquidity_filter",
+                        lambda universe, config, **kw: (["005930"], {"passed": 1}))
+    bench_idx = pd.date_range("2023-01-01", "2025-12-31", freq="D")
+    monkeypatch.setattr(rcs, "buy_and_hold_benchmark_with_returns",
+                        lambda *a, **kw: ({"benchmark_usable": True}, pd.Series([0.0001] * len(bench_idx), index=bench_idx)))
+    monkeypatch.setattr(rcs, "make_windows", lambda *a, **kw: [])
+    monkeypatch.setattr(rcs, "evaluate_candidate",
+                        lambda *a, **kw: {"sharpe": 1.0, "total_return": 10, "benchmark_excess_return": 1,
+                                          "benchmark_excess_sharpe": 0.1, "total_trades": 30})
+    monkeypatch.setattr(rcs, "diversification_for_spec", lambda spec: {})
+
+    bundle = rcs.run_candidate_sweep(
+        symbols=["005930"], start="2023-01-01", end="2025-12-31",
+        include_walk_forward=False,
+    )
+    assert bundle.get("oos_holdout") is None
 
 
 def test_build_candidate_specs_supports_all_families():
@@ -1748,6 +2111,40 @@ def test_write_sweep_artifact_surfaces_rejection_reasons(tmp_path):
     assert "risk_candidate" in text
     assert "mdd < -20" in text
     assert "turnover 1097.1%/y >= 1000.0%/y" in text
+
+
+def test_write_sweep_artifact_surfaces_validation_section(tmp_path):
+    """validation_warnings / multiple_testing / oos_holdout이 Markdown에 노출된다."""
+    from tools.research_candidate_sweep import write_candidate_artifacts
+
+    bundle = _minimal_bundle([
+        {"candidate_id": "c1", "rank_score": 5.0,
+         "promotion": {"status": "paper_only", "reason": ""}, "metrics": {"sharpe": 0.8}},
+    ])
+    bundle["validation_warnings"] = [
+        "deflated_sharpe_fail: 최고 Sharpe 후보의 DSR=0.4 < 0.95 — 50개 변형 탐색의 다중검정",
+    ]
+    bundle["multiple_testing"] = {
+        "n_trials": 50,
+        "best_by_sharpe_deflated": {"dsr": 0.4, "passes": False},
+    }
+    bundle["oos_holdout"] = {
+        "status": "ok", "selected_candidate_id": "c1",
+        "train_sharpe": 2.0, "test_sharpe": -0.3, "sharpe_degradation": 2.3,
+        "holdout_passes": False,
+        "selection_window": ["2023-01-01", "2024-12-31"],
+        "holdout_window": ["2025-01-01", "2025-12-31"],
+    }
+
+    _, md_path = write_candidate_artifacts(bundle, tmp_path)
+    text = md_path.read_text(encoding="utf-8")
+
+    assert "## Validation" in text
+    assert "deflated_sharpe_fail" in text
+    assert "DSR=0.4" in text
+    assert "OOS holdout" in text
+    assert "test_sharpe=-0.3" in text
+    assert "통과=False" in text
 
 
 def test_run_candidate_sweep_filters_universe_before_evaluation(monkeypatch):

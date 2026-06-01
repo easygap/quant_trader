@@ -2029,10 +2029,22 @@ def select_canonical_universe(
     top_n: int = DEFAULT_TOP_N,
     *,
     scan_limit: int | None = None,
+    as_of_date: str | None = None,
+    universe_mode: str | None = None,
+    liquidity_window: tuple[str, str] = ("2022-10-01", "2022-12-31"),
+    meta_out: dict | None = None,
 ) -> list[str]:
-    """Use the same liquidity proxy as canonical promotion evaluation."""
-    from core.data_collector import DataCollector
-    import FinanceDataReader as fdr
+    """Use the same liquidity proxy as canonical promotion evaluation.
+
+    universe_mode (None이면 risk_params.backtest_universe.mode 사용):
+      - "current": 현재 상장 KOSPI (FDR). **생존자 편향 있음** — 상폐 종목이 빠져 수익률 과대평가.
+      - "historical"/"kospi200": as_of 시점에 상장돼 있던 종목(pykrx, 상폐 포함)을 후보 풀로 사용
+        → 생존자 편향 완화. 백테스트 권장(risk_params 기본값).
+
+    meta_out가 주어지면 universe_mode / survivorship_controlled / candidate_source 등
+    선택 메타데이터를 채워, 산출물이 어떤 유니버스로 만들어졌는지 정직하게 드러낸다.
+    """
+    from core.data_collector import DataCollector, HAS_PYKRX
 
     requested_top_n = max(1, int(top_n))
     requested_scan_limit = (
@@ -2040,18 +2052,74 @@ def select_canonical_universe(
         if scan_limit is None
         else max(requested_top_n, int(scan_limit))
     )
+
+    # 유니버스 모드: 명시값 > risk_params.backtest_universe.mode > "current"
+    exclude_admin = True
+    if universe_mode is None:
+        try:
+            from config.config_loader import Config
+            uni_cfg = (Config.get().risk_params or {}).get("backtest_universe") or {}
+            universe_mode = str(uni_cfg.get("mode") or "current").strip().lower()
+            exclude_admin = bool(uni_cfg.get("exclude_administrative", True))
+        except Exception:
+            universe_mode = "current"
+    else:
+        universe_mode = str(universe_mode).strip().lower()
+
+    win_start, win_end = liquidity_window
+    listing_as_of = as_of_date or win_end  # 유동성 창 끝을 상장 기준일로 사용
+
     dc = DataCollector()
     dc.quiet_ohlcv_log = True
-    stocks = fdr.StockListing("KOSPI")
-    common = stocks[~stocks["Code"].str.match(r"^\d{5}[5-9KL]$")]
-    if "Marcap" in common.columns:
-        common = common[common["Marcap"] > 1e11]
+
+    # ── 후보 풀 선정 (핵심: historical 모드면 as_of 시점 상장 목록으로 생존자 편향 완화) ──
+    common = None
+    candidate_source = ""
+    if universe_mode in ("historical", "kospi200"):
+        try:
+            listing = DataCollector.get_krx_stock_list(
+                as_of_date=listing_as_of,
+                exclude_administrative=exclude_admin,
+                universe_mode=universe_mode,
+            )
+        except Exception as exc:
+            logger.warning(
+                "historical universe 조회 실패 (mode={}, as_of={}): {} — 현재 상장 목록으로 폴백",
+                universe_mode, listing_as_of, exc,
+            )
+            listing = None
+        if listing is not None and not listing.empty:
+            # 원래 canonical 유니버스는 KOSPI 중심이므로 KOSPI로 한정(가능 시).
+            if "Market" in listing.columns:
+                kospi = listing[listing["Market"].astype(str).str.upper().str.contains("KOSPI")]
+                listing = kospi if not kospi.empty else listing
+            common = listing
+            candidate_source = f"krx_{universe_mode}_as_of_{listing_as_of}"
+
+    if common is None:
+        import FinanceDataReader as fdr
+        stocks = fdr.StockListing("KOSPI")
+        common = stocks[~stocks["Code"].str.match(r"^\d{5}[5-9KL]$")]
+        if "Marcap" in common.columns:
+            common = common[common["Marcap"] > 1e11]
+        candidate_source = candidate_source or "fdr_current_kospi"
+    else:
+        # 우선주 등 제외 필터를 동일하게 적용.
+        common = common[~common["Code"].astype(str).str.match(r"^\d{5}[5-9KL]$")]
+
+    # 후보 풀이 실제로 시점(point-in-time) pykrx 데이터로 만들어졌을 때만 생존자 편향이
+    # 통제됐다고 본다. pykrx 과거 목록 조회가 실패해 FDR 현재 목록으로 폴백되면
+    # (universe_source!=pykrx_pit) False — 설치 여부(HAS_PYKRX)만으로 판단하지 않는다.
+    survivorship_controlled = False
+    if universe_mode in ("historical", "kospi200") and candidate_source.startswith("krx_"):
+        if "universe_source" in getattr(common, "columns", []) and len(common):
+            survivorship_controlled = bool((common["universe_source"] == "pykrx_pit").all())
 
     amounts: dict[str, float] = {}
     candidates = common["Code"].tolist()[:requested_scan_limit]
     for sym in candidates:
         try:
-            df = dc.fetch_korean_stock(sym, "2022-10-01", "2022-12-31")
+            df = dc.fetch_korean_stock(sym, win_start, win_end)
             if df is not None and not df.empty:
                 if "date" in df.columns:
                     df = df.set_index("date")
@@ -2066,7 +2134,26 @@ def select_canonical_universe(
             requested_scan_limit,
             len(amounts),
         )
-    return normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:requested_top_n])
+
+    selected = normalize_symbols(sorted(amounts, key=amounts.get, reverse=True)[:requested_top_n])
+
+    if not survivorship_controlled and universe_mode == "current":
+        logger.warning(
+            "canonical universe가 현재 상장 목록(current)으로 생성됨 — 생존자 편향 주의. "
+            "백테스트 신뢰도를 높이려면 risk_params.backtest_universe.mode=historical + pykrx 사용."
+        )
+
+    if meta_out is not None:
+        meta_out.update({
+            "universe_mode": universe_mode,
+            "survivorship_controlled": survivorship_controlled,
+            "candidate_source": candidate_source,
+            "listing_as_of": listing_as_of,
+            "liquidity_window": [win_start, win_end],
+            "candidate_pool_size": int(len(common)),
+            "pykrx_available": bool(HAS_PYKRX),
+        })
+    return selected
 
 
 def apply_research_universe_liquidity_filter(
@@ -4521,6 +4608,157 @@ def build_candidate_record(
     }
 
 
+def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int) -> dict[str, Any]:
+    """시행 집합(여러 변형) 전체의 Sharpe 분산으로 각 record에 deflated Sharpe를 부여한다.
+
+    한 패밀리에서 N개 변형을 탐색해 '최고'를 고르면 in-sample Sharpe가 다중검정으로
+    구조적으로 부풀려진다. Bailey & López de Prado의 Deflated Sharpe Ratio로 시행 횟수에
+    맞춰 할인하여 각 record.metrics['deflated_sharpe']에 기록한다(랭킹/승격은 변경하지
+    않고 보고만 — 과적합 신호 노출용). skew/kurt는 집계 단계에서 수익률 시계열이 없어
+    정규(0/3)로 가정하며, 다중검정 할인이 주효과다.
+    """
+    from backtest.statistical_validation import deflated_sharpe_ratio
+    import statistics
+
+    sharpes = [
+        float(r["metrics"]["sharpe"])
+        for r in records
+        if isinstance((r.get("metrics") or {}).get("sharpe"), (int, float))
+    ]
+    n_trials = len(records)
+    variance = statistics.pvariance(sharpes) if len(sharpes) >= 2 else 0.0
+    best_dsr = None
+    for r in records:
+        metrics = r.get("metrics") or {}
+        s = metrics.get("sharpe")
+        if not isinstance(s, (int, float)):
+            continue
+        dsr = deflated_sharpe_ratio(
+            float(s), n_obs=int(n_obs), n_trials=n_trials,
+            sharpe_variance_across_trials=variance,
+        )
+        metrics["deflated_sharpe"] = dsr
+        if best_dsr is None or float(s) > best_dsr.get("observed_sharpe_annual", float("-inf")):
+            best_dsr = dsr
+    return {
+        "n_trials": n_trials,
+        "sharpe_variance_across_trials": round(variance, 6),
+        "n_obs": int(n_obs),
+        "best_by_sharpe_deflated": best_dsr,
+        "note": (
+            "deflated Sharpe는 다중검정 보정 보고용이며 랭킹/승격 게이트를 바꾸지 않는다. "
+            "skew/kurt는 정규 가정."
+        ),
+    }
+
+
+def compute_validation_warnings(
+    ranked: list[dict[str, Any]],
+    multiple_testing: dict[str, Any],
+    universe_selection: dict[str, Any],
+) -> list[str]:
+    """스윕 산출물의 과적합/생존자 편향 신호를 사람이 보는 경고 목록으로 모은다.
+
+    report-only — 랭킹/승격 게이트를 바꾸지 않고, 운영자가 best 후보의 신뢰도를
+    판단할 수 있게 결정 요약에 노출한다.
+    """
+    warnings: list[str] = []
+    if not ranked:
+        return warnings
+
+    # 1) 생존자 편향: canonical 유니버스인데 시점 통제가 안 됨(상폐 종목 누락 가능).
+    if (
+        universe_selection.get("source") == "canonical_liquidity_universe"
+        and not universe_selection.get("survivorship_controlled", False)
+    ):
+        warnings.append(
+            "survivorship_not_controlled: 후보 유니버스가 시점(point-in-time) 데이터가 "
+            "아니어서 상장폐지 종목이 빠졌을 수 있음 → 수익률 과대평가 위험 "
+            f"(candidate_source={universe_selection.get('candidate_source')})"
+        )
+
+    # 2) 다중검정: best 후보의 deflated Sharpe가 기준(0.95)을 통과하지 못함.
+    best_dsr = (multiple_testing or {}).get("best_by_sharpe_deflated") or {}
+    if best_dsr and not best_dsr.get("passes", True):
+        warnings.append(
+            "deflated_sharpe_fail: 최고 Sharpe 후보의 DSR="
+            f"{best_dsr.get('dsr')} < 0.95 — {multiple_testing.get('n_trials')}개 변형 탐색의 "
+            "다중검정 운으로 설명 가능(in-sample 과적합 위험)"
+        )
+    return warnings
+
+
+def evaluate_oos_holdout(
+    specs: list[Any],
+    *,
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    evaluate_fn,
+    rank_fn=None,
+) -> dict[str, Any]:
+    """진짜 out-of-time holdout 평가.
+
+    지금 walk-forward는 전체 구간에서 고른 파라미터를 각 구간에 재평가하므로 사실상
+    전부 in-sample이라 변형 선택 과적합을 못 잡는다. 이 함수는 **train 구간 성과로만
+    변형을 고르고**, 한 번도 안 본 **test 구간 성과를 보고**한다. test_sharpe가
+    train_sharpe보다 크게 떨어지면 선택 과적합(selection overfitting) 신호다.
+
+    evaluate_fn(spec, start, end) -> metrics dict 를 주입받아 단위 테스트가 가능하다.
+    """
+    rank_fn = rank_fn or rank_score
+    if not specs:
+        return {"status": "no_specs", "trials": 0}
+
+    def _num(metrics: dict[str, Any], key: str):
+        value = (metrics or {}).get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    scored = []
+    for spec in specs:
+        train_metrics = evaluate_fn(spec, train_start, train_end)
+        scored.append({
+            "spec": spec,
+            "candidate_id": getattr(spec, "candidate_id", None),
+            "train_metrics": train_metrics,
+            "train_rank_score": rank_fn(train_metrics),
+        })
+    # train 랭킹으로만 선택 (test는 절대 보지 않음)
+    scored.sort(key=lambda item: item["train_rank_score"], reverse=True)
+    winner = scored[0]
+    test_metrics = evaluate_fn(winner["spec"], test_start, test_end)
+
+    train_sharpe = _num(winner["train_metrics"], "sharpe")
+    test_sharpe = _num(test_metrics, "sharpe")
+    sharpe_degradation = (
+        round(train_sharpe - test_sharpe, 3)
+        if train_sharpe is not None and test_sharpe is not None
+        else None
+    )
+    return {
+        "status": "ok",
+        "trials": len(scored),
+        "selection_window": [train_start, train_end],
+        "holdout_window": [test_start, test_end],
+        "selected_candidate_id": winner["candidate_id"],
+        "selected_on": "train_rank_score_only",
+        "train_sharpe": train_sharpe,
+        "test_sharpe": test_sharpe,
+        "train_total_return": _num(winner["train_metrics"], "total_return"),
+        "test_total_return": _num(test_metrics, "total_return"),
+        "train_benchmark_excess_return": _num(winner["train_metrics"], "benchmark_excess_return"),
+        "test_benchmark_excess_return": _num(test_metrics, "benchmark_excess_return"),
+        "sharpe_degradation": sharpe_degradation,
+        # holdout 통과: 선택된 변형이 untouched 구간에서도 양(+)의 Sharpe 유지
+        "holdout_passes": bool(test_sharpe is not None and test_sharpe > 0),
+        "note": (
+            "선택은 train 구간 rank_score만 사용, 성과는 test(untouched) 구간 기준. "
+            "test_sharpe가 train보다 크게 낮으면 선택 과적합 신호."
+        ),
+    }
+
+
 def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not metrics.get("benchmark_coverage_complete", True):
@@ -4806,6 +5044,7 @@ def run_candidate_sweep(
     include_walk_forward: bool = True,
     candidate_family: str = DEFAULT_CANDIDATE_FAMILY,
     candidate_ids: list[str] | None = None,
+    oos_holdout_split: str | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -4824,6 +5063,8 @@ def run_candidate_sweep(
             input_universe = select_canonical_universe(
                 top_n,
                 scan_limit=universe_scan_limit,
+                as_of_date=start,
+                meta_out=universe_selection,
             )
         except Exception as exc:
             logger.warning("canonical universe selection failed: {}", exc)
@@ -4969,6 +5210,14 @@ def run_candidate_sweep(
         records.append(build_candidate_record(spec, metrics, benchmark))
 
     ranked = sort_candidate_records(records)
+    # 다중검정(여러 변형 탐색)으로 부풀려진 Sharpe를 deflated Sharpe로 보고(랭킹 불변).
+    try:
+        import pandas as _pd
+        _n_obs = int(len(_pd.bdate_range(start, end)))
+        multiple_testing = annotate_multiple_testing(ranked, _n_obs)
+    except Exception as exc:  # 보고용이므로 실패해도 스윕을 막지 않는다.
+        logger.warning("deflated sharpe 주석 실패(무시): {}", exc)
+        multiple_testing = {"error": str(exc)}
     family_slug = candidate_family.lower().strip()
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{family_slug}"
     eligible = [
@@ -4980,6 +5229,56 @@ def run_candidate_sweep(
         walk_forward_enabled=include_walk_forward,
         benchmark=benchmark,
     )
+    validation_warnings = compute_validation_warnings(ranked, multiple_testing, universe_selection)
+    if validation_warnings:
+        for _w in validation_warnings:
+            logger.warning("validation warning: {}", _w)
+
+    # 진짜 out-of-time holdout: train 구간 성과로만 변형을 고르고 untouched test 구간
+    # 성과를 보고한다(선택 과적합 노출). split 날짜가 주어진 경우에만 수행.
+    oos_holdout = None
+    if oos_holdout_split:
+        try:
+            import pandas as _pd
+
+            def _slice_benchmark(_s, _e):
+                if benchmark_daily_returns is None or benchmark_daily_returns.empty:
+                    return benchmark_daily_returns
+                _idx = _pd.to_datetime(benchmark_daily_returns.index)
+                return benchmark_daily_returns[
+                    (_idx >= _pd.Timestamp(_s)) & (_idx <= _pd.Timestamp(_e))
+                ]
+
+            def _oos_eval(_spec, _s, _e):
+                return evaluate_candidate(
+                    _spec, symbols, _s, _e, capital,
+                    _slice_benchmark(_s, _e),
+                    target_weight_collector=target_weight_collector,
+                )
+
+            # split 직전 영업일을 train 종료일로 사용.
+            _split_ts = _pd.Timestamp(oos_holdout_split)
+            _train_end = (_split_ts - _pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            oos_holdout = evaluate_oos_holdout(
+                specs,
+                train_start=start,
+                train_end=_train_end,
+                test_start=oos_holdout_split,
+                test_end=end,
+                evaluate_fn=_oos_eval,
+            )
+            logger.info(
+                "OOS holdout: selected={} train_sharpe={} test_sharpe={} degradation={} passes={}",
+                oos_holdout.get("selected_candidate_id"),
+                oos_holdout.get("train_sharpe"),
+                oos_holdout.get("test_sharpe"),
+                oos_holdout.get("sharpe_degradation"),
+                oos_holdout.get("holdout_passes"),
+            )
+        except Exception as exc:  # 보고용이므로 실패해도 스윕을 막지 않는다.
+            logger.warning("OOS holdout 평가 실패(무시): {}", exc)
+            oos_holdout = {"status": "error", "error": str(exc)}
+
     return {
         "schema_version": 1,
         "artifact_type": "research_candidate_sweep_bundle",
@@ -5017,6 +5316,9 @@ def run_candidate_sweep(
             else {"enabled": False}
         ),
         "decision": decision,
+        "multiple_testing": multiple_testing,
+        "validation_warnings": validation_warnings,
+        "oos_holdout": oos_holdout,
         "rejection_summary": summarize_rejection_reasons(ranked),
         "candidates": ranked,
         "summary": {
@@ -5148,6 +5450,36 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
         )
     for action in bundle.get("decision", {}).get("next_actions", []):
         lines.append(f"- {action}")
+
+    # 과적합/생존자 편향 검증 신호를 운영자가 보는 Markdown에도 노출(report-only).
+    validation_warnings = bundle.get("validation_warnings") or []
+    multiple_testing = bundle.get("multiple_testing") or {}
+    oos_holdout = bundle.get("oos_holdout")
+    if validation_warnings or multiple_testing or oos_holdout:
+        lines.extend(["", "## Validation (과적합/편향 점검)"])
+        if validation_warnings:
+            for _w in validation_warnings:
+                lines.append(f"- ⚠️ {_w}")
+        else:
+            lines.append("- 경고 없음 (생존자 통제·deflated Sharpe 기준 통과)")
+        best_dsr = (multiple_testing or {}).get("best_by_sharpe_deflated") or {}
+        if best_dsr:
+            lines.append(
+                f"- Deflated Sharpe(best): DSR={best_dsr.get('dsr')} "
+                f"(시행 {multiple_testing.get('n_trials')}개, 기준 0.95, "
+                f"통과={best_dsr.get('passes')})"
+            )
+        if isinstance(oos_holdout, dict) and oos_holdout.get("status") == "ok":
+            lines.append(
+                f"- OOS holdout: 선택={oos_holdout.get('selected_candidate_id')} "
+                f"train_sharpe={oos_holdout.get('train_sharpe')} → "
+                f"test_sharpe={oos_holdout.get('test_sharpe')} "
+                f"(저하 {oos_holdout.get('sharpe_degradation')}, "
+                f"통과={oos_holdout.get('holdout_passes')}); "
+                f"선택구간={oos_holdout.get('selection_window')}, "
+                f"검증구간={oos_holdout.get('holdout_window')}"
+            )
+
     lines.extend([
         "",
         "## Ranking",
@@ -5290,6 +5622,14 @@ def main() -> None:
         ),
     )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
+    parser.add_argument(
+        "--oos-holdout-split",
+        default=None,
+        help=(
+            "진짜 out-of-time holdout 날짜(YYYY-MM-DD). 지정하면 이 날짜 이전(train)으로만 "
+            "변형을 고르고 이 날짜 이후(test, untouched) 성과/degradation을 artifact에 보고한다."
+        ),
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
@@ -5303,6 +5643,7 @@ def main() -> None:
         include_walk_forward=not args.quick,
         candidate_family=args.candidate_family,
         candidate_ids=parse_candidate_ids(args.candidate_id),
+        oos_holdout_split=args.oos_holdout_split,
     )
     json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
     print(f"Wrote {json_path}")
