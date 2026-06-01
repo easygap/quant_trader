@@ -4,10 +4,14 @@
 > 모은다. 헤드라인 백테스트 수치만 보고 실거래에 들어가는 것을 막기 위한 문서다.
 > 최종 갱신: 2026-06-01.
 
-## 한 줄 결론
+## 한 줄 결론 (2026-06-01 갱신)
 
-**현재 전략으로는 벤치마크를 이기는 검증된 alpha가 없다.** 절대수익은 높아 보여도 그건
-시장(KOSPI) 베타이지 초과수익이 아니다. 지금 상태로 실거래에 자본을 넣는 것은 권장하지 않는다.
+**모멘텀/로테이션 계열은 전부 벤치마크에 패배했지만, 저변동성(low-volatility) 팩터에서
+처음으로 벤치마크를 이기는 후보가 나왔다.** 이 후보(`low_vol_top5_120d_invvol`)는 초과수익
++12.7%p, 초과 Sharpe +0.23, walk-forward 6/6 window 양수, OOS holdout 통과, deflated
+Sharpe 0.985(≥0.95)로 지금까지 만든 모든 정직한 게이트를 통과한 **유일한** 후보다.
+단, 이건 대형 유동주 10종목·비(非)생존자통제 백테스트 결과이므로 canonical 평가 +
+60영업일 paper 검증 전까지는 "유망한 연구 후보"이지 "검증된 수익"이 아니다.
 
 ## 전략별 현황
 
@@ -30,7 +34,45 @@
 - **Deflated Sharpe DSR=0.748 < 0.95** → 21개 변형 탐색의 다중검정 운으로 설명 가능(과적합 신호).
 - OOS holdout이 "통과"한 건 절대 Sharpe 기준(test 1.71)일 뿐, 벤치마크 대비로는 여전히 패배.
 
-즉 "train으로 고르고 test로 본다"는 정직한 방식으로 봐도, 대형주에서는 초과수익이 없다.
+즉 "train으로 고르고 test로 본다"는 정직한 방식으로 봐도, 모멘텀 계열은 초과수익이 없다.
+
+## 돌파구 — 저변동성 팩터 (2026-06-01)
+
+모멘텀이 실패한 이유는 전부 "수익 추격(return-chasing)"이었기 때문이다. 저변동성 팩터는 그
+베타/모멘텀 틸트와 **직교(orthogonal)** 한 유일한 축이라 따로 시험했고, 처음으로 벤치마크를
+이겼다. 같은 10종목·같은 OSS holdout 방식, `--candidate-family low_volatility`:
+
+- **판정: RUN_CANONICAL_EVALUATION** (모멘텀의 NO_ALPHA_CANDIDATE와 정반대).
+- **최고 후보 `low_vol_top5_120d_invvol`** (120일 실현변동성 최저 5종목 선택 + 역변동성 비중, 월 1회):
+
+  | 지표 | 값 | 의미 |
+  |------|----|----|
+  | 벤치마크 초과수익 | **+12.7%p** | EW B&H를 실제로 이김(베타 아님) |
+  | 초과 Sharpe | **+0.23** | risk-adjusted로도 우위 |
+  | 전체 수익/Sharpe/MDD | +124.7% / 1.30 / −18.2% | 벤치마크 Sharpe 1.07보다 높음 |
+  | Walk-forward | **6/6 window 양수** (positive·sharpe+ 모두 1.0) | 구간 안정성 |
+  | OOS holdout (untouched 2025) | **통과**, test Sharpe 2.05 | 선택 과적합 아님 |
+  | Deflated Sharpe | **DSR 0.985 ≥ 0.95** | 다중검정 운 아님 |
+  | 회전율 | 194%/년 | 모멘텀(~800~1000%)보다 훨씬 낮음(비용 유리) |
+  | validation_warnings | **없음** | 모든 정직 게이트 통과 |
+
+경제적 근거: EW B&H는 고변동 종목까지 동일비중으로 담아 수익 대비 변동성만 키운다(저변동성
+이상현상). 변동성 낮은 종목을 골라 역변동성으로 담으면 절대수익은 비슷해도 변동성·낙폭이 낮아
+초과 Sharpe가 양수가 된다. 이게 모멘텀 40여 변형이 못 한 것이다.
+
+**넓은 유니버스(20종목) 재현 — 좁은 유니버스 특이성 아님:** 위 10종목에 10개를 더한 20종목으로
+재실행해도 `RUN_CANONICAL_EVALUATION` 유지, 오히려 더 강함. `low_vol_top5_60d_equal`은 초과수익
+**+27.2%p**, 초과 Sharpe **+0.44**, MDD −13.7%, WF 6/6; `low_vol_top5_60d_invvol`은 +13.3%p,
++0.41, MDD −11.4%. 두 유니버스 모두 "저변동 top-5 선택"이 일관되게 양수 초과수익을 냈다(다만
+최적 lookback은 유니버스마다 달라 — 그 부분은 약한 lookback 과적합이므로 canonical에서 고정 필요).
+
+**정직한 한계(이게 "검증된 수익"이 아닌 이유):**
+1. 대형 유동주 10종목 한정 — 유니버스가 좁아 저변동성 스프레드가 작다. 넓은 유니버스로 재현 필요.
+2. 비(非)생존자통제 — 생존자 편향 영향이 모멘텀보다는 작지만(저변동 선택이라) 여전히 미통제.
+3. canonical 평가 + 60영업일 paper 미통과 — live 게이트는 그대로 다 통과해야 한다.
+
+재현: `tools/research_candidate_sweep.py --candidate-family low_volatility --oos-holdout-split 2025-01-01`.
+구현은 `_target_weight_score_panel`의 `score_mode="low_volatility"` + `build_target_weight_low_volatility_candidate_specs`.
 
 ## 헤드라인(+171%)이 과대평가된 이유
 
@@ -60,14 +102,16 @@
 
 ## 그래서 다음에 뭘 해야 하나
 
-"안정적 고수익"으로 가는 정직한 경로는 둘 중 하나다:
+저변동성 후보가 나왔으니 우선순위가 바뀌었다:
 
-1. **생존자 통제 유니버스로 헤드라인 재측정**: pykrx KRX 과거 상장목록이 동작하는 환경(또는 상폐
-   포함 데이터셋)에서 `evaluate_and_promote.py --canonical`을 돌려 `survivorship_controlled=true`로
-   진짜 엣지를 측정. 그래도 초과수익이 양수로 남는지 확인.
-2. **새로운 alpha 소스 설계**: 단순 모멘텀 로테이션을 넘어 벤치마크를 실제로 이기는 신호를 연구.
-   (지금까지의 모든 변형은 벤치마크 대비 음수였다.)
+1. **저변동성 후보 넓은 유니버스 재현**: 10종목이 아니라 canonical 유동성 유니버스(top-50~200)에서
+   `--candidate-family low_volatility`를 돌려 초과수익이 유지되는지 확인(좁은 유니버스 특이성 배제).
+2. **저변동성 후보 canonical 평가 → 60영업일 paper**: 재현되면 `evaluate_and_promote.py`로 canonical
+   평가에 올리고, live 게이트 전제인 60영업일 execution-backed paper 증거를 쌓는다.
+3. **생존자 통제 재측정**: pykrx KRX 과거 상장목록이 동작하는 환경에서 `--canonical`로
+   `survivorship_controlled=true` 확인(저변동 선택이라 생존자 영향은 모멘텀보다 작지만 미통제).
+4. **추가 직교 팩터 탐색**: 저변동성이 통했으니 quality/value(재무 데이터 복구 시), 단기 reversal 등
+   모멘텀과 직교인 다른 축도 같은 OOS 방식으로 검증.
 
-둘 중 하나로 **벤치마크 초과수익이 양수인 후보**가 나오기 전까지는, 60영업일 paper도 live도
-"수익 검증"이 아니라 "운영 안정성 검증"으로만 의미가 있다. 자세한 운영 경로는
-`docs/PAPER_TO_LIVE_RUNBOOK.md` 참고.
+저변동성 후보가 넓은 유니버스에서도 양수 초과수익을 유지하기 전까지는 여전히 "유망한 연구 후보"다.
+운영 경로는 `docs/PAPER_TO_LIVE_RUNBOOK.md` 참고.
