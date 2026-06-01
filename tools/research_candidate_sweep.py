@@ -4688,6 +4688,77 @@ def compute_validation_warnings(
     return warnings
 
 
+def evaluate_oos_holdout(
+    specs: list[Any],
+    *,
+    train_start: str,
+    train_end: str,
+    test_start: str,
+    test_end: str,
+    evaluate_fn,
+    rank_fn=None,
+) -> dict[str, Any]:
+    """진짜 out-of-time holdout 평가.
+
+    지금 walk-forward는 전체 구간에서 고른 파라미터를 각 구간에 재평가하므로 사실상
+    전부 in-sample이라 변형 선택 과적합을 못 잡는다. 이 함수는 **train 구간 성과로만
+    변형을 고르고**, 한 번도 안 본 **test 구간 성과를 보고**한다. test_sharpe가
+    train_sharpe보다 크게 떨어지면 선택 과적합(selection overfitting) 신호다.
+
+    evaluate_fn(spec, start, end) -> metrics dict 를 주입받아 단위 테스트가 가능하다.
+    """
+    rank_fn = rank_fn or rank_score
+    if not specs:
+        return {"status": "no_specs", "trials": 0}
+
+    def _num(metrics: dict[str, Any], key: str):
+        value = (metrics or {}).get(key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    scored = []
+    for spec in specs:
+        train_metrics = evaluate_fn(spec, train_start, train_end)
+        scored.append({
+            "spec": spec,
+            "candidate_id": getattr(spec, "candidate_id", None),
+            "train_metrics": train_metrics,
+            "train_rank_score": rank_fn(train_metrics),
+        })
+    # train 랭킹으로만 선택 (test는 절대 보지 않음)
+    scored.sort(key=lambda item: item["train_rank_score"], reverse=True)
+    winner = scored[0]
+    test_metrics = evaluate_fn(winner["spec"], test_start, test_end)
+
+    train_sharpe = _num(winner["train_metrics"], "sharpe")
+    test_sharpe = _num(test_metrics, "sharpe")
+    sharpe_degradation = (
+        round(train_sharpe - test_sharpe, 3)
+        if train_sharpe is not None and test_sharpe is not None
+        else None
+    )
+    return {
+        "status": "ok",
+        "trials": len(scored),
+        "selection_window": [train_start, train_end],
+        "holdout_window": [test_start, test_end],
+        "selected_candidate_id": winner["candidate_id"],
+        "selected_on": "train_rank_score_only",
+        "train_sharpe": train_sharpe,
+        "test_sharpe": test_sharpe,
+        "train_total_return": _num(winner["train_metrics"], "total_return"),
+        "test_total_return": _num(test_metrics, "total_return"),
+        "train_benchmark_excess_return": _num(winner["train_metrics"], "benchmark_excess_return"),
+        "test_benchmark_excess_return": _num(test_metrics, "benchmark_excess_return"),
+        "sharpe_degradation": sharpe_degradation,
+        # holdout 통과: 선택된 변형이 untouched 구간에서도 양(+)의 Sharpe 유지
+        "holdout_passes": bool(test_sharpe is not None and test_sharpe > 0),
+        "note": (
+            "선택은 train 구간 rank_score만 사용, 성과는 test(untouched) 구간 기준. "
+            "test_sharpe가 train보다 크게 낮으면 선택 과적합 신호."
+        ),
+    }
+
+
 def candidate_rejection_reasons(metrics: dict[str, Any], promotion: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not metrics.get("benchmark_coverage_complete", True):
