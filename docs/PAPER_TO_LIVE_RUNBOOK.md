@@ -78,6 +78,10 @@
 현실적 고수익 경로**다. 이걸 실제로 굴리는 경로는 바스켓 리밸런싱이다.
 
 ```bash
+# 0) 배포 점검 한눈에 — 계획·예상비용·회전율·활성화 절차를 요약(가장 먼저 실행 권장)
+.venv\Scripts\python.exe main.py --mode deploy_check --basket kr_diversified_hold
+#    과거 기준일로 점검: --as-of 2025-12-30 / 스크립트용: --json
+
 # 1) 계획만 확인 (주문 없음) — 목표비중 vs 실제 드리프트, 매수/매도 계획 출력
 .venv\Scripts\python.exe main.py --mode rebalance --basket kr_diversified_hold --dry-run
 
