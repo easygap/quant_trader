@@ -29,6 +29,28 @@ baskets:
       "006400": 0.10    # 삼성SDI  10%
       # 합계 = 1.00 (현금 비중 = diversification.min_cash_ratio로 별도 관리)
 
+  # --- 균형 배분(주식 50% + 현금 50%) — 안정성 우선 ---
+  # docs/STATIC_ALLOCATION.md 결론을 실행 기능으로 구현. target_stock_weight로 주식 비중을
+  # 총자산의 50%로 고정하고 나머지는 현금 유보 → 낙폭을 순수 주식 대비 절반 수준으로 낮춘다
+  # (백테스트 2022~25: 주식100% MDD -25.5% → 50:50 MDD -11.9%, CAGR 12.9%→9.1%, Sharpe 0.58→0.64).
+  # 낙폭에 민감하거나 "안정적"을 우선하는 운영자용. enabled는 운영자가 검증 후 켠다.
+  kr_balanced_5050:
+    name: "한국 대형주 균형배분 (주식50/현금50)"
+    enabled: false
+    target_stock_weight: 0.5       # 총자산 중 주식 50%, 나머지 현금
+    rebalance:
+      trigger: drift
+      drift_threshold: 0.08        # 저회전(큰 이탈만 교정)
+      min_trade_amount: 200000
+      max_turnover_ratio: 0.15
+    holdings:                      # 주식 부분은 동일비중(섹터 분산 5종목)
+      "005930": 0.20
+      "000660": 0.20
+      "035420": 0.20
+      "005380": 0.20
+      "051910": 0.20
+      # 합계 = 1.00 (이 비중은 "주식 슬리브 내부" 기준; 주식 슬리브 자체가 총자산의 50%)
+
   # --- 예시 2: 신호 가중 리밸런싱 바스켓 ---
   # signal_weighted: true 시, 스코어링 전략 점수에 따라 목표 비중을 동적 조정
   kr_signal_weighted:

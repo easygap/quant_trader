@@ -80,11 +80,26 @@ class BasketRebalancer:
         self._min_cash_ratio = (
             self._risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
         )
+        # target_stock_weight: 바스켓이 명시하는 주식 목표 비중(총자산 대비). 나머지는 현금으로
+        # 보유한다. 미지정(None)이면 기존 동작(min_cash_ratio만 현금 유보)을 유지한다.
+        # 정적 자산배분(docs/STATIC_ALLOCATION.md) 결론을 실행 기능으로 구현: 예) 0.5면 주식 50%
+        # 보유 + 50% 현금 → 낙폭을 절반으로 줄인다. min_cash_ratio가 더 큰 현금을 요구하면 그쪽을 따른다.
+        tsw = self.basket.get("target_stock_weight")
+        self._target_stock_weight = float(tsw) if tsw is not None else None
 
         logger.info(
-            "BasketRebalancer 초기화: {} ({}종목, trigger={})",
+            "BasketRebalancer 초기화: {} ({}종목, trigger={}, target_stock_weight={})",
             basket_name, len(self.holdings), self.rebalance_cfg.get("trigger", "drift"),
+            self._target_stock_weight if self._target_stock_weight is not None else "기본",
         )
+
+    def _stock_fraction(self) -> float:
+        """총자산 중 주식에 배정할 비중. target_stock_weight가 있으면 그것을(단, min_cash_ratio
+        가 요구하는 현금 하한은 항상 지킴), 없으면 (1 - min_cash_ratio)."""
+        max_stock = 1.0 - self._min_cash_ratio
+        if self._target_stock_weight is None:
+            return max_stock
+        return max(0.0, min(self._target_stock_weight, max_stock))
 
     # ------------------------------------------------------------------
     # Config
@@ -139,7 +154,7 @@ class BasketRebalancer:
         if total_value <= 0:
             return {s: 0.0 for s in self.holdings}
 
-        investable = total_value * (1.0 - self._min_cash_ratio)
+        investable = total_value * self._stock_fraction()
 
         positions = get_all_positions(
             account_key=self.account_key if self.account_key else None,
@@ -233,7 +248,7 @@ class BasketRebalancer:
             logger.warning("총 자산이 0 — 리밸런싱 불가")
             return []
 
-        investable = total_value * (1.0 - self._min_cash_ratio)
+        investable = total_value * self._stock_fraction()
         targets = self.get_target_weights()
         actuals = self.get_current_weights(prices)
 
