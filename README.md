@@ -235,6 +235,8 @@ pytest tests/ -q
 
 | 문서 | 내용 |
 |------|------|
+| [`docs/PROFITABILITY_FINDINGS.md`](docs/PROFITABILITY_FINDINGS.md) | **수익성 정직 점검 (먼저 읽을 것)** — OOS 실측상 검증된 alpha 없음 |
+| [`docs/PAPER_TO_LIVE_RUNBOOK.md`](docs/PAPER_TO_LIVE_RUNBOOK.md) | Paper→Live 검증된 운영 경로 + 정직한 caveat |
 | [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 역할, 모드별 흐름, 설정 요약, 실전 전 체크리스트 |
 | [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처, 지표·전략·리스크 설계, 검증 관점, 로드맵 |
 | [`BACKTEST_IMPROVEMENT.md`](docs/BACKTEST_IMPROVEMENT.md) | 백테스트 신뢰성 개선 내역, 알려진 한계, 추가 과제 |
