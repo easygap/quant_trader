@@ -343,6 +343,71 @@ def test_compute_validation_warnings_empty_ranked():
     assert compute_validation_warnings([], {}, {}) == []
 
 
+class _FakeSpec:
+    def __init__(self, candidate_id):
+        self.candidate_id = candidate_id
+
+
+def test_oos_holdout_selects_on_train_not_test():
+    """선택은 train 성과로만 — train 최고지만 test에서 무너지는 변형이 선택/보고되어야 한다."""
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    overfit = _FakeSpec("overfit")   # train 최고, test 붕괴
+    robust = _FakeSpec("robust")     # train 2등, test 양호
+
+    def fake_eval(spec, start, end):
+        is_train = start == "2023-01-01"
+        if spec.candidate_id == "overfit":
+            return {"sharpe": 2.5 if is_train else -0.4, "total_return": 80 if is_train else -10}
+        return {"sharpe": 1.2 if is_train else 1.0, "total_return": 30 if is_train else 18}
+
+    out = evaluate_oos_holdout(
+        [robust, overfit],
+        train_start="2023-01-01", train_end="2024-12-31",
+        test_start="2025-01-01", test_end="2025-12-31",
+        evaluate_fn=fake_eval,
+        rank_fn=lambda m: m.get("sharpe", 0),  # train sharpe로 랭킹
+    )
+    # train 최고는 overfit → 그게 선택되고, test 성과(음수)가 보고됨
+    assert out["selected_candidate_id"] == "overfit"
+    assert out["train_sharpe"] == 2.5
+    assert out["test_sharpe"] == -0.4
+    assert out["sharpe_degradation"] == 2.9
+    assert out["holdout_passes"] is False  # test에서 음의 Sharpe → 과적합 노출
+
+
+def test_oos_holdout_passes_for_robust_winner():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    def fake_eval(spec, start, end):
+        is_train = start == "2023-01-01"
+        return {"sharpe": 1.5 if is_train else 1.1, "total_return": 40 if is_train else 25}
+
+    out = evaluate_oos_holdout(
+        [_FakeSpec("a"), _FakeSpec("b")],
+        train_start="2023-01-01", train_end="2024-12-31",
+        test_start="2025-01-01", test_end="2025-12-31",
+        evaluate_fn=fake_eval,
+        rank_fn=lambda m: m.get("sharpe", 0),
+    )
+    assert out["status"] == "ok"
+    assert out["test_sharpe"] == 1.1
+    assert out["holdout_passes"] is True
+    assert out["selection_window"] == ["2023-01-01", "2024-12-31"]
+    assert out["holdout_window"] == ["2025-01-01", "2025-12-31"]
+
+
+def test_oos_holdout_empty_specs():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+
+    out = evaluate_oos_holdout(
+        [], train_start="a", train_end="b", test_start="c", test_end="d",
+        evaluate_fn=lambda *a: {},
+    )
+    assert out["status"] == "no_specs"
+    assert out["trials"] == 0
+
+
 def test_build_candidate_specs_supports_all_families():
     from tools.research_candidate_sweep import build_candidate_specs
 
