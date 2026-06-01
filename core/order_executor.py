@@ -380,6 +380,10 @@ class OrderExecutor:
         if snapshots.empty:
             return None
 
+        # 일일 손실 기준은 "전일 종가 평가금액"이어야 한다. 당일 스냅샷을 기준으로 쓰면
+        # daily_pnl ≈ 0 이 되어 손실 한도 가드가 사실상 무력화되므로, 당일보다 이전
+        # 스냅샷이 없으면 기준값 없음(None)으로 처리해 일일 손실 하위 점검만 건너뛴다.
+        # (MDD 한도 점검은 상위에서 그대로 동작한다.)
         baseline_rows = snapshots
         if "date" in snapshots.columns:
             try:
@@ -389,8 +393,10 @@ class OrderExecutor:
                     lambda value: value.date() if hasattr(value, "date") else value
                 )
                 previous_rows = dated[dated["_snapshot_date"] < today]
-                if not previous_rows.empty:
-                    baseline_rows = previous_rows
+                if previous_rows.empty:
+                    # 당일 스냅샷만 있는 경우 — 오늘 값을 기준으로 삼지 않는다.
+                    return None
+                baseline_rows = previous_rows
             except Exception as exc:
                 logger.debug("일일 손실 기준 스냅샷 날짜 해석 실패: {}", exc)
 
