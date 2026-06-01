@@ -5044,6 +5044,7 @@ def run_candidate_sweep(
     include_walk_forward: bool = True,
     candidate_family: str = DEFAULT_CANDIDATE_FAMILY,
     candidate_ids: list[str] | None = None,
+    oos_holdout_split: str | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
 
@@ -5232,6 +5233,52 @@ def run_candidate_sweep(
     if validation_warnings:
         for _w in validation_warnings:
             logger.warning("validation warning: {}", _w)
+
+    # 진짜 out-of-time holdout: train 구간 성과로만 변형을 고르고 untouched test 구간
+    # 성과를 보고한다(선택 과적합 노출). split 날짜가 주어진 경우에만 수행.
+    oos_holdout = None
+    if oos_holdout_split:
+        try:
+            import pandas as _pd
+
+            def _slice_benchmark(_s, _e):
+                if benchmark_daily_returns is None or benchmark_daily_returns.empty:
+                    return benchmark_daily_returns
+                _idx = _pd.to_datetime(benchmark_daily_returns.index)
+                return benchmark_daily_returns[
+                    (_idx >= _pd.Timestamp(_s)) & (_idx <= _pd.Timestamp(_e))
+                ]
+
+            def _oos_eval(_spec, _s, _e):
+                return evaluate_candidate(
+                    _spec, symbols, _s, _e, capital,
+                    _slice_benchmark(_s, _e),
+                    target_weight_collector=target_weight_collector,
+                )
+
+            # split 직전 영업일을 train 종료일로 사용.
+            _split_ts = _pd.Timestamp(oos_holdout_split)
+            _train_end = (_split_ts - _pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            oos_holdout = evaluate_oos_holdout(
+                specs,
+                train_start=start,
+                train_end=_train_end,
+                test_start=oos_holdout_split,
+                test_end=end,
+                evaluate_fn=_oos_eval,
+            )
+            logger.info(
+                "OOS holdout: selected={} train_sharpe={} test_sharpe={} degradation={} passes={}",
+                oos_holdout.get("selected_candidate_id"),
+                oos_holdout.get("train_sharpe"),
+                oos_holdout.get("test_sharpe"),
+                oos_holdout.get("sharpe_degradation"),
+                oos_holdout.get("holdout_passes"),
+            )
+        except Exception as exc:  # 보고용이므로 실패해도 스윕을 막지 않는다.
+            logger.warning("OOS holdout 평가 실패(무시): {}", exc)
+            oos_holdout = {"status": "error", "error": str(exc)}
+
     return {
         "schema_version": 1,
         "artifact_type": "research_candidate_sweep_bundle",
@@ -5271,6 +5318,7 @@ def run_candidate_sweep(
         "decision": decision,
         "multiple_testing": multiple_testing,
         "validation_warnings": validation_warnings,
+        "oos_holdout": oos_holdout,
         "rejection_summary": summarize_rejection_reasons(ranked),
         "candidates": ranked,
         "summary": {
@@ -5544,6 +5592,14 @@ def main() -> None:
         ),
     )
     parser.add_argument("--quick", action="store_true", help="Skip walk-forward windows.")
+    parser.add_argument(
+        "--oos-holdout-split",
+        default=None,
+        help=(
+            "진짜 out-of-time holdout 날짜(YYYY-MM-DD). 지정하면 이 날짜 이전(train)으로만 "
+            "변형을 고르고 이 날짜 이후(test, untouched) 성과/degradation을 artifact에 보고한다."
+        ),
+    )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     args = parser.parse_args()
 
@@ -5557,6 +5613,7 @@ def main() -> None:
         include_walk_forward=not args.quick,
         candidate_family=args.candidate_family,
         candidate_ids=parse_candidate_ids(args.candidate_id),
+        oos_holdout_split=args.oos_holdout_split,
     )
     json_path, md_path = write_candidate_artifacts(bundle, Path(args.output_dir))
     print(f"Wrote {json_path}")
