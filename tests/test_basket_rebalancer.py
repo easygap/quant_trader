@@ -282,3 +282,75 @@ class TestExecute:
         assert result["failed"] == 1
         assert "승인 단위 불일치" in result["reason"]
         executor_cls.assert_not_called()
+
+
+class TestTargetStockWeight:
+    """target_stock_weight(주식/현금 정적 배분) 기능 — docs/STATIC_ALLOCATION.md 실행 구현."""
+
+    @staticmethod
+    def _baskets():
+        return {
+            "full": {  # target 없음 → 기존 동작
+                "name": "풀 인베스트",
+                "enabled": True,
+                "rebalance": {"trigger": "drift", "drift_threshold": 0.05,
+                              "min_trade_amount": 50000, "max_turnover_ratio": 1.0},
+                "holdings": {"005930": 0.5, "000660": 0.5},
+            },
+            "balanced": {  # 주식 50%, 현금 50%
+                "name": "균형",
+                "enabled": True,
+                "target_stock_weight": 0.5,
+                "rebalance": {"trigger": "drift", "drift_threshold": 0.05,
+                              "min_trade_amount": 50000, "max_turnover_ratio": 1.0},
+                "holdings": {"005930": 0.5, "000660": 0.5},
+            },
+        }
+
+    def _make(self, name):
+        with patch("core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                   return_value=self._baskets()):
+            with patch("core.basket_rebalancer.PortfolioManager"), \
+                 patch("core.basket_rebalancer.DataCollector"):
+                from core.basket_rebalancer import BasketRebalancer
+                return BasketRebalancer(basket_name=name, config=_MockConfig())
+
+    def test_default_basket_uses_min_cash_ratio(self):
+        rb = self._make("full")
+        assert rb._target_stock_weight is None
+        # _MockConfig min_cash_ratio=0.20 → 주식 0.80
+        assert rb._stock_fraction() == pytest.approx(0.80, abs=1e-9)
+
+    def test_balanced_basket_holds_half_stock(self):
+        rb = self._make("balanced")
+        assert rb._target_stock_weight == 0.5
+        assert rb._stock_fraction() == pytest.approx(0.50, abs=1e-9)
+
+    def test_target_stock_weight_capped_by_min_cash(self):
+        """target_stock_weight가 1 - min_cash_ratio보다 크면 현금 하한이 우선한다."""
+        baskets = self._baskets()
+        baskets["balanced"]["target_stock_weight"] = 0.95  # min_cash 0.20 → 최대 0.80
+        with patch("core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                   return_value=baskets):
+            with patch("core.basket_rebalancer.PortfolioManager"), \
+                 patch("core.basket_rebalancer.DataCollector"):
+                from core.basket_rebalancer import BasketRebalancer
+                rb = BasketRebalancer(basket_name="balanced", config=_MockConfig())
+        assert rb._stock_fraction() == pytest.approx(0.80, abs=1e-9)
+
+    def test_balanced_plan_invests_less_than_full(self):
+        """같은 자본에서 balanced(50%)는 full(80%)보다 적게 매수해야 한다."""
+        prices = {"005930": 70000, "000660": 70000}
+        full = self._make("full")
+        bal = self._make("balanced")
+        for rb in (full, bal):
+            rb._fetch_current_prices = MagicMock(return_value=prices)
+            rb.portfolio_mgr.get_portfolio_summary = MagicMock(return_value={"total_value": 100_000_000})
+        with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
+            full_orders = full.plan_rebalance(prices=prices)
+            bal_orders = bal.plan_rebalance(prices=prices)
+        full_notional = sum(o.quantity * prices[o.symbol] for o in full_orders)
+        bal_notional = sum(o.quantity * prices[o.symbol] for o in bal_orders)
+        assert bal_notional < full_notional
+        # 대략 50/80 비율
+        assert bal_notional == pytest.approx(full_notional * 0.5 / 0.8, rel=0.1)
