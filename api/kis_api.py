@@ -299,6 +299,7 @@ class KISApi:
         params: dict = None,
         body: dict = None,
         max_retries: int = None,
+        idempotent: bool = True,
     ) -> Dict[str, Any]:
         """
         API 요청 공통 메서드 (에러별 재시도 로직 포함)
@@ -307,6 +308,11 @@ class KISApi:
         - SSL/연결 오류 전용 재시도 + 서킷 누적
         - 지수 백오프에 랜덤 지터 적용 (thundering-herd 방지)
         - 토큰 발급 실패 시 60초 쿨다운으로 연속 실패 루프 방지
+
+        idempotent=False (주문 제출 등)일 때는 응답을 못 받은 네트워크 오류에서
+        재시도하지 않는다. 브로커가 이미 주문을 받았는데 응답만 유실된 경우 같은 주문을
+        다시 POST하면 이중 체결이 나기 때문이다. 이때는 빈 응답을 돌려 상위의
+        미체결 조회/reconcile 로직이 판단하도록 한다(최대 1회 제출 원칙).
         """
         breaker = get_breaker()
         if not breaker.can_request():
@@ -327,6 +333,11 @@ class KISApi:
         max_retries = max_retries if max_retries is not None else int(Config.get().kis_api.get("max_retry", 3))
 
         for attempt in range(1, max_retries + 1):
+            # 루프 내에서 서킷이 OPEN으로 바뀌었으면 더 이상 서버를 때리지 않는다.
+            if attempt > 1 and not breaker.can_request():
+                logger.warning("Circuit Breaker 동작 — 재시도 중단: {}", path)
+                return {}
+
             headers = self._get_headers(tr_id)
             self._wait_for_token()
 
@@ -338,7 +349,12 @@ class KISApi:
 
                 if response.status_code == 429:
                     self._total_429s += 1
-                    retry_after = int(response.headers.get("Retry-After", 5))
+                    try:
+                        retry_after = int(response.headers.get("Retry-After", 5))
+                    except (TypeError, ValueError):
+                        # Retry-After가 HTTP-date 형식이면 정수 변환이 실패한다 — 기본값 사용.
+                        retry_after = 5
+                    retry_after = max(1, min(retry_after, 60))
                     logger.warning(
                         "[429 Too Many Requests] {}초 대기 후 재시도 ({}/{}) - 경로: {} (누적 429: {}회)",
                         retry_after, attempt, max_retries, path, self._total_429s,
@@ -382,6 +398,14 @@ class KISApi:
             except (requests.exceptions.ConnectionError, ssl.SSLError, ConnectionResetError, EOFError) as e:
                 self._total_conn_errors += 1
                 breaker.on_failure()
+                if not idempotent:
+                    # 주문 제출처럼 비멱등 요청은 응답 유실 시 재전송하면 이중 체결 위험.
+                    # 재시도하지 않고 빈 응답을 돌려 상위 reconcile/미체결 조회가 판단하게 한다.
+                    logger.error(
+                        "비멱등 요청 네트워크 오류 — 재전송하지 않고 중단(이중 체결 방지): {} - {}",
+                        path, type(e).__name__,
+                    )
+                    return {}
                 wait = self._backoff_with_jitter(attempt, base=2.0)
                 logger.warning(
                     "연결/SSL 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {} - {} (누적: {}회)",
@@ -391,12 +415,22 @@ class KISApi:
 
             except requests.exceptions.Timeout:
                 breaker.on_failure()
+                if not idempotent:
+                    logger.error(
+                        "비멱등 요청 타임아웃 — 재전송하지 않고 중단(이중 체결 방지): {}", path,
+                    )
+                    return {}
                 wait = self._backoff_with_jitter(attempt)
                 logger.warning("요청 타임아웃, {:.1f}초 후 재시도 ({}/{}) - 경로: {}", wait, attempt, max_retries, path)
                 time.sleep(wait)
 
             except requests.exceptions.RequestException as e:
                 breaker.on_failure()
+                if not idempotent:
+                    logger.error(
+                        "비멱등 요청 실패 — 재전송하지 않고 중단(이중 체결 방지): {} - {}", path, e,
+                    )
+                    return {}
                 logger.error("요청 실패: {} - {}", path, e)
                 time.sleep(self._backoff_with_jitter(attempt, base=0.5))
 
@@ -627,6 +661,7 @@ class KISApi:
             "/uapi/domestic-stock/v1/trading/order-cash",
             tr_id,
             body=body,
+            idempotent=False,  # 주문 제출: 응답 유실 시 재전송 금지(이중 체결 방지)
         )
 
         if data and data.get("rt_cd") == "0":
@@ -672,6 +707,7 @@ class KISApi:
             "/uapi/domestic-stock/v1/trading/order-cash",
             tr_id,
             body=body,
+            idempotent=False,  # 주문 제출: 응답 유실 시 재전송 금지(이중 체결 방지)
         )
 
         if data and data.get("rt_cd") == "0":
@@ -1411,6 +1447,7 @@ class KISApi:
             "/uapi/overseas-stock/v1/trading/order",
             tr_id,
             body=body,
+            idempotent=False,  # 주문 제출: 응답 유실 시 재전송 금지(이중 체결 방지)
         )
         if data and data.get("rt_cd") == "0":
             logger.info("해외주문 성공 {} {} {}주 @ {}", sd, symb, qty, unpr)

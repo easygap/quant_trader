@@ -6,7 +6,14 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-05-14)**:
+> **현재 상태 (2026-06-01)**:
+> - 적대적 코드 감사로 실거래 안전 버그 정리: KIS 주문이 응답 유실 시 재전송돼 이중 체결되던 경로를 `idempotent=False`로 차단(최대 1회 제출), 서킷 브레이커 재시도 루프 내 재확인, 429 Retry-After HTTP-date 크래시 가드
+> - 부분 익절이 매 모니터링 사이클마다 재발동되던 버그 수정(`Position.partial_tp_done` 영속화), 스케줄러 진입 예외 시 손절/익절 스킵 방지, 일일 손실 한도 기준값에 당일 스냅샷 사용 차단
+> - 라이브 게이트 fail-closed 보강: NaN/Inf 지표가 임계값 비교를 통과하던 구멍을 막아(`_as_float` 비유한값 → None) 손상된 지표로 라이브 승격되는 것을 차단
+> - 수익성 검증 정직화: canonical 유니버스 생존자 편향 차단 + Deflated/Probabilistic Sharpe + 진짜 OOS holdout(`--oos-holdout-split`)로 다중검정·선택 과적합 노출
+> - 지표 엔진 ADX +DI/-DI 매핑 오류, 백테스트 gross_return 비용 환원 오류, 거래량비율 inf 가드 수정
+>
+> **이전 상태 (2026-05-14)**:
 > - GitHub 원격 브랜치 정리 완료: 완료 브랜치 삭제, 활성 PR 브랜치만 유지
 > - 60영업일 Paper 실험 freeze pack 병합: `reports/experiment_freeze_pack.md`, 일/주간 ops checklist, stop condition 문서 추가
 > - Paper Evidence 런타임: v2 일별 자동 수집 → benchmark finalization → 날짜순 canonical evidence → promotion package → launch readiness
