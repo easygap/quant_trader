@@ -612,8 +612,13 @@ class Scheduler:
 
             if self.auto_entry and self._entry_candidates and not self.blackswan.is_on_cooldown():
                 if live_entry_allowed:
-                    with PositionLock():
-                        self._execute_entry_candidates()
+                    # 신규 진입 실행 중 예기치 못한 예외가 나도 아래 손절/익절 점검은
+                    # 반드시 돌아야 하므로 진입 블록을 별도 try로 감싼다(안전 우선).
+                    try:
+                        with PositionLock():
+                            self._execute_entry_candidates()
+                    except Exception as entry_err:
+                        logger.error("신규 진입 실행 실패 — exit 점검은 계속 진행: {}", entry_err)
                     if (
                         self.config.trading.get("mode") == "live"
                         and self._last_broker_sync_ok is False

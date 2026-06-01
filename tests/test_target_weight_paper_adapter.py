@@ -7507,6 +7507,7 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     tmp_path,
     monkeypatch,
 ):
+    import database.models as db_models
     import tools.target_weight_rotation_pilot as twp
 
     report = {
@@ -7774,6 +7775,11 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
         "review_worklist_ready_for_authoritative_csv_update"
     ] is True
     assert ready_worklist_validation["blockers"] == []
+    write_command = ready_worklist_validation["operator_commands"][
+        "write_authoritative_csv_from_worklist"
+    ]
+    assert "--write-db-restore-authoritative-csv-from-worklist" in write_command
+    assert "\\" not in write_command
     assert ready_worklist_validation["validation"]["trade_history"][
         "accepted_status_count"
     ] == 1
@@ -7784,6 +7790,81 @@ def test_prepare_target_weight_db_restore_review_bundle_is_no_write_and_manual(
     assert "Ready for authoritative CSV update: `True`" in Path(
         ready_worklist_validation["report_path"]
     ).read_text(encoding="utf-8")
+    pending_export = twp.write_target_weight_db_restore_authoritative_csvs_from_worklist(
+        validation_report_path=worklist_validation["artifact_path"],
+        output_dir=tmp_path / "authoritative_export_pending",
+    )
+    assert pending_export["status"] == "blocked"
+    assert pending_export["no_write_safety"]["authoritative_csv_written"] is False
+    assert "review_worklist_validation_not_ready" in pending_export["blockers"]
+    ready_export = twp.write_target_weight_db_restore_authoritative_csvs_from_worklist(
+        validation_report_path=ready_worklist_validation["artifact_path"],
+        output_dir=tmp_path / "authoritative_export_ready",
+    )
+    assert ready_export["status"] == "ready_for_db_restore_verification"
+    assert ready_export["authoritative_csv_ready_for_verification"] is True
+    assert ready_export["no_write_safety"]["db_write_enabled"] is False
+    assert ready_export["no_write_safety"]["restore_applied"] is False
+    assert ready_export["no_write_safety"]["authoritative_csv_written"] is True
+    assert ready_export["trade_history"]["rows_appended"] == 1
+    assert ready_export["positions"]["rows_appended"] == 1
+    assert (
+        len(list(csv.DictReader(authoritative_trade.open(encoding="utf-8-sig"))))
+        == 1
+    )
+    assert (
+        len(list(csv.DictReader(authoritative_positions.open(encoding="utf-8-sig"))))
+        == 1
+    )
+    verified_from_export = twp.verify_target_weight_db_restore_package(
+        manifest_path=package["manifest_path"],
+        authoritative_trade_history_csv=authoritative_trade,
+        authoritative_positions_csv=authoritative_positions,
+        output_dir=tmp_path / "verification_from_worklist_export",
+    )
+    assert verified_from_export["status"] == "ready_for_authoritative_db_restore"
+    duplicate_export = twp.write_target_weight_db_restore_authoritative_csvs_from_worklist(
+        validation_report_path=ready_worklist_validation["artifact_path"],
+        output_dir=tmp_path / "authoritative_export_duplicate",
+    )
+    assert duplicate_export["status"] == "ready_for_db_restore_verification"
+    assert duplicate_export["trade_history"]["rows_appended"] == 0
+    assert duplicate_export["trade_history"]["rows_already_present"] == 1
+    assert duplicate_export["positions"]["rows_appended"] == 0
+    assert duplicate_export["positions"]["rows_already_present"] == 1
+
+    def fail_init_database() -> None:
+        pytest.fail("no-write DB restore CLI must not initialize the database")
+
+    monkeypatch.setattr(db_models, "init_database", fail_init_database)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--validate-db-restore-review-worklist",
+            "--restore-manifest",
+            str(package["manifest_path"]),
+            "--review-worklist-csv",
+            str(worklist_path),
+            "--output-dir",
+            str(tmp_path / "review_worklist_validation_cli"),
+        ],
+    )
+    twp.main()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "target_weight_rotation_pilot.py",
+            "--write-db-restore-authoritative-csv-from-worklist",
+            "--review-worklist-validation",
+            str(ready_worklist_validation["artifact_path"]),
+            "--output-dir",
+            str(tmp_path / "authoritative_export_cli"),
+        ],
+    )
+    twp.main()
     assert Path(bundle["artifact_path"]).exists()
     assert Path(bundle["report_path"]).exists()
     report_md = Path(bundle["report_path"]).read_text(encoding="utf-8")

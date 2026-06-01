@@ -2011,6 +2011,13 @@ def _print_target_weight_daily_ops_status(
                         f"trade_pending={priority_action.get('snapshot_db_restore_review_worklist_validation_trade_pending', 0)} "
                         f"positions_pending={priority_action.get('snapshot_db_restore_review_worklist_validation_positions_pending', 0)}"
                     )
+                if priority_action.get(
+                    "snapshot_db_restore_authoritative_csv_from_worklist_command"
+                ):
+                    print(
+                        "    Snapshot DB restore authoritative CSV export: "
+                        f"{priority_action.get('snapshot_db_restore_authoritative_csv_from_worklist_command')}"
+                    )
             if priority_db_restore_review_guard:
                 print(
                     "    Snapshot DB restore review guard: "

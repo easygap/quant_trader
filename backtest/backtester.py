@@ -1050,11 +1050,10 @@ class Backtester:
                     monthly_returns[idx.strftime("%Y-%m")] = round(val * 100, 2)
 
         # 5) 비용 반영 전 수익률 (gross return) — 비용 차감 전 성과로 비용 영향 정량화
-        total_costs = total_commission + sum(
-            t.get("commission", 0) for t in sell_trades
-        )
-        # sell_trades의 tax는 pnl에 이미 차감됨, commission은 별도 기록
-        gross_pnl = sum(t["pnl"] for t in sell_trades) + total_costs
+        # sell_trades의 pnl에는 해당 매도의 수수료와 세금이 모두 차감돼 있으므로,
+        # gross로 되돌리려면 전체 수수료(매수+매도)와 전체 세금을 다시 더해야 한다.
+        # total_commission은 이미 매수·매도 양쪽을 합산한 값이라 중복으로 더하지 않는다.
+        gross_pnl = sum(t["pnl"] for t in sell_trades) + total_commission + total_tax
         gross_return = (gross_pnl / initial_capital * 100) if initial_capital > 0 else 0
         cost_drag = round(gross_return - total_return, 2)
 
