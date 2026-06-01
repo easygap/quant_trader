@@ -18,6 +18,9 @@ Usage:
     # audit trail 출력
     python tools/paper_runtime_status.py --strategy scoring --audit
 
+    # 운영자 통합 헬스 점검 (전 전략 runtime + current_blockers 한눈에)
+    python tools/paper_runtime_status.py --health
+
 Note:
     canonical promotion bundle / live eligibility는 절대 수정하지 않습니다.
 """
@@ -36,6 +39,9 @@ def main():
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument("--strategy", help="전략 이름")
     target_group.add_argument("--all", action="store_true", help="전체 전략 상태")
+    target_group.add_argument("--health", action="store_true",
+                              help="운영자 통합 헬스 점검 (runtime + blockers)")
+    parser.add_argument("--json", action="store_true", help="--health 결과를 JSON으로 출력")
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument("--freeze", action="store_true", help="수동 freeze")
     action_group.add_argument("--unfreeze", action="store_true", help="수동 unfreeze")
@@ -54,6 +60,8 @@ def main():
         run_unfreeze(args.strategy, args.reason or "manual unfreeze via CLI")
     elif args.audit and args.strategy:
         run_audit(args.strategy)
+    elif args.health:
+        sys.exit(run_health(as_json=args.json))
     elif args.all:
         run_all()
     elif args.strategy:
@@ -152,6 +160,62 @@ def run_audit(strategy: str):
         print(path.read_text(encoding="utf-8"))
     else:
         print(f"No audit history for {strategy}")
+
+
+def _load_current_blockers():
+    """reports/current_blockers.json을 로드한다(없거나 손상 시 None)."""
+    path = _ROOT / "reports" / "current_blockers.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def run_health(as_json: bool = False) -> int:
+    """전 전략 runtime state + current_blockers를 모아 단일 헬스 verdict를 출력한다.
+
+    반환 코드: 0=OK, 1=ATTENTION, 2=BLOCKED (모니터링 스크립트에서 활용 가능).
+    """
+    from core.paper_runtime import get_paper_runtime_state
+    from core.strategy_universe import get_paper_strategy_names
+    from core.operator_health import build_operator_health
+
+    strategies = sorted(get_paper_strategy_names() or [])
+    states = []
+    for strategy in strategies:
+        try:
+            states.append(get_paper_runtime_state(strategy))
+        except Exception as exc:  # 한 전략 실패가 전체 점검을 막지 않게 한다.
+            print(f"  ⚠️  {strategy} 상태 조회 실패: {exc}")
+
+    blockers = _load_current_blockers()
+    health = build_operator_health(states, blockers)
+
+    if as_json:
+        print(json.dumps(health, ensure_ascii=False, indent=2))
+    else:
+        icon = {"OK": "✅", "ATTENTION": "⚠️", "BLOCKED": "⛔"}.get(health["verdict"], "❓")
+        print(f"\n{'=' * 60}")
+        print(f"  {icon}  운영 헬스: {health['verdict']}")
+        print(f"  {health['headline']}")
+        print(f"{'=' * 60}")
+        b = health["blockers"]
+        print(f"\n  go_live: {b['go_live']} | hard_blockers: {b['hard_blocker_count']} | "
+              f"artifact_stale: {b['freshness_stale']}")
+        print(f"\n  전략별:")
+        for s in health["strategies"]:
+            si = {"OK": "✅", "ATTENTION": "⚠️", "BLOCKED": "⛔"}.get(s["verdict"], "❓")
+            extra = f" ({', '.join(s['notes'])})" if s["notes"] else ""
+            print(f"    {si} {s['strategy']}: {s['state']}{extra}")
+        if health["attention_items"]:
+            print(f"\n  확인 항목:")
+            for item in health["attention_items"]:
+                print(f"    - {item}")
+        print()
+
+    return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
 
 
 if __name__ == "__main__":
