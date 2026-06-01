@@ -4216,6 +4216,17 @@ def _target_weight_db_restore_validate_review_worklist_command(
     )
 
 
+def _target_weight_db_restore_write_authoritative_from_worklist_command(
+    validation_report_path: str | Path,
+) -> str:
+    validation_report = Path(validation_report_path).as_posix()
+    return (
+        "python tools/target_weight_rotation_pilot.py "
+        "--write-db-restore-authoritative-csv-from-worklist "
+        f"--review-worklist-validation {validation_report}"
+    )
+
+
 def _target_weight_db_restore_apply_plan_command(
     verification_report_path: str | Path,
 ) -> str:
@@ -5358,6 +5369,16 @@ def validate_target_weight_db_restore_review_worklist(
         },
         "operator_commands": {
             "verify_after_authoritative_csv_update": verify_command,
+            "write_authoritative_csv_from_worklist": (
+                _target_weight_db_restore_write_authoritative_from_worklist_command(
+                    output_dir
+                    / (
+                        "target_weight_db_restore_review_worklist_validation_"
+                        f"{_safe_path_component(candidate_id or 'target_weight')}_"
+                        f"{_safe_path_component(snapshot_date or 'unknown')}.json"
+                    )
+                )
+            ),
             "manual_review_guard": (
                 "# manual step required: copy reviewed worklist evidence into "
                 "the reviewed authoritative CSV files, then verify"
@@ -5492,6 +5513,439 @@ def _print_target_weight_db_restore_review_worklist_validation(
     verify_command = (report.get("operator_commands") or {}).get(
         "verify_after_authoritative_csv_update"
     )
+    export_command = (report.get("operator_commands") or {}).get(
+        "write_authoritative_csv_from_worklist"
+    )
+    if export_command:
+        print(f"  write_authoritative_csv_from_worklist: {export_command}")
+    if verify_command:
+        print(f"  verify_after_authoritative_csv_update: {verify_command}")
+    print(f"  artifact: {report.get('artifact_path')}")
+    print(f"  report: {report.get('report_path')}")
+
+
+def _target_weight_restore_expected_authoritative_filename(kind: str) -> str:
+    if kind == "trade_history":
+        return "reviewed_authoritative_trade_history.csv"
+    if kind == "positions":
+        return "reviewed_authoritative_positions.csv"
+    return ""
+
+
+def _target_weight_restore_worklist_target_path(
+    *,
+    rows: list[dict[str, Any]],
+    kind: str,
+    blockers: list[str],
+) -> Path | None:
+    values = sorted(
+        {
+            str(row.get("target_authoritative_csv") or "").strip()
+            for row in rows
+            if str(row.get("target_authoritative_csv") or "").strip()
+        }
+    )
+    if not values:
+        blockers.append(f"authoritative_{kind}_target_csv_missing")
+        return None
+    if len(values) > 1:
+        blockers.append(f"authoritative_{kind}_target_csv_ambiguous")
+        return None
+    path = Path(values[0])
+    expected_name = _target_weight_restore_expected_authoritative_filename(kind)
+    if expected_name and path.name != expected_name:
+        blockers.append(f"authoritative_{kind}_target_csv_name_invalid")
+        return None
+    return path
+
+
+def _target_weight_restore_authoritative_row_from_worklist(
+    row: dict[str, Any],
+    columns: list[str],
+) -> dict[str, Any]:
+    return {
+        **{column: row.get(column, "") for column in columns},
+        **{
+            column: row.get(column, "")
+            for column in TARGET_WEIGHT_RESTORE_AUTHORITATIVE_METADATA_COLUMNS
+        },
+    }
+
+
+def _merge_target_weight_restore_authoritative_rows(
+    *,
+    path: Path,
+    kind: str,
+    rows_to_add: list[dict[str, Any]],
+    columns: list[str],
+    candidate_source_path: Any,
+    blockers: list[str],
+    write: bool = True,
+) -> dict[str, Any]:
+    expected_columns = _target_weight_restore_authoritative_columns(columns)
+    info: dict[str, Any] = {
+        "kind": kind,
+        "path": path.as_posix(),
+        "exists_before": path.exists(),
+        "row_count_before": 0,
+        "rows_from_worklist": len(rows_to_add),
+        "rows_appended": 0,
+        "rows_already_present": 0,
+        "row_count_after": 0,
+        "sha256_before": "",
+        "sha256_after": "",
+        "written": False,
+    }
+    if _paths_point_to_same_file(path, candidate_source_path):
+        blockers.append(f"authoritative_{kind}_target_csv_candidate_source_rejected")
+        return info
+    existing_rows: list[dict[str, Any]] = []
+    fieldnames: list[str] = []
+    if path.exists():
+        info["sha256_before"] = _file_sha256(path)
+        existing_rows, fieldnames = _read_csv_dict_rows_with_fieldnames(path)
+        info["row_count_before"] = len(existing_rows)
+        marker_count = _restore_authoritative_candidate_marker_count(existing_rows)
+        if marker_count:
+            blockers.append(f"authoritative_{kind}_target_csv_candidate_marker_rejected")
+            info["candidate_marker_row_count"] = marker_count
+            return info
+        missing_existing_columns = [
+            column for column in expected_columns if column not in fieldnames
+        ]
+        if existing_rows and missing_existing_columns:
+            blockers.append(f"authoritative_{kind}_target_csv_columns_missing")
+            info["missing_columns"] = missing_existing_columns
+            return info
+    existing_counter = _restore_row_counter(existing_rows, columns)
+    rows_to_write = list(existing_rows)
+    for row in rows_to_add:
+        row_key = tuple(
+            (column, _normalize_restore_compare_value(column, row.get(column)))
+            for column in columns
+        )
+        if existing_counter[row_key] > 0:
+            existing_counter[row_key] -= 1
+            info["rows_already_present"] += 1
+            continue
+        rows_to_write.append(row)
+        info["rows_appended"] += 1
+    output_columns = list(fieldnames or expected_columns)
+    for column in expected_columns:
+        if column not in output_columns:
+            output_columns.append(column)
+    info["row_count_after"] = len(rows_to_write)
+    if not write:
+        return info
+    _write_csv_rows(path, rows_to_write, output_columns)
+    info["written"] = True
+    info["sha256_after"] = _file_sha256(path)
+    return info
+
+
+def write_target_weight_db_restore_authoritative_csvs_from_worklist(
+    *,
+    validation_report_path: str | Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """검증된 worklist를 reviewed authoritative CSV로 병합한다. DB에는 쓰지 않는다."""
+    validation_path = Path(validation_report_path)
+    blockers: list[str] = []
+    warnings: list[str] = []
+    validation_report: dict[str, Any] = {}
+    if not validation_path.is_file():
+        blockers.append("review_worklist_validation_missing")
+    else:
+        try:
+            validation_report = json.loads(validation_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            blockers.append(f"review_worklist_validation_invalid_json:{exc}")
+            validation_report = {}
+    if (
+        validation_report.get("artifact_type")
+        != "target_weight_db_restore_review_worklist_validation"
+    ):
+        blockers.append("review_worklist_validation_artifact_type_invalid")
+    if validation_report.get("status") != "ready_for_authoritative_csv_update":
+        blockers.append("review_worklist_validation_not_ready")
+    if not bool(
+        validation_report.get("review_worklist_ready_for_authoritative_csv_update")
+    ):
+        blockers.append("review_worklist_validation_ready_flag_false")
+    if validation_report.get("blockers"):
+        blockers.append("review_worklist_validation_has_blockers")
+
+    manifest_path_raw = str(validation_report.get("manifest_path") or "").strip()
+    worklist_path_raw = str(validation_report.get("review_worklist_csv") or "").strip()
+    manifest_path = Path(manifest_path_raw) if manifest_path_raw else None
+    worklist_path = Path(worklist_path_raw) if worklist_path_raw else None
+    if not manifest_path or not manifest_path.is_file():
+        blockers.append("manifest_missing")
+    elif validation_report.get("manifest_hash") and _file_sha256(manifest_path) != str(
+        validation_report.get("manifest_hash")
+    ):
+        blockers.append("manifest_changed_after_worklist_validation")
+    if not worklist_path or not worklist_path.is_file():
+        blockers.append("review_worklist_csv_missing")
+    elif validation_report.get("review_worklist_csv_sha256") and _file_sha256(
+        worklist_path
+    ) != str(validation_report.get("review_worklist_csv_sha256")):
+        blockers.append("review_worklist_csv_changed_after_validation")
+
+    manifest: dict[str, Any] = {}
+    if manifest_path and manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            blockers.append(f"manifest_invalid_json:{exc}")
+            manifest = {}
+    candidate_id = str(
+        validation_report.get("candidate_id") or manifest.get("candidate_id") or ""
+    )
+    snapshot_date = str(
+        validation_report.get("snapshot_date") or manifest.get("snapshot_date") or ""
+    )
+
+    worklist_rows: list[dict[str, Any]] = []
+    if worklist_path and worklist_path.is_file():
+        worklist_rows = _read_csv_dict_rows(worklist_path)
+    trade_rows = [
+        _target_weight_restore_authoritative_row_from_worklist(
+            row,
+            TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+        )
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "trade_history"
+    ]
+    position_rows = [
+        _target_weight_restore_authoritative_row_from_worklist(
+            row,
+            TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+        )
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "positions"
+    ]
+    trade_worklist_rows = [
+        row
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "trade_history"
+    ]
+    position_worklist_rows = [
+        row
+        for row in worklist_rows
+        if str(row.get("candidate_kind") or "").strip() == "positions"
+    ]
+    trade_target = _target_weight_restore_worklist_target_path(
+        rows=trade_worklist_rows,
+        kind="trade_history",
+        blockers=blockers,
+    )
+    position_target = _target_weight_restore_worklist_target_path(
+        rows=position_worklist_rows,
+        kind="positions",
+        blockers=blockers,
+    )
+    trade_info: dict[str, Any] = {"kind": "trade_history"}
+    position_info: dict[str, Any] = {"kind": "positions"}
+    if not blockers and trade_target and position_target:
+        trade_info = _merge_target_weight_restore_authoritative_rows(
+            path=trade_target,
+            kind="trade_history",
+            rows_to_add=trade_rows,
+            columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+            candidate_source_path=manifest.get("trade_history_candidate_csv"),
+            blockers=blockers,
+            write=False,
+        )
+        position_info = _merge_target_weight_restore_authoritative_rows(
+            path=position_target,
+            kind="positions",
+            rows_to_add=position_rows,
+            columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            candidate_source_path=manifest.get("positions_candidate_csv"),
+            blockers=blockers,
+            write=False,
+        )
+    if not blockers and trade_target and position_target:
+        trade_info = _merge_target_weight_restore_authoritative_rows(
+            path=trade_target,
+            kind="trade_history",
+            rows_to_add=trade_rows,
+            columns=TARGET_WEIGHT_RESTORE_TRADE_COMPARE_COLUMNS,
+            candidate_source_path=manifest.get("trade_history_candidate_csv"),
+            blockers=blockers,
+        )
+        position_info = _merge_target_weight_restore_authoritative_rows(
+            path=position_target,
+            kind="positions",
+            rows_to_add=position_rows,
+            columns=TARGET_WEIGHT_RESTORE_POSITION_COMPARE_COLUMNS,
+            candidate_source_path=manifest.get("positions_candidate_csv"),
+            blockers=blockers,
+        )
+
+    written = bool(
+        not blockers and trade_info.get("written") and position_info.get("written")
+    )
+    verify_command = ""
+    if manifest_path and trade_target and position_target:
+        verify_command = _target_weight_db_restore_verify_with_templates_command(
+            manifest_path=manifest_path.as_posix(),
+            trade_history_template=trade_target.as_posix(),
+            positions_template=position_target.as_posix(),
+        )
+    report = {
+        "artifact_type": "target_weight_db_restore_authoritative_csv_from_worklist",
+        "schema_version": 1,
+        "generated_at": datetime.now().isoformat(),
+        "status": "ready_for_db_restore_verification" if written else "blocked",
+        "authoritative_csv_ready_for_verification": written,
+        "blockers": blockers,
+        "warnings": warnings,
+        "candidate_id": candidate_id,
+        "snapshot_date": snapshot_date,
+        "validation_report_path": validation_path.as_posix(),
+        "validation_report_hash": (
+            _file_sha256(validation_path) if validation_path.is_file() else ""
+        ),
+        "manifest_path": manifest_path.as_posix() if manifest_path else "",
+        "review_worklist_csv": worklist_path.as_posix() if worklist_path else "",
+        "trade_history": trade_info,
+        "positions": position_info,
+        "no_write_safety": {
+            "db_write_enabled": False,
+            "portfolio_snapshot_write_enabled": False,
+            "db_state_checked": False,
+            "restore_applied": False,
+            "dry_run_only": False,
+            "authoritative_csv_written": written,
+        },
+        "operator_commands": {
+            "verify_after_authoritative_csv_update": verify_command,
+            "manual_review_guard": (
+                "# no DB write performed; run verification before any restore plan"
+            ),
+        },
+    }
+    json_path, md_path = write_target_weight_db_restore_authoritative_csv_from_worklist_report(
+        report,
+        output_dir=output_dir,
+    )
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    return report
+
+
+def render_target_weight_db_restore_authoritative_csv_from_worklist_markdown(
+    report: dict[str, Any],
+) -> str:
+    trade = report.get("trade_history") or {}
+    positions = report.get("positions") or {}
+    lines = [
+        "# Target-weight DB Restore Authoritative CSV Export",
+        "",
+        f"- Candidate: `{report.get('candidate_id') or 'unknown'}`",
+        f"- Snapshot date: `{report.get('snapshot_date') or 'unknown'}`",
+        f"- Status: `{report.get('status') or 'unknown'}`",
+        "- Ready for DB restore verification: "
+        f"`{bool(report.get('authoritative_csv_ready_for_verification'))}`",
+        "- Blockers: "
+        f"`{', '.join(report.get('blockers') or []) or 'none'}`",
+        "",
+        "## No-write Safety",
+        "- DB write enabled: `False`",
+        "- Portfolio snapshot write enabled: `False`",
+        "- DB state checked: `False`",
+        "- Restore applied: `False`",
+        f"- Authoritative CSV written: `{bool((report.get('no_write_safety') or {}).get('authoritative_csv_written'))}`",
+        "",
+        "## Trade History",
+        f"- CSV: `{trade.get('path') or 'none'}`",
+        f"- Rows before: `{trade.get('row_count_before', 0)}`",
+        f"- Rows appended: `{trade.get('rows_appended', 0)}`",
+        f"- Rows already present: `{trade.get('rows_already_present', 0)}`",
+        f"- Rows after: `{trade.get('row_count_after', 0)}`",
+        "",
+        "## Positions",
+        f"- CSV: `{positions.get('path') or 'none'}`",
+        f"- Rows before: `{positions.get('row_count_before', 0)}`",
+        f"- Rows appended: `{positions.get('rows_appended', 0)}`",
+        f"- Rows already present: `{positions.get('rows_already_present', 0)}`",
+        f"- Rows after: `{positions.get('row_count_after', 0)}`",
+        "",
+        "## Operator Commands",
+    ]
+    for key, value in sorted((report.get("operator_commands") or {}).items()):
+        lines.append(f"- {key}: `{value}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_target_weight_db_restore_authoritative_csv_from_worklist_report(
+    report: dict[str, Any],
+    *,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate = _safe_path_component(str(report.get("candidate_id") or "target_weight"))
+    snapshot_date = _safe_path_component(str(report.get("snapshot_date") or "unknown"))
+    stem = f"target_weight_db_restore_authoritative_csv_from_worklist_{candidate}_{snapshot_date}"
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    report["artifact_path"] = json_path.as_posix()
+    report["report_path"] = md_path.as_posix()
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(
+        render_target_weight_db_restore_authoritative_csv_from_worklist_markdown(
+            report
+        ),
+        encoding="utf-8",
+    )
+    return json_path, md_path
+
+
+def _print_target_weight_db_restore_authoritative_csv_from_worklist(
+    report: dict[str, Any],
+) -> None:
+    trade = report.get("trade_history") or {}
+    positions = report.get("positions") or {}
+    print(f"  status: {report.get('status')}")
+    print(
+        "  ready_for_db_restore_verification: "
+        f"{bool(report.get('authoritative_csv_ready_for_verification'))}"
+    )
+    if report.get("blockers"):
+        print(f"  blockers: {', '.join(report.get('blockers') or [])}")
+    print(
+        "  no_write_safety: db_write=False snapshot_write=False restore_applied=False "
+        f"authoritative_csv_written={bool((report.get('no_write_safety') or {}).get('authoritative_csv_written'))}"
+    )
+    print(
+        "  trade_history: "
+        f"rows_before={trade.get('row_count_before', 0)} "
+        f"appended={trade.get('rows_appended', 0)} "
+        f"already_present={trade.get('rows_already_present', 0)} "
+        f"rows_after={trade.get('row_count_after', 0)} "
+        f"path={trade.get('path')}"
+    )
+    print(
+        "  positions: "
+        f"rows_before={positions.get('row_count_before', 0)} "
+        f"appended={positions.get('rows_appended', 0)} "
+        f"already_present={positions.get('rows_already_present', 0)} "
+        f"rows_after={positions.get('row_count_after', 0)} "
+        f"path={positions.get('path')}"
+    )
+    verify_command = (report.get("operator_commands") or {}).get(
+        "verify_after_authoritative_csv_update"
+    )
+    export_command = (report.get("operator_commands") or {}).get(
+        "write_authoritative_csv_from_worklist"
+    )
+    if export_command:
+        print(f"  write_authoritative_csv_from_worklist: {export_command}")
     if verify_command:
         print(f"  verify_after_authoritative_csv_update: {verify_command}")
     print(f"  artifact: {report.get('artifact_path')}")
@@ -12150,6 +12604,11 @@ def main() -> None:
         help="Validate DB restore review worklist completion without DB writes or DB state checks.",
     )
     parser.add_argument(
+        "--write-db-restore-authoritative-csv-from-worklist",
+        action="store_true",
+        help="Merge a ready reviewed worklist into authoritative CSV files without DB writes.",
+    )
+    parser.add_argument(
         "--plan-db-restore-apply",
         action="store_true",
         help="Create a no-write manual DB restore apply plan from a ready verification report.",
@@ -12176,6 +12635,13 @@ def main() -> None:
     parser.add_argument(
         "--review-worklist-csv",
         help="DB restore review worklist CSV to validate with --validate-db-restore-review-worklist.",
+    )
+    parser.add_argument(
+        "--review-worklist-validation",
+        help=(
+            "Ready review worklist validation report for "
+            "--write-db-restore-authoritative-csv-from-worklist."
+        ),
     )
     parser.add_argument(
         "--restore-verification",
@@ -12286,6 +12752,10 @@ def main() -> None:
             cash_blocked_modes.append("--inspect-db-restore-review-progress")
         if args.validate_db_restore_review_worklist:
             cash_blocked_modes.append("--validate-db-restore-review-worklist")
+        if args.write_db_restore_authoritative_csv_from_worklist:
+            cash_blocked_modes.append(
+                "--write-db-restore-authoritative-csv-from-worklist"
+            )
         if args.plan_db_restore_apply:
             cash_blocked_modes.append("--plan-db-restore-apply")
         if args.apply_db_restore:
@@ -12307,6 +12777,7 @@ def main() -> None:
         args.prepare_db_restore_review_bundle,
         args.inspect_db_restore_review_progress,
         args.validate_db_restore_review_worklist,
+        args.write_db_restore_authoritative_csv_from_worklist,
         args.plan_db_restore_apply,
         args.apply_db_restore,
         args.backup_db_restore_state,
@@ -12318,6 +12789,7 @@ def main() -> None:
             "--prepare-db-restore-review-bundle, "
             "--inspect-db-restore-review-progress, "
             "--validate-db-restore-review-worklist, "
+            "--write-db-restore-authoritative-csv-from-worklist, "
             "--plan-db-restore-apply, --backup-db-restore-state, "
             "and --apply-db-restore are mutually exclusive"
         )
@@ -12329,6 +12801,7 @@ def main() -> None:
         or args.prepare_db_restore_review_bundle
         or args.inspect_db_restore_review_progress
         or args.validate_db_restore_review_worklist
+        or args.write_db_restore_authoritative_csv_from_worklist
         or args.plan_db_restore_apply
         or args.apply_db_restore
         or args.backup_db_restore_state
@@ -12398,6 +12871,22 @@ def main() -> None:
             "--review-worklist-csv is only used with "
             "--validate-db-restore-review-worklist"
         )
+    if (
+        args.write_db_restore_authoritative_csv_from_worklist
+        and not args.review_worklist_validation
+    ):
+        parser.error(
+            "--review-worklist-validation is required with "
+            "--write-db-restore-authoritative-csv-from-worklist"
+        )
+    if (
+        args.review_worklist_validation
+        and not args.write_db_restore_authoritative_csv_from_worklist
+    ):
+        parser.error(
+            "--review-worklist-validation is only used with "
+            "--write-db-restore-authoritative-csv-from-worklist"
+        )
     if args.plan_db_restore_apply and not args.restore_verification:
         parser.error("--restore-verification is required with --plan-db-restore-apply")
     if args.restore_verification and not args.plan_db_restore_apply:
@@ -12443,6 +12932,65 @@ def main() -> None:
             "are required with --verify-db-restore-package or "
             "--inspect-db-restore-review-progress"
         )
+
+    if args.prepare_db_restore_review_bundle:
+        result = prepare_target_weight_db_restore_review_bundle(
+            manifest_path=args.restore_manifest,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore review bundle")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  manifest: {result.get('manifest_path')}")
+        _print_target_weight_db_restore_review_bundle(result)
+        if result["status"] != "ready_for_manual_authoritative_review":
+            raise SystemExit(1)
+        return
+
+    if args.validate_db_restore_review_worklist:
+        result = validate_target_weight_db_restore_review_worklist(
+            manifest_path=args.restore_manifest,
+            review_worklist_csv=args.review_worklist_csv,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore review worklist validation")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  manifest: {result.get('manifest_path')}")
+        _print_target_weight_db_restore_review_worklist_validation(result)
+        if result["status"] == "blocked":
+            raise SystemExit(1)
+        return
+
+    if args.write_db_restore_authoritative_csv_from_worklist:
+        result = write_target_weight_db_restore_authoritative_csvs_from_worklist(
+            validation_report_path=args.review_worklist_validation,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore authoritative CSV export")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  validation: {result.get('validation_report_path')}")
+        _print_target_weight_db_restore_authoritative_csv_from_worklist(result)
+        if result["status"] != "ready_for_db_restore_verification":
+            raise SystemExit(1)
+        return
+
+    if args.inspect_db_restore_review_progress:
+        result = inspect_target_weight_db_restore_review_progress(
+            manifest_path=args.restore_manifest,
+            authoritative_trade_history_csv=args.authoritative_trade_history_csv,
+            authoritative_positions_csv=args.authoritative_positions_csv,
+            output_dir=Path(args.output_dir),
+        )
+        print("\nTarget-weight DB restore review progress")
+        print(f"  candidate: {result.get('candidate_id')}")
+        print(f"  snapshot_date: {result.get('snapshot_date')}")
+        print(f"  manifest: {result.get('manifest_path')}")
+        _print_target_weight_db_restore_review_progress(result)
+        if result["status"] == "blocked":
+            raise SystemExit(1)
+        return
 
     from database.models import init_database
 
@@ -12592,51 +13140,6 @@ def main() -> None:
             print(f"  proof: {result['proof_status_after'].get('reason')}")
         _print_target_weight_finalize_diagnostics(result)
         if result["status"] == "waiting_for_final_benchmark":
-            raise SystemExit(1)
-        return
-
-    if args.prepare_db_restore_review_bundle:
-        result = prepare_target_weight_db_restore_review_bundle(
-            manifest_path=args.restore_manifest,
-            output_dir=Path(args.output_dir),
-        )
-        print("\nTarget-weight DB restore review bundle")
-        print(f"  candidate: {result.get('candidate_id')}")
-        print(f"  snapshot_date: {result.get('snapshot_date')}")
-        print(f"  manifest: {result.get('manifest_path')}")
-        _print_target_weight_db_restore_review_bundle(result)
-        if result["status"] != "ready_for_manual_authoritative_review":
-            raise SystemExit(1)
-        return
-
-    if args.validate_db_restore_review_worklist:
-        result = validate_target_weight_db_restore_review_worklist(
-            manifest_path=args.restore_manifest,
-            review_worklist_csv=args.review_worklist_csv,
-            output_dir=Path(args.output_dir),
-        )
-        print("\nTarget-weight DB restore review worklist validation")
-        print(f"  candidate: {result.get('candidate_id')}")
-        print(f"  snapshot_date: {result.get('snapshot_date')}")
-        print(f"  manifest: {result.get('manifest_path')}")
-        _print_target_weight_db_restore_review_worklist_validation(result)
-        if result["status"] == "blocked":
-            raise SystemExit(1)
-        return
-
-    if args.inspect_db_restore_review_progress:
-        result = inspect_target_weight_db_restore_review_progress(
-            manifest_path=args.restore_manifest,
-            authoritative_trade_history_csv=args.authoritative_trade_history_csv,
-            authoritative_positions_csv=args.authoritative_positions_csv,
-            output_dir=Path(args.output_dir),
-        )
-        print("\nTarget-weight DB restore review progress")
-        print(f"  candidate: {result.get('candidate_id')}")
-        print(f"  snapshot_date: {result.get('snapshot_date')}")
-        print(f"  manifest: {result.get('manifest_path')}")
-        _print_target_weight_db_restore_review_progress(result)
-        if result["status"] == "blocked":
             raise SystemExit(1)
         return
 

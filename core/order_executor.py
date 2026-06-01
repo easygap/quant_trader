@@ -380,6 +380,10 @@ class OrderExecutor:
         if snapshots.empty:
             return None
 
+        # 일일 손실 기준은 "전일 종가 평가금액"이어야 한다. 당일 스냅샷을 기준으로 쓰면
+        # daily_pnl ≈ 0 이 되어 손실 한도 가드가 사실상 무력화되므로, 당일보다 이전
+        # 스냅샷이 없으면 기준값 없음(None)으로 처리해 일일 손실 하위 점검만 건너뛴다.
+        # (MDD 한도 점검은 상위에서 그대로 동작한다.)
         baseline_rows = snapshots
         if "date" in snapshots.columns:
             try:
@@ -389,8 +393,10 @@ class OrderExecutor:
                     lambda value: value.date() if hasattr(value, "date") else value
                 )
                 previous_rows = dated[dated["_snapshot_date"] < today]
-                if not previous_rows.empty:
-                    baseline_rows = previous_rows
+                if previous_rows.empty:
+                    # 당일 스냅샷만 있는 경우 — 오늘 값을 기준으로 삼지 않는다.
+                    return None
+                baseline_rows = previous_rows
             except Exception as exc:
                 logger.debug("일일 손실 기준 스냅샷 날짜 해석 실패: {}", exc)
 
@@ -1396,9 +1402,10 @@ class OrderExecutor:
                 from database.repositories import update_position_targets
                 tp_config = self.risk_manager.risk_params.get("take_profit", {})
                 final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
+                # 부분 익절 완료 표시를 영속화해 다음 모니터링 사이클에서 재발동되지 않게 한다.
                 update_position_targets(
                     symbol, take_profit_price=round(final_target, 0),
-                    account_key=self.account_key,
+                    account_key=self.account_key, partial_tp_done=True,
                 )
 
         # 매매 로그
@@ -1484,7 +1491,7 @@ class OrderExecutor:
             if (
                 current_price >= partial_target_price
                 and position.quantity >= 2  # 1주면 부분 매도 불가
-                and not getattr(position, "_partial_tp_done", False)
+                and not getattr(position, "partial_tp_done", False)
             ):
                 partial_qty = max(1, int(position.quantity * partial_ratio))
                 if partial_qty < position.quantity:

@@ -432,6 +432,8 @@ def save_position(
             if trailing_stop_price:
                 position.trailing_stop_price = trailing_stop_price
             position.highest_price = max(position.highest_price or 0, avg_price)
+            # 추가 매수로 평균단가가 바뀌면 1차 부분 익절 목표도 새로 잡히므로 재발동 허용.
+            position.partial_tp_done = False
         else:
             # 신규 포지션
             position = Position(
@@ -633,6 +635,7 @@ def update_position_targets(
     take_profit_price: float = None,
     trailing_stop_price: float = None,
     account_key: str = "",
+    partial_tp_done: bool = None,
 ):
     """
     포지션의 손절/익절/트레일링 가격을 업데이트 (부분 매도 후 재조정 등).
@@ -652,6 +655,8 @@ def update_position_targets(
             position.take_profit_price = take_profit_price
         if trailing_stop_price is not None:
             position.trailing_stop_price = trailing_stop_price
+        if partial_tp_done is not None:
+            position.partial_tp_done = bool(partial_tp_done)
         session.commit()
     except Exception as e:
         session.rollback()
