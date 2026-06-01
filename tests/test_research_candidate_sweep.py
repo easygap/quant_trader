@@ -344,8 +344,11 @@ def test_compute_validation_warnings_empty_ranked():
 
 
 class _FakeSpec:
-    def __init__(self, candidate_id):
+    def __init__(self, candidate_id, strategy="scoring"):
         self.candidate_id = candidate_id
+        self.strategy = strategy
+        self.params = {}
+        self.description = candidate_id
 
 
 def test_oos_holdout_selects_on_train_not_test():
@@ -406,6 +409,84 @@ def test_oos_holdout_empty_specs():
     )
     assert out["status"] == "no_specs"
     assert out["trials"] == 0
+
+
+def test_run_candidate_sweep_wires_oos_holdout(monkeypatch):
+    """run_candidate_sweep에 --oos-holdout-split이 들어오면 artifact에 oos_holdout이 채워진다.
+
+    무거운 백테스트/유니버스 선택은 스텁으로 대체하고, 배선만 검증한다.
+    """
+    import pandas as pd
+    import tools.research_candidate_sweep as rcs
+
+    spec_a = _FakeSpec("a")
+    spec_b = _FakeSpec("b")
+
+    # 후보 빌드/유니버스/벤치마크/평가/아티팩트 기록을 가볍게 스텁.
+    monkeypatch.setattr(rcs, "filter_candidate_specs", lambda specs, ids: [spec_a, spec_b])
+    monkeypatch.setattr(rcs, "build_candidate_specs", lambda family: [spec_a, spec_b])
+    monkeypatch.setattr(rcs, "apply_research_universe_liquidity_filter",
+                        lambda universe, config, **kw: (["005930", "000660"], {"passed": 2}))
+    monkeypatch.setattr(rcs, "select_canonical_universe",
+                        lambda *a, **kw: ["005930", "000660"])
+    bench_idx = pd.date_range("2023-01-01", "2025-12-31", freq="D")
+    bench_returns = pd.Series([0.0001] * len(bench_idx), index=bench_idx)
+    monkeypatch.setattr(rcs, "buy_and_hold_benchmark_with_returns",
+                        lambda *a, **kw: ({"benchmark_usable": True, "total_return": 10.0}, bench_returns))
+    monkeypatch.setattr(rcs, "make_windows", lambda *a, **kw: [])
+
+    def fake_eval(spec, symbols, start, end, capital, bench, **kw):
+        is_train = start == "2023-01-01"
+        if getattr(spec, "candidate_id", None) == "a":
+            return {"sharpe": 2.0 if is_train else -0.3, "total_return": 50 if is_train else -5,
+                    "benchmark_excess_return": 5, "benchmark_excess_sharpe": 0.3, "total_trades": 40}
+        return {"sharpe": 1.1 if is_train else 0.9, "total_return": 25 if is_train else 15,
+                "benchmark_excess_return": 3, "benchmark_excess_sharpe": 0.2, "total_trades": 40}
+
+    monkeypatch.setattr(rcs, "evaluate_candidate", fake_eval)
+    monkeypatch.setattr(rcs, "diversification_for_spec", lambda spec: {})
+
+    bundle = rcs.run_candidate_sweep(
+        symbols=["005930", "000660"],
+        start="2023-01-01", end="2025-12-31",
+        include_walk_forward=False,
+        oos_holdout_split="2025-01-01",
+    )
+
+    oos = bundle.get("oos_holdout")
+    assert oos is not None and oos["status"] == "ok"
+    # train 최고는 a(sharpe 2.0)지만 test에서 무너짐(-0.3) → 그게 선택·보고됨
+    assert oos["selected_candidate_id"] == "a"
+    assert oos["train_sharpe"] == 2.0
+    assert oos["test_sharpe"] == -0.3
+    assert oos["holdout_passes"] is False
+    assert oos["selection_window"] == ["2023-01-01", "2024-12-31"]
+    assert oos["holdout_window"] == ["2025-01-01", "2025-12-31"]
+
+
+def test_run_candidate_sweep_no_oos_when_split_absent(monkeypatch):
+    """split을 안 주면 oos_holdout은 None."""
+    import pandas as pd
+    import tools.research_candidate_sweep as rcs
+
+    monkeypatch.setattr(rcs, "filter_candidate_specs", lambda specs, ids: [_FakeSpec("a")])
+    monkeypatch.setattr(rcs, "build_candidate_specs", lambda family: [_FakeSpec("a")])
+    monkeypatch.setattr(rcs, "apply_research_universe_liquidity_filter",
+                        lambda universe, config, **kw: (["005930"], {"passed": 1}))
+    bench_idx = pd.date_range("2023-01-01", "2025-12-31", freq="D")
+    monkeypatch.setattr(rcs, "buy_and_hold_benchmark_with_returns",
+                        lambda *a, **kw: ({"benchmark_usable": True}, pd.Series([0.0001] * len(bench_idx), index=bench_idx)))
+    monkeypatch.setattr(rcs, "make_windows", lambda *a, **kw: [])
+    monkeypatch.setattr(rcs, "evaluate_candidate",
+                        lambda *a, **kw: {"sharpe": 1.0, "total_return": 10, "benchmark_excess_return": 1,
+                                          "benchmark_excess_sharpe": 0.1, "total_trades": 30})
+    monkeypatch.setattr(rcs, "diversification_for_spec", lambda spec: {})
+
+    bundle = rcs.run_candidate_sweep(
+        symbols=["005930"], start="2023-01-01", end="2025-12-31",
+        include_walk_forward=False,
+    )
+    assert bundle.get("oos_holdout") is None
 
 
 def test_build_candidate_specs_supports_all_families():
