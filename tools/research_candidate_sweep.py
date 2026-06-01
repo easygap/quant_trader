@@ -1957,6 +1957,31 @@ def build_target_weight_low_volatility_candidate_specs() -> list[CandidateSpec]:
             },
             description="risk-parity hold-all with 15% per-name weight cap (avoid concentration)",
         ),
+        # ── 방어형(defensive): EW B&H 자체에 risk-off 오버레이를 얹어 낙폭만 줄인다 ──
+        # 목표가 "벤치마크 초과"가 아니라 "절대수익 + 낙폭 관리(안정적 고수익)"라면, 동일비중
+        # 보유에 KS11 SMA120 risk-off를 거는 게 합리적이다. 강세장 노출은 유지하고 약세장만
+        # 줄여 같은 수익을 더 낮은 MDD로 얻는지(=Sharpe/Calmar 개선) 확인한다.
+        CandidateSpec(
+            candidate_id="ew_holdall_equal_baseline",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "equal", "target_exposure": 1.0,
+            },
+            description="equal-weight hold entire universe (EW B&H reproduction baseline)",
+        ),
+        CandidateSpec(
+            candidate_id="ew_holdall_riskoff_sma120",
+            strategy="target_weight_rotation",
+            params={
+                **common, "target_top_n": 999, "hold_rank_buffer": 0,
+                "target_allocation_mode": "equal", "target_exposure": 1.0,
+                "market_exposure_mode": "benchmark_sma",
+                "market_ma_period": 120,
+                "bear_target_exposure": 0.40,
+            },
+            description="equal-weight hold-all + KS11 SMA120 risk-off (defensive: cut MDD, keep upside)",
+        ),
     ]
 
 
