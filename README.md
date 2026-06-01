@@ -154,6 +154,11 @@ python main.py --mode dashboard
 # 기본 바인드는 http://127.0.0.1:8080 입니다.
 # 외부 공개가 필요할 때만 인증/reverse proxy 구성 후 --dashboard-host 0.0.0.0 을 명시하세요.
 
+# 운영 통합 헬스 점검 (전 전략 runtime + current_blockers 한눈에)
+python main.py --mode health
+# 종료코드 0=OK / 1=ATTENTION / 2=BLOCKED — 모니터링 스크립트에서 분기 가능.
+# 같은 점검을 tools/paper_runtime_status.py --health (--json) 으로도 실행할 수 있습니다.
+
 # 휴장일 갱신
 python main.py --update-holidays
 ```
