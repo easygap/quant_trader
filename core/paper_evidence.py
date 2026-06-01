@@ -1743,6 +1743,10 @@ def _promotion_headline_summary(
     """promotion package headline metrics recalculated from selected source records."""
     total_days = len(records)
     shadow_days = len(all_records) - len(execution_records)
+    # promotable(승격 가능) 일수는 실제 승격 가능한 record만 센다. shadow-only fallback에서
+    # records가 shadow 기록으로 채워져도 promotable_evidence_days가 부풀지 않도록 한다
+    # (author 측 generate_promotion_package와 값이 일치하게 유지).
+    promotable_days = sum(1 for r in records if _is_promotable_paper_evidence(r))
     daily_returns = [
         r.get("daily_return") for r in records if r.get("daily_return") is not None
     ]
@@ -1838,7 +1842,8 @@ def _promotion_headline_summary(
         "benchmark_final_ratio": round(benchmark_final_ratio, 4),
         "excess_non_null_days": excess_non_null_days,
         "excess_non_null_ratio": round(excess_non_null_ratio, 4),
-        "real_paper_days_total": total_days,
+        # author(generate_promotion_package)와 동일하게 promotable 기준으로 보고한다.
+        "real_paper_days_total": promotable_days,
         "pilot_real_paper_days": sum(
             1
             for r in all_records
@@ -1857,8 +1862,8 @@ def _promotion_headline_summary(
         ),
         "non_promotable_evidence_days": shadow_days,
         "shadow_days": shadow_days,
-        "real_paper_days": total_days,
-        "promotable_evidence_days": total_days,
+        "real_paper_days": promotable_days,
+        "promotable_evidence_days": promotable_days,
         "non_promotable_shadow_days": shadow_days,
     }
 
