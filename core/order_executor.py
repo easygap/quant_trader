@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from config.config_loader import Config
-from api.kis_api import KISApi
+from api.kis_api import KISApi, KISOrderResponseUnknown
 from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position,
@@ -30,6 +30,12 @@ try:
     from monitoring.paper_monitor import log_event as _log_op_event
 except ImportError:
     def _log_op_event(*a, **kw): pass
+
+
+# 비멱등 주문의 응답 유실(체결 여부 불명) 표식.
+# 재시도 래퍼가 KISOrderResponseUnknown을 받으면 이 표식을 돌려주고,
+# 호출부는 재전송 대신 reconcile 대기 결과로 분기한다(이중 체결 방지).
+ORDER_RESPONSE_UNKNOWN = object()
 
 
 class OrderExecutor:
@@ -910,6 +916,8 @@ class OrderExecutor:
                 symbol=symbol, action="BUY", price=price, quantity=quantity,
                 strategy=strategy, signal_score=signal_score, reason=reason,
             )
+            if order_result is ORDER_RESPONSE_UNKNOWN:
+                return self._unknown_response_result(order, "BUY")
             if order_result is None:
                 order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
                 OrderGuard.clear(symbol)
@@ -1328,6 +1336,8 @@ class OrderExecutor:
                 symbol=symbol, action="SELL", price=price, quantity=sell_qty,
                 strategy=strategy, signal_score=signal_score, reason=reason,
             )
+            if order_result is ORDER_RESPONSE_UNKNOWN:
+                return self._unknown_response_result(order, "SELL")
             if order_result is None:
                 order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
                 OrderGuard.clear(symbol)
@@ -1790,6 +1800,35 @@ class OrderExecutor:
                 fill_price=fill_price,
             )
 
+    def _unknown_response_result(self, order, action: str) -> dict:
+        """비멱등 주문의 응답이 유실돼 체결 여부가 불명한 경우의 결과.
+
+        주문이 브로커에 접수됐을 수 있으므로:
+        - 재전송하지 않는다(이중 체결 방지). 호출 전에 이미 재시도 래퍼에서 중단됨.
+        - 주문을 SUBMITTED 상태로 유지한다(미완료 주문으로 남아 다음 시도의
+          persistent open-order 차단이 같은 종목 중복 주문을 막는다).
+        - OrderGuard를 clear하지 않는다(TTL 동안 추가 중복 차단).
+        - 장부(거래·포지션)는 반영하지 않고, requires_reconcile로 표시해
+          다음 KIS↔DB 동기화에서 실제 체결분을 대조하게 한다.
+        """
+        self._persist_order_record(order)
+        logger.warning(
+            "실전 주문 응답 유실 — 접수 여부 불명, 장부 반영 보류·reconcile 대기: {} {} order_id={} status={}",
+            action, order.symbol, order.order_id, order.status.value,
+        )
+        return {
+            "success": False,
+            "reason": "실전 주문 응답이 유실돼 체결 여부를 확인할 수 없습니다. 재전송하지 않고 reconcile을 대기합니다.",
+            "symbol": order.symbol,
+            "action": action,
+            "mode": self.mode,
+            "order_pending": True,
+            "requires_reconcile": True,
+            "response_unknown": True,
+            "order_id": order.order_id,
+            "order_status": order.status.value,
+        }
+
     def _pending_live_execution_result(
         self,
         *,
@@ -2063,7 +2102,17 @@ class OrderExecutor:
         모든 재시도 실패 시 dead-letter 테이블에 저장하여 주문 누락을 방지합니다.
         """
         for attempt in range(1, self.MAX_RETRIES + 1):
-            result = order_func(*args)
+            try:
+                result = order_func(*args)
+            except KISOrderResponseUnknown as exc:
+                # 응답 유실 — 주문이 브로커에 접수됐을 수 있어 체결 여부 불명.
+                # 재전송하면 이중 체결 위험이므로 즉시 중단하고 reconcile 대기로 넘긴다.
+                # dead-letter에 넣지 않는다(접수됐을 수 있어 '주문 누락'이 아님).
+                logger.error(
+                    "주문 응답 유실 — 재전송 금지(이중 체결 방지), reconcile 대기: {} {} ({})",
+                    action or "?", symbol or "?", exc,
+                )
+                return ORDER_RESPONSE_UNKNOWN
             if result is not None:
                 if attempt > 1:
                     logger.info("주문 성공 ({}회째 시도)", attempt)
