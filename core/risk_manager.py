@@ -303,11 +303,29 @@ class RiskManager:
             fixed_rate = sl_config.get("fixed_rate", 0.03) * regime_multiplier
             stop_price = entry_price * (1 - fixed_rate)
 
+        stop_price = round(stop_price, 0)
+
+        # 하방 보호 보장: 손절가는 반드시 0 < stop < entry 범위여야 한다.
+        # ATR이 지나치게 크면(atr*배수 >= entry) 손절가가 0 이하가 되고,
+        # 청산 조건 `current_price <= stop_loss_price` 가 양수 가격에 대해
+        # 영원히 거짓이 되어 손절이 조용히 비활성화된다(무방비 포지션).
+        # 고정 손절도 fixed_rate*국면배수 >= 1 이면 stop >= entry 가 되어 즉시 청산된다.
+        # 두 비정상 케이스만 최대 손실폭(기본 50%) 기준으로 폴백한다(정상 손절가는 유지).
+        if entry_price > 0 and (stop_price <= 0 or stop_price >= entry_price):
+            max_loss_pct = float(sl_config.get("max_loss_pct", 0.5))
+            floor_price = round(entry_price * (1 - max_loss_pct), 0)
+            logger.warning(
+                "손절가 비정상({:,.0f}) — 매수가({:,.0f}) 대비 손절폭이 비현실적이라 "
+                "최대손실폭 {:.0%} 기준으로 폴백",
+                stop_price, entry_price, max_loss_pct,
+            )
+            stop_price = floor_price
+
         logger.debug(
             "손절가 계산: 매수가={:,.0f} → 손절가={:,.0f} (국면배수={:.2f})",
             entry_price, stop_price, regime_multiplier,
         )
-        return round(stop_price, 0)
+        return stop_price
 
     def calculate_take_profit(
         self,
