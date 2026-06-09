@@ -395,3 +395,33 @@ class TestTargetStockWeight:
         assert bal_notional < full_notional
         # 대략 50/80 비율
         assert bal_notional == pytest.approx(full_notional * 0.5 / 0.8, rel=0.1)
+
+
+class _RealSignatureCollector:
+    """실제 DataCollector.fetch_korean_stock 시그니처만 받는 fake.
+
+    기존 테스트는 DataCollector를 MagicMock으로 패치해 `days=` 같은 잘못된 인자도
+    조용히 받아들여, 운영 경로가 깨진 걸 못 잡았다. 이 fake는 실제 시그니처
+    (symbol, start_date, end_date)만 받으므로 days= 를 주면 TypeError가 난다.
+    """
+
+    def fetch_korean_stock(self, symbol, start_date=None, end_date=None):
+        import pandas as pd
+        assert start_date and end_date, "start_date/end_date 누락"
+        return pd.DataFrame({"close": [100.0, 101.0, 102.0]})
+
+
+class TestPriceFetchUsesDateRange:
+    """현재가 조회가 days= 가 아니라 start_date/end_date 로 호출되는지(운영 경로 회귀)."""
+
+    def test_fetch_current_prices_uses_date_range_not_days(self, rebalancer):
+        rebalancer.data_collector = _RealSignatureCollector()
+        prices = rebalancer._fetch_current_prices()
+        # days= 였다면 TypeError로 전부 실패해 빈 dict가 된다.
+        assert set(prices) == set(rebalancer.holdings)
+        assert all(v == 102.0 for v in prices.values())
+
+    def test_recent_range_returns_start_before_end(self):
+        from core.basket_rebalancer import BasketRebalancer
+        start, end = BasketRebalancer._recent_range(15)
+        assert start < end
