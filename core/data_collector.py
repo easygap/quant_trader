@@ -999,7 +999,10 @@ class DataCollector:
                         name = _pykrx_stock.get_market_ticker_name(t) or ""
                     except Exception:
                         name = ""
-                rows.append({"Code": code, "Name": name, "Market": "KOSPI", "Marcap": 0})
+                rows.append({
+                    "Code": code, "Name": name, "Market": "KOSPI", "Marcap": 0,
+                    "universe_source": "pykrx_pit",
+                })
             df = pd.DataFrame(rows)
             logger.info("코스피200 구성종목 {}개 조회 완료 (기준일: {})", len(df), as_of_date)
             return df
@@ -1010,7 +1013,11 @@ class DataCollector:
             "{}개 대체 (지수 구성과 다를 수 있음, as_of={})",
             len(fb), as_of_date,
         )
-        rows = [{"Code": c, "Name": "", "Market": "KOSPI", "Marcap": 0} for c in fb]
+        # 현재 상장 목록 기반 폴백 → 생존자 편향 통제 안 됨(universe_source로 명시).
+        rows = [
+            {"Code": c, "Name": "", "Market": "KOSPI", "Marcap": 0, "universe_source": "fdr_fallback"}
+            for c in fb
+        ]
         return pd.DataFrame(rows)
 
     def _fetch_korean_stock_via_yfinance(
