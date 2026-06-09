@@ -111,12 +111,14 @@ scoring:
   # --- 신호 히스터리시스 (과매매 방지) ---
   # 진입/청산 임계값을 분리하여 임계값 근처에서 BUY↔SELL 반복(과매매)을 방지합니다.
   # enabled: true 시 이전 봉의 신호 상태를 유지하며, 상태 전환에 더 강한 조건을 요구합니다.
-  # exit_sell_threshold: 보유(BUY) 상태에서 매도 전환 임계값. buy_threshold보다 낮아야 의미 있음.
-  # exit_buy_threshold: 보유(BUY) 상태에서 HOLD로 전환되는 임계값 (BUY 유지 해제선).
+  # exit_sell_threshold: SELL→HOLD 해제선(실제 점수 레벨). 점수가 이 값 위로 회복하면 SELL 해제.
+  #                      sell_threshold(-2)보다 중립(0)에 가까워야 의미 있음(예: -1).
+  # exit_buy_threshold: BUY→HOLD 해제선(실제 점수 레벨). 점수가 이 값 아래로 약화되면 BUY 해제.
+  #                     buy_threshold(2)보다 중립에 가까워야 의미 있음(예: 0.5).
   hysteresis:
     enabled: true                 # 과매매 방지: 진입/청산 임계값 분리
-    exit_sell_threshold: -1       # 보유→매도 전환 (sell_threshold -2보다 완화)
-    exit_buy_threshold: 0.5       # BUY 유지 해제선 (buy_threshold 2보다 낮은 값)
+    exit_sell_threshold: -1       # SELL 해제선: 점수 > -1 로 회복 시 HOLD (sell_threshold -2보다 완화)
+    exit_buy_threshold: 0.5       # BUY 해제선: 점수 < 0.5 로 약화 시 HOLD (buy_threshold 2보다 완화)
 
   # ⚠️ 미검증 직관값 — OOS 검증 없이 사용 금지.
   # RSI·MACD·MA는 모두 가격 기반으로 다중공선성이 높음 (RSI↔스토캐스틱 r≈0.8, MACD↔MA r≈0.7).
