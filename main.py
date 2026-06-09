@@ -1478,6 +1478,64 @@ def run_health_check() -> int:
     return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
 
 
+def _build_cli_guide(args) -> str:
+    """인자 없이 실행하거나 --mode guide 일 때 보여줄 사용 가이드.
+
+    --strategy / --symbol 값을 예시 명령에 반영해 바로 복사해 쓸 수 있게 한다.
+    시스템(로거·DB)을 초기화하지 않고 stdout으로만 출력한다.
+    """
+    strategy = getattr(args, "strategy", "scoring") or "scoring"
+    symbol = getattr(args, "symbol", "005930") or "005930"
+    lines = [
+        "=" * 60,
+        "  📖 QUANT TRADER 실행 가이드",
+        "=" * 60,
+        "",
+        "  인자 없이 실행하면 이 가이드가 표시됩니다(매매·백테스트 미실행).",
+        "  실제 동작은 아래처럼 --mode 를 명시하세요.",
+        "",
+        "  [분석·검증]",
+        f"  python main.py --mode backtest --strategy {strategy} --symbol {symbol}",
+        "      과거 데이터로 단일 종목 전략 백테스트 (strict-lookahead 기본).",
+        f"  python main.py --mode validate --strategy {strategy} --validation-years 5",
+        "      3~5년·in/out-of-sample·벤치마크 대비 전략 유효성 검증.",
+        f"  python main.py --mode portfolio_backtest --strategy {strategy} --symbols 005930,000660,035720",
+        "      멀티 종목 포트폴리오 백테스트.",
+        "  python main.py --mode backtest_momentum_top --top-n 5 --market-filter",
+        "      모멘텀 상위 동일비중 포트폴리오 백테스트.",
+        f"  python main.py --mode optimize --strategy {strategy} --include-weights",
+        "      파라미터 최적화 (OOS 게이트, 오버피팅 주의).",
+        f"  python main.py --mode compare --strategy {strategy} --start 2025-01-01 --end 2025-03-18",
+        "      모의투자 vs 백테스트 비교 + 실전 전환 준비 평가.",
+        "",
+        "  [모의·운영]",
+        f"  python main.py --mode paper --strategy {strategy}",
+        "      워치리스트 1회 순회 모의매매 (DB 기록만, 실주문 없음).",
+        f"  python main.py --mode schedule --strategy {strategy}",
+        "      모의 스케줄 무한 루프 (서버 상시 구동).",
+        "  python main.py --mode rebalance --basket <이름> --dry-run",
+        "      바스켓 목표 비중 리밸런싱 계획 출력.",
+        "  python main.py --mode dashboard",
+        "      실시간 웹 대시보드 (기본 http://127.0.0.1:8080).",
+        "  python main.py --mode health",
+        "      전 전략 운영 헬스·blocker 점검.",
+        "",
+        "  [실전 — 신중히]",
+        f"  python main.py --mode live --strategy {strategy} --confirm-live",
+        "      실전 매매 (ENABLE_LIVE_TRADING=true + hard gate 필요).",
+        "  python main.py --mode liquidate --confirm-live",
+        "      긴급 전 종목 매도.",
+        "",
+        "  [유지보수]",
+        "  python main.py --update-holidays      휴장일 파일 자동 갱신",
+        "  python main.py --mode guide            이 가이드 다시 보기",
+        "  python main.py --help                  전체 옵션 도움말",
+        "",
+        "=" * 60,
+    ]
+    return "\n".join(lines)
+
+
 def main():
     """메인 진입점"""
     parser = argparse.ArgumentParser(
@@ -1558,6 +1616,7 @@ def main():
             "rebalance",
             "health",
             "deploy_check",
+            "guide",
         ],
         help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers). deploy_check: 바스켓 배포 점검(계획·비용·활성화 절차).",
     )
@@ -1695,6 +1754,12 @@ def main():
     args.strict_lookahead = True
     if args.allow_lookahead:
         args.strict_lookahead = False
+
+    # 인자 없이 실행(`python main.py`)하거나 `--mode guide` → 사용 가이드만 출력 후 종료.
+    # 시스템(로거·DB)을 초기화하지 않고, 매매/백테스트도 실행하지 않는다.
+    if len(sys.argv) == 1 or args.mode == "guide":
+        print(_build_cli_guide(args))
+        return
 
     # 휴장일 파일만 갱신 후 종료
     if getattr(args, "update_holidays", False):
