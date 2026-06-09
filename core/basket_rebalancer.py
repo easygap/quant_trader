@@ -11,7 +11,7 @@ fintics의 BasketRebalanceTask 개념을 차용하여 Python으로 구현.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import yaml
@@ -462,12 +462,25 @@ class BasketRebalancer:
     # 내부 헬퍼
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _recent_range(calendar_days: int) -> tuple[str, str]:
+        """오늘 기준 과거 calendar_days일 ~ 오늘의 (start, end) 날짜 문자열.
+
+        fetch_korean_stock는 days 인자가 없고 start_date/end_date만 받는다.
+        거래일이 아닌 달력일 기준이므로 필요한 거래일보다 넉넉히 잡는다.
+        """
+        end = datetime.now()
+        start = end - timedelta(days=calendar_days)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
     def _fetch_current_prices(self) -> dict[str, float]:
         """바스켓 종목의 현재가를 일괄 조회."""
         prices = {}
+        # 최근 약 5거래일 커버 위해 달력 15일 범위로 조회 후 마지막 종가 사용.
+        start, end = self._recent_range(15)
         for symbol in self.holdings:
             try:
-                df = self.data_collector.fetch_korean_stock(symbol, days=5)
+                df = self.data_collector.fetch_korean_stock(symbol, start, end)
                 if df is not None and not df.empty:
                     prices[symbol] = float(df["close"].iloc[-1])
             except Exception as e:
@@ -489,9 +502,11 @@ class BasketRebalancer:
             return base
 
         adjusted = {}
+        # 지표·신호 계산용으로 약 120거래일 커버 위해 달력 200일 범위 조회.
+        start, end = self._recent_range(200)
         for symbol, weight in base.items():
             try:
-                df = self.data_collector.fetch_korean_stock(symbol, days=120)
+                df = self.data_collector.fetch_korean_stock(symbol, start, end)
                 if df is None or df.empty:
                     adjusted[symbol] = weight
                     continue
