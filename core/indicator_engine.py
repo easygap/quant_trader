@@ -131,7 +131,8 @@ class IndicatorEngine:
             rolling_std = df["close"].rolling(window=period).std()
             df["bb_upper"] = df["bb_middle"] + (rolling_std * std_dev)
             df["bb_lower"] = df["bb_middle"] - (rolling_std * std_dev)
-            df["bb_bandwidth"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"]
+            # pandas-ta BBB는 ×100 스케일(밴드폭 %). 폴백도 동일 스케일로 맞춘다.
+            df["bb_bandwidth"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"] * 100
             df["bb_percent"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
 
         return df
@@ -212,7 +213,10 @@ class IndicatorEngine:
                 if not dmn.empty:
                     df["di_minus"] = dmn.iloc[:, 0]      # -DI
         else:
-            df["adx"] = self._calc_adx(df, period)
+            adx, di_plus, di_minus = self._calc_adx(df, period)
+            df["adx"] = adx
+            df["di_plus"] = di_plus
+            df["di_minus"] = di_minus
 
         return df
 
@@ -231,7 +235,8 @@ class IndicatorEngine:
             high_close = (df["high"] - df["close"].shift(1)).abs()
             low_close = (df["low"] - df["close"].shift(1)).abs()
             true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-            df["atr"] = true_range.rolling(window=period).mean()
+            # pandas-ta ATR 기본은 Wilder RMA. 폴백도 SMA가 아닌 RMA로 맞춘다.
+            df["atr"] = true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
         return df
 
@@ -276,46 +281,53 @@ class IndicatorEngine:
 
     @staticmethod
     def _calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-        """RSI 수동 계산"""
+        """RSI 수동 계산.
+
+        Wilder smoothing = RMA = ewm(alpha=1/period, adjust=False)로 pandas-ta와
+        값이 일치한다(부동소수 epsilon 이내). 이전 구현은 rolling-mean seed가 한 봉
+        앞으로 밀리고 index-0의 허위 0 gain이 섞여 pandas-ta 대비 최대 ~12 RSI 포인트
+        틀어졌다(과매수/과매도 임계 오판 유발).
+        """
         delta = series.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
 
-        avg_gain = gain.rolling(window=period, min_periods=period).mean()
-        avg_loss = loss.rolling(window=period, min_periods=period).mean()
-
-        # Wilder's smoothing
-        for i in range(period, len(series)):
-            avg_gain.iloc[i] = (avg_gain.iloc[i - 1] * (period - 1) + gain.iloc[i]) / period
-            avg_loss.iloc[i] = (avg_loss.iloc[i - 1] * (period - 1) + loss.iloc[i]) / period
+        avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
         rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        return 100 - (100 / (1 + rs))
 
     @staticmethod
-    def _calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """ADX 수동 계산 (간략 버전)"""
+    def _calc_adx(df: pd.DataFrame, period: int = 14):
+        """ADX/DMI 수동 계산. (adx, +DI, -DI) 반환.
+
+        +DM/-DM/TR/DX 평활을 SMA가 아닌 Wilder RMA(ewm alpha=1/period)로 계산해
+        pandas-ta ADX와 값이 일치한다(이전 SMA 구현은 ~47% 어긋남). +DI/-DI 컬럼도
+        함께 채워 pandas-ta 경로와 컬럼 구성을 맞춘다.
+        """
         high = df["high"]
         low = df["low"]
         close = df["close"]
 
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+        up = high.diff()
+        down = -low.diff()
+        plus_dm = (((up > down) & (up > 0)) * up.clip(lower=0))
+        minus_dm = (((down > up) & (down > 0)) * down.clip(lower=0))
 
         high_low = high - low
         high_close = (high - close.shift(1)).abs()
         low_close = (low - close.shift(1)).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
 
-        atr = tr.rolling(window=period).mean()
-        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        def _rma(s: pd.Series) -> pd.Series:
+            return s.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+        atr = _rma(tr)
+        plus_di = 100 * (_rma(plus_dm) / atr)
+        minus_di = 100 * (_rma(minus_dm) / atr)
 
         dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di))
-        adx = dx.rolling(window=period).mean()
+        adx = _rma(dx)
 
-        return adx
+        return adx, plus_di, minus_di
