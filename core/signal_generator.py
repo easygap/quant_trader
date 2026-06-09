@@ -317,11 +317,15 @@ class SignalGenerator:
         상태 전이는 반드시 BUY ↔ HOLD ↔ SELL 순서를 따릅니다.
         BUY → SELL 또는 SELL → BUY 직접 전환은 허용하지 않아 과매매를 방지합니다.
 
-        상태 전이 규칙:
-          HOLD → BUY:  score >= buy_threshold
-          HOLD → SELL: score <= sell_threshold
-          BUY  → HOLD: score < exit_buy_threshold (BUY 유지 해제)
-          SELL → HOLD: score > -exit_sell_threshold (SELL 유지 해제)
+        상태 전이 규칙 (exit 임계값은 모두 실제 점수 레벨, 부호 그대로 사용):
+          HOLD → BUY:  score >= buy_threshold      (예: +2)
+          HOLD → SELL: score <= sell_threshold     (예: -2)
+          BUY  → HOLD: score < exit_buy_threshold  (예: +0.5, 모멘텀이 약해지면 해제)
+          SELL → HOLD: score > exit_sell_threshold (예: -1, 점수가 중립으로 회복하면 해제)
+
+        exit_buy_threshold/exit_sell_threshold는 진입선(±buy/sell_threshold)보다
+        중립(0)에 가까워야 의미가 있다(과매매 방지 밴드). BUY는 점수가 exit_buy 아래로
+        떨어질 때, SELL은 점수가 exit_sell 위로 올라올 때 HOLD로 해제된다.
         """
         exit_sell = self._exit_sell_threshold if self._exit_sell_threshold is not None else sell_threshold
         exit_buy = self._exit_buy_threshold if self._exit_buy_threshold is not None else 0.0
@@ -347,7 +351,7 @@ class SignalGenerator:
                 if s < exit_buy:
                     state = self.HOLD
             elif state == self.SELL:
-                if s > (-exit_sell):
+                if s > exit_sell:
                     state = self.HOLD
             signals[i] = state
 
