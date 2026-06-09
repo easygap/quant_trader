@@ -62,6 +62,20 @@ def _get_kospi_top_n_symbols(
         return []
     if stocks.empty:
         return []
+    # 런타임 생존자 편향 점검: config(mode) 기준이 아니라 실제 데이터 출처로 판정한다.
+    # 생존자 통제 모드(historical/kospi200)를 요청했어도 pykrx 시점 데이터를 못 받아
+    # 현재 상장 목록(fdr_fallback)으로 폴백했다면 상장폐지·시총하락 종목이 빠져
+    # 벤치마크·검증 수치가 과대평가된다. 이 경우 조용히 넘어가지 않고 크게 경고한다.
+    if mode in ("historical", "kospi200") and "universe_source" in stocks.columns:
+        sources = set(stocks["universe_source"].dropna().astype(str))
+        if sources and "pykrx_pit" not in sources:
+            logger.warning(
+                "⚠️ 벤치마크 생존자 편향 미통제(런타임 폴백): universe_mode='{}'를 요청했으나 "
+                "pykrx 시점 데이터를 받지 못해 현재 상장 목록(fdr_fallback)으로 계산했습니다. "
+                "상장폐지·시총 하락 종목이 제외되어 벤치마크·검증 수치가 과대평가됩니다. "
+                "신뢰할 수 있는 검증은 pykrx 과거 데이터가 동작하는 환경에서 재실행하세요.",
+                mode,
+            )
     df = stocks.copy()
     code_col = next((c for c in ["Code", "Symbol", "code", "symbol"] if c in df.columns), None)
     if not code_col:
