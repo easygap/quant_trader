@@ -1,7 +1,8 @@
 """KIS _request 비멱등(주문) 재시도 안전성 회귀 테스트.
 
 핵심: 주문 제출(POST)은 응답을 못 받은 네트워크 오류에서 재전송하면 이중 체결이
-난다. idempotent=False면 한 번만 보내고 빈 응답을 돌려 상위 reconcile가 판단해야 한다.
+난다. idempotent=False면 한 번만 보내고, 체결 여부 불명 예외(KISOrderResponseUnknown)를
+던져 상위 재시도 래퍼가 재전송 대신 reconcile 경로로 분기하게 한다.
 """
 import time
 from unittest.mock import patch
@@ -9,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from api.kis_api import KISApi
+from api.kis_api import KISApi, KISOrderResponseUnknown
 from api.circuit_breaker import get_breaker
 
 
@@ -49,7 +50,7 @@ def _reset_breaker():
 
 
 def test_order_post_not_resubmitted_on_timeout():
-    """idempotent=False: Timeout 시 재전송하지 않고 1회 POST 후 빈 응답."""
+    """idempotent=False: Timeout 시 재전송하지 않고 1회 POST 후 체결 불명 예외."""
     api = _make_api()
     calls = {"post": 0}
 
@@ -59,14 +60,14 @@ def test_order_post_not_resubmitted_on_timeout():
 
     with patch("api.kis_api.requests.post", side_effect=fake_post), \
          patch("api.kis_api.requests.get", side_effect=AssertionError("should not GET")):
-        result = api._request("POST", "/order", "TR", body={"x": 1}, idempotent=False)
+        with pytest.raises(KISOrderResponseUnknown):
+            api._request("POST", "/order", "TR", body={"x": 1}, idempotent=False)
 
-    assert result == {}
     assert calls["post"] == 1  # 단 한 번만 제출(재전송 없음)
 
 
 def test_order_post_not_resubmitted_on_connection_error():
-    """idempotent=False: ConnectionError(응답 유실 가능)도 재전송 금지."""
+    """idempotent=False: ConnectionError(응답 유실 가능)도 재전송 금지하고 체결 불명 예외."""
     api = _make_api()
     calls = {"post": 0}
 
@@ -75,9 +76,9 @@ def test_order_post_not_resubmitted_on_connection_error():
         raise requests.exceptions.ConnectionError("RST")
 
     with patch("api.kis_api.requests.post", side_effect=fake_post):
-        result = api._request("POST", "/order", "TR", body={"x": 1}, idempotent=False)
+        with pytest.raises(KISOrderResponseUnknown):
+            api._request("POST", "/order", "TR", body={"x": 1}, idempotent=False)
 
-    assert result == {}
     assert calls["post"] == 1
 
 
