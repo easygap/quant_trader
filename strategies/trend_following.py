@@ -106,6 +106,9 @@ class TrendFollowingStrategy(BaseStrategy):
         adx_threshold = self.params.get("adx_threshold", 25)
 
         signal = last.get("signal", self.HOLD)
+        # strategy_score는 analyze()에서 이미 has_trend + above_200 + macd_golden*2로
+        # 계산돼 있다. 아래 조건들은 reasons(설명) 생성에만 쓰고 score에 다시 더하지 않는다
+        # (재가산 시 점수가 약 2배로 부풀려진다).
         score = last.get("strategy_score", 0)
         reasons = []
 
@@ -113,13 +116,11 @@ class TrendFollowingStrategy(BaseStrategy):
         has_trend = pd.notna(adx) and adx > adx_threshold
         if has_trend:
             reasons.append(f"ADX={adx:.1f} > {adx_threshold}")
-            score += 1
 
         # 조건 2: 상승 추세 (200일선 위)
         above_200 = pd.notna(sma_200) and sma_200 > 0 and close > sma_200
         if above_200:
             reasons.append("종가 > 200일선")
-            score += 1
 
         # 조건 3: MACD 골든크로스
         macd_golden = (
@@ -128,7 +129,6 @@ class TrendFollowingStrategy(BaseStrategy):
         )
         if macd_golden:
             reasons.append("MACD 골든크로스")
-            score += 2
 
         below_200 = pd.notna(sma_200) and sma_200 > 0 and close < sma_200
         macd_dead = (
