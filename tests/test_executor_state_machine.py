@@ -864,3 +864,67 @@ class TestExecutorUsesStateMachine:
         finally:
             session.close()
             OrderGuard.clear("005387")
+
+    def test_live_buy_lost_response_does_not_resubmit_and_requires_reconcile(self):
+        """비멱등 주문의 응답 유실 시 재전송하지 않고(이중 체결 방지) reconcile 대기로 남긴다.
+
+        브로커가 주문을 받았으나 응답이 유실되면(타임아웃/연결 리셋) KISApi가
+        KISOrderResponseUnknown을 던진다. 재시도 래퍼는 이를 받아 재전송하지 않고,
+        주문은 SUBMITTED·OrderGuard 유지로 중복을 막으며 장부 반영을 보류해야 한다.
+        """
+        from core.order_guard import OrderGuard
+        from api.kis_api import KISOrderResponseUnknown
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_open_order_records, get_position
+
+        class LostResponseKIS:
+            def __init__(self):
+                self.buy_calls = 0
+
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                self.buy_calls += 1
+                raise KISOrderResponseUnknown("order-cash: ConnectionError")
+
+        OrderGuard.clear("005931")
+        kis = LostResponseKIS()
+        executor = self._prepare_live_executor(self._make_executor(), kis)
+
+        result = executor.execute_buy(
+            symbol="005931",
+            price=60_000,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            signal_score=2.0,
+            reason="live lost response test",
+            strategy="scoring",
+        )
+
+        # 1) 재전송 금지: buy_order는 정확히 1회만 호출돼야 한다(재시도 없음).
+        assert kis.buy_calls == 1, f"재전송 발생: buy_order {kis.buy_calls}회 호출"
+        # 2) 결과는 실패가 아니라 reconcile 대기 신호.
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert result["response_unknown"] is True
+        # 3) 주문은 SUBMITTED로 남아 다음 시도의 persistent open-order 차단이 중복을 막는다.
+        assert result["order_status"] == OrderStatus.SUBMITTED.value
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "005931"]
+        assert orders[-1].status == OrderStatus.SUBMITTED
+        # 4) OrderGuard는 유지(추가 중복 차단), 장부(포지션·거래)는 미반영.
+        assert OrderGuard.has_pending("005931")
+        assert get_position("005931", account_key="test_sm") is None
+        open_records = get_open_order_records(
+            symbol="005931", account_key="test_sm", mode="live",
+        )
+        assert len(open_records) == 1
+        assert open_records[0]["status"] == OrderStatus.SUBMITTED.value
+
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005931").count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("005931")

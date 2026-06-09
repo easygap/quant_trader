@@ -26,6 +26,15 @@ class KISTokenExpiredError(Exception):
     """KIS API 401 응답(토큰 만료) 시 사용. CircuitBreaker 실패로 누적하지 않음."""
 
 
+class KISOrderResponseUnknown(Exception):
+    """비멱등(주문 제출) 요청에서 응답을 받지 못한 네트워크 오류.
+
+    주문 바이트가 브로커에 도달했을 수 있어 체결 여부가 불명한 상태다.
+    재전송하면 이중 체결 위험이 있으므로, 상위(재시도 래퍼)가 이 예외를 받으면
+    재전송하지 않고 reconcile(미체결 조회·잔고 대조) 경로로 넘겨야 한다.
+    """
+
+
 class KISApi:
     """
     한국투자증권 Open API 래퍼
@@ -400,12 +409,13 @@ class KISApi:
                 breaker.on_failure()
                 if not idempotent:
                     # 주문 제출처럼 비멱등 요청은 응답 유실 시 재전송하면 이중 체결 위험.
-                    # 재시도하지 않고 빈 응답을 돌려 상위 reconcile/미체결 조회가 판단하게 한다.
+                    # 재시도하지 않고, 체결 여부 불명 예외를 던져 상위 재시도 래퍼가
+                    # 재전송 대신 reconcile/미체결 조회 경로로 분기하게 한다.
                     logger.error(
                         "비멱등 요청 네트워크 오류 — 재전송하지 않고 중단(이중 체결 방지): {} - {}",
                         path, type(e).__name__,
                     )
-                    return {}
+                    raise KISOrderResponseUnknown(f"{path}: {type(e).__name__}") from e
                 wait = self._backoff_with_jitter(attempt, base=2.0)
                 logger.warning(
                     "연결/SSL 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {} - {} (누적: {}회)",
@@ -419,7 +429,7 @@ class KISApi:
                     logger.error(
                         "비멱등 요청 타임아웃 — 재전송하지 않고 중단(이중 체결 방지): {}", path,
                     )
-                    return {}
+                    raise KISOrderResponseUnknown(f"{path}: Timeout")
                 wait = self._backoff_with_jitter(attempt)
                 logger.warning("요청 타임아웃, {:.1f}초 후 재시도 ({}/{}) - 경로: {}", wait, attempt, max_retries, path)
                 time.sleep(wait)
@@ -430,7 +440,7 @@ class KISApi:
                     logger.error(
                         "비멱등 요청 실패 — 재전송하지 않고 중단(이중 체결 방지): {} - {}", path, e,
                     )
-                    return {}
+                    raise KISOrderResponseUnknown(f"{path}: {type(e).__name__}") from e
                 logger.error("요청 실패: {} - {}", path, e)
                 time.sleep(self._backoff_with_jitter(attempt, base=0.5))
 
@@ -1442,13 +1452,18 @@ class KISApi:
             "ORD_DVSN": "00",
         }
 
-        data = self._request(
-            "POST",
-            "/uapi/overseas-stock/v1/trading/order",
-            tr_id,
-            body=body,
-            idempotent=False,  # 주문 제출: 응답 유실 시 재전송 금지(이중 체결 방지)
-        )
+        try:
+            data = self._request(
+                "POST",
+                "/uapi/overseas-stock/v1/trading/order",
+                tr_id,
+                body=body,
+                idempotent=False,  # 주문 제출: 응답 유실 시 재전송 금지(이중 체결 방지)
+            )
+        except KISOrderResponseUnknown as exc:
+            # 응답 유실(체결 여부 불명) — 재전송하지 않고 실패로 처리(이중 체결 방지).
+            logger.error("해외주문 응답 유실 — 재전송 금지, 체결 여부 불명: {} {} ({})", symb, sd, exc)
+            return None
         if data and data.get("rt_cd") == "0":
             logger.info("해외주문 성공 {} {} {}주 @ {}", sd, symb, qty, unpr)
             out = data.get("output")
