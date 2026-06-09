@@ -292,14 +292,20 @@ class StrategyEnsemble:
         return self._resolve_majority_vote(parts)
 
     def _resolve_majority_vote(self, parts: list[tuple[str, str, float]]) -> str:
-        """다수결: 가장 많은 신호 선택"""
+        """다수결: 가장 많은 신호 선택. 최다 득표가 동률이면 다수가 없으므로 HOLD.
+
+        (예: 4개 구성에서 BUY 2 / SELL 2면 다수 없음 → 첫 구성 방향으로 매매하지
+        않고 HOLD로 둔다.)
+        """
         from collections import Counter
 
         votes = [p[1] for p in parts]
         if not votes:
             return "HOLD"
-        count = Counter(votes)
-        return count.most_common(1)[0][0]
+        ranked = Counter(votes).most_common()
+        if len(ranked) >= 2 and ranked[0][1] == ranked[1][1]:
+            return "HOLD"
+        return ranked[0][0]
 
     def _resolve_weighted_sum(self, parts: list[tuple[str, str, float]]) -> str:
         """가중합: 전략별 가중치 * 신호값 합산 후 임계값으로 판단"""
