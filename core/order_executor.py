@@ -237,6 +237,14 @@ class OrderExecutor:
                 event_type="CONFIG_ERROR",
             )
 
+        # 바스켓 리밸런싱(basket_rebalance[:<basket>])은 신호 전략이 아니라 정적 목표비중
+        # 운영 단위라서 preflight/runtime 상태머신(canonical 신호 전략 전용)이 존재하지 않는다.
+        # 바스켓 자체 거버넌스(운영자 enabled 플래그·드리프트 임계값·회전 상한·바스켓별
+        # live gate)가 그 역할을 하므로, 이 가드만 면제한다. 거래시간·블랙스완·유동성·
+        # 월간 BUY 캡·손실 한도 등 주문 수준 안전 체크는 그대로 적용된다.
+        if strategy_name.split(":", 1)[0] == "basket_rebalance":
+            return {"allowed": True, "reason": "basket_rebalance: 바스켓 자체 거버넌스 적용"}
+
         try:
             from core.paper_preflight import load_preflight_status
             preflight = load_preflight_status(strategy_name, strict=True)

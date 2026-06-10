@@ -314,8 +314,10 @@ class TestShippedBasketsConfig:
         rb = b["rebalance"]
         assert rb["drift_threshold"] >= 0.08
         assert rb["max_turnover_ratio"] <= 0.15
-        # 기본 비활성(운영자가 paper 검증 후 켠다)
-        assert b["enabled"] is False
+        # 2026-06-10 paper 운영 개시(트랙레코드 축적) — enabled:true.
+        # paper에서는 실주문이 없고, live는 별도 4중 게이트(ENABLE_LIVE_TRADING +
+        # --confirm-live + basket_rebalance:<name> readiness gate)를 통과해야 한다.
+        assert b["enabled"] is True
 
     def test_all_basket_symbols_are_6digit_kr_codes(self):
         baskets = self._load()
@@ -538,3 +540,52 @@ class TestLivePlanFailClosed:
         with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
             orders = rebalancer.plan_rebalance()
         assert len(orders) > 0  # 정상 계획 생성
+
+
+class _RealSignatureCollectorWithVolume:
+    """실 시그니처 + volume 컬럼 포함 fake (유동성 데이터 공급 검증용)."""
+
+    def fetch_korean_stock(self, symbol, start_date=None, end_date=None):
+        import pandas as pd
+        assert start_date and end_date
+        return pd.DataFrame({
+            "close": [100.0, 101.0, 102.0],
+            "volume": [10_000.0, 20_000.0, 30_000.0],
+        })
+
+
+class TestMarketSnapshotLiquidity:
+    """가격 조회가 20일 평균 거래량도 수집하고, execute가 유동성 체크용으로 전달하는지."""
+
+    def test_snapshot_includes_price_and_avg_volume(self, rebalancer):
+        rebalancer.data_collector = _RealSignatureCollectorWithVolume()
+        snap = rebalancer._fetch_market_snapshot()
+        assert set(snap) == set(rebalancer.holdings)
+        for v in snap.values():
+            assert v["price"] == 102.0
+            assert v["avg_volume"] == pytest.approx(20_000.0)
+
+    def test_execute_passes_avg_volume_to_buy(self, rebalancer, monkeypatch):
+        """paper BUY 주문에 스냅샷의 avg_volume이 전달된다(없으면 strict 유동성 필터가 차단)."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.portfolio_mgr = SimpleNamespace(
+            get_available_cash=MagicMock(return_value=5_000_000),
+            get_current_capital=MagicMock(return_value=100_000_000),
+        )
+        rebalancer._market_snapshot = {
+            "005930": {"price": 70_000.0, "avg_volume": 123_456.0},
+        }
+        fake_executor = MagicMock()
+        fake_executor.execute_buy_quantity.return_value = {"success": True}
+        monkeypatch.setattr(
+            "core.order_executor.OrderExecutor", MagicMock(return_value=fake_executor)
+        )
+
+        result = rebalancer.execute([
+            RebalanceOrder("005930", "BUY", 10, 70_000, "테스트"),
+        ])
+
+        assert result["executed"] == 1
+        kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
+        assert kwargs["avg_daily_volume"] == pytest.approx(123_456.0)
