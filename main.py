@@ -1480,7 +1480,35 @@ def run_health_check() -> int:
         except Exception:
             blockers = None
 
-    health = build_operator_health(states, blockers)
+    # 바스켓 paper 운영(트랙레코드) 상태 — 일일 사이클이 조용히 멈추면 여기서 드러난다.
+    basket_operation = None
+    try:
+        from datetime import date
+        from core.basket_rebalancer import BasketRebalancer
+        from database.models import get_session, PortfolioSnapshot
+        from database.repositories import get_all_positions
+
+        enabled_baskets = BasketRebalancer.get_enabled_baskets()
+        session = get_session()
+        try:
+            last_snap = (
+                session.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.account_key == "")
+                .order_by(PortfolioSnapshot.date.desc())
+                .first()
+            )
+        finally:
+            session.close()
+        basket_operation = {
+            "enabled_baskets": enabled_baskets,
+            "last_snapshot_date": last_snap.date if last_snap else None,
+            "position_count": len(get_all_positions() or []),
+            "today": date.today(),
+        }
+    except Exception as exc:
+        logger.warning("바스켓 운영 상태 조회 실패: {}", exc)
+
+    health = build_operator_health(states, blockers, basket_operation=basket_operation)
     icon = {"OK": "✅", "ATTENTION": "⚠️", "BLOCKED": "⛔"}.get(health["verdict"], "❓")
     logger.info("{} 운영 헬스: {} — {}", icon, health["verdict"], health["headline"])
     b = health["blockers"]
@@ -1491,6 +1519,15 @@ def run_health_check() -> int:
     for s in health["strategies"]:
         extra = f" ({', '.join(s['notes'])})" if s["notes"] else ""
         logger.info("  - {}: {}{}", s["strategy"], s["state"], extra)
+    bk = health.get("basket")
+    if bk is not None:
+        logger.info(
+            "  - basket[{}]: 스냅샷 {} | 포지션 {}개{}",
+            ",".join(bk["enabled_baskets"]) or "없음",
+            bk["last_snapshot_date"] or "없음",
+            bk["position_count"],
+            f" ({', '.join(bk['notes'])})" if bk["notes"] else "",
+        )
     for item in health["attention_items"]:
         logger.info("  확인: {}", item)
 
