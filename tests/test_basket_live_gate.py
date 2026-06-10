@@ -38,14 +38,17 @@ def _eval_result(verdict, issues=None, progress=60):
     }
 
 
-def _config(use_mock=False):
+def _config(use_mock=False, mock_url=None):
     """게이트 테스트용 config — 기본은 실계좌(use_mock=False, 평가 차단 적용)."""
-    return SimpleNamespace(kis_api={"use_mock": use_mock})
+    kis = {"use_mock": use_mock}
+    if mock_url is not None:
+        kis["mock_url"] = mock_url
+    return SimpleNamespace(kis_api=kis)
 
 
 class TestBasketLiveGate:
     def _run(self, strategy_name, verdict="PASS_CANDIDATE", eval_issues=None,
-             progress=60, use_mock=False, baskets=None):
+             progress=60, use_mock=False, baskets=None, mock_url=None):
         with patch(
             "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
             return_value=baskets or _BASKETS,
@@ -53,7 +56,7 @@ class TestBasketLiveGate:
             "core.basket_evaluation.collect_basket_paper_evaluation",
             return_value=(_eval_result(verdict, eval_issues, progress), "label"),
         ) as collect:
-            issues = check_basket_live_readiness(_config(use_mock), strategy_name)
+            issues = check_basket_live_readiness(_config(use_mock, mock_url), strategy_name)
         self._last_collect = collect
         return issues
 
@@ -207,3 +210,13 @@ class TestTimelineLevers:
                 basket_name="bk_md", include_benchmark=False, min_days=5,
             )
             assert result2["min_trading_days"] == 5
+
+    def test_mock_waiver_requires_vts_domain(self):
+        """use_mock=true라도 mock_url이 실전 도메인으로 오설정돼 있으면 완화하지 않는다
+        — 주문이 실서버로 가는 조합에서 평가 면제는 금지(fail-closed)."""
+        issues = self._run(
+            strategy_name="basket_rebalance:kr_diversified_hold",
+            verdict="WAIT", progress=1, use_mock=True,
+            mock_url="https://openapi.koreainvestment.com:9443",  # 실전 도메인
+        )
+        assert len(issues) == 1 and "WAIT" in issues[0]
