@@ -128,3 +128,83 @@ class TestBuildOperatorHealth:
     def test_missing_blockers_is_attention(self):
         out = build_operator_health([_state("scoring", "normal")], None)
         assert out["verdict"] == "ATTENTION"
+
+
+class TestSummarizeBasketOperation:
+    """바스켓 paper 운영(트랙레코드) 헬스 — 일일 사이클 끊김 감지."""
+
+    def _summ(self, **kw):
+        from datetime import date
+        from core.operator_health import summarize_basket_operation
+        defaults = dict(
+            enabled_baskets=["kr_diversified_hold"],
+            last_snapshot_date=date(2026, 6, 10),
+            position_count=6,
+            today=date(2026, 6, 10),
+        )
+        defaults.update(kw)
+        return summarize_basket_operation(**defaults)
+
+    def test_fresh_snapshot_is_ok(self):
+        out = self._summ()
+        assert out["verdict"] == "OK"
+        assert out["stale_days"] == 0
+
+    def test_no_enabled_baskets_is_ok_with_note(self):
+        out = self._summ(enabled_baskets=[])
+        assert out["verdict"] == "OK"
+        assert any("운영 안 함" in n for n in out["notes"])
+
+    def test_enabled_but_no_snapshot_is_attention(self):
+        out = self._summ(last_snapshot_date=None)
+        assert out["verdict"] == "ATTENTION"
+        assert any("스냅샷 없음" in n for n in out["notes"])
+
+    def test_stale_snapshot_is_attention(self):
+        from datetime import date
+        out = self._summ(last_snapshot_date=date(2026, 6, 1), today=date(2026, 6, 10))
+        assert out["verdict"] == "ATTENTION"
+        assert out["stale_days"] == 9
+        assert any("끊김" in n for n in out["notes"])
+
+    def test_weekend_gap_within_threshold_is_ok(self):
+        """금요일 스냅샷 → 화요일 점검(4일)은 주말+월 휴장 커버로 OK."""
+        from datetime import date
+        out = self._summ(last_snapshot_date=date(2026, 6, 5), today=date(2026, 6, 9))
+        assert out["verdict"] == "OK"
+        assert out["stale_days"] == 4
+
+    def test_datetime_inputs_are_normalized(self):
+        from datetime import datetime, date
+        out = self._summ(
+            last_snapshot_date=datetime(2026, 6, 10, 0, 0),
+            today=date(2026, 6, 10),
+        )
+        assert out["verdict"] == "OK"
+
+
+class TestBuildOperatorHealthWithBasket:
+    def test_basket_attention_escalates_overall_verdict(self):
+        from datetime import date
+        health = build_operator_health(
+            [_state("scoring", "normal")],
+            {"go_live": False, "hard_blockers": [], "live_candidates": []},
+            basket_operation={
+                "enabled_baskets": ["kr_diversified_hold"],
+                "last_snapshot_date": None,
+                "position_count": 0,
+                "today": date(2026, 6, 10),
+            },
+        )
+        assert health["verdict"] == "ATTENTION"
+        assert health["basket"]["verdict"] == "ATTENTION"
+        assert any(item.startswith("basket:") for item in health["attention_items"])
+
+    def test_without_basket_input_section_is_none(self):
+        """하위 호환: basket_operation 미전달 시 기존 동작 그대로."""
+        health = build_operator_health(
+            [_state("scoring", "normal")],
+            {"go_live": False, "hard_blockers": [], "live_candidates": []},
+        )
+        assert health["basket"] is None
+        assert health["verdict"] == "OK"
