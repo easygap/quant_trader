@@ -701,6 +701,7 @@ def run_rebalance(args):
     logger.info("🔄 바스켓 리밸런싱 시작 (바스켓: {}, dry_run: {})", basket_names, dry_run)
     logger.info("=" * 50)
 
+    snapshot_prices: dict[str, float] = {}
     for name in basket_names:
         try:
             live_strategy_name = _rebalance_live_strategy_id(name)
@@ -723,6 +724,11 @@ def run_rebalance(args):
 
             report = rebalancer.get_status_report()
             logger.info("\n{}", report)
+            # 일일 NAV 스냅샷용 현재가 수집(리밸런싱 실행 여부와 무관)
+            snapshot_prices.update({
+                s: v["price"]
+                for s, v in getattr(rebalancer, "_market_snapshot", {}).items()
+            })
 
             should, reason = rebalancer.should_rebalance()
             if not should and not dry_run:
@@ -751,6 +757,19 @@ def run_rebalance(args):
         except Exception as e:
             logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)
             notifier.send_message(f"바스켓 '{name}' 리밸런싱 오류: {e}")
+
+    # paper 트랙레코드: 거래 여부와 무관하게 일일 NAV 스냅샷을 남긴다.
+    # (상시 스케줄러 없이 일일 rebalance CLI만 돌려도 60영업일 평가 시계열이 쌓이도록)
+    # live 스냅샷은 스케줄러 장마감 단계가 담당하므로 paper에서만 저장. (account_key, date)
+    # upsert라 같은 날 중복 실행해도 멱등이다.
+    if mode != "live" and not dry_run:
+        try:
+            from core.portfolio_manager import PortfolioManager
+            PortfolioManager(config).save_daily_snapshot(
+                current_prices=snapshot_prices or None,
+            )
+        except Exception as e:
+            logger.warning("리밸런싱 후 일일 스냅샷 저장 실패: {}", e)
 
 
 def run_paper_trading(args):
