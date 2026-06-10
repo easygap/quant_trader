@@ -393,6 +393,7 @@ class BasketRebalancer:
                 return results
 
         executor = None
+        snapshot: dict[str, dict] = {}
         if not dry_run:
             from core.order_executor import OrderExecutor
 
@@ -401,6 +402,8 @@ class BasketRebalancer:
                 account_key=self.account_key,
                 live_gate_validated=live_confirmed,
             )
+            # 유동성 체크용 20일 평균 거래량 — plan 단계 캐시 재사용, 없으면 새로 조회.
+            snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
 
         for order in orders:
             if dry_run:
@@ -422,6 +425,7 @@ class BasketRebalancer:
                         available_cash=available_cash,
                         reason=f"리밸런싱: {order.reason}",
                         strategy=self.execution_strategy,
+                        avg_daily_volume=snapshot.get(order.symbol, {}).get("avg_volume"),
                     )
                 else:
                     res = executor.execute_sell(
@@ -500,19 +504,35 @@ class BasketRebalancer:
         start = end - timedelta(days=calendar_days)
         return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
-    def _fetch_current_prices(self) -> dict[str, float]:
-        """바스켓 종목의 현재가를 일괄 조회."""
-        prices = {}
-        # 최근 약 5거래일 커버 위해 달력 15일 범위로 조회 후 마지막 종가 사용.
-        start, end = self._recent_range(15)
+    def _fetch_market_snapshot(self) -> dict[str, dict]:
+        """바스켓 종목의 현재가 + 20일 평균 거래량 일괄 조회.
+
+        평균 거래량은 paper/live 매수의 유동성 체크(_entry_liquidity_check)에 전달한다
+        — 데이터 없이 주문하면 strict 유동성 필터가 fail-closed로 차단한다.
+        결과는 인스턴스에 캐시해 plan→execute 한 사이클 내 중복 조회를 피한다.
+        """
+        snapshot: dict[str, dict] = {}
+        # 거래일 20개(평균 거래량 산정분) 커버 위해 달력 45일 범위로 조회.
+        start, end = self._recent_range(45)
         for symbol in self.holdings:
             try:
                 df = self.data_collector.fetch_korean_stock(symbol, start, end)
-                if df is not None and not df.empty:
-                    prices[symbol] = float(df["close"].iloc[-1])
+                if df is None or df.empty:
+                    continue
+                entry = {"price": float(df["close"].iloc[-1])}
+                if "volume" in df.columns:
+                    recent_vol = df["volume"].tail(20).dropna()
+                    if len(recent_vol) > 0 and float(recent_vol.mean()) > 0:
+                        entry["avg_volume"] = float(recent_vol.mean())
+                snapshot[symbol] = entry
             except Exception as e:
-                logger.warning("가격 조회 실패 {}: {}", symbol, e)
-        return prices
+                logger.warning("시세 조회 실패 {}: {}", symbol, e)
+        self._market_snapshot = snapshot
+        return snapshot
+
+    def _fetch_current_prices(self) -> dict[str, float]:
+        """바스켓 종목의 현재가를 일괄 조회."""
+        return {s: v["price"] for s, v in self._fetch_market_snapshot().items()}
 
     def _apply_signal_weights(self, base: dict[str, float]) -> dict[str, float]:
         """전략 점수에 따라 목표 비중을 동적 조정."""
