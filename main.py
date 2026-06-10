@@ -713,15 +713,16 @@ def run_rebalance(args):
     logger.info("🔄 바스켓 리밸런싱 시작 (바스켓: {}, dry_run: {})", basket_names, dry_run)
     logger.info("=" * 50)
 
-    snapshot_prices: dict[str, float] = {}
     for name in basket_names:
         try:
             live_strategy_name = _rebalance_live_strategy_id(name)
+            # 계정·귀속 키는 paper/live 공통(basket_rebalance:<name>) — 트랙레코드를
+            # 바스켓별로 격리·귀속한다(기본 계정 ''는 전 계정 합산 뷰라 오염 위험).
             rebalancer = BasketRebalancer(
                 basket_name=name,
                 config=config,
-                account_key=live_strategy_name if mode == "live" and not dry_run else "",
-                execution_strategy=live_strategy_name if mode == "live" and not dry_run else "basket_rebalance",
+                account_key=live_strategy_name,
+                execution_strategy=live_strategy_name,
             )
 
             if mode == "live" and not dry_run:
@@ -736,52 +737,38 @@ def run_rebalance(args):
 
             report = rebalancer.get_status_report()
             logger.info("\n{}", report)
-            # 일일 NAV 스냅샷용 현재가 수집(리밸런싱 실행 여부와 무관)
-            snapshot_prices.update({
-                s: v["price"]
-                for s, v in getattr(rebalancer, "_market_snapshot", {}).items()
-            })
 
             should, reason = rebalancer.should_rebalance()
+            executed = False
             if not should and not dry_run:
                 logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
-                continue
+            else:
+                orders = rebalancer.plan_rebalance()
+                if not orders:
+                    logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
+                else:
+                    result = rebalancer.execute(
+                        orders,
+                        dry_run=dry_run,
+                        live_confirmed=live_rebalance_confirmed,
+                    )
+                    executed = True
+                    summary = (
+                        f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
+                        f"완료: 실행 {result['executed']}건, 스킵 {result['skipped']}건, "
+                        f"실패 {result['failed']}건"
+                    )
+                    logger.info(summary)
+                    notifier.send_message(summary)
 
-            orders = rebalancer.plan_rebalance()
-            if not orders:
-                logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
-                continue
-
-            result = rebalancer.execute(
-                orders,
-                dry_run=dry_run,
-                live_confirmed=live_rebalance_confirmed,
-            )
-
-            summary = (
-                f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
-                f"완료: 실행 {result['executed']}건, 스킵 {result['skipped']}건, "
-                f"실패 {result['failed']}건"
-            )
-            logger.info(summary)
-            notifier.send_message(summary)
+            # 트랙레코드: 거래 여부와 무관하게 바스켓 계정의 일일 NAV 스냅샷을 남긴다.
+            # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
+            if not dry_run:
+                rebalancer.save_daily_nav_snapshot()
 
         except Exception as e:
             logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)
             notifier.send_message(f"바스켓 '{name}' 리밸런싱 오류: {e}")
-
-    # paper 트랙레코드: 거래 여부와 무관하게 일일 NAV 스냅샷을 남긴다.
-    # (상시 스케줄러 없이 일일 rebalance CLI만 돌려도 60영업일 평가 시계열이 쌓이도록)
-    # live 스냅샷은 스케줄러 장마감 단계가 담당하므로 paper에서만 저장. (account_key, date)
-    # upsert라 같은 날 중복 실행해도 멱등이다.
-    if mode != "live" and not dry_run:
-        try:
-            from core.portfolio_manager import PortfolioManager
-            PortfolioManager(config).save_daily_snapshot(
-                current_prices=snapshot_prices or None,
-            )
-        except Exception as e:
-            logger.warning("리밸런싱 후 일일 스냅샷 저장 실패: {}", e)
 
     # DB 일일 백업: 트랙레코드(거래·포지션·NAV 시계열)가 단일 SQLite 파일이라
     # 손상 시 60영업일 증거가 통째로 소실된다. 기존엔 상시 스케줄러 장마감에서만
@@ -1511,21 +1498,35 @@ def run_health_check() -> int:
         from database.models import get_session, PortfolioSnapshot
         from database.repositories import get_all_positions
 
+        from core.basket_rebalancer import rebalance_live_strategy_id
+
         enabled_baskets = BasketRebalancer.get_enabled_baskets()
+        # 바스켓별 전용 계정 키(basket_rebalance:<name>) 기준으로 조회한다.
+        # 복수 바스켓이면 '가장 오래된 최신 스냅샷'을 기준으로(가장 뒤처진 사이클 감시).
+        last_dates = []
+        position_count = 0
         session = get_session()
         try:
-            last_snap = (
-                session.query(PortfolioSnapshot)
-                .filter(PortfolioSnapshot.account_key == "")
-                .order_by(PortfolioSnapshot.date.desc())
-                .first()
-            )
+            for name in enabled_baskets:
+                key = rebalance_live_strategy_id(name)
+                snap = (
+                    session.query(PortfolioSnapshot)
+                    .filter(PortfolioSnapshot.account_key == key)
+                    .order_by(PortfolioSnapshot.date.desc())
+                    .first()
+                )
+                last_dates.append(snap.date if snap else None)
+                position_count += len(get_all_positions(account_key=key) or [])
         finally:
             session.close()
+        oldest_last = (
+            None if (not last_dates or any(d is None for d in last_dates))
+            else min(last_dates)
+        )
         basket_operation = {
             "enabled_baskets": enabled_baskets,
-            "last_snapshot_date": last_snap.date if last_snap else None,
-            "position_count": len(get_all_positions() or []),
+            "last_snapshot_date": oldest_last,
+            "position_count": position_count,
             "today": date.today(),
         }
     except Exception as exc:
