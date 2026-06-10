@@ -183,6 +183,9 @@ class TestForceLiveRemoved:
                 }
                 return {"executed": 1, "skipped": 0, "failed": 0}
 
+            def save_daily_nav_snapshot(self):
+                return True
+
         gate = MagicMock(return_value=[])
         notifier = SimpleNamespace(send_message=MagicMock())
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)

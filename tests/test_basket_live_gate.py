@@ -53,6 +53,21 @@ class TestBasketLiveGate:
         issues = self._run("basket_rebalance:kr_diversified_hold")
         assert issues == []
 
+    def test_gate_evaluates_its_own_basket_record(self):
+        """게이트는 반드시 '자기 바스켓'의 기록으로 평가한다 — 이름 없이 합산하면
+        다른 바스켓의 60일 트랙레코드로 신규 바스켓이 승격되는 구멍."""
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=_BASKETS,
+        ), patch(
+            "core.basket_evaluation.collect_basket_paper_evaluation",
+            return_value=(_eval_result("PASS_CANDIDATE"), "label"),
+        ) as collect:
+            check_basket_live_readiness(
+                SimpleNamespace(), "basket_rebalance:kr_diversified_hold"
+            )
+        assert collect.call_args.kwargs["basket_name"] == "kr_diversified_hold"
+
     def test_wait_blocks_with_progress_reason(self):
         issues = self._run(
             "basket_rebalance:kr_diversified_hold", verdict="WAIT", progress=1
