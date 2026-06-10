@@ -52,8 +52,10 @@ def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
     try:
         from core.basket_evaluation import collect_basket_paper_evaluation
 
+        # 반드시 '이 바스켓'의 기록으로 판정한다 — 이름 없이 합산 평가하면
+        # 다른 바스켓의 60일 트랙레코드로 신규 바스켓이 승격되는 구멍이 생긴다.
         result, _label = collect_basket_paper_evaluation(
-            config=config, include_benchmark=False,
+            config=config, include_benchmark=False, basket_name=basket_name,
         )
         if result["verdict"] != "PASS_CANDIDATE":
             detail = "; ".join(result["issues"]) if result["issues"] else (
