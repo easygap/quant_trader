@@ -118,11 +118,76 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def summarize_basket_operation(
+    enabled_baskets: list[str],
+    last_snapshot_date: Any,
+    position_count: int,
+    today: Any,
+    max_stale_calendar_days: int = 4,
+) -> dict[str, Any]:
+    """바스켓 paper 운영(트랙레코드 축적) 상태를 verdict + 요약으로 환원한다.
+
+    배포 수익경로(바스켓 buy&hold)는 일일 NAV 스냅샷 시계열이 생명이다 — 일일
+    사이클(스케줄 작업 또는 --mode rebalance)이 조용히 멈추면 60영업일 평가에
+    구멍이 난다. 여기서 그 끊김을 운영자 아침 점검에 노출한다.
+
+    규칙(보수적):
+      - enabled 바스켓 없음 → OK (운영 안 함은 문제 아님), note만 남김.
+      - enabled 있는데 스냅샷이 전혀 없음 → ATTENTION (운영 시작 직후이거나 사이클 미실행).
+      - 마지막 스냅샷이 max_stale_calendar_days(기본 4 — 주말+월 휴장 커버) 초과
+        경과 → ATTENTION (일일 사이클 중단 의심). 긴 연휴엔 오탐 가능 — 주의 수준이므로 수용.
+
+    last_snapshot_date / today 는 date 또는 datetime(섞여도 됨) — 날짜로 정규화해 비교.
+    """
+    def _as_date(v: Any):
+        return v.date() if hasattr(v, "date") and callable(getattr(v, "date")) else v
+
+    notes: list[str] = []
+    if not enabled_baskets:
+        return {
+            "verdict": "OK",
+            "enabled_baskets": [],
+            "last_snapshot_date": None,
+            "position_count": int(position_count or 0),
+            "stale_days": None,
+            "notes": ["enabled 바스켓 없음(운영 안 함)"],
+        }
+
+    verdict = "OK"
+    stale_days = None
+    if last_snapshot_date is None:
+        verdict = "ATTENTION"
+        notes.append("트랙레코드 스냅샷 없음 — 일일 리밸런싱 사이클 미실행 의심")
+    else:
+        delta = _as_date(today) - _as_date(last_snapshot_date)
+        stale_days = int(delta.days)
+        if stale_days > max_stale_calendar_days:
+            verdict = "ATTENTION"
+            notes.append(
+                f"스냅샷 끊김 {stale_days}일(마지막 {_as_date(last_snapshot_date)}) — "
+                "일일 사이클 중단 의심"
+            )
+
+    return {
+        "verdict": verdict,
+        "enabled_baskets": list(enabled_baskets),
+        "last_snapshot_date": _as_date(last_snapshot_date) if last_snapshot_date is not None else None,
+        "position_count": int(position_count or 0),
+        "stale_days": stale_days,
+        "notes": notes,
+    }
+
+
 def build_operator_health(
     runtime_states: list[Any],
     blockers: dict[str, Any] | None,
+    basket_operation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """전략별 runtime state + current_blockers를 하나의 헬스 요약으로 합친다.
+    """전략별 runtime state + current_blockers (+ 바스켓 운영)를 하나의 헬스 요약으로 합친다.
+
+    basket_operation: summarize_basket_operation에 넘길 raw 입력 dict
+      {"enabled_baskets": [...], "last_snapshot_date": date|None,
+       "position_count": int, "today": date}. None이면 섹션 생략(하위 호환).
 
     반환:
       {
@@ -130,17 +195,23 @@ def build_operator_health(
         "strategy_count": N,
         "strategies": [summarize_runtime_state(...), ...],
         "blockers": summarize_blockers(...),
+        "basket": summarize_basket_operation(...) | None,
         "headline": 사람이 읽는 한 줄 요약,
         "attention_items": [...],  # 운영자가 봐야 할 항목들
       }
     """
     strat_summaries = [summarize_runtime_state(s) for s in runtime_states]
     blocker_summary = summarize_blockers(blockers)
+    basket_summary = (
+        summarize_basket_operation(**basket_operation) if basket_operation is not None else None
+    )
 
     verdict = "OK"
     for s in strat_summaries:
         verdict = _worst(verdict, s["verdict"])
     verdict = _worst(verdict, blocker_summary["verdict"])
+    if basket_summary is not None:
+        verdict = _worst(verdict, basket_summary["verdict"])
 
     attention_items: list[str] = []
     for s in strat_summaries:
@@ -148,6 +219,8 @@ def build_operator_health(
             attention_items.append(f"{s['strategy']}: {', '.join(s['notes']) or s['state']}")
     if blocker_summary["notes"]:
         attention_items.append("blockers: " + ", ".join(blocker_summary["notes"]))
+    if basket_summary is not None and basket_summary["verdict"] != "OK":
+        attention_items.append("basket: " + ", ".join(basket_summary["notes"]))
 
     n = len(strat_summaries)
     n_ok = sum(1 for s in strat_summaries if s["verdict"] == "OK")
@@ -163,6 +236,7 @@ def build_operator_health(
         "strategy_count": n,
         "strategies": strat_summaries,
         "blockers": blocker_summary,
+        "basket": basket_summary,
         "headline": headline,
         "attention_items": attention_items,
     }
