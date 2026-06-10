@@ -1516,11 +1516,21 @@ class Scheduler:
         try:
             from core.basket_rebalancer import (
                 BasketRebalancer,
+                check_basket_account_isolation,
                 rebalance_live_strategy_id,
             )
 
             enabled = BasketRebalancer.get_enabled_baskets()
             if not enabled:
+                return
+
+            # 여러 바스켓이 같은 계좌(자본 풀)를 공유하면 각자 목표 비중을 독립 배분해
+            # 과배분되고 트랙레코드가 섞인다 — fail-closed로 이번 사이클을 중단한다.
+            isolation_issues = check_basket_account_isolation(enabled, self.config, self._mode)
+            if isolation_issues:
+                msg = "바스켓 리밸런싱 중단 — 계좌 격리 실패: " + "; ".join(isolation_issues)
+                logger.error(msg)
+                self.discord.send_message(msg, critical=True)
                 return
 
             logger.info("🔄 바스켓 리밸런싱 체크: {}", enabled)
@@ -1544,7 +1554,10 @@ class Scheduler:
 
                     rebalancer = BasketRebalancer(
                         basket_name=name, config=self.config,
-                        account_key=live_strategy_name if is_live else self.strategy_name,
+                        # paper는 CLI(--mode rebalance)와 동일한 기본 계정("")을 쓴다 —
+                        # 스케줄러가 전략명 계정에 기록하면 일일 CLI로 쌓던 트랙레코드
+                        # (NAV 시계열·평가·health 감시 모두 기본 계정 기준)와 찢어진다.
+                        account_key=live_strategy_name if is_live else "",
                         execution_strategy=(
                             live_strategy_name if is_live else "basket_rebalance"
                         ),
