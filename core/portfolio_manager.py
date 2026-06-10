@@ -183,8 +183,12 @@ class PortfolioManager:
             "broker_balance_error": broker_balance_error,
         }
 
-    def save_daily_snapshot(self, current_prices: dict = None):
-        """일일 포트폴리오 스냅샷 저장"""
+    def save_daily_snapshot(self, current_prices: dict = None, snapshot_date=None):
+        """일일 포트폴리오 스냅샷 저장.
+
+        snapshot_date: 귀속 날짜 지정(미지정 시 오늘). 비거래일 보충 실행에서
+        NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
+        """
         summary = self.get_portfolio_summary(current_prices)
 
         save_portfolio_snapshot(
@@ -196,6 +200,7 @@ class PortfolioManager:
             position_count=summary["position_count"],
             account_key=self.account_key,
             peak_value=self._peak_value,
+            snapshot_date=snapshot_date,
         )
 
         logger.info(

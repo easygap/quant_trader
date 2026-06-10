@@ -687,11 +687,19 @@ def save_portfolio_snapshot(
     position_count: int = 0,
     account_key: str = "",
     peak_value: float = None,
+    snapshot_date: datetime = None,
 ):
-    """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분)."""
+    """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분).
+
+    snapshot_date: 스냅샷 귀속 날짜(자정으로 정규화). 미지정 시 오늘.
+    비거래일 보충 실행에서 NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
+    """
     session = get_session()
     try:
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        base = snapshot_date or datetime.now()
+        if not isinstance(base, datetime):
+            base = datetime(base.year, base.month, base.day)
+        today = base.replace(hour=0, minute=0, second=0, microsecond=0)
         ak = account_key or ""
         snapshot = PortfolioSnapshot(
             account_key=ak,

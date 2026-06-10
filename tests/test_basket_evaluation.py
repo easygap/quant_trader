@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date
 
+import pytest
+
 from core.basket_evaluation import (
     evaluate_basket_paper_operation,
     format_evaluation_report,
@@ -83,3 +85,91 @@ def test_report_formatting_contains_verdict_and_criteria():
     text = format_evaluation_report(out, basket_name="kr_diversified_hold")
     assert "WAIT" in text and "kr_diversified_hold" in text
     assert "합격 기준이 아님" in text  # 베타 전략 명시
+
+
+class TestCollectorAttribution:
+    """수집기의 바스켓별 귀속 — A 바스켓 기록으로 B가 평가/승격되지 않아야 한다."""
+
+    def _seed(self, key, symbol, costs, snap_value):
+        from database.repositories import save_trade, save_portfolio_snapshot
+        save_trade(
+            symbol=symbol, action="BUY", price=10_000, quantity=1,
+            commission=costs, tax=0, slippage=0,
+            strategy=key, mode="paper", account_key=key,
+        )
+        save_portfolio_snapshot(
+            total_value=snap_value, cash=snap_value, invested=0,
+            account_key=key,
+        )
+
+    def test_collect_filters_by_basket_key(self, monkeypatch):
+        from database.models import init_database
+        from core.basket_evaluation import collect_basket_paper_evaluation
+
+        init_database()
+        self._seed("basket_rebalance:bk_a", "000001", costs=111.0, snap_value=10_000_000)
+        self._seed("basket_rebalance:bk_b", "000002", costs=999.0, snap_value=20_000_000)
+
+        result, name = collect_basket_paper_evaluation(
+            basket_name="bk_a", include_benchmark=False,
+        )
+        assert name == "bk_a"
+        # bk_b의 비용(999)이 섞이지 않는다
+        assert result["metrics"]["total_costs"] == 111.0
+
+        result_b, _ = collect_basket_paper_evaluation(
+            basket_name="bk_b", include_benchmark=False,
+        )
+        assert result_b["metrics"]["total_costs"] == 999.0
+
+    def test_collect_ambiguous_without_name_fails_closed(self, monkeypatch):
+        from core.basket_evaluation import collect_basket_paper_evaluation
+        from unittest.mock import patch
+
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",
+            return_value=["a", "b"],
+        ):
+            with pytest.raises(ValueError, match="모호"):
+                collect_basket_paper_evaluation(include_benchmark=False)
+
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",
+            return_value=[],
+        ):
+            with pytest.raises(ValueError, match="모호"):
+                collect_basket_paper_evaluation(include_benchmark=False)
+
+
+class TestSnapshotDateAttribution:
+    """save_portfolio_snapshot의 snapshot_date 귀속 — 비거래일 보충 실행이
+    직전 거래일 NAV로 정직하게 커버되기 위한 기반."""
+
+    def test_snapshot_date_override_and_upsert(self):
+        from datetime import datetime
+        from database.models import init_database, get_session, PortfolioSnapshot
+        from database.repositories import save_portfolio_snapshot
+
+        init_database()
+        key = "basket_rebalance:bk_dated"
+        d = datetime(2026, 6, 5, 15, 30)  # 시각 포함 → 자정 정규화 기대
+        save_portfolio_snapshot(
+            total_value=1_000, cash=1_000, invested=0,
+            account_key=key, snapshot_date=d,
+        )
+        save_portfolio_snapshot(
+            total_value=2_000, cash=2_000, invested=0,
+            account_key=key, snapshot_date=d,  # 같은 날 upsert
+        )
+        session = get_session()
+        try:
+            rows = (
+                session.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.account_key == key)
+                .all()
+            )
+        finally:
+            session.close()
+        assert len(rows) == 1
+        assert rows[0].date == datetime(2026, 6, 5)
+        assert float(rows[0].total_value) == 2_000.0
