@@ -59,3 +59,31 @@ def test_dry_run_rebalance_does_not_save_snapshot(patched_rebalance):
     main_mod.run_rebalance(_args(dry_run=True))
 
     fake_pm.save_daily_snapshot.assert_not_called()
+
+
+def test_paper_rebalance_triggers_daily_db_backup(patched_rebalance, monkeypatch):
+    """일일 rebalance CLI가 DB 백업도 호출한다(트랙레코드 단일 파일 보호).
+
+    backup_path 미설정이면 run_daily_backup이 no-op(False)이므로 호출 자체는 항상 안전.
+    """
+    import main as main_mod
+
+    called = {}
+    monkeypatch.setattr(
+        "database.backup.run_daily_backup",
+        lambda config=None: called.setdefault("backup", True),
+    )
+    main_mod.run_rebalance(_args(dry_run=False))
+    assert called.get("backup") is True
+
+
+def test_dry_run_rebalance_skips_db_backup(patched_rebalance, monkeypatch):
+    import main as main_mod
+
+    called = {}
+    monkeypatch.setattr(
+        "database.backup.run_daily_backup",
+        lambda config=None: called.setdefault("backup", True),
+    )
+    main_mod.run_rebalance(_args(dry_run=True))
+    assert "backup" not in called
