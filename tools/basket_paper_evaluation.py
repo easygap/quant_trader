@@ -23,7 +23,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="바스켓 paper 운영 평가 (승격 판정)")
     parser.add_argument("--basket", type=str, default=None,
                         help="평가할 바스켓 이름 (미지정 시 enabled 바스켓 전체를 각각 평가)")
-    parser.add_argument("--min-days", type=int, default=60, help="필요 운영 영업일 수 (기본 60)")
+    parser.add_argument(
+        "--min-days", type=int, default=None,
+        help="필요 운영 영업일 수 (미지정 시 바스켓 설정 promotion.min_trading_days, 기본 60 — 게이트와 동일 기준)",
+    )
     parser.add_argument("--out", type=str, default=None, help="평가 리포트 저장 경로 (Markdown)")
     args = parser.parse_args()
 
