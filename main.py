@@ -771,6 +771,17 @@ def run_rebalance(args):
         except Exception as e:
             logger.warning("리밸런싱 후 일일 스냅샷 저장 실패: {}", e)
 
+    # DB 일일 백업: 트랙레코드(거래·포지션·NAV 시계열)가 단일 SQLite 파일이라
+    # 손상 시 60영업일 증거가 통째로 소실된다. 기존엔 상시 스케줄러 장마감에서만
+    # 백업했는데, 일일 rebalance CLI 운영에서는 그 경로가 돌지 않으므로 여기서도
+    # 호출한다. database.backup_path 미설정이면 no-op, 날짜별 파일이라 멱등.
+    if not dry_run:
+        try:
+            from database.backup import run_daily_backup
+            run_daily_backup(config)
+        except Exception as e:
+            logger.warning("리밸런싱 후 DB 백업 실패: {}", e)
+
 
 def run_paper_trading(args):
     """페이퍼 트레이딩 모드 실행"""
