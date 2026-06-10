@@ -6,7 +6,16 @@
 실전 주문과 잔고 조회는 KIS API를 사용합니다.  
 데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
 
-> **현재 상태 (2026-06-01)**:
+> **현재 상태 (2026-06-10)**:
+> - **바스켓 paper 운영 개시**: `kr_diversified_hold`(분산 대형주 buy&hold, 주식 80%/현금 20%) enabled — 일일 자동 사이클(리밸런싱 → NAV 스냅샷 → DB 백업 → 승격 진행률 보고)로 60영업일 트랙레코드 축적 중. `--mode health`가 사이클 끊김(스냅샷 4일+)을 자동 경고
+> - **paper→live 승격 기준 정의**(`docs/BASKET_PAPER_EVALUATION.md`): 60영업일·스냅샷 커버리지 ≥95%·dead-letter 0건·비용 드래그 ≤1%/년. 베타 전략이므로 "시장 초과수익"은 기준이 아님. `tools/basket_paper_evaluation.py`로 자동 판정(WAIT/PASS_CANDIDATE/FAIL_REVIEW)
+> - **바스켓 전용 live gate 분기**: 기존 게이트가 바스켓에 신호 전략용 canonical promotion(벤치마크 초과수익 포함)을 요구해 영구 통과 불가였던 함정 해소 — paper 평가 PASS_CANDIDATE 기반으로 실제로 열리는 경로 확립. 전환 절차는 `docs/BASKET_LIVE_RUNBOOK.md`(모의서버 리허설 → 실계좌 소액 → 목표 자본)
+> - live 바스켓 리밸런싱 실행 가능화: BUY가 "paper-only" 차단으로 항상 실패해 SELL-only 현금화가 되던 버그 수정(일반 매수와 동일한 집행 안전장치 + live gate 검사 승계), 회전율 예산 SELL 우선·부분 실행, KIS 잔고 미확인 시 사이징 fail-closed
+> - 주문 응답 유실 시 재시도 래퍼가 재전송하던 잔여 구멍 폐쇄(`KISOrderResponseUnknown` → reconcile 대기), 손절가 하한 클램프, 히스터리시스 SELL 해제 부호 수정, 내장 지표 폴백 pandas-ta 패리티(RSI ~12pt 오차 정정)
+> - 트랙레코드 도구가 현금 배분(`target_stock_weight`·`min_cash_ratio`)을 무시해 수익·MDD를 과대 보고하던 문제 정정 — 배포 바스켓 정직 수치(2021-12~2026-06): **CAGR +26.9%, Sharpe 1.09, MDD −21.4%**
+> - 인자 없이 실행 시 백테스트 자동실행 대신 사용 가이드 출력(`--mode guide`), 운영 문서 v6.1 갱신
+>
+> **이전 상태 (2026-06-01)**:
 > - 적대적 코드 감사로 실거래 안전 버그 정리: KIS 주문이 응답 유실 시 재전송돼 이중 체결되던 경로를 `idempotent=False`로 차단(최대 1회 제출), 서킷 브레이커 재시도 루프 내 재확인, 429 Retry-After HTTP-date 크래시 가드
 > - 부분 익절이 매 모니터링 사이클마다 재발동되던 버그 수정(`Position.partial_tp_done` 영속화), 스케줄러 진입 예외 시 손절/익절 스킵 방지, 일일 손실 한도 기준값에 당일 스냅샷 사용 차단
 > - 라이브 게이트 fail-closed 보강: NaN/Inf 지표가 임계값 비교를 통과하던 구멍을 막아(`_as_float` 비유한값 → None) 손상된 지표로 라이브 승격되는 것을 차단
