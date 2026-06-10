@@ -35,6 +35,13 @@ def build_track_record(basket_name, start, end, capital=10_000_000):
         raise SystemExit(f"바스켓 '{basket_name}' 없음. 가능: {', '.join(baskets)}")
     holdings = baskets[basket_name].get("holdings", {})
 
+    # 주식 슬리브 비중 — 운영(BasketRebalancer._stock_fraction)과 동일하게
+    # target_stock_weight(바스켓 명시 주식 비중)와 min_cash_ratio(현금 하한)를 반영한다.
+    # 이걸 무시하면 '주식50/현금50' 바스켓이 주식 100%로 시뮬레이션돼
+    # 수익·MDD가 과대 보고된다(트랙레코드는 운영과 같은 조건이어야 정직하다).
+    rb = BasketRebalancer(basket_name=basket_name)
+    stock_fraction = rb._stock_fraction()
+
     dc = DataCollector()
     closes = {}
     for sym in holdings:
@@ -51,11 +58,12 @@ def build_track_record(basket_name, start, end, capital=10_000_000):
     if panel.empty or len(panel) < 20:
         raise SystemExit("가격 데이터 부족")
 
-    # 초기 동일비중 매수: 각 종목에 capital*weight 배정, 진입 수수료 차감
+    # 초기 매수: 주식 슬리브(capital*stock_fraction)를 holdings 비중대로 배정, 진입 수수료 차감.
+    # 나머지는 현금 보유(운영의 현금 배분과 동일).
     first_px = panel.iloc[0]
     shares, invested, commission_paid = {}, 0.0, 0.0
     for sym, w in holdings.items():
-        alloc = capital * float(w)
+        alloc = capital * stock_fraction * float(w)
         qty = int(alloc / first_px[sym])
         shares[sym] = qty
         cost = qty * first_px[sym]
@@ -92,6 +100,7 @@ def build_track_record(basket_name, start, end, capital=10_000_000):
         "mdd_pct": round(float(mdd), 2),
         "entry_commission": round(commission_paid, 0),
         "holdings": holdings,
+        "stock_fraction": round(float(stock_fraction), 4),
         "monthly": monthly_rows,
         "years": round(years, 2),
     }
@@ -115,6 +124,7 @@ def render_markdown(tr):
         f"| Sharpe | {tr['sharpe']} |",
         f"| MDD | {tr['mdd_pct']:.2f}% |",
         f"| 진입 수수료 | {tr['entry_commission']:,.0f}원 |",
+        f"| 주식 비중 | {tr['stock_fraction']*100:.0f}% (나머지 현금 — target_stock_weight·min_cash_ratio 반영, 운영과 동일) |",
         f"| 보유 종목 | {len(tr['holdings'])}개 동일비중 |",
         "",
         "## 월별 평가액",
