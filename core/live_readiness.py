@@ -3,15 +3,87 @@
 from __future__ import annotations
 
 
+def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
+    """바스켓 승인 단위(basket_rebalance:<basket>)의 live 전환 게이트.
+
+    바스켓은 신호 전략의 canonical promotion 체계(canonical bundle·live_candidate
+    승격·벤치마크 양의 초과수익) 밖이다 — 특히 "벤치마크 초과수익" 요구는 베타
+    전략의 정착된 결론(시장 초과 불가)과 모순이라 영구 통과 불가가 된다.
+    대신 docs/BASKET_PAPER_EVALUATION.md의 승격 기준으로 판정한다:
+
+      1) 승인 단위에 바스켓 이름이 명시돼 있고(basket_rebalance:<name>),
+         baskets.yaml에 존재 + enabled=true
+      2) 목표 비중 합 = 1.0 (±0.1%)
+      3) paper 운영 평가(60영업일·스냅샷 커버리지 ≥95%·dead-letter 0건·
+         비용 드래그 ≤1%/년) 판정이 PASS_CANDIDATE
+
+    모든 예외는 fail-closed(이슈 추가)로 처리한다. 빈 리스트 = 통과.
+    """
+    issues: list[str] = []
+
+    parts = str(strategy_name or "").split(":", 1)
+    basket_name = parts[1].strip() if len(parts) == 2 else ""
+    if not basket_name:
+        return [
+            "바스켓 live 승인 단위에 바스켓 이름이 없습니다 — "
+            "'basket_rebalance:<basket>' 형식이어야 합니다."
+        ]
+
+    try:
+        from core.basket_rebalancer import BasketRebalancer
+
+        baskets_cfg = BasketRebalancer._load_baskets_config()
+        basket = baskets_cfg.get(basket_name)
+        if basket is None:
+            return [f"바스켓 '{basket_name}'이 baskets.yaml에 없습니다."]
+        if not basket.get("enabled", False):
+            issues.append(
+                f"바스켓 '{basket_name}'이 enabled=false — paper 운영(트랙레코드)부터 시작하세요."
+            )
+        holdings = basket.get("holdings", {}) or {}
+        total_w = sum(float(w) for w in holdings.values())
+        if abs(total_w - 1.0) > 0.001:
+            issues.append(
+                f"바스켓 '{basket_name}' 목표 비중 합 {total_w:.4f} ≠ 1.0 — baskets.yaml 확인."
+            )
+    except Exception as exc:
+        return [f"바스켓 설정 검증 오류(fail-closed): {exc}"]
+
+    try:
+        from core.basket_evaluation import collect_basket_paper_evaluation
+
+        result, _label = collect_basket_paper_evaluation(
+            config=config, include_benchmark=False,
+        )
+        if result["verdict"] != "PASS_CANDIDATE":
+            detail = "; ".join(result["issues"]) if result["issues"] else (
+                f"진행 {result['progress_days']}/{result['min_trading_days']} 영업일"
+            )
+            issues.append(
+                f"바스켓 paper 운영 평가 미통과 (verdict={result['verdict']}): {detail}. "
+                "기준: docs/BASKET_PAPER_EVALUATION.md"
+            )
+    except Exception as exc:
+        issues.append(f"바스켓 paper 운영 평가 조회 오류(fail-closed): {exc}")
+
+    return issues
+
+
 def check_live_readiness_gate(config, strategy_name: str) -> list[str]:
     """
     라이브 전 필수 검증 게이트.
 
     하나라도 실패하면 live 주문 경로로 진입하지 않는다. 빈 리스트는 통과를 의미한다.
+    바스켓 승인 단위(basket_rebalance[:<basket>])는 신호 전략의 canonical promotion
+    체계 대신 바스켓 전용 게이트(check_basket_live_readiness)로 판정한다 — 공통
+    데이터 소스 health check는 두 경로 모두 동일하게 적용된다.
     """
-    from core.live_gate import validate_live_readiness
+    if str(strategy_name or "").split(":", 1)[0] == "basket_rebalance":
+        issues = check_basket_live_readiness(config, strategy_name)
+    else:
+        from core.live_gate import validate_live_readiness
 
-    issues = validate_live_readiness(config, strategy_name)
+        issues = validate_live_readiness(config, strategy_name)
     if issues:
         return issues
 
