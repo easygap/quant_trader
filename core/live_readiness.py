@@ -68,9 +68,20 @@ def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
             # KIS 모의투자 서버(use_mock=true)는 실돈이 아니다 — 게이트의 목적은
             # 실자금 보호이므로, 모의서버에서의 live 경로 리허설(런북 Phase 1)은
             # 평가 기간을 기다리지 않고 허용한다. 실계좌(use_mock=false)는 그대로 차단.
-            if bool((getattr(config, "kis_api", {}) or {}).get("use_mock", True)):
+            # 단, use_mock=true라도 mock_url이 실전 도메인으로 오설정돼 있으면 주문이
+            # 실서버로 가므로(KISApi는 use_mock 시 mock_url을 base_url로 사용) 실효
+            # 도메인이 모의투자(openapivts)일 때만 완화한다 — fail-closed.
+            kis_cfg = (getattr(config, "kis_api", {}) or {})
+            effective_mock_url = str(
+                kis_cfg.get("mock_url", "https://openapivts.koreainvestment.com:29443")
+            )
+            is_mock_rehearsal = (
+                bool(kis_cfg.get("use_mock", True))
+                and "openapivts" in effective_mock_url
+            )
+            if is_mock_rehearsal:
                 logger.warning(
-                    "바스켓 '{}' 평가 미통과({})지만 KIS 모의투자 서버(use_mock=true) — "
+                    "바스켓 '{}' 평가 미통과({})지만 KIS 모의투자 서버(use_mock=true, vts 도메인) — "
                     "live 경로 리허설 허용. 실계좌 전환 전 평가 통과 필수.",
                     basket_name, result["verdict"],
                 )
