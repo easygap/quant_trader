@@ -51,6 +51,22 @@ def run_daily_backup(config=None) -> bool:
     if not backup_path:
         return False
 
+    # 격리 환경 가드: QUANT_DB_PATH가 설정된 환경(테스트·임시 DB)에서 settings의
+    # 운영 backup_path로 백업하면, 격리된(대개 빈) DB가 같은 날짜 파일명으로
+    # 운영 백업을 덮어쓴다 — 실제로 테스트 스위트가 당일 운영 백업을 빈 DB로
+    # 대체한 사고가 있었다(2026-06-10, 복원 리허설에서 발견). 소스 DB가 격리
+    # 경로일 때는 운영 백업 디렉토리에 쓰지 않는다(명시적으로 backup_path까지
+    # 같이 오버라이드한 경우에만 수행).
+    import os
+    db_path_override = os.environ.get("QUANT_DB_PATH")
+    if db_path_override and not os.environ.get("QUANT_BACKUP_PATH"):
+        logger.debug(
+            "DB 백업 스킵: QUANT_DB_PATH(격리 DB) 환경 — 운영 backup_path 오염 방지"
+        )
+        return False
+    if os.environ.get("QUANT_BACKUP_PATH"):
+        backup_path = os.environ["QUANT_BACKUP_PATH"]
+
     sqlite_path = db_config.get("sqlite_path", "data/quant_trader.db")
     root = Path(__file__).resolve().parent.parent
     src = root / sqlite_path if not Path(sqlite_path).is_absolute() else Path(sqlite_path)
