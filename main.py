@@ -672,6 +672,18 @@ def run_rebalance(args):
             logger.warning("enabled=true인 바스켓이 없습니다. --basket으로 지정하거나 baskets.yaml에서 enabled를 true로 설정하세요.")
             return
 
+    # 여러 바스켓이 같은 계좌(자본 풀)를 공유하면 각자 목표 비중을 독립 배분해
+    # 과배분(예: 80%+80%)되고, paper에서는 NAV 시계열(트랙레코드)이 섞인다 — fail-closed.
+    from core.basket_rebalancer import check_basket_account_isolation
+    isolation_issues = check_basket_account_isolation(basket_names, config, mode)
+    if isolation_issues:
+        for issue in isolation_issues:
+            logger.error("🚫 바스켓 계좌 격리 실패: {}", issue)
+        notifier.send_message(
+            "바스켓 리밸런싱 중단 — 계좌 격리 실패:\n" + "\n".join(isolation_issues)
+        )
+        return
+
     if mode == "live" and not dry_run:
         _require_live_operator_confirmation(
             args,
