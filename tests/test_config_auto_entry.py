@@ -319,3 +319,69 @@ class TestSchedulerUsesConfig:
         os.environ.pop("QUANT_AUTO_ENTRY", None)
         scheduler = Scheduler(strategy_name="scoring")
         assert scheduler.auto_entry is False
+
+
+def test_yaml_string_false_is_not_truthy(monkeypatch):
+    """YAML에 따옴표로 'false'를 쓰면 bool('false')==True 함정 — 엄격 파싱으로 False여야 한다.
+    (auto_entry 마스터 스위치가 따옴표 하나로 뒤집히면 live에서 실돈 자동매수)"""
+    from config.config_loader import _resolve_auto_entry
+
+    monkeypatch.delenv("QUANT_AUTO_ENTRY", raising=False)
+    s = _resolve_auto_entry({"trading": {"mode": "paper", "auto_entry": "false"}})
+    assert s["trading"]["auto_entry"] is False
+
+    s = _resolve_auto_entry({"trading": {"mode": "live", "auto_entry": "false"}})
+    assert s["trading"]["auto_entry"] is False
+
+
+def test_enforce_live_policy_reverts_env_enable_after_mode_flip(monkeypatch):
+    """정식 live 경로(YAML mode=paper 로드 → mode 플립)에서 ENV=true 잔존 시,
+    enforce_live_auto_entry_policy가 YAML 값으로 강제 복귀해야 한다 —
+    로드 시점 live-ignore 분기는 이 경로에서 발동하지 않는 죽은 코드였다."""
+    from config.config_loader import Config, _resolve_auto_entry
+
+    monkeypatch.setenv("QUANT_AUTO_ENTRY", "true")
+    settings = _resolve_auto_entry({"trading": {"mode": "paper", "auto_entry": False}})
+    # 로드 시점: paper라 ENV가 이긴다 (기존 동작 — 여기까진 의도)
+    assert settings["trading"]["auto_entry"] is True
+    assert settings["trading"]["_auto_entry_source"] == "ENV"
+
+    cfg = Config.__new__(Config)
+    cfg._settings = settings
+    # run_live_trading의 모드 플립 재현
+    cfg._settings["trading"]["mode"] = "live"
+    cfg.enforce_live_auto_entry_policy()
+
+    assert cfg.trading["auto_entry"] is False  # YAML 값으로 복귀
+    assert cfg.trading["_auto_entry_source"] == "YAML (live override)"
+
+
+def test_enforce_live_policy_respects_env_disable(monkeypatch):
+    """끄는 방향(ENV=false)은 fail-safe라 live에서도 존중한다."""
+    from config.config_loader import Config, _resolve_auto_entry
+
+    monkeypatch.setenv("QUANT_AUTO_ENTRY", "false")
+    settings = _resolve_auto_entry({"trading": {"mode": "paper", "auto_entry": True}})
+    assert settings["trading"]["auto_entry"] is False
+
+    cfg = Config.__new__(Config)
+    cfg._settings = settings
+    cfg._settings["trading"]["mode"] = "live"
+    cfg.enforce_live_auto_entry_policy()
+
+    assert cfg.trading["auto_entry"] is False  # 그대로 꺼짐 유지
+
+
+def test_enforce_live_policy_noop_for_yaml_source(monkeypatch):
+    """ENV 미설정(YAML 소스)이면 정책 재적용은 무변화."""
+    from config.config_loader import Config, _resolve_auto_entry
+
+    monkeypatch.delenv("QUANT_AUTO_ENTRY", raising=False)
+    settings = _resolve_auto_entry({"trading": {"mode": "paper", "auto_entry": True}})
+    cfg = Config.__new__(Config)
+    cfg._settings = settings
+    cfg._settings["trading"]["mode"] = "live"
+    cfg.enforce_live_auto_entry_policy()
+
+    assert cfg.trading["auto_entry"] is True
+    assert cfg.trading["_auto_entry_source"] == "YAML"
