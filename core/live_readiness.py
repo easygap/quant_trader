@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from loguru import logger
+
 
 def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
     """바스켓 승인 단위(basket_rebalance:<basket>)의 live 전환 게이트.
@@ -54,6 +56,8 @@ def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
 
         # 반드시 '이 바스켓'의 기록으로 판정한다 — 이름 없이 합산 평가하면
         # 다른 바스켓의 60일 트랙레코드로 신규 바스켓이 승격되는 구멍이 생긴다.
+        # 승격 기간(promotion.min_trading_days, 기본 60)은 collect가 바스켓 설정에서
+        # 해석한다 — CLI와 게이트가 같은 값으로 판정(단일 소스).
         result, _label = collect_basket_paper_evaluation(
             config=config, include_benchmark=False, basket_name=basket_name,
         )
@@ -61,10 +65,20 @@ def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
             detail = "; ".join(result["issues"]) if result["issues"] else (
                 f"진행 {result['progress_days']}/{result['min_trading_days']} 영업일"
             )
-            issues.append(
-                f"바스켓 paper 운영 평가 미통과 (verdict={result['verdict']}): {detail}. "
-                "기준: docs/BASKET_PAPER_EVALUATION.md"
-            )
+            # KIS 모의투자 서버(use_mock=true)는 실돈이 아니다 — 게이트의 목적은
+            # 실자금 보호이므로, 모의서버에서의 live 경로 리허설(런북 Phase 1)은
+            # 평가 기간을 기다리지 않고 허용한다. 실계좌(use_mock=false)는 그대로 차단.
+            if bool((getattr(config, "kis_api", {}) or {}).get("use_mock", True)):
+                logger.warning(
+                    "바스켓 '{}' 평가 미통과({})지만 KIS 모의투자 서버(use_mock=true) — "
+                    "live 경로 리허설 허용. 실계좌 전환 전 평가 통과 필수.",
+                    basket_name, result["verdict"],
+                )
+            else:
+                issues.append(
+                    f"바스켓 paper 운영 평가 미통과 (verdict={result['verdict']}): {detail}. "
+                    "기준: docs/BASKET_PAPER_EVALUATION.md"
+                )
     except Exception as exc:
         issues.append(f"바스켓 paper 운영 평가 조회 오류(fail-closed): {exc}")
 

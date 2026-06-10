@@ -147,7 +147,7 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
 
 def collect_basket_paper_evaluation(
     config=None,
-    min_days: int = 60,
+    min_days: int | None = None,
     include_benchmark: bool = True,
     basket_name: str | None = None,
 ) -> tuple[dict[str, Any], str]:
@@ -158,6 +158,9 @@ def collect_basket_paper_evaluation(
     바스켓별 귀속 없이 합산하면 A 바스켓의 트랙레코드로 B 바스켓이 승격되는 구멍이 생긴다.
     basket_name 미지정 시 enabled 바스켓이 정확히 1개면 그것을 쓰고, 0개·복수면
     ValueError(어느 기록을 평가하는지 모호 — fail-closed).
+    min_days 미지정(None) 시 바스켓 설정 promotion.min_trading_days(기본 60)를
+    사용한다 — 기간 해석의 단일 소스. CLI·게이트가 같은 값으로 판정해야
+    "CLI가 보여주는 판정 = 게이트 판정" 원칙이 유지된다.
     include_benchmark=False면 KS11 조회(네트워크)를 생략한다(게이트 경로용).
     """
     from datetime import date, datetime, timedelta
@@ -178,6 +181,10 @@ def collect_basket_paper_evaluation(
             )
         basket_name = enabled[0]
     basket_key = rebalance_live_strategy_id(basket_name)
+
+    if min_days is None:
+        basket_cfg = BasketRebalancer._load_baskets_config().get(basket_name) or {}
+        min_days = int((basket_cfg.get("promotion") or {}).get("min_trading_days", 60))
 
     session = get_session()
     try:
