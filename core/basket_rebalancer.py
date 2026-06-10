@@ -153,7 +153,11 @@ class BasketRebalancer:
         보유 종목 가격이 전부 확보됐을 때만 저장한다 — 가격 미확보 시
         avg_price 폴백으로 평가된 가짜 NAV가 '커버된 영업일'로 집계되는 것보다,
         스킵하고 health의 끊김 감지에 노출되는 편이 정직하다.
-        (account_key, date) upsert라 같은 날 중복 호출은 멱등.
+
+        귀속 날짜는 NAV의 가격 기준일이다: 비거래일(주말·휴장일) 보충 실행에서
+        조회되는 가격은 직전 거래일 종가이므로 그 거래일로 귀속한다 — PC가 꺼져
+        있던 거래일을 다음날 보충 실행이 정당하게 커버한다(주말 날짜 스냅샷은
+        커버리지에 영원히 안 잡히는 낭비였다). (account_key, date) upsert 멱등.
         """
         try:
             snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
@@ -166,11 +170,34 @@ class BasketRebalancer:
                     self.basket_name, missing,
                 )
                 return False
-            self.portfolio_mgr.save_daily_snapshot(current_prices=prices or None)
+            self.portfolio_mgr.save_daily_snapshot(
+                current_prices=prices or None,
+                snapshot_date=self._nav_attribution_date(),
+            )
             return True
         except Exception as e:
             logger.warning("바스켓 '{}' NAV 스냅샷 저장 실패: {}", self.basket_name, e)
             return False
+
+    def _nav_attribution_date(self) -> datetime:
+        """NAV 스냅샷 귀속 날짜: 오늘이 거래일이면 오늘, 아니면 직전 거래일.
+
+        조회 가격이 직전 거래일 종가이므로 그 날짜가 정직한 귀속일이다.
+        거래일 판정 실패 시 오늘로 폴백(보수적 — 기존 동작).
+        """
+        now = datetime.now(_KST).replace(tzinfo=None)
+        try:
+            from core.trading_hours import TradingHours
+
+            th = TradingHours(self.config)
+            d = now
+            for _ in range(15):  # 최장 연휴 커버
+                if th.is_trading_day(d):
+                    return d
+                d -= timedelta(days=1)
+        except Exception as e:
+            logger.debug("거래일 판정 실패 — 오늘로 귀속: {}", e)
+        return now
 
     # ------------------------------------------------------------------
     # Config
