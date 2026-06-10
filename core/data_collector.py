@@ -109,6 +109,11 @@ def _fdr_stock_listing_table(market: str, top_n: int | None) -> pd.DataFrame:
             c = str(row[code_col]).strip()
             if not c or c.lower() == "nan":
                 continue
+            # KRX 보통주 코드는 6자리 숫자다. FDR 목록에 섞이는 특수 코드
+            # (예: '0126Z0' — 신형우선주 등)는 가격 조회가 안 돼 "possibly
+            # delisted" 노이즈와 유니버스 슬롯 낭비만 만든다 — 후보 풀에서 제외.
+            if len(c) > 6 or not c.isdigit():
+                continue
             codes.append(c.zfill(6))
             names.append(str(row[name_col]).strip() if name_col and pd.notna(row.get(name_col)) else "")
             if marcap_col and pd.notna(row.get(marcap_col)):
