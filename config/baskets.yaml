@@ -34,10 +34,12 @@ baskets:
   # 현실적 고수익 경로다(실행 기준 ~22% CAGR, Sharpe ~1.0, MDD ~-20%). 능동 리밸런싱은
   # 비용이라 수익을 깎으므로 회전을 최소화한다 — 그래서 분기(quarterly) + 넓은 드리프트
   # 임계값(8%p) + 낮은 회전 상한으로 "사서 들고 있기"에 가깝게 운용한다.
-  # 활성화는 운영자 판단(enabled: true) + paper 검증 후.
+  # 2026-06-10 paper 운영 개시: trading.mode=paper에서 트랙레코드(60영업일) 축적 목적.
+  # paper에서는 실주문이 없고, live 전환은 별도로 ENABLE_LIVE_TRADING + --confirm-live +
+  # 바스켓별 readiness gate(basket_rebalance:kr_diversified_hold)를 모두 통과해야 한다.
   kr_diversified_hold:
     name: "분산 대형주 buy&hold (저회전)"
-    enabled: false
+    enabled: true
     rebalance:
       trigger: drift               # 분기 점검을 권장하나 drift로 큰 이탈만 교정
       drift_threshold: 0.08        # 8%p 이상 이탈 시에만 리밸런싱(잦은 매매 억제)
