@@ -1036,11 +1036,12 @@ class OrderExecutor:
         atr: float = None,
         execution_session_id: str = "",
     ) -> dict:
-        """Execute a fixed-quantity paper buy.
+        """Execute a fixed-quantity buy (paper or live).
 
-        Portfolio target-weight adapters already decide quantities at the book
-        level, so the normal risk-ratio position sizer must not override them.
-        This path is deliberately paper-only.
+        Portfolio target-weight adapters (바스켓 리밸런싱, target-weight pilot)는
+        목표 비중으로 수량을 이미 정하므로, 일반 1%-룰 사이저가 이를 덮어쓰면 안 된다.
+        live에서도 주문 집행(OrderGuard·미체결조회·체결확인·reconcile)은 일반 매수와
+        동일한 안전 장치를 거친다. 사이징만 건너뛰고 집행은 동일하다.
         """
         with PositionLock():
             return self._execute_buy_quantity_impl(
@@ -1071,8 +1072,11 @@ class OrderExecutor:
         atr: float = None,
         execution_session_id: str = "",
     ) -> dict:
-        if self.mode == "live":
-            return {"success": False, "reason": "fixed-quantity buy is paper-only"}
+        # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
+        # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
+        live_gate_check = self._live_buy_gate_check("BUY")
+        if not live_gate_check["allowed"]:
+            return {"success": False, **live_gate_check}
 
         quantity = int(quantity or 0)
         if quantity <= 0:
@@ -1142,9 +1146,64 @@ class OrderExecutor:
                 result.update({"requires_reconcile": True, "persistent_order_block": True})
             return result
 
-        order.transition(OrderStatus.SUBMITTED)
-        order.transition(OrderStatus.ACKED)
-        order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+        # 주문 집행: 사이징만 건너뛰고, 집행 안전장치는 일반 매수와 동일하게 적용한다.
+        actual_slippage_pct = None
+        if self.mode == "live":
+            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            persistent_block = self._persistent_live_order_block(symbol, order)
+            if persistent_block:
+                return persistent_block
+            if OrderGuard.has_pending(symbol):
+                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+                self._persist_order_record(order)
+                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
+            live_unfilled_block = self._live_unfilled_order_block(symbol, order)
+            if live_unfilled_block:
+                self._persist_order_record(order)
+                return live_unfilled_block
+
+            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            order.transition(OrderStatus.SUBMITTED)
+            self._persist_order_record(order)
+
+            order_result = self._execute_with_retry(
+                self.kis_api.buy_order, symbol, quantity, int(price),
+                symbol=symbol, action="BUY", price=price, quantity=quantity,
+                strategy=strategy, signal_score=signal_score, reason=reason,
+            )
+            if order_result is ORDER_RESPONSE_UNKNOWN:
+                return self._unknown_response_result(order, "BUY")
+            if order_result is None:
+                order.transition(OrderStatus.REJECTED, reason="KIS API 3회 재시도 실패")
+                OrderGuard.clear(symbol)
+                self._persist_order_record(order)
+                return {"success": False, "reason": "KIS API 주문 실패 (3회 재시도 후, dead-letter 저장됨)"}
+
+            order.transition(OrderStatus.ACKED, broker_order_id=str(order_result.get("odno", "")))
+            self._persist_order_record(order)
+            execution = self._resolve_live_execution(
+                symbol, expected_price, order_result if isinstance(order_result, dict) else None,
+                requested_qty=quantity,
+            )
+            if not execution["confirmed"]:
+                self._mark_partial_live_execution(order, execution)
+                return self._pending_live_execution_result(
+                    order=order, action="BUY", execution=execution,
+                )
+            fill_price = float(execution["fill_price"])
+            actual_slippage_pct = execution["actual_slippage_pct"]
+            self._report_execution_slippage(symbol, "BUY", expected_price, fill_price, actual_slippage_pct)
+            order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
+            self._persist_order_record(order)
+            OrderGuard.clear(symbol)
+            # 체결가 기준 비용 재계산
+            costs = self.risk_manager.calculate_transaction_costs(
+                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+            )
+        else:
+            order.transition(OrderStatus.SUBMITTED)
+            order.transition(OrderStatus.ACKED)
+            order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
         assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
 
         stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
@@ -1168,7 +1227,7 @@ class OrderExecutor:
             signal_at=_order_at,
             order_at=_order_at,
             expected_price=expected_price,
-            actual_slippage_pct=None,
+            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
             execution_session_id=execution_session_id,
             order_id=order.order_id,
         )
