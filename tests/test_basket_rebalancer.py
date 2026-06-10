@@ -425,3 +425,116 @@ class TestPriceFetchUsesDateRange:
         from core.basket_rebalancer import BasketRebalancer
         start, end = BasketRebalancer._recent_range(15)
         assert start < end
+
+
+class TestTurnoverBudgetOrdering:
+    """회전율 예산이 SELL(자금원) 우선·거래액 큰 순으로 배분되고, 넘치는 거래는 부분 실행되는지.
+
+    이전 버그: dict(YAML) 순서대로 예산을 소진해 BUY가 먼저 예산을 다 쓰면 자금원이 될
+    SELL이 통째로 누락됐고(break), 이후 작은 거래도 모두 버려졌다.
+    """
+
+    def _prepare(self, rebalancer, actual_weights, positions, budget_ratio):
+        rebalancer._fetch_current_prices = MagicMock(return_value={
+            "005930": 70_000, "000660": 100_000, "035420": 300_000,
+        })
+        rebalancer.portfolio_mgr.get_portfolio_summary = MagicMock(return_value={
+            "total_value": 100_000_000,
+        })
+        rebalancer.get_current_weights = MagicMock(return_value=actual_weights)
+        rebalancer.rebalance_cfg["max_turnover_ratio"] = budget_ratio
+        return positions
+
+    def test_sell_gets_budget_priority_over_buy(self, rebalancer):
+        """BUY가 dict 순서상 먼저라도 예산은 SELL이 먼저 가져간다."""
+        # 005930(첫 키): 0.40 목표 vs 0.25 → BUY 12M / 000660: 0.35 vs 0.50 → SELL 12M
+        positions = [SimpleNamespace(symbol="000660", quantity=200, avg_price=100_000)]
+        self._prepare(
+            rebalancer,
+            {"005930": 0.25, "000660": 0.50, "035420": 0.25},
+            positions,
+            budget_ratio=0.13,  # 예산 13M — 12M 거래 하나만 온전히 들어감
+        )
+        with patch("core.basket_rebalancer.get_all_positions", return_value=positions):
+            orders = rebalancer.plan_rebalance()
+
+        sells = [o for o in orders if o.action == "SELL"]
+        buys = [o for o in orders if o.action == "BUY"]
+        # SELL이 예산을 먼저 받아 전량(120주=12M) 계획된다.
+        assert len(sells) == 1 and sells[0].symbol == "000660"
+        assert sells[0].quantity == 120
+        # BUY는 잔여 예산(1M)만큼 부분 실행으로 축소된다(이전엔 BUY가 전량, SELL이 잘림).
+        if buys:
+            assert buys[0].quantity * buys[0].price <= 1_000_000
+            assert "부분 실행" in buys[0].reason
+        # SELL이 리스트 앞(현금 확보 먼저).
+        assert orders[0].action == "SELL"
+
+    def test_single_oversized_trade_partially_executes(self, rebalancer):
+        """예산보다 큰 단일 드리프트는 영원히 스킵되지 않고 예산만큼 부분 실행된다."""
+        self._prepare(
+            rebalancer,
+            {"005930": 0.0, "000660": 0.35, "035420": 0.25},  # 005930만 32M 부족
+            [],
+            budget_ratio=0.13,
+        )
+        with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
+            orders = rebalancer.plan_rebalance()
+
+        assert len(orders) == 1
+        o = orders[0]
+        assert o.action == "BUY" and o.symbol == "005930"
+        notional = o.quantity * o.price
+        assert notional <= 13_000_000
+        assert notional >= 12_000_000  # 예산을 거의 다 사용 (영(0)건이 아님)
+        assert "부분 실행" in o.reason
+
+    def test_smaller_trades_still_fit_after_oversized_one(self, rebalancer):
+        """큰 거래가 예산을 못 맞춰도 뒤의 작은 거래는 계속 검토된다(continue, break 아님)."""
+        # 000660 SELL 24M(예산 초과→부분), 035420 SELL 4M(온전히 들어가야 함)
+        positions = [
+            SimpleNamespace(symbol="000660", quantity=400, avg_price=100_000),
+            SimpleNamespace(symbol="035420", quantity=40, avg_price=300_000),
+        ]
+        self._prepare(
+            rebalancer,
+            {"005930": 0.40, "000660": 0.65, "035420": 0.30},
+            positions,
+            budget_ratio=0.28,  # 예산 28M
+        )
+        with patch("core.basket_rebalancer.get_all_positions", return_value=positions):
+            orders = rebalancer.plan_rebalance()
+
+        symbols = {o.symbol for o in orders}
+        assert "000660" in symbols  # 큰 SELL (전량 24M ≤ 28M)
+        assert "035420" in symbols  # 작은 SELL도 잔여 예산(4M)에 들어감
+
+
+class TestLivePlanFailClosed:
+    """live에서 KIS 잔고 미확인(broker_balance_ok=False) 시 stale 자본으로 사이징하지 않는다."""
+
+    def _prepare(self, rebalancer, broker_ok):
+        rebalancer._fetch_current_prices = MagicMock(return_value={
+            "005930": 70_000, "000660": 100_000, "035420": 300_000,
+        })
+        summary = {"total_value": 100_000_000}
+        if broker_ok is not None:
+            summary["broker_balance_ok"] = broker_ok
+        rebalancer.portfolio_mgr.get_portfolio_summary = MagicMock(return_value=summary)
+        rebalancer.get_current_weights = MagicMock(return_value={
+            "005930": 0.0, "000660": 0.0, "035420": 0.0,
+        })
+
+    def test_live_plan_blocked_when_broker_balance_unconfirmed(self, rebalancer):
+        rebalancer.config.trading["mode"] = "live"
+        self._prepare(rebalancer, broker_ok=False)
+        with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
+            orders = rebalancer.plan_rebalance()
+        assert orders == []
+
+    def test_paper_plan_unaffected_by_broker_flag(self, rebalancer):
+        rebalancer.config.trading["mode"] = "paper"
+        self._prepare(rebalancer, broker_ok=False)  # paper에선 의미 없는 플래그
+        with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
+            orders = rebalancer.plan_rebalance()
+        assert len(orders) > 0  # 정상 계획 생성

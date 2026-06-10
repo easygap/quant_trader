@@ -293,6 +293,41 @@ class TestExecutorUsesStateMachine:
         assert kis_api.buy_called is False
         assert get_position("005930", account_key="test_sm") is None
 
+    def test_live_buy_quantity_requires_live_gate_validation(self):
+        """고정수량 live BUY(execute_buy_quantity)도 live gate 미검증 executor면 KIS 호출 전 차단."""
+        from core.order_guard import OrderGuard
+        from database.repositories import get_position
+
+        class KISShouldNotBeCalled:
+            def __init__(self):
+                self.buy_called = False
+
+            def buy_order(self, symbol, quantity, price):
+                self.buy_called = True
+                return {"odno": "BYPASS-Q"}
+
+        OrderGuard.clear("005936")
+        kis_api = KISShouldNotBeCalled()
+        executor = self._make_executor()
+        executor.mode = "live"
+        executor.kis_api = kis_api
+        # live_gate_validated 기본 False — 게이트 미통과 executor
+
+        result = executor.execute_buy_quantity(
+            symbol="005936",
+            price=60_000,
+            quantity=3,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            reason="direct live quantity bypass test",
+            strategy="basket_rebalance:test",
+        )
+
+        assert result["success"] is False
+        assert result["live_gate_blocked"] is True
+        assert kis_api.buy_called is False
+        assert get_position("005936", account_key="test_sm") is None
+
     def test_live_buy_blocks_when_unfilled_lookup_fails_before_api_order(self):
         """실전 BUY는 KIS 미체결 조회 실패 시 주문 제출 전에 fail-closed 차단한다."""
         from core.order_guard import OrderGuard
@@ -928,3 +963,97 @@ class TestExecutorUsesStateMachine:
         finally:
             session.close()
             OrderGuard.clear("005931")
+
+    def test_live_buy_quantity_confirmed_fill_books_exact_quantity(self):
+        """고정수량 매수(execute_buy_quantity)도 live에서 실제 KIS 주문 → 체결확인 시
+        정확한 수량으로 포지션/거래를 반영한다(바스켓 리밸런싱 live 경로)."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position
+
+        class FullFillKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                # 고정수량이 그대로 브로커에 전달되는지 기록
+                self.last_qty = quantity
+                return {"odno": "BQ100"}
+
+            def get_order_execution_after_order(self, symbol, order_output):
+                return {
+                    "fill_price": 60_000,
+                    "filled_qty": 4,
+                    "remaining_qty": 0,
+                    "order_no": "BQ100",
+                }
+
+        OrderGuard.clear("005933")
+        kis = FullFillKIS()
+        executor = self._prepare_live_executor(self._make_executor(), kis)
+
+        result = executor.execute_buy_quantity(
+            symbol="005933",
+            price=60_000,
+            quantity=4,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            reason="basket live rebalance buy",
+            strategy="basket_rebalance:test",
+        )
+
+        assert result["success"] is True, result.get("reason")
+        assert result["quantity"] == 4
+        assert kis.last_qty == 4  # 사이저가 덮어쓰지 않고 고정수량 그대로 주문
+        pos = get_position("005933", account_key="test_sm")
+        assert pos is not None and pos.quantity == 4
+        orders = [o for o in executor.order_book._orders.values() if o.symbol == "005933"]
+        assert orders[-1].status == OrderStatus.FILLED
+        assert not OrderGuard.has_pending("005933")  # 체결 후 해제
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005933").count() == 1
+        finally:
+            session.close()
+            OrderGuard.clear("005933")
+
+    def test_live_buy_quantity_ack_without_fill_requires_reconcile(self):
+        """고정수량 live 매수도 ACK만 있고 체결 미확인이면 장부 반영을 보류한다."""
+        from core.order_guard import OrderGuard
+        from database.models import TradeHistory, get_session
+        from database.repositories import get_position
+
+        class AckNoFillKIS:
+            def has_unfilled_orders(self, symbol):
+                return False
+
+            def buy_order(self, symbol, quantity, price):
+                return {"odno": "BQ200"}
+
+            def get_order_execution_after_order(self, symbol, order_output):
+                return None  # 체결 확인 불가
+
+        OrderGuard.clear("005934")
+        executor = self._prepare_live_executor(self._make_executor(), AckNoFillKIS())
+
+        result = executor.execute_buy_quantity(
+            symbol="005934",
+            price=60_000,
+            quantity=4,
+            capital=10_000_000,
+            available_cash=10_000_000,
+            reason="basket live rebalance buy unconfirmed",
+            strategy="basket_rebalance:test",
+        )
+
+        assert result["success"] is False
+        assert result["order_pending"] is True
+        assert result["requires_reconcile"] is True
+        assert get_position("005934", account_key="test_sm") is None
+        assert OrderGuard.has_pending("005934")  # 미확정 → 가드 유지
+        session = get_session()
+        try:
+            assert session.query(TradeHistory).filter(TradeHistory.symbol == "005934").count() == 0
+        finally:
+            session.close()
+            OrderGuard.clear("005934")

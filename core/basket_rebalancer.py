@@ -13,9 +13,12 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 from loguru import logger
+
+_KST = ZoneInfo("Asia/Seoul")
 
 from config.config_loader import Config
 from core.portfolio_manager import PortfolioManager
@@ -100,6 +103,10 @@ class BasketRebalancer:
         if self._target_stock_weight is None:
             return max_stock
         return max(0.0, min(self._target_stock_weight, max_stock))
+
+    def _is_live(self) -> bool:
+        """실전(live) 모드 여부."""
+        return str(self.config.trading.get("mode", "paper")).lower() == "live"
 
     # ------------------------------------------------------------------
     # Config
@@ -216,14 +223,15 @@ class BasketRebalancer:
 
         elif trigger == "weekly":
             weekday = self.rebalance_cfg.get("weekday", 0)
-            today = datetime.now().weekday()
+            # 한국 거래일 기준(KST). 호스트 TZ가 UTC면 자정 부근에 요일이 어긋날 수 있다.
+            today = datetime.now(_KST).weekday()
             if today == weekday:
                 return True, f"주간 리밸런싱 (요일: {today})"
             return False, f"리밸런싱 요일 아님 (오늘: {today}, 대상: {weekday})"
 
         elif trigger == "monthly":
             day = self.rebalance_cfg.get("day", 1)
-            today = datetime.now().day
+            today = datetime.now(_KST).day
             if today == day:
                 return True, f"월간 리밸런싱 (일: {day})"
             return False, f"리밸런싱 일 아님 (오늘: {today}, 대상: {day})"
@@ -243,6 +251,11 @@ class BasketRebalancer:
         """
         prices = prices or self._fetch_current_prices()
         summary = self.portfolio_mgr.get_portfolio_summary(current_prices=prices)
+        # live에서 KIS 잔고가 확인되지 않으면(broker_balance_ok=False) stale DB 자본으로
+        # 주문 수량을 사이징하지 않는다 — get_current_capital/get_available_cash의 fail-closed와 동일 기조.
+        if self._is_live() and summary.get("broker_balance_ok") is False:
+            logger.error("live 리밸런싱 중단: KIS 잔고 미확인 — stale 자본으로 주문 사이징 금지(fail-closed)")
+            return []
         total_value = summary.get("total_value", 0)
         if total_value <= 0:
             logger.warning("총 자산이 0 — 리밸런싱 불가")
@@ -261,51 +274,65 @@ class BasketRebalancer:
         )
         pos_map = {p.symbol: p for p in positions}
 
-        orders: list[RebalanceOrder] = []
-        total_trade_amount = 0.0
-
+        # 1) 후보 거래를 먼저 모두 계산(회전율 예산 적용 전). 거래액은 실제 주문 명목금액 기준.
+        candidates: list[tuple[RebalanceOrder, float]] = []
         for symbol in targets:
             target_w = targets[symbol]
             actual_w = actuals.get(symbol, 0.0)
             drift = target_w - actual_w
-
-            target_value = investable * target_w
-            actual_value = investable * actual_w
-            trade_value = abs(target_value - actual_value)
-
+            trade_value = abs(investable * target_w - investable * actual_w)
             if trade_value < min_trade:
                 continue
-
-            if total_trade_amount + trade_value > max_turnover_amount:
-                trade_value = max(0, max_turnover_amount - total_trade_amount)
-                if trade_value < min_trade:
-                    break
-
             price = prices.get(symbol, 0)
             if price <= 0:
                 logger.warning("종목 {} 가격 조회 불가 — 스킵", symbol)
                 continue
-
             quantity = int(trade_value / price)
             if quantity <= 0:
                 continue
-
             if drift > 0:
-                orders.append(RebalanceOrder(
+                candidates.append((RebalanceOrder(
                     symbol=symbol, action="BUY", quantity=quantity, price=price,
                     reason=f"비중 부족 ({actual_w:.1%} → {target_w:.1%}, +{drift:.1%})",
-                ))
+                ), quantity * price))
             elif drift < 0:
                 pos = pos_map.get(symbol)
-                if pos:
-                    sell_qty = min(quantity, pos.quantity)
-                    if sell_qty > 0:
-                        orders.append(RebalanceOrder(
-                            symbol=symbol, action="SELL", quantity=sell_qty, price=price,
-                            reason=f"비중 초과 ({actual_w:.1%} → {target_w:.1%}, {drift:.1%})",
-                        ))
+                if not pos:
+                    continue
+                sell_qty = min(quantity, pos.quantity)
+                if sell_qty <= 0:
+                    continue
+                candidates.append((RebalanceOrder(
+                    symbol=symbol, action="SELL", quantity=sell_qty, price=price,
+                    reason=f"비중 초과 ({actual_w:.1%} → {target_w:.1%}, {drift:.1%})",
+                ), sell_qty * price))
 
-            total_trade_amount += trade_value
+        # 2) SELL을 먼저(현금 확보) 두고 거래액 큰 순으로 정렬해 회전율 예산 우선권을 준다.
+        #    (기존엔 dict 순서대로라 BUY가 예산을 먼저 소진해 자금원 SELL이 누락될 수 있었다.)
+        candidates.sort(key=lambda c: (0 if c[0].action == "SELL" else 1, -c[1]))
+
+        # 3) 회전율 예산 적용: 개별 거래가 예산을 넘으면 그 거래만 건너뛰고(continue) 더 작은
+        #    거래는 계속 검토한다(기존 break는 이후 거래를 모두 누락시켰다).
+        orders: list[RebalanceOrder] = []
+        total_trade_amount = 0.0
+        for order, notional in candidates:
+            remaining = max_turnover_amount - total_trade_amount
+            if remaining < min_trade:
+                # 예산 소진 — 이후 후보는 모두 min_trade 이상이라 어차피 담을 수 없다.
+                break
+            if notional > remaining:
+                # 부분 실행: 예산 잔여분만큼 수량을 줄여 집행한다(드리프트 점진 수렴).
+                shrunk_qty = int(remaining / order.price)
+                if shrunk_qty <= 0:
+                    continue
+                shrunk_notional = shrunk_qty * order.price
+                if shrunk_notional < min_trade:
+                    continue
+                order.quantity = shrunk_qty
+                order.reason += " (회전상한 부분 실행)"
+                notional = shrunk_notional
+            orders.append(order)
+            total_trade_amount += notional
 
         sells = [o for o in orders if o.action == "SELL"]
         buys = [o for o in orders if o.action == "BUY"]
