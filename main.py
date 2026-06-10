@@ -1010,6 +1010,11 @@ def run_live_trading(args):
 
     old_mode = config.trading.get("mode", "paper")
     config._settings.setdefault("trading", {})["mode"] = "live"
+    # 모드 플립 직후 auto_entry의 ENV '켜기' 오버라이드를 YAML 값으로 강제 복귀 —
+    # 로드 시점(YAML mode=paper)에는 _resolve_auto_entry의 live-ignore 분기가
+    # 발동하지 않아, paper 실험용 QUANT_AUTO_ENTRY=true 잔존 시 signal-only 설정의
+    # live가 자동매수하게 되는 구멍을 막는다.
+    config.enforce_live_auto_entry_policy()
 
     try:
         # 토큰 사전 발급 (필수 환경변수 미설정 시 명확히 종료)
