@@ -21,6 +21,8 @@ from loguru import logger  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="바스켓 paper 운영 평가 (승격 판정)")
+    parser.add_argument("--basket", type=str, default=None,
+                        help="평가할 바스켓 이름 (미지정 시 enabled 바스켓 전체를 각각 평가)")
     parser.add_argument("--min-days", type=int, default=60, help="필요 운영 영업일 수 (기본 60)")
     parser.add_argument("--out", type=str, default=None, help="평가 리포트 저장 경로 (Markdown)")
     args = parser.parse_args()
@@ -29,19 +31,35 @@ def main() -> int:
         collect_basket_paper_evaluation,
         format_evaluation_report,
     )
+    from core.basket_rebalancer import BasketRebalancer
 
-    result, basket_label = collect_basket_paper_evaluation(min_days=args.min_days)
-    report = format_evaluation_report(result, basket_name=basket_label)
-    print(report)
+    if args.basket:
+        names = [args.basket]
+    else:
+        names = BasketRebalancer.get_enabled_baskets()
+        if not names:
+            logger.warning("enabled=true인 바스켓이 없습니다. --basket으로 지정하세요.")
+            return 0
+
+    reports = []
+    any_fail = False
+    for name in names:
+        result, basket_name = collect_basket_paper_evaluation(
+            min_days=args.min_days, basket_name=name,
+        )
+        report = format_evaluation_report(result, basket_name=basket_name)
+        print(report)
+        reports.append(report)
+        any_fail = any_fail or result["verdict"] == "FAIL_REVIEW"
 
     if args.out:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(report + "\n", encoding="utf-8")
+        out.write_text("\n\n".join(reports) + "\n", encoding="utf-8")
         logger.info("평가 리포트 저장: {}", out)
 
     # exit code: WAIT/PASS=0(정상 흐름), FAIL_REVIEW=1(운영자 확인 필요)
-    return 1 if result["verdict"] == "FAIL_REVIEW" else 0
+    return 1 if any_fail else 0
 
 
 if __name__ == "__main__":

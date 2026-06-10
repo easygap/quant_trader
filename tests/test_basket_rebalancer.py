@@ -80,6 +80,25 @@ def rebalancer(mock_baskets_config):
             return rb
 
 
+class TestDefaultAccountKey:
+    """paper/live 공통 기본 계정·귀속 키 = basket_rebalance:<name> (격리·귀속 보장)."""
+
+    def test_default_keys_are_basket_scoped(self, rebalancer):
+        assert rebalancer.account_key == "basket_rebalance:test_basket"
+        assert rebalancer.execution_strategy == "basket_rebalance:test_basket"
+
+    def test_explicit_keys_still_respected(self, mock_baskets_config):
+        with patch("core.basket_rebalancer.PortfolioManager"), \
+             patch("core.basket_rebalancer.DataCollector"):
+            from core.basket_rebalancer import BasketRebalancer
+            rb = BasketRebalancer(
+                basket_name="test_basket", config=_MockConfig(),
+                account_key="custom", execution_strategy="custom_strat",
+            )
+        assert rb.account_key == "custom"
+        assert rb.execution_strategy == "custom_strat"
+
+
 class TestBasketConfig:
 
     def test_get_enabled_baskets(self, mock_baskets_config):
@@ -215,7 +234,8 @@ class TestExecute:
         kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
         assert kwargs["capital"] == 100_000_000
         assert kwargs["available_cash"] == 5_000_000
-        assert kwargs["strategy"] == "basket_rebalance"
+        # 거래 귀속: 바스켓 이름 포함 키(어느 바스켓의 트랙레코드인지 구분 가능해야 함)
+        assert kwargs["strategy"] == "basket_rebalance:test_basket"
 
     def test_live_execute_requires_confirmed_gate(self, rebalancer, monkeypatch):
         """live 리밸런싱은 확인 게이트 없이 주문 실행부에 도달하면 안 된다."""
@@ -610,12 +630,10 @@ class TestBasketAccountIsolation:
         assert check_basket_account_isolation(["a"], self._config(), "paper") == []
         assert check_basket_account_isolation([], self._config(), "live") == []
 
-    def test_two_paper_baskets_blocked(self):
-        """paper는 모두 기본 계정을 공유하므로 2개 이상이면 차단."""
+    def test_two_paper_baskets_pass_with_key_isolation(self):
+        """paper는 바스켓별 가상 계정 키(basket_rebalance:<name>)로 자연 격리 — 통과."""
         from core.basket_rebalancer import check_basket_account_isolation
-        issues = check_basket_account_isolation(["a", "b"], self._config(), "paper")
-        assert len(issues) == 1
-        assert "공유" in issues[0] and "트랙레코드" in issues[0]
+        assert check_basket_account_isolation(["a", "b"], self._config(), "paper") == []
 
     def test_two_live_baskets_same_default_account_blocked(self):
         """live라도 계좌 미분리(둘 다 기본 계좌)면 차단."""
