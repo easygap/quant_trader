@@ -31,6 +31,44 @@ def rebalance_live_strategy_id(basket_name: str) -> str:
     return f"basket_rebalance:{basket_name}"
 
 
+def check_basket_account_isolation(basket_names, config, mode: str) -> list[str]:
+    """여러 enabled 바스켓이 같은 계좌(자본 풀)를 공유하는지 검사한다. fail-closed.
+
+    각 BasketRebalancer는 자기 목표 비중을 '총자산 × stock_fraction'에 독립적으로
+    배분한다. 두 바스켓이 같은 자본을 공유하면 예컨대 80% + 80% = 160%를 배분하려
+    들어 과배분·상호 간섭이 생기고, paper에서는 동일 default 계정의 NAV 시계열이
+    섞여 60영업일 트랙레코드가 오염된다. 바스켓을 여러 개 운영하려면 계좌를
+    분리해야 한다(live: kis_api.accounts에 basket_rebalance:<name>별 계좌 지정).
+
+    반환: 이슈 문자열 리스트 (빈 리스트 = 통과).
+    """
+    names = list(basket_names or [])
+    if len(names) <= 1:
+        return []
+
+    if str(mode).lower() != "live":
+        return [
+            f"enabled 바스켓 {len(names)}개({', '.join(names)})가 paper 기본 계정(자본 풀)을 "
+            "공유합니다 — 각 바스켓이 같은 자본에 목표 비중을 독립 배분해 과배분되고 "
+            "트랙레코드(NAV 시계열)가 섞입니다. 하나만 enabled로 두거나 운영을 분리하세요."
+        ]
+
+    by_account: dict[str, list[str]] = {}
+    for name in names:
+        try:
+            acct = config.get_account_no(rebalance_live_strategy_id(name)) or "(기본 계좌)"
+        except Exception as exc:
+            return [f"바스켓 '{name}' 계좌 해석 실패(fail-closed): {exc}"]
+        by_account.setdefault(acct, []).append(name)
+
+    return [
+        f"live 계좌 '{acct}'를 바스켓 {', '.join(ns)}가 공유합니다 — 같은 잔고에 "
+        "목표 비중이 중복 배분됩니다. kis_api.accounts에 바스켓별 계좌를 분리 지정하세요."
+        for acct, ns in by_account.items()
+        if len(ns) > 1
+    ]
+
+
 class RebalanceOrder:
     """리밸런싱 개별 주문 정보."""
 
