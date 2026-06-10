@@ -589,3 +589,55 @@ class TestMarketSnapshotLiquidity:
         assert result["executed"] == 1
         kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
         assert kwargs["avg_daily_volume"] == pytest.approx(123_456.0)
+
+
+class TestBasketAccountIsolation:
+    """여러 enabled 바스켓의 계좌(자본 풀) 공유 차단 — 과배분·트랙레코드 오염 방지."""
+
+    def _config(self, accounts=None):
+        cfg = _MockConfig()
+        cfg.kis_api = {"account_no": "11111111-01", "accounts": accounts or {}}
+        def get_account_no(strategy=""):
+            accts = cfg.kis_api.get("accounts", {}) or {}
+            if strategy and strategy in accts:
+                return accts[strategy] or cfg.kis_api.get("account_no", "")
+            return cfg.kis_api.get("account_no", "")
+        cfg.get_account_no = get_account_no
+        return cfg
+
+    def test_single_basket_passes(self):
+        from core.basket_rebalancer import check_basket_account_isolation
+        assert check_basket_account_isolation(["a"], self._config(), "paper") == []
+        assert check_basket_account_isolation([], self._config(), "live") == []
+
+    def test_two_paper_baskets_blocked(self):
+        """paper는 모두 기본 계정을 공유하므로 2개 이상이면 차단."""
+        from core.basket_rebalancer import check_basket_account_isolation
+        issues = check_basket_account_isolation(["a", "b"], self._config(), "paper")
+        assert len(issues) == 1
+        assert "공유" in issues[0] and "트랙레코드" in issues[0]
+
+    def test_two_live_baskets_same_default_account_blocked(self):
+        """live라도 계좌 미분리(둘 다 기본 계좌)면 차단."""
+        from core.basket_rebalancer import check_basket_account_isolation
+        issues = check_basket_account_isolation(["a", "b"], self._config(), "live")
+        assert len(issues) == 1
+        assert "공유" in issues[0]
+
+    def test_two_live_baskets_separate_accounts_pass(self):
+        """live에서 kis_api.accounts로 바스켓별 계좌를 분리하면 통과."""
+        from core.basket_rebalancer import check_basket_account_isolation
+        cfg = self._config(accounts={
+            "basket_rebalance:a": "11111111-01",
+            "basket_rebalance:b": "22222222-01",
+        })
+        assert check_basket_account_isolation(["a", "b"], cfg, "live") == []
+
+    def test_account_resolution_error_fails_closed(self):
+        from core.basket_rebalancer import check_basket_account_isolation
+        cfg = self._config()
+        def boom(strategy=""):
+            raise RuntimeError("config broken")
+        cfg.get_account_no = boom
+        issues = check_basket_account_isolation(["a", "b"], cfg, "live")
+        assert len(issues) == 1 and "fail-closed" in issues[0]
