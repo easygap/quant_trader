@@ -630,6 +630,38 @@ def test_paper_buy_quantity_fails_closed_when_preflight_missing(fresh_db, monkey
     assert get_position("005930", account_key="preflight_missing_test") is None
 
 
+def test_paper_buy_quantity_basket_strategy_exempt_from_preflight(fresh_db, monkeypatch):
+    """바스켓 리밸런싱(basket_rebalance[:<name>])은 신호 전략 preflight/runtime 상태머신을
+    요구하지 않는다 — 바스켓 자체 거버넌스(enabled·드리프트·회전상한)가 그 역할.
+    preflight가 없어도(다른 전략이면 차단되는 상황) paper 매수가 진행돼야 한다."""
+    from core.order_executor import OrderExecutor
+    from database.repositories import get_position
+
+    executor = OrderExecutor(account_key="basket_exempt_test")
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    # preflight 산출물 없음 + runtime 조회도 실패하는 환경 (바스켓은 상태머신 밖)
+    monkeypatch.setattr("core.paper_preflight.load_preflight_status", lambda strategy, strict=False: None)
+    monkeypatch.setattr(
+        "core.paper_runtime.get_paper_runtime_state",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no runtime for baskets")),
+    )
+
+    result = executor.execute_buy_quantity(
+        symbol="005930",
+        price=60_000,
+        quantity=3,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="basket exempt test",
+        strategy="basket_rebalance:kr_diversified_hold",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is True, result.get("reason")
+    pos = get_position("005930", account_key="basket_exempt_test")
+    assert pos is not None and pos.quantity == 3
+
+
 def test_paper_buy_quantity_blocks_on_preflight_fail(fresh_db, monkeypatch):
     """저장된 preflight fail은 runtime normal 여부와 무관하게 신규 진입을 차단한다."""
     from core.order_executor import OrderExecutor
