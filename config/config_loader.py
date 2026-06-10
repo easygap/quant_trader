@@ -177,6 +177,12 @@ def _resolve_auto_entry(settings: dict) -> dict:
 
     env_raw = os.environ.get("QUANT_AUTO_ENTRY")
 
+    # YAML 값은 엄격 파서로 해석 — bool("false")==True 같은 문자열 함정 차단.
+    # (따옴표 하나로 auto_entry 마스터 스위치가 뒤집히면 live에서 실돈 자동매수다)
+    yaml_resolved = _coerce_bool_setting(
+        yaml_value, default=False, key="trading.auto_entry",
+    )
+
     if env_raw is not None:
         normalized = env_raw.strip().lower()
         if normalized in _BOOL_TRUE:
@@ -190,20 +196,25 @@ def _resolve_auto_entry(settings: dict) -> dict:
             )
         source = "ENV"
     else:
-        resolved = bool(yaml_value)
+        resolved = yaml_resolved
         source = "YAML"
 
-    # live 모드에서는 환경변수 오버라이드 무시
+    # live 모드에서는 ENV의 '켜는 방향' 오버라이드 무시 (끄는 방향은 fail-safe라 존중).
+    # 주의: 정식 live 경로는 YAML mode=paper로 로드 후 mode를 플립하므로 이 분기만으로는
+    # 부족하다 — run_live_trading이 플립 직후 enforce_live_auto_entry_policy()를 호출해
+    # 같은 정책을 다시 적용한다(아래 보존 값 사용).
     if mode == "live" and resolved and source == "ENV":
         _log.warning(
             "QUANT_AUTO_ENTRY=true 이지만 live 모드에서는 무시됩니다. "
             "live 모드의 auto_entry는 YAML 설정(%s)을 따릅니다.", yaml_value,
         )
-        resolved = bool(yaml_value)
+        resolved = yaml_resolved
         source = "YAML (live override)"
 
     trading["auto_entry"] = resolved
     trading["_auto_entry_source"] = source
+    # 모드 플립 후 재적용을 위해 YAML 원천 값을 보존(엄격 파싱 결과)
+    trading["_auto_entry_yaml"] = yaml_resolved
 
     _log.info(
         "auto_entry resolved: %s (source=%s, yaml=%s, env=%s, mode=%s)",
@@ -473,6 +484,28 @@ class Config:
     def auto_entry_source(self) -> str:
         """auto_entry 값의 출처: 'ENV', 'YAML', 'YAML (live override)'."""
         return self.trading.get("_auto_entry_source", "YAML")
+
+    def enforce_live_auto_entry_policy(self) -> None:
+        """live 진입 시 auto_entry의 ENV '켜는 방향' 오버라이드를 YAML 값으로 강제 복귀.
+
+        _resolve_auto_entry의 live-ignore 분기는 '로드 시점 YAML mode'를 보므로,
+        정식 live 경로(YAML mode=paper로 로드 → run_live_trading이 mode 플립)에서는
+        발동하지 않는다 — paper 실험용 QUANT_AUTO_ENTRY=true가 셸/.env에 남아 있으면
+        signal-only 설정의 live가 자동매수하게 되는 구멍. 모드 플립 직후 이 메서드를
+        호출해 같은 정책을 재적용한다. 끄는 방향(ENV false)은 fail-safe라 존중.
+        """
+        trading = self.trading
+        if (
+            trading.get("_auto_entry_source") == "ENV"
+            and trading.get("auto_entry")
+        ):
+            yaml_resolved = bool(trading.get("_auto_entry_yaml", False))
+            logging.getLogger("config_loader").warning(
+                "live 진입: QUANT_AUTO_ENTRY=true(ENV)는 무시되고 YAML 값(%s)을 따릅니다.",
+                yaml_resolved,
+            )
+            trading["auto_entry"] = yaml_resolved
+            trading["_auto_entry_source"] = "YAML (live override)"
 
     @property
     def yaml_hash(self) -> str:
