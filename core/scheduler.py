@@ -1552,15 +1552,12 @@ class Scheduler:
                             self.discord.send_message(msg, critical=True)
                             continue
 
+                    # 계정·귀속 키는 paper/live·CLI/스케줄러 공통(basket_rebalance:<name>)
+                    # — 트랙레코드가 바스켓별 한 곳에 쌓인다.
                     rebalancer = BasketRebalancer(
                         basket_name=name, config=self.config,
-                        # paper는 CLI(--mode rebalance)와 동일한 기본 계정("")을 쓴다 —
-                        # 스케줄러가 전략명 계정에 기록하면 일일 CLI로 쌓던 트랙레코드
-                        # (NAV 시계열·평가·health 감시 모두 기본 계정 기준)와 찢어진다.
-                        account_key=live_strategy_name if is_live else "",
-                        execution_strategy=(
-                            live_strategy_name if is_live else "basket_rebalance"
-                        ),
+                        account_key=live_strategy_name,
+                        execution_strategy=live_strategy_name,
                     )
                     if is_live:
                         sync_result = rebalancer.portfolio_mgr.sync_with_broker()
@@ -1574,26 +1571,27 @@ class Scheduler:
                             continue
 
                     should, reason = rebalancer.should_rebalance()
-                    if not should:
+                    if should:
+                        orders = rebalancer.plan_rebalance()
+                        if orders:
+                            result = rebalancer.execute(
+                                orders,
+                                live_confirmed=(
+                                    is_live and self._live_gate_validated
+                                ),
+                            )
+                            summary = (
+                                f"🔄 바스켓 '{name}' 리밸런싱 완료: "
+                                f"실행 {result['executed']}건, 실패 {result['failed']}건"
+                            )
+                            logger.info(summary)
+                            self.discord.send_message(summary)
+                    else:
                         logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
-                        continue
 
-                    orders = rebalancer.plan_rebalance()
-                    if not orders:
-                        continue
-
-                    result = rebalancer.execute(
-                        orders,
-                        live_confirmed=(
-                            is_live and self._live_gate_validated
-                        ),
-                    )
-                    summary = (
-                        f"🔄 바스켓 '{name}' 리밸런싱 완료: "
-                        f"실행 {result['executed']}건, 실패 {result['failed']}건"
-                    )
-                    logger.info(summary)
-                    self.discord.send_message(summary)
+                    # 트랙레코드: 스케줄러 단독 운영(상시 구동)에서도 바스켓 계정의
+                    # 일일 NAV 스냅샷이 쌓이도록 거래 여부와 무관하게 저장(멱등 upsert).
+                    rebalancer.save_daily_nav_snapshot()
 
                 except Exception as e:
                     logger.error("바스켓 '{}' 리밸런싱 오류: {}", name, e)

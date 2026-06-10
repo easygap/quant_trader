@@ -35,23 +35,19 @@ def check_basket_account_isolation(basket_names, config, mode: str) -> list[str]
     """여러 enabled 바스켓이 같은 계좌(자본 풀)를 공유하는지 검사한다. fail-closed.
 
     각 BasketRebalancer는 자기 목표 비중을 '총자산 × stock_fraction'에 독립적으로
-    배분한다. 두 바스켓이 같은 자본을 공유하면 예컨대 80% + 80% = 160%를 배분하려
-    들어 과배분·상호 간섭이 생기고, paper에서는 동일 default 계정의 NAV 시계열이
-    섞여 60영업일 트랙레코드가 오염된다. 바스켓을 여러 개 운영하려면 계좌를
-    분리해야 한다(live: kis_api.accounts에 basket_rebalance:<name>별 계좌 지정).
+    배분한다. 두 바스켓이 같은 자본(계좌)을 공유하면 예컨대 80% + 80% = 160%를
+    배분하려 들어 과배분·상호 간섭이 생긴다.
+
+    paper: 바스켓별 가상 계정 키(basket_rebalance:<name>)로 DB가 격리되고 각자
+    initial_capital 기준으로 독립 집계되므로 자연 격리 — 통과.
+    live: 같은 KIS 실계좌(잔고)를 공유하면 차단. 다중 바스켓 live 운영은
+    kis_api.accounts에 basket_rebalance:<name>별 계좌를 분리 지정해야 한다.
 
     반환: 이슈 문자열 리스트 (빈 리스트 = 통과).
     """
     names = list(basket_names or [])
-    if len(names) <= 1:
+    if len(names) <= 1 or str(mode).lower() != "live":
         return []
-
-    if str(mode).lower() != "live":
-        return [
-            f"enabled 바스켓 {len(names)}개({', '.join(names)})가 paper 기본 계정(자본 풀)을 "
-            "공유합니다 — 각 바스켓이 같은 자본에 목표 비중을 독립 배분해 과배분되고 "
-            "트랙레코드(NAV 시계열)가 섞입니다. 하나만 enabled로 두거나 운영을 분리하세요."
-        ]
 
     by_account: dict[str, list[str]] = {}
     for name in names:
@@ -98,11 +94,16 @@ class BasketRebalancer:
         basket_name: str,
         config: Config = None,
         account_key: str = "",
-        execution_strategy: str = "basket_rebalance",
+        execution_strategy: str = "",
     ):
         self.config = config or Config.get()
-        self.account_key = account_key
-        self.execution_strategy = execution_strategy or "basket_rebalance"
+        # 계정·귀속 키 기본값: paper/live 공통으로 바스켓 전용 키(basket_rebalance:<name>).
+        # 기본 계정("")은 전 계정 합산 뷰라서 다른 전략의 paper 거래 한 건에도 NAV·드리프트·
+        # 평가가 오염되고, 이름 없는 strategy("basket_rebalance")로는 어느 바스켓의 트랙레코드
+        # 인지 귀속이 불가능하다(다른 바스켓 기록으로 승격되는 구멍). 키로 격리·귀속한다.
+        default_key = rebalance_live_strategy_id(basket_name)
+        self.account_key = account_key or default_key
+        self.execution_strategy = execution_strategy or default_key
         self.basket_name = basket_name
 
         baskets_cfg = self._load_baskets_config()
@@ -145,6 +146,31 @@ class BasketRebalancer:
     def _is_live(self) -> bool:
         """실전(live) 모드 여부."""
         return str(self.config.trading.get("mode", "paper")).lower() == "live"
+
+    def save_daily_nav_snapshot(self) -> bool:
+        """바스켓 계정의 일일 NAV 스냅샷 저장. 트랙레코드 시계열의 1행.
+
+        보유 종목 가격이 전부 확보됐을 때만 저장한다 — 가격 미확보 시
+        avg_price 폴백으로 평가된 가짜 NAV가 '커버된 영업일'로 집계되는 것보다,
+        스킵하고 health의 끊김 감지에 노출되는 편이 정직하다.
+        (account_key, date) upsert라 같은 날 중복 호출은 멱등.
+        """
+        try:
+            snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
+            prices = {s: v["price"] for s, v in snapshot.items()}
+            positions = get_all_positions(account_key=self.account_key)
+            missing = [p.symbol for p in positions if p.symbol not in prices]
+            if missing:
+                logger.warning(
+                    "바스켓 '{}' NAV 스냅샷 스킵 — 가격 미확보 종목: {} (가짜 NAV 방지)",
+                    self.basket_name, missing,
+                )
+                return False
+            self.portfolio_mgr.save_daily_snapshot(current_prices=prices or None)
+            return True
+        except Exception as e:
+            logger.warning("바스켓 '{}' NAV 스냅샷 저장 실패: {}", self.basket_name, e)
+            return False
 
     # ------------------------------------------------------------------
     # Config
