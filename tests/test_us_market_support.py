@@ -83,3 +83,33 @@ def test_config_markets_property():
     m = Config.get().markets
     assert isinstance(m, dict)
     assert "korea" in m or "us" in m or len(m) >= 0
+
+
+def test_fdr_listing_table_filters_non_standard_codes(monkeypatch):
+    import sys
+    """FDR 후보 풀에서 6자리 숫자가 아닌 특수 코드('0126Z0' 등)를 제외한다 —
+    가격 조회 불가 노이즈·유니버스 슬롯 낭비 방지."""
+    import pandas as pd
+    import core.data_collector as dc
+
+    fake = pd.DataFrame({
+        "Code": ["005930", "0126Z0", "37550K", "660", "00104K"],
+        "Name": ["삼성전자", "신형우선주", "우선주K", "SK하이닉스", "특수"],
+        "Marcap": [5e12, 1e9, 1e9, 4e12, 1e9],
+    })
+
+    class _FDR:
+        @staticmethod
+        def StockListing(market):
+            return fake
+
+    dc.clear_fdr_listing_cache()
+    monkeypatch.setattr(dc, "HAS_FDR", True)
+    monkeypatch.setitem(sys.modules, "FinanceDataReader", _FDR)
+    try:
+        tab = dc._fdr_stock_listing_table("KOSPI", None)
+    finally:
+        dc.clear_fdr_listing_cache()
+
+    codes = set(tab["Code"])
+    assert codes == {"005930", "000660"}  # 5자리 숫자는 zfill로 정상화, 특수코드 제외
