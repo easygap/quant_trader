@@ -38,16 +38,24 @@ def _eval_result(verdict, issues=None, progress=60):
     }
 
 
+def _config(use_mock=False):
+    """게이트 테스트용 config — 기본은 실계좌(use_mock=False, 평가 차단 적용)."""
+    return SimpleNamespace(kis_api={"use_mock": use_mock})
+
+
 class TestBasketLiveGate:
-    def _run(self, strategy_name, verdict="PASS_CANDIDATE", eval_issues=None, progress=60):
+    def _run(self, strategy_name, verdict="PASS_CANDIDATE", eval_issues=None,
+             progress=60, use_mock=False, baskets=None):
         with patch(
             "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
-            return_value=_BASKETS,
+            return_value=baskets or _BASKETS,
         ), patch(
             "core.basket_evaluation.collect_basket_paper_evaluation",
             return_value=(_eval_result(verdict, eval_issues, progress), "label"),
-        ):
-            return check_basket_live_readiness(SimpleNamespace(), strategy_name)
+        ) as collect:
+            issues = check_basket_live_readiness(_config(use_mock), strategy_name)
+        self._last_collect = collect
+        return issues
 
     def test_pass_candidate_opens_gate(self):
         issues = self._run("basket_rebalance:kr_diversified_hold")
@@ -64,7 +72,7 @@ class TestBasketLiveGate:
             return_value=(_eval_result("PASS_CANDIDATE"), "label"),
         ) as collect:
             check_basket_live_readiness(
-                SimpleNamespace(), "basket_rebalance:kr_diversified_hold"
+                _config(), "basket_rebalance:kr_diversified_hold"
             )
         assert collect.call_args.kwargs["basket_name"] == "kr_diversified_hold"
 
@@ -109,7 +117,7 @@ class TestBasketLiveGate:
             side_effect=RuntimeError("db corrupted"),
         ):
             issues = check_basket_live_readiness(
-                SimpleNamespace(), "basket_rebalance:kr_diversified_hold"
+                _config(), "basket_rebalance:kr_diversified_hold"
             )
         assert any("fail-closed" in i for i in issues)
 
@@ -121,7 +129,7 @@ class TestGateRouting:
             "core.live_gate.validate_live_readiness",
             return_value=["canonical issue"],
         ) as canonical:
-            issues = check_live_readiness_gate(SimpleNamespace(), "scoring")
+            issues = check_live_readiness_gate(_config(), "scoring")
         canonical.assert_called_once()
         assert issues == ["canonical issue"]
 
@@ -138,7 +146,64 @@ class TestGateRouting:
             return_value=(_eval_result("WAIT", progress=1), "label"),
         ):
             issues = check_live_readiness_gate(
-                SimpleNamespace(), "basket_rebalance:kr_diversified_hold"
+                _config(), "basket_rebalance:kr_diversified_hold"
             )
         canonical.assert_not_called()
         assert len(issues) == 1 and "WAIT" in issues[0]
+
+
+class TestTimelineLevers:
+    """live 전환 타임라인 레버 — 모의서버 리허설 즉시 허용 + 승격 기간 운영자 설정."""
+
+    def _run(self, **kw):
+        return TestBasketLiveGate._run(TestBasketLiveGate(), **kw)
+
+    def test_mock_server_allows_rehearsal_during_wait(self):
+        """use_mock=true(KIS 모의서버, 실돈 아님)면 평가 WAIT여도 게이트 통과 —
+        런북 Phase 1 리허설을 60일 평가와 병행 가능."""
+        issues = self._run(
+            strategy_name="basket_rebalance:kr_diversified_hold",
+            verdict="WAIT", progress=1, use_mock=True,
+        )
+        assert issues == []
+
+    def test_real_account_still_blocked_during_wait(self):
+        """실계좌(use_mock=false)는 평가 통과 전 차단 유지(기존 보호 불변)."""
+        issues = self._run(
+            strategy_name="basket_rebalance:kr_diversified_hold",
+            verdict="WAIT", progress=1, use_mock=False,
+        )
+        assert len(issues) == 1 and "WAIT" in issues[0]
+
+    def test_mock_server_does_not_waive_config_issues(self):
+        """모의서버 완화는 '평가 기간'에만 적용 — 비중합 오류 같은 설정 결함은 여전히 차단."""
+        issues = self._run(
+            strategy_name="basket_rebalance:kr_bad_weights",
+            verdict="WAIT", use_mock=True,
+        )
+        assert any("비중 합" in i for i in issues)
+
+    def test_promotion_min_days_resolved_by_collector_single_source(self):
+        """promotion.min_trading_days는 수집기(collect)가 해석한다 — CLI·게이트가
+        같은 값으로 판정(단일 소스). 명시 min_days는 설정보다 우선."""
+        from core.basket_evaluation import collect_basket_paper_evaluation
+
+        baskets = {
+            "bk_md": {
+                "enabled": True,
+                "holdings": {"005930": 1.0},
+                "promotion": {"min_trading_days": 20},
+            },
+        }
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=baskets,
+        ):
+            result, _ = collect_basket_paper_evaluation(
+                basket_name="bk_md", include_benchmark=False,
+            )
+            assert result["min_trading_days"] == 20
+            result2, _ = collect_basket_paper_evaluation(
+                basket_name="bk_md", include_benchmark=False, min_days=5,
+            )
+            assert result2["min_trading_days"] == 5
