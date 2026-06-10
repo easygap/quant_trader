@@ -59,12 +59,30 @@ def _override_with_env(settings: dict) -> dict:
     settings["kis_api"]["app_key"] = os.environ.get("KIS_APP_KEY", "")
     settings["kis_api"]["app_secret"] = os.environ.get("KIS_APP_SECRET", "")
     settings["kis_api"]["account_no"] = os.environ.get("KIS_ACCOUNT_NO", settings["kis_api"].get("account_no", ""))
-    # 전략별 계좌 (다중 계좌): KIS_ACCOUNT_NO_SCORING, KIS_ACCOUNT_NO_MEAN_REVERSION 등으로 덮어씀
+    # 전략별 계좌 (다중 계좌): KIS_ACCOUNT_NO_SCORING, KIS_ACCOUNT_NO_MEAN_REVERSION 등으로 덮어씀.
+    # 키 파생 시 영숫자 외 문자(':', '-')는 '_'로 정규화한다 — 바스켓 승인 단위
+    # ('basket_rebalance:<name>')처럼 콜론이 든 키도 env로 설정 가능해야 한다
+    # (콜론은 Windows env 이름에 쓸 수 없어 기존 파생식으로는 영구 설정 불가였다).
+    import re as _re
     accounts = settings["kis_api"].get("accounts", {}) or {}
+    consumed_env_keys = set()
     for key in list(accounts.keys()):
-        env_key = f"KIS_ACCOUNT_NO_{key.upper().replace('-', '_')}"
+        env_key = "KIS_ACCOUNT_NO_" + _re.sub(r"[^A-Z0-9]", "_", key.upper())
+        consumed_env_keys.add(env_key)
         accounts[key] = os.environ.get(env_key, accounts[key])
     settings["kis_api"]["accounts"] = accounts
+    # YAML에 선언되지 않은 KIS_ACCOUNT_NO_* env는 조용히 무시되면 운영자가
+    # "덮어썼다"고 믿은 채 기본 계좌로 라우팅된다(침묵 공유) — 명시 경고로 드러낸다.
+    for env_name in os.environ:
+        if (
+            env_name.startswith("KIS_ACCOUNT_NO_")
+            and env_name not in consumed_env_keys
+        ):
+            logging.getLogger("config_loader").warning(
+                "%s 환경변수가 설정돼 있지만 kis_api.accounts에 대응하는 키가 없어 "
+                "무시됩니다 — settings.yaml의 accounts에 해당 전략 키를 선언하세요.",
+                env_name,
+            )
     if "MAX_CALLS_PER_SEC" in os.environ:
         settings["kis_api"]["max_calls_per_sec"] = float(os.environ["MAX_CALLS_PER_SEC"])
     if "MAX_CALLS_PER_MIN" in os.environ:
@@ -466,15 +484,31 @@ class Config:
         """환경변수 반영 후 실행 설정 해시."""
         return self._resolved_hash
 
+    # live에서 기본 계좌 폴백 경고를 전략당 1회만 내기 위한 기록 (프로세스 전역)
+    _default_account_warned: set = set()
+
     def get_account_no(self, strategy: str = "") -> str:
         """
         전략에 해당하는 계좌번호 반환 (다중 계좌 분리).
         kis_api.accounts에 전략명이 있으면 해당 계좌, 없으면 kis_api.account_no(기본) 사용.
+
+        live 모드에서 전략 키가 미선언/빈 값이라 기본 계좌로 폴백하면 경고를 남긴다 —
+        침묵 폴백은 여러 전략·바스켓이 모르게 같은 실계좌(자본 풀)를 공유하게 만들고,
+        DB상 account_key는 서로 달라 보여 공유 사실이 가려진다.
         """
         kis = self.kis_api
         accounts = kis.get("accounts", {}) or {}
-        if strategy and strategy in accounts:
-            return accounts[strategy] or kis.get("account_no", "")
+        if strategy and strategy in accounts and accounts[strategy]:
+            return accounts[strategy]
+        if strategy and str(self.trading.get("mode", "paper")).lower() == "live":
+            if strategy not in Config._default_account_warned:
+                Config._default_account_warned.add(strategy)
+                logging.getLogger("config_loader").warning(
+                    "live 계좌 라우팅: 전략 '%s'의 계좌가 kis_api.accounts에 %s — "
+                    "기본 계좌로 폴백합니다(다른 전략과 자본 풀 공유 가능).",
+                    strategy,
+                    "선언되지 않음" if strategy not in accounts else "빈 값",
+                )
         return kis.get("account_no", "")
 
     def with_strategy_overrides(self, strategy_name: str, overrides: dict) -> "ConfigOverlay":
