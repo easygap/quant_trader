@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v6.0
-> **최종 수정**: 2026-05-21
+> **문서 버전**: v6.1
+> **최종 수정**: 2026-06-10 (guide/health/deploy_check 모드, 바스켓 paper 운영 개시·승격 기준·일일 스냅샷/백업 반영)
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -27,7 +27,7 @@
 ### 1.1 전체 흐름 요약
 
 1. **시작**  
-   `main.py` 실행 → 로거·DB 초기화 → `--mode`에 따라 **backtest / backtest_momentum_top / validate / paper / schedule / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance** 중 하나로 분기.
+   `main.py` 실행 → `--mode`에 따라 **backtest / backtest_momentum_top / portfolio_backtest / validate / paper / schedule / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance / health / deploy_check / guide** (17종) 중 하나로 분기. **인자 없이 실행하면 백테스트가 돌지 않고 사용 가이드만 출력**된다(`--mode guide`와 동일 — 로거·DB 초기화 없이 종료).
 
 2. **백테스트 (backtest)**  
    `DataCollector`로 과거 주가 수집 → `Backtester`가 전략으로 시뮬레이션(수수료·세금·슬리피지·손절/익절/트레일링 스탑, gap/어닝/BlackSwan guard 반영, **strict-lookahead 기본**) → `ReportGenerator`가 txt/html 리포트 생성.
@@ -63,7 +63,10 @@
 | **dashboard** | `run_dashboard(args)` | monitoring.web_dashboard (aiohttp), PortfolioManager, get_portfolio_snapshots |
 | **check_correlation** | `run_check_indicator_correlation(args)` | DataCollector, IndicatorEngine, SignalGenerator → core.indicator_correlation (스코어 상관계수·고상관 쌍 권고) |
 | **check_ensemble_correlation** | `run_check_ensemble_correlation(args)` | DataCollector, StrategyEnsemble.analyze → core.ensemble_correlation (신호 상관 + BUY 동시 발생률 + 대안 전략 권고). **validate --strategy ensemble** 시 자동 실행 |
-| **rebalance** | `run_rebalance(args)` | BasketRebalancer (baskets.yaml 기반 목표 비중 vs 실제 비중 드리프트 체크 → 주문 생성·실행). `--basket`, `--dry-run` 옵션 지원. live 실행은 바스켓별 `basket_rebalance:<basket>` 승인 단위로 live gate/account/order tag가 일치해야 한다 |
+| **rebalance** | `run_rebalance(args)` | BasketRebalancer (baskets.yaml 기반 목표 비중 vs 실제 비중 드리프트 체크 → 주문 생성·실행). `--basket`, `--dry-run` 옵션 지원. live 실행은 바스켓별 `basket_rebalance:<basket>` 승인 단위로 live gate/account/order tag가 일치해야 한다. **종료 시(비 dry-run) paper 일일 NAV 스냅샷 저장 + DB 일일 백업**(`database.backup_path` 설정 시) — 상시 스케줄러 없이 일일 CLI만으로 트랙레코드 시계열·백업이 쌓인다 |
+| **health** | `run_health_check()` | core.operator_health — 전 전략 runtime state + current_blockers + **바스켓 paper 운영(스냅샷 끊김 감시)**을 단일 verdict(OK/ATTENTION/BLOCKED)로 요약. 반환 코드 0/1/2 |
+| **deploy_check** | `run_deploy_check(args)` | 바스켓 배포 점검 — 계획 주문·예상 비용·회전율·활성화 절차 출력. `--as-of`, `--json` 지원 |
+| **guide** | (인자 없이 실행과 동일) | 사용 가이드 치트시트 출력 후 종료. 시스템 초기화 없음 |
 
 ---
 
@@ -71,7 +74,7 @@
 
 ```
 quant_trader/
-├── main.py                      # CLI 진입점, --mode 분기 (14개 모드)
+├── main.py                      # CLI 진입점, --mode 분기 (17개 모드; 무인자 실행 시 가이드 출력)
 ├── test_integration.py          # 통합 검증 스크립트 (단일 실행, pytest 아님)
 ├── pyproject.toml               # 프로젝트 메타데이터 (Python >=3.11,<3.13, 패키지, pytest 설정)
 ├── requirements.txt             # pip 의존성 목록
@@ -86,7 +89,7 @@ quant_trader/
 │   ├── settings.yaml            # KIS API, database, data_source, trading, discord, telegram, dashboard, watchlist
 │   ├── strategies.yaml          # indicators, scoring, mean_reversion, trend_following, fundamental_factor, momentum_factor, volatility_condition, ensemble(components)
 │   ├── risk_params.yaml         # backtest_universe, liquidity_filter, 포지션/손절/익절/트레일링/분산/MDD/성과열화/거래비용
-│   ├── baskets.yaml             # 바스켓 포트폴리오 & 리밸런싱 설정 (종목별 목표 비중, drift/weekly/monthly 트리거, 신호 가중)
+│   ├── baskets.yaml             # 바스켓 포트폴리오 & 리밸런싱 설정 (종목별 목표 비중, drift/weekly/monthly 트리거, 신호 가중). kr_diversified_hold는 2026-06-10부터 paper 운영 중(enabled: true)
 │   ├── holidays.yaml.example    # 한국 휴장일 예시
 │   ├── holidays.yaml            # --update-holidays 로 자동 갱신
 │   └── us_holidays.yaml         # 미국 휴장일(선택, NYSE 판별 보조)
@@ -123,6 +126,8 @@ quant_trader/
 │   ├── target_weight_rotation.py # Portfolio-level target-weight plan 생성/검증, 가격 최신성 진단
 │   ├── evidence_collector.py    # Deprecated v1 collector no-op shim (v2 paper_evidence 사용)
 │   ├── promotion_engine.py      # metrics 기반 전략 승격 판정 (research→paper→live)
+│   ├── operator_health.py       # 운영 통합 헬스 요약 (전략 runtime + blockers + 바스켓 운영 → OK/ATTENTION/BLOCKED)
+│   ├── basket_evaluation.py     # 바스켓 paper→live 승격 판정 (60영업일·커버리지·dead-letter·비용 드래그 → WAIT/PASS_CANDIDATE/FAIL_REVIEW)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
 │   └── order_guard.py           # 동일 종목 TTL(기본 600초) 동안 중복 주문 차단
 ├── tools/
@@ -137,6 +142,7 @@ quant_trader/
 │   ├── research_candidate_sweep.py     # Research-only 후보 sweep → benchmark-aware ranking artifact + 벤치마크 결측 guard
 │   ├── target_weight_rotation_pilot.py # target-weight 후보 전용 paper/pilot adapter + shadow proof
 │   ├── rebuild_paper_runtime.py        # Paper 런타임 재구성
+│   ├── basket_paper_evaluation.py      # 바스켓 paper 운영 평가 CLI (DB 수집 → 승격 판정·진행률 출력, --out 마크다운)
 │   └── quarantine_test_artifacts.py    # 테스트 artifact 격리(paper_evidence/runtime/promotion)
 ├── strategies/
 │   ├── __init__.py              # 전략 레지스트리(플러그인형): create_strategy(name), get_strategy_names(), register_strategy()
@@ -206,6 +212,7 @@ quant_trader/
 │   └── logrotate.conf          # 로그 로테이션 정책 (copytruncate)
 ├── docs/
 │   ├── PROJECT_GUIDE.md         # 본 문서
+│   ├── BASKET_PAPER_EVALUATION.md # 바스켓 paper→live 승격 기준 정의·근거 (60영업일 평가)
 │   └── BACKTEST_IMPROVEMENT.md  # 백테스트 손익 개선 포인트
 └── reports/                     # 백테스트 txt/html + Paper 운영 산출물
     ├── paper_evidence/          # Paper Evidence JSONL (append-only) + promotion package
@@ -234,7 +241,7 @@ quant_trader/
 
 | 파일 | 역할 |
 |------|------|
-| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / **portfolio_backtest** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance (14종). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. 실전 live와 live 설정의 긴급 청산은 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
+| **main.py** | CLI 진입점. `--mode`: backtest / **backtest_momentum_top** / **portfolio_backtest** / validate / paper / **schedule** / live / liquidate / compare / optimize / dashboard / check_correlation / check_ensemble_correlation / rebalance / **health** / **deploy_check** / **guide** (17종). 인자 없이 실행하면 가이드만 출력(백테스트 자동실행 아님). **strict-lookahead 기본 True**, `--allow-lookahead` 시 해제(경고 출력). paper·schedule·live 시 스케줄러 경로에서 시장 국면 필터 등 동일 로직. rebalance 종료 시 paper 일일 NAV 스냅샷 + DB 백업(설정 시) 저장. 실전 live와 live 설정의 긴급 청산은 `ENABLE_LIVE_TRADING=true` + `--confirm-live` 필수. |
 | **test_integration.py** | 설정·DB·지표·신호·리스크·백테스트·리포트·디스코드 등 전체 파이프라인 일괄 검증(14단계). 단일 실행 스크립트 (pytest 아님). |
 | **pyproject.toml** | 프로젝트 메타데이터: name=`quant_trader`, version=`0.1.0`, Python `>=3.11,<3.13`, 패키지 구성, pytest 설정 (`tests/` 대상, pandas 경고 필터). |
 | **requirements.txt** | pip 의존성 목록. pandas, numpy, scipy, pandas-ta, pykrx, finance-datareader, yfinance, requests, aiohttp, websockets, sqlalchemy, pyyaml, loguru, click, pytest 등. |
