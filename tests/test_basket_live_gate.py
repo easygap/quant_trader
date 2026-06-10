@@ -183,18 +183,27 @@ class TestTimelineLevers:
         )
         assert any("비중 합" in i for i in issues)
 
-    def test_promotion_min_days_from_basket_config(self):
-        """baskets.yaml의 promotion.min_trading_days가 평가 기간으로 전달된다."""
+    def test_promotion_min_days_resolved_by_collector_single_source(self):
+        """promotion.min_trading_days는 수집기(collect)가 해석한다 — CLI·게이트가
+        같은 값으로 판정(단일 소스). 명시 min_days는 설정보다 우선."""
+        from core.basket_evaluation import collect_basket_paper_evaluation
+
         baskets = {
-            "kr_diversified_hold": {
+            "bk_md": {
                 "enabled": True,
                 "holdings": {"005930": 1.0},
                 "promotion": {"min_trading_days": 20},
             },
         }
-        gate = TestBasketLiveGate()
-        gate._run(
-            strategy_name="basket_rebalance:kr_diversified_hold",
-            baskets=baskets,
-        )
-        assert gate._last_collect.call_args.kwargs["min_days"] == 20
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=baskets,
+        ):
+            result, _ = collect_basket_paper_evaluation(
+                basket_name="bk_md", include_benchmark=False,
+            )
+            assert result["min_trading_days"] == 20
+            result2, _ = collect_basket_paper_evaluation(
+                basket_name="bk_md", include_benchmark=False, min_days=5,
+            )
+            assert result2["min_trading_days"] == 5
