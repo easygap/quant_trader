@@ -149,37 +149,47 @@ def collect_basket_paper_evaluation(
     config=None,
     min_days: int = 60,
     include_benchmark: bool = True,
+    basket_name: str | None = None,
 ) -> tuple[dict[str, Any], str]:
-    """DB·설정에서 바스켓 paper 운영 데이터를 수집해 (평가결과, 바스켓 라벨) 반환.
+    """DB·설정에서 **특정 바스켓**의 paper 운영 데이터를 수집해 (평가결과, 바스켓 이름) 반환.
 
     CLI(tools/basket_paper_evaluation.py)와 바스켓 live gate가 공유하는 단일 수집 경로.
-    include_benchmark=False면 KS11 조회(네트워크)를 생략한다 — 게이트 경로에서는
-    참고 지표 때문에 판정을 지연/실패시키지 않기 위함.
+    거래·스냅샷·dead-letter 모두 바스켓 전용 키(basket_rebalance:<name>)로 필터한다 —
+    바스켓별 귀속 없이 합산하면 A 바스켓의 트랙레코드로 B 바스켓이 승격되는 구멍이 생긴다.
+    basket_name 미지정 시 enabled 바스켓이 정확히 1개면 그것을 쓰고, 0개·복수면
+    ValueError(어느 기록을 평가하는지 모호 — fail-closed).
+    include_benchmark=False면 KS11 조회(네트워크)를 생략한다(게이트 경로용).
     """
     from datetime import date, datetime, timedelta
 
     from config.config_loader import Config
-    from core.basket_rebalancer import BasketRebalancer
+    from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
     from core.trading_hours import TradingHours
     from database.models import get_session, PortfolioSnapshot, TradeHistory, init_database
     from database.repositories import get_pending_failed_orders
 
     init_database()
     config = config or Config.get()
-    enabled = BasketRebalancer.get_enabled_baskets()
-    basket_label = ",".join(enabled) if enabled else "(enabled 바스켓 없음)"
+    if not basket_name:
+        enabled = BasketRebalancer.get_enabled_baskets()
+        if len(enabled) != 1:
+            raise ValueError(
+                f"평가 대상 바스켓이 모호합니다 (enabled={enabled}) — basket_name을 명시하세요."
+            )
+        basket_name = enabled[0]
+    basket_key = rebalance_live_strategy_id(basket_name)
 
     session = get_session()
     try:
         trades = (
             session.query(TradeHistory)
-            .filter(TradeHistory.strategy.like("basket_rebalance%"))
+            .filter(TradeHistory.strategy == basket_key)
             .filter(TradeHistory.mode == "paper")
             .all()
         )
         snaps = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == "")
+            .filter(PortfolioSnapshot.account_key == basket_key)
             .order_by(PortfolioSnapshot.date.asc())
             .all()
         )
@@ -201,6 +211,10 @@ def collect_basket_paper_evaluation(
     d = operation_start
     while d <= today:
         if th.is_trading_day(datetime(d.year, d.month, d.day)):
+            # 오늘은 스냅샷이 이미 찍힌 경우에만 분모에 포함한다 — 장전(스냅샷 저장 전)
+            # 게이트 실행에서 분모만 +1 되어 커버리지가 경계에서 오판되는 것을 방지.
+            if d == today and d not in snapshot_dates:
+                break
             trading_days_total += 1
             if d in snapshot_dates:
                 snapshot_days += 1
@@ -234,11 +248,13 @@ def collect_basket_paper_evaluation(
         today=today,
         trading_days_total=trading_days_total,
         snapshot_days=snapshot_days,
-        pending_failed_orders=len(get_pending_failed_orders() or []),
+        # dead-letter도 이 바스켓 계정 것만 집계 — 다른 전략의 잔여 실패 주문이
+        # 바스켓 승격을 막는 오판 방지(바스켓 자신의 실패는 여전히 fail-closed).
+        pending_failed_orders=len(get_pending_failed_orders(account_key=basket_key) or []),
         total_costs=total_costs,
         initial_capital=initial_capital,
         nav_return_pct=nav_return_pct,
         benchmark_return_pct=benchmark_return_pct,
         min_trading_days=min_days,
     )
-    return result, basket_label
+    return result, basket_name
