@@ -1032,30 +1032,38 @@ class DataCollector:
         end_date: str = None,
     ) -> pd.DataFrame:
         """
-        yfinance로 한국 주식 일봉 수집 (티커: 005930.KS).
-        FDR 미설치 환경에서 백테스트용 폴백.
+        yfinance로 한국 주식 일봉 수집 (티커: 005930.KS / KOSDAQ은 .KQ).
+        FDR 미설치/실패 환경에서 백테스트용 폴백.
+
+        시장 구분 정보가 없으므로 .KS(KOSPI) 먼저, 비면 .KQ(KOSDAQ)를 한 번 더
+        시도한다 — KOSDAQ 종목이 .KS로만 조회돼 "possibly delisted" 노이즈를 내고
+        데이터가 누락되던 문제 방지(각 1회, 과다 재시도 없음).
         """
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
-        ticker = "^KS11" if symbol.upper() == "KS11" else f"{symbol}.KS"
-        logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
-        try:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-            if df.empty or len(df) < 2:
-                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-            df = self._normalize_dataframe(df)
-            from core.data_validator import DataValidator
-            df = DataValidator.clean_dataframe(df, symbol)
-            logger.info(
-                "종목 {} 데이터 수집 완료 (소스=yfinance, 수정주가=auto_adjust=True): {}건",
-                symbol, len(df),
-            )
-            return df
-        except Exception as e:
-            logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        if symbol.upper() == "KS11":
+            tickers = ["^KS11"]
+        else:
+            tickers = [f"{symbol}.KS", f"{symbol}.KQ"]
+        for ticker in tickers:
+            logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
+            try:
+                df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+                if df is None or df.empty or len(df) < 2:
+                    continue
+                df = self._normalize_dataframe(df)
+                from core.data_validator import DataValidator
+                df = DataValidator.clean_dataframe(df, symbol)
+                logger.info(
+                    "종목 {} 데이터 수집 완료 (소스=yfinance, 티커={}, 수정주가=auto_adjust=True): {}건",
+                    symbol, ticker, len(df),
+                )
+                return df
+            except Exception as e:
+                logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
     def fetch_korean_stock_via_kis(self, symbol: str) -> pd.DataFrame:
         """

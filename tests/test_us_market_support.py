@@ -113,3 +113,29 @@ def test_fdr_listing_table_filters_non_standard_codes(monkeypatch):
 
     codes = set(tab["Code"])
     assert codes == {"005930", "000660"}  # 5자리 숫자는 zfill로 정상화, 특수코드 제외
+
+
+def test_yfinance_korean_fallback_tries_kq_after_ks(monkeypatch):
+    """KOSDAQ 종목: .KS 조회가 비면 .KQ를 한 번 더 시도한다(각 1회)."""
+    import pandas as pd
+    import core.data_collector as dc
+    from core.data_collector import DataCollector
+
+    calls = []
+
+    def fake_download(ticker, **kw):
+        calls.append(ticker)
+        if ticker.endswith(".KQ"):
+            idx = pd.date_range("2024-01-02", periods=5)
+            return pd.DataFrame(
+                {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 100},
+                index=idx,
+            )
+        return pd.DataFrame()  # .KS는 빈 결과
+
+    monkeypatch.setattr(dc.yf, "download", fake_download)
+    collector = DataCollector()
+    df = collector._fetch_korean_stock_via_yfinance("098070", "2024-01-01", "2024-02-01")
+
+    assert calls == ["098070.KS", "098070.KQ"]
+    assert not df.empty and len(df) == 5
