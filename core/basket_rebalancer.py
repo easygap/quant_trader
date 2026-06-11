@@ -380,6 +380,16 @@ class BasketRebalancer:
                 continue
             quantity = int(trade_value / price)
             if quantity <= 0:
+                if drift > 0:
+                    # 1주 가격이 목표 거래금액을 초과 — 현재 자본 규모로는 이 슬롯을
+                    # 영원히 채울 수 없다(예: 자본 1,000만·목표 8%=80만 < SK하이닉스
+                    # 1주 213만). 침묵 스킵하면 운영자가 모른 채 배분이 설계와
+                    # 달라진다 — 자본 증액 또는 비중 조정이 필요한 운영자 결정 사항.
+                    logger.warning(
+                        "종목 {} 채움 불가: 1주 가격 {:,.0f}원 > 목표 거래금액 {:,.0f}원 "
+                        "— 자본 증액 또는 baskets.yaml 비중 조정 필요 (현재 미보유 비중 {:.1%})",
+                        symbol, price, trade_value, drift,
+                    )
                 continue
             if drift > 0:
                 candidates.append((RebalanceOrder(
