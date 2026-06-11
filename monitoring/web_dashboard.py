@@ -486,7 +486,10 @@ def _html_page() -> str:
 
 
 async def handle_index(_request: web.Request) -> web.Response:
-    return web.Response(text=_html_page(), content_type="text/html; charset=utf-8")
+    # aiohttp 3.13+: content_type에 charset을 섞으면 ValueError — 분리 인자로 전달.
+    # (기존 표기는 메인 페이지 '/'를 500으로 죽이는 운영 결함이었다 — API만 검증하고
+    # 페이지 서빙은 검증하지 않아 가려져 있었다.)
+    return web.Response(text=_html_page(), content_type="text/html", charset="utf-8")
 
 
 async def handle_api_portfolio(_request: web.Request) -> web.Response:
