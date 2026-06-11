@@ -16,13 +16,13 @@ from config.config_loader import Config
 # 프로젝트 루트 (config 상위)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 한국 증시 공휴일 — 최종 fallback (네트워크/파일 불가 시)
-KR_HOLIDAYS_FALLBACK = {
-    "2026-01-01", "2026-01-27", "2026-01-28", "2026-01-29",
-    "2026-03-01", "2026-05-05", "2026-05-24", "2026-06-06",
-    "2026-08-15", "2026-09-24", "2026-09-25", "2026-09-26",
-    "2026-10-03", "2026-10-09", "2026-12-25",
-}
+# 한국 증시 공휴일 — 최종 fallback (네트워크/파일 불가 시).
+# 단일 소스: core/holidays_updater.FALLBACK_BY_YEAR (대체공휴일·연말휴장 포함).
+# 별도 하드코딩을 두면 누락이 한쪽만 고쳐지는 드리프트가 생긴다 — 휴장일 누락은
+# 트랙레코드 커버리지 분모 부풀림·스냅샷 귀속 오차로 직결된다.
+from core.holidays_updater import FALLBACK_BY_YEAR as _FALLBACK_BY_YEAR
+
+KR_HOLIDAYS_FALLBACK = set().union(*_FALLBACK_BY_YEAR.values())
 
 
 def _load_holidays() -> set:
