@@ -86,6 +86,7 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
             "hard_blocker_count": 0,
             "notes": ["current_blockers 없음/로드 실패"],
             "freshness_stale": True,
+            "gate_health_issue": True,
         }
 
     hard = list(blockers.get("hard_blockers") or [])
@@ -99,16 +100,19 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
 
     notes = []
     verdict = "OK"
+    gate_health_issue = False  # '장애성' 신호(artifact 부재/stale/표기 불일치) — NO-GO 자체와 구분
     if hard:
         verdict = "BLOCKED"
         notes.append(f"hard_blockers={len(hard)}")
     if stale:
         verdict = _worst(verdict, "BLOCKED")
         notes.append("artifact_stale")
+        gate_health_issue = True
     # go_live=false인데 live_candidates가 비어있지 않으면 표기 불일치(주의).
     if not go_live and live_candidates:
         verdict = _worst(verdict, "ATTENTION")
         notes.append("go_live=false_but_live_candidates_present")
+        gate_health_issue = True
 
     return {
         "verdict": verdict,
@@ -117,6 +121,7 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
         "hard_blocker_count": len(hard),
         "hard_blockers": hard,
         "freshness_stale": stale,
+        "gate_health_issue": gate_health_issue,
         "notes": notes,
     }
 
@@ -218,11 +223,10 @@ def build_operator_health(
     verdict = "OK"
     for s in strat_summaries:
         verdict = _worst(verdict, s["verdict"])
-    gate_health_notes = [
-        note for note in blocker_summary["notes"]
-        if note in ("artifact_stale", "current_blockers 없음/로드 실패",
-                    "go_live=false_but_live_candidates_present")
-    ]
+    # 문자열 매칭 대신 구조 플래그 — 노트 문구가 바뀌어도 강등 로직이 깨지지 않는다.
+    gate_health_notes = (
+        list(blocker_summary["notes"]) if blocker_summary.get("gate_health_issue") else []
+    )
     if gate_health_notes:
         verdict = _worst(verdict, "ATTENTION")
     if basket_summary is not None:
