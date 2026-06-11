@@ -321,6 +321,62 @@ class TestSchedulerUsesConfig:
         assert scheduler.auto_entry is False
 
 
+class TestAccountRoutingVisibility:
+    """다중 계좌 라우팅의 침묵 결함 가시화 — env 키 정규화·미선언 경고·live 폴백 경고."""
+
+    def test_basket_key_env_override_with_colon_normalized(self, monkeypatch):
+        """'basket_rebalance:<name>' 키도 콜론을 '_'로 정규화한 env 이름으로 덮어쓸 수 있다
+        (콜론은 Windows env 이름에 불가 — 기존 파생식으로는 영구 설정 불가였다)."""
+        from config.config_loader import _override_with_env
+
+        monkeypatch.setenv("KIS_ACCOUNT_NO_BASKET_REBALANCE_KR_DIVERSIFIED_HOLD", "9999-01")
+        s = _override_with_env({
+            "kis_api": {"accounts": {"basket_rebalance:kr_diversified_hold": "1111-01"}},
+        })
+        assert s["kis_api"]["accounts"]["basket_rebalance:kr_diversified_hold"] == "9999-01"
+
+    def test_undeclared_account_env_warns(self, monkeypatch, caplog):
+        """YAML 미선언 KIS_ACCOUNT_NO_* env는 무시되되 명시 경고를 남긴다(침묵 라우팅 방지)."""
+        import logging
+        from config.config_loader import _override_with_env
+
+        monkeypatch.setenv("KIS_ACCOUNT_NO_GHOST_STRATEGY", "7777-01")
+        with caplog.at_level(logging.WARNING, logger="config_loader"):
+            _override_with_env({"kis_api": {"accounts": {}}})
+        assert any("KIS_ACCOUNT_NO_GHOST_STRATEGY" in r.message for r in caplog.records)
+
+    def test_live_default_fallback_warns_once(self, caplog):
+        """live에서 미선언 전략이 기본 계좌로 폴백하면 1회 경고(공유 가시화)."""
+        import logging
+        from config.config_loader import Config
+
+        cfg = Config.__new__(Config)
+        cfg._settings = {
+            "trading": {"mode": "live"},
+            "kis_api": {"account_no": "1111-01", "accounts": {}},
+        }
+        Config._default_account_warned = set()
+        with caplog.at_level(logging.WARNING, logger="config_loader"):
+            assert cfg.get_account_no("scoring") == "1111-01"
+            assert cfg.get_account_no("scoring") == "1111-01"  # 2회째는 경고 없음
+        warns = [r for r in caplog.records if "기본 계좌로 폴백" in r.message]
+        assert len(warns) == 1
+
+    def test_paper_default_fallback_silent(self, caplog):
+        """paper에서는 기본 계좌 폴백이 정상 동작 — 경고 없음."""
+        import logging
+        from config.config_loader import Config
+
+        cfg = Config.__new__(Config)
+        cfg._settings = {
+            "trading": {"mode": "paper"},
+            "kis_api": {"account_no": "1111-01", "accounts": {}},
+        }
+        Config._default_account_warned = set()
+        with caplog.at_level(logging.WARNING, logger="config_loader"):
+            assert cfg.get_account_no("scoring") == "1111-01"
+        assert not [r for r in caplog.records if "기본 계좌" in r.message]
+
 def test_yaml_string_false_is_not_truthy(monkeypatch):
     """YAML에 따옴표로 'false'를 쓰면 bool('false')==True 함정 — 엄격 파싱으로 False여야 한다.
     (auto_entry 마스터 스위치가 따옴표 하나로 뒤집히면 live에서 실돈 자동매수)"""
