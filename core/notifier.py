@@ -192,7 +192,28 @@ class Notifier:
     # ------------------------------------------------------------------
     # 디스코드 결과 추적
     # ------------------------------------------------------------------
+    def _discord_deliverable(self) -> bool:
+        """디스코드가 실제 채널로 전달 가능한 상태인지.
+
+        DiscordBot은 비활성(웹훅 미설정) 시 콘솔에 출력하고 True를 반환한다 —
+        그 True를 '발송 성공'으로 믿으면 이메일 폴백이 영영 트리거되지 않아,
+        웹훅 미설정 환경에서 일반 알림이 콘솔에만 남는다(무인 운영에서는 아무도
+        못 본다). 콘솔 폴백은 채널 전달이 아니므로 구분한다.
+        """
+        return bool(
+            getattr(self.discord, "enabled", False)
+            and getattr(self.discord, "webhook_url", "")
+        )
+
     def _discord_send_message(self, text: str) -> bool:
+        if not self._discord_deliverable():
+            # 콘솔 기록은 유지하되 '전달 안 됨'으로 취급해 이메일 폴백을 트리거한다.
+            # 설정상 비활성은 장애가 아니므로 실패 카운트는 올리지 않는다(경보 오탐 방지).
+            try:
+                self.discord.send_message(text)
+            except Exception:
+                pass
+            return False
         try:
             ok = self.discord.send_message(text)
             if ok:
@@ -208,6 +229,12 @@ class Notifier:
     def _discord_send_embed(
         self, title: str, description: str, color: int = 0x4F9EF8, fields: list = None,
     ) -> bool:
+        if not self._discord_deliverable():
+            try:
+                self.discord.send_embed(title, description, color, fields)
+            except Exception:
+                pass
+            return False
         try:
             ok = self.discord.send_embed(title, description, color, fields)
             if ok:

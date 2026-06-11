@@ -116,7 +116,7 @@ quant_trader/
 │   ├── ensemble_correlation.py  # 앙상블 전략 신호 상관계수 + BUY 동시 발생률 + 대안 전략 권고 + auto_downgrade
 │   ├── strategy_ensemble.py     # 앙상블: ensemble.components (technical·momentum_factor·volatility_condition·fundamental_factor 선택), auto_downgrade
 │   ├── data_validator.py        # OHLCV 정합성 검사 (Null, NaN, 음수 주가, 타임스탬프 역전, lookahead 방지 정제)
-│   ├── notifier.py              # 통합 알림 이중화 (1차 디스코드 → 2차 텔레그램 → 3차 이메일, critical 전채널 동시)
+│   ├── notifier.py              # 통합 알림 이중화 (1차 디스코드 → 2차 이메일 SMTP, critical 동시 발송; 웹훅 미설정 시에도 이메일 폴백. 텔레그램은 미구현)
 │   ├── strategy_diagnostics.py  # 전략 진단 보조: DiagnosticLine — 전략별 신호·점수 진단 라인 생성
 │   ├── paper_evidence.py        # Paper Evidence 수집 (일별 22개 지표, benchmark excess, anomaly detection)
 │   ├── paper_runtime.py         # Paper Runtime State Machine (5개 상태, schema quarantine, allowed_actions)
@@ -290,7 +290,7 @@ quant_trader/
 | **order_guard.py** | 동일 종목에 대해 최근 주문 접수 후 TTL(기본 600초) 동안 추가 주문 차단. |
 | **strategy_ensemble.py** | `strategies.yaml` → `ensemble.components`에 정의된 구성(기본: technical·momentum_factor·volatility_condition·**fundamental_factor** 등) 신호 통합. majority_vote / weighted_sum / conservative. **auto_downgrade**. 설계서 §4.4. |
 | **data_validator.py** | OHLCV Null·NaN·음수 주가·거래량·타임스탬프 역전 등 검사. 결측 정제는 시간순 정렬 뒤 과거값 `ffill`만 사용하고, 선행 OHLC 결측은 제거해 미래 가격이 과거 신호·백테스트에 섞이지 않게 한다. |
-| **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 텔레그램 Bot API → 3차 이메일(SMTP). `critical=True` 시 모든 채널 동시 발송. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
+| **notifier.py** | 통합 알림 이중화. 1차 디스코드 → 2차 이메일(SMTP) 폴백, `critical=True` 시 동시 발송 (텔레그램은 미구현 — 문서만 앞서 있던 것 정정). 디스코드 웹훅 미설정(콘솔 폴백) 상태도 '전달 안 됨'으로 취급해 이메일 폴백을 트리거한다. `Scheduler`, `CircuitBreaker`, `main.py` 등 주요 모듈이 `DiscordBot` 대신 `Notifier` 사용. 알림 실패 5회 누적 시 점검 경고. |
 | **strategy_diagnostics.py** | `DiagnosticLine` — 전략별 신호·점수 진단 라인 생성. 스케줄러·대시보드에서 전략 실행 현황 요약 시 사용. |
 | **paper_evidence.py** | Paper Evidence 런타임 수집. `DailyEvidence` 데이터클래스, `collect_daily_evidence()`, `append_shadow_plan_evidence()`, `finalize_daily_evidence()`, `generate_promotion_package()`, 3종 benchmark excess (same_universe/exposure_matched/cash_adjusted), 6 anomaly rule (repeated_reject, phantom_position, stale_pending, duplicate_flood, reconcile, deep_drawdown), cash-only carry-forward (zero-return semantics). PortfolioSnapshot의 양수 MDD는 evidence 표준인 음수 drawdown(%)으로 정규화해 anomaly/promotion 차단에 반영한다. Canonical view는 같은 날짜의 뒤쪽 최신 record를 유지하되, 검증된 `real_paper`/`pilot_paper` 증거를 나중에 추가된 backfill/shadow/비승격 repair record가 덮지 못하게 보호한 뒤 날짜순으로 반환하고, promotion package에 `earliest_evidence_date`/`latest_evidence_date`와 `trade_quality`를 남긴다. Shadow plan evidence는 `execution_backed=False`라 promotion에는 반영되지 않는다. package 생성 시 canonical `strategy_specs`가 target-weight 후보로 식별한 전략은 prefix가 없어도 verified pilot proof와 canonical params hash 일치를 요구한다. |
 | **paper_runtime.py** | Paper Runtime State Machine. 5개 상태 (research_disabled/normal/degraded/frozen/blocked_insufficient_evidence), schema quarantine (legacy record 제외), allowed_actions (모든 상태에서 exit/cancel/reconcile/finalize/evidence/reporting 허용). legacy `approved_strategies.json`가 깨지면 fail-closed로 entry/shadow를 닫고 exit/finalize만 유지한다. `get_paper_runtime_state()`, `filter_runtime_eligible()`. |
