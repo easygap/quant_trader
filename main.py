@@ -769,7 +769,14 @@ def run_rebalance(args):
                 # 에서는 돌지 않아 운영자가 받는 푸시가 0건이었다 — 사이클마다 바스켓
                 # NAV 요약 카드를 보낸다. 실패해도 사이클에는 영향 없음(채널은 보조).
                 try:
-                    summary_data = rebalancer.portfolio_mgr.get_portfolio_summary()
+                    # 시장가 기준으로 평가해야 한다 — current_prices 없이 호출하면 paper
+                    # 포지션이 avg_price로 평가돼 누적수익 −0.0%·MDD 0.0%가 60일 내내
+                    # 표시된다(자기검토 2라운드 HIGH). 스냅샷 단계가 채운 가격 캐시 재사용.
+                    _snap_cache = getattr(rebalancer, "_market_snapshot", None) or {}
+                    _prices = {s: v["price"] for s, v in _snap_cache.items()}
+                    summary_data = rebalancer.portfolio_mgr.get_portfolio_summary(
+                        current_prices=_prices or None,
+                    )
                     # 일간 수익률: 직전 스냅샷 대비 (summary에는 누적치만 있다)
                     daily_ret = 0.0
                     try:
