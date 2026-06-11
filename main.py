@@ -765,6 +765,37 @@ def run_rebalance(args):
             # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
             if not dry_run:
                 rebalancer.save_daily_nav_snapshot()
+                # 일일 디스코드 리포트: 상시 스케줄러의 장마감 리포트는 일일 CLI 운영
+                # 에서는 돌지 않아 운영자가 받는 푸시가 0건이었다 — 사이클마다 바스켓
+                # NAV 요약 카드를 보낸다. 실패해도 사이클에는 영향 없음(채널은 보조).
+                try:
+                    summary_data = rebalancer.portfolio_mgr.get_portfolio_summary()
+                    # 일간 수익률: 직전 스냅샷 대비 (summary에는 누적치만 있다)
+                    daily_ret = 0.0
+                    try:
+                        from database.repositories import get_portfolio_snapshots
+                        snaps = get_portfolio_snapshots(
+                            days=7, account_key=live_strategy_name,
+                        )
+                        if snaps is not None and len(snaps) >= 2:
+                            vals = snaps.sort_values("date")["total_value"].astype(float)
+                            prev, last = float(vals.iloc[-2]), float(vals.iloc[-1])
+                            if prev > 0:
+                                daily_ret = (last / prev - 1) * 100
+                    except Exception:
+                        pass
+                    notifier.send_daily_report({
+                        "total_value": summary_data.get("total_value", 0),
+                        "cash": summary_data.get("cash", 0),
+                        "daily_return": daily_ret,
+                        "cumulative_return": summary_data.get("total_return", 0),
+                        "mdd": summary_data.get("mdd", 0),
+                        "position_count": summary_data.get("position_count", 0),
+                        "total_trades": (result.get("executed", 0) if executed else 0),
+                        "strategy_diagnosis": f"바스켓 {name} · paper 트랙레코드 일일 사이클",
+                    })
+                except Exception as e:
+                    logger.debug("바스켓 '{}' 일일 리포트 발송 실패(무시): {}", name, e)
 
         except Exception as e:
             logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)

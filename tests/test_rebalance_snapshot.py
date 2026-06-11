@@ -75,3 +75,32 @@ def test_dry_run_rebalance_skips_db_backup(patched_rebalance, monkeypatch):
     )
     main_mod.run_rebalance(_args(dry_run=True))
     assert "backup" not in called
+
+
+def test_paper_rebalance_sends_daily_discord_report(patched_rebalance, monkeypatch):
+    """일일 CLI 사이클이 디스코드 일일 리포트를 발송한다(상시 스케줄러 없이도
+    운영자가 매일 푸시를 받도록). 실패해도 사이클에는 영향 없어야 한다."""
+    import main as main_mod
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = {
+        "total_value": 9_800_000, "cash": 2_000_000, "total_return": -2.0,
+        "mdd": 2.0, "position_count": 9,
+    }
+    main_mod.run_rebalance(_args(dry_run=False))
+    assert fake_notifier.send_daily_report.called
+    payload = fake_notifier.send_daily_report.call_args.args[0]
+    assert payload["total_value"] == 9_800_000
+    assert payload["position_count"] == 9
+
+
+def test_dry_run_rebalance_does_not_send_daily_report(patched_rebalance, monkeypatch):
+    import main as main_mod
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    main_mod.run_rebalance(_args(dry_run=True))
+    assert not fake_notifier.send_daily_report.called
