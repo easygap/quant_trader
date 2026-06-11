@@ -520,13 +520,30 @@ async def handle_api_snapshots(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+# 평가 결과 캐시 (TTL 60초) — 수집기가 호출마다 TradingHours를 새로 만들어
+# 10초 폴링이면 INFO 로그 2줄×8,640회/일 스팸이 되고, holidays.yaml이 사라진
+# 환경에서는 pykrx 네트워크 갱신이 sync-in-async 핸들러를 매 폴링 블로킹할 수
+# 있다(잠재). 진행률은 하루 단위로 변하는 값이라 60초 캐시는 충분히 신선하다.
+_BASKET_EVAL_CACHE: dict = {"at": 0.0, "data": None}
+_BASKET_EVAL_TTL_SEC = 60.0
+
+
 async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
     """바스켓 paper 운영 평가(승격 진행률) — 게이트와 같은 수집기라 판정이 동일하다.
 
     read-only. include_benchmark=False로 네트워크(KS11 조회)를 피한다 — 대시보드는
-    10초 폴링이므로 외부 조회를 섞으면 안 된다.
+    10초 폴링이므로 외부 조회를 섞으면 안 된다. 결과는 60초 TTL 캐시.
     """
+    import time as _time
+
     try:
+        now = _time.monotonic()
+        if (
+            _BASKET_EVAL_CACHE["data"] is not None
+            and now - _BASKET_EVAL_CACHE["at"] < _BASKET_EVAL_TTL_SEC
+        ):
+            return web.json_response(_BASKET_EVAL_CACHE["data"])
+
         from core.basket_evaluation import collect_basket_paper_evaluation
         from core.basket_rebalancer import BasketRebalancer
 
@@ -543,7 +560,10 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
                 "snapshot_coverage": result.get("snapshot_coverage"),
                 "issues": result.get("issues", []),
             })
-        return web.json_response({"evaluations": out})
+        payload = {"evaluations": out}
+        _BASKET_EVAL_CACHE["at"] = now
+        _BASKET_EVAL_CACHE["data"] = payload
+        return web.json_response(payload)
     except Exception as e:
         logger.exception("API /api/basket_evaluation 오류: {}", e)
         return web.json_response({"error": str(e)}, status=500)
