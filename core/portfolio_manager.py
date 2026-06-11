@@ -27,12 +27,19 @@ class PortfolioManager:
     - account_key: 전략별 계좌 구분 (다중 계좌 시)
     """
 
-    def __init__(self, config: Config = None, account_key: str = ""):
+    def __init__(self, config: Config = None, account_key: str = "", initial_capital: float = None):
         self.config = config or Config.get()
         self.account_key = account_key or ""
-        self.initial_capital = self.config.risk_params.get(
-            "position_sizing", {}
-        ).get("initial_capital", 10000000)
+        # initial_capital 명시 시 전역(risk_params.position_sizing.initial_capital) 대신
+        # 사용한다 — 계정 키별 paper 계정은 독립 자본 풀이므로, 바스켓처럼 자기 자본
+        # 규모가 필요한 계정(예: 고가 종목 슬롯을 채우려면 전역 1,000만으로 부족)이
+        # 전역값을 건드리지 않고 자본을 지정할 수 있어야 한다.
+        if initial_capital is not None:
+            self.initial_capital = float(initial_capital)
+        else:
+            self.initial_capital = self.config.risk_params.get(
+                "position_sizing", {}
+            ).get("initial_capital", 10000000)
         self._is_live = self.config.trading.get("mode", "paper") == "live"
 
         # Peak value 복구: DB 스냅샷에서 이전 세션의 peak을 가져와 MDD 연속성 유지

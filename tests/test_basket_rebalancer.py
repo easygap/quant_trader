@@ -659,3 +659,34 @@ class TestBasketAccountIsolation:
         cfg.get_account_no = boom
         issues = check_basket_account_isolation(["a", "b"], cfg, "live")
         assert len(issues) == 1 and "fail-closed" in issues[0]
+
+
+class TestPerBasketInitialCapital:
+    """바스켓별 initial_capital 레버 + portfolio_mgr 계정 키 전달 회귀."""
+
+    def _make(self, monkeypatch, basket_cfg):
+        from unittest.mock import patch
+        from core.basket_rebalancer import BasketRebalancer
+
+        with patch.object(BasketRebalancer, "_load_baskets_config",
+                          return_value={"t": basket_cfg}):
+            return BasketRebalancer(basket_name="t")
+
+    def test_basket_initial_capital_overrides_global(self, monkeypatch):
+        """baskets.yaml의 initial_capital이 그 바스켓 계정의 자본이 된다(전역 무변)."""
+        rb = self._make(monkeypatch, {
+            "holdings": {"005930": 1.0},
+            "initial_capital": 30_000_000,
+        })
+        assert rb.portfolio_mgr.initial_capital == 30_000_000
+
+    def test_default_uses_global_capital(self, monkeypatch):
+        rb = self._make(monkeypatch, {"holdings": {"005930": 1.0}})
+        from config.config_loader import Config
+        global_cap = Config.get().risk_params.get("position_sizing", {}).get("initial_capital", 10000000)
+        assert rb.portfolio_mgr.initial_capital == global_cap
+
+    def test_portfolio_mgr_gets_resolved_account_key(self, monkeypatch):
+        """인자 생략 시 portfolio_mgr는 ''(전 계정 합산)가 아니라 바스켓 키를 봐야 한다."""
+        rb = self._make(monkeypatch, {"holdings": {"005930": 1.0}})
+        assert rb.portfolio_mgr.account_key == "basket_rebalance:t"
