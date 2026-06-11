@@ -173,3 +173,47 @@ class TestSnapshotDateAttribution:
         assert len(rows) == 1
         assert rows[0].date == datetime(2026, 6, 5)
         assert float(rows[0].total_value) == 2_000.0
+
+
+class TestEvaluatorPerBasketCapital:
+    """평가 수집기의 자본 해석이 운영(바스켓별 initial_capital 레버)과 일치하는지.
+
+    자기검토 2라운드 HIGH: 레버 설정 시 평가가 전역 자본으로 나누면 비용 드래그가
+    수 배 과대 → 거짓 FAIL_REVIEW, NAV 수익률 왜곡 — 게이트 verdict 자체가 틀어진다.
+    """
+
+    def test_collector_uses_basket_initial_capital(self):
+        from unittest.mock import patch
+        from core.basket_rebalancer import BasketRebalancer
+        from core.basket_evaluation import collect_basket_paper_evaluation
+
+        baskets = {
+            "cap_t": {
+                "enabled": True,
+                "holdings": {"005930": 1.0},
+                "initial_capital": 30_000_000,
+            },
+        }
+        with patch.object(BasketRebalancer, "_load_baskets_config",
+                          return_value=baskets):
+            result, _ = collect_basket_paper_evaluation(
+                basket_name="cap_t", include_benchmark=False,
+            )
+        assert result["metrics"]["initial_capital"] == 30_000_000
+
+    def test_collector_falls_back_to_global_capital(self):
+        from unittest.mock import patch
+        from core.basket_rebalancer import BasketRebalancer
+        from core.basket_evaluation import collect_basket_paper_evaluation
+        from config.config_loader import Config
+
+        baskets = {"cap_g": {"enabled": True, "holdings": {"005930": 1.0}}}
+        global_cap = float(
+            Config.get().risk_params.get("position_sizing", {}).get("initial_capital", 10_000_000)
+        )
+        with patch.object(BasketRebalancer, "_load_baskets_config",
+                          return_value=baskets):
+            result, _ = collect_basket_paper_evaluation(
+                basket_name="cap_g", include_benchmark=False,
+            )
+        assert result["metrics"]["initial_capital"] == global_cap

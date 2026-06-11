@@ -60,8 +60,12 @@ def run_daily_backup(config=None) -> bool:
     import os
     db_path_override = os.environ.get("QUANT_DB_PATH")
     if db_path_override and not os.environ.get("QUANT_BACKUP_PATH"):
-        logger.debug(
-            "DB 백업 스킵: QUANT_DB_PATH(격리 DB) 환경 — 운영 backup_path 오염 방지"
+        # warning 레벨 — QUANT_DB_PATH는 '배포 환경별 DB 분리'라는 정당한 운영 용도도
+        # 있어(config_loader 주석), 그 배포에서 백업이 조용히 꺼지면 운영자가 주간
+        # 복원 리허설 전까지 모른다. 운영 배포라면 QUANT_BACKUP_PATH도 함께 설정할 것.
+        logger.warning(
+            "DB 백업 스킵: QUANT_DB_PATH 설정 환경 — 운영 backup_path 오염 방지. "
+            "운영 배포라면 QUANT_BACKUP_PATH도 함께 설정하세요."
         )
         return False
     if os.environ.get("QUANT_BACKUP_PATH"):
