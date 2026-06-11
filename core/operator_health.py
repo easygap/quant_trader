@@ -9,11 +9,14 @@
 사람이 읽는 요약을 만든다. 순수 함수라 외부 상태를 직접 읽지 않고 주입받은
 데이터로만 판정하므로 단위 테스트가 쉽다.
 
-verdict 규칙(보수적 — 의심스러우면 주의 이상):
-  - BLOCKED  : frozen 전략 존재, 또는 hard_blocker 존재, 또는 artifact가 stale/손상.
-  - ATTENTION: degraded/blocked_insufficient_evidence 전략 존재, 또는 manual freeze,
-               또는 최근 이상치(anomaly) 존재, 또는 go_live=false인데 live_candidate 표기 불일치.
-  - OK       : 위 어느 것에도 안 걸림.
+verdict 규칙(보수적 — 의심스러우면 주의 이상). '운영 건강(장애)'과 'live 승격
+게이트(진행 단계)'를 구분한다 — 승격 NO-GO(live 후보 없음)는 장애가 아니라 상태이고,
+알파 없음이 정착 결론인 체제에서는 상시 NO-GO가 정상이므로 전체 verdict에 합산하지
+않는다(헤드라인의 게이트 라벨로 보고; 매일 빨강이면 진짜 장애를 못 알아본다):
+  - BLOCKED  : frozen 전략 존재, 또는 바스켓 운영 차단 수준 이상.
+  - ATTENTION: degraded/blocked_insufficient_evidence 전략, manual freeze, 최근 anomaly,
+               바스켓 스냅샷 끊김, 또는 게이트 artifact의 '장애성' 신호(부재/stale/표기 불일치).
+  - OK       : 위 어느 것에도 안 걸림. (게이트 NO-GO 여부와 무관)
 """
 
 from __future__ import annotations
@@ -83,6 +86,7 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
             "hard_blocker_count": 0,
             "notes": ["current_blockers 없음/로드 실패"],
             "freshness_stale": True,
+            "gate_health_issue": True,
         }
 
     hard = list(blockers.get("hard_blockers") or [])
@@ -96,16 +100,19 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
 
     notes = []
     verdict = "OK"
+    gate_health_issue = False  # '장애성' 신호(artifact 부재/stale/표기 불일치) — NO-GO 자체와 구분
     if hard:
         verdict = "BLOCKED"
         notes.append(f"hard_blockers={len(hard)}")
     if stale:
         verdict = _worst(verdict, "BLOCKED")
         notes.append("artifact_stale")
+        gate_health_issue = True
     # go_live=false인데 live_candidates가 비어있지 않으면 표기 불일치(주의).
     if not go_live and live_candidates:
         verdict = _worst(verdict, "ATTENTION")
         notes.append("go_live=false_but_live_candidates_present")
+        gate_health_issue = True
 
     return {
         "verdict": verdict,
@@ -114,6 +121,7 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
         "hard_blocker_count": len(hard),
         "hard_blockers": hard,
         "freshness_stale": stale,
+        "gate_health_issue": gate_health_issue,
         "notes": notes,
     }
 
@@ -206,10 +214,21 @@ def build_operator_health(
         summarize_basket_operation(**basket_operation) if basket_operation is not None else None
     )
 
+    # verdict 합산 원칙: '운영 건강(장애)'과 'live 승격 게이트(진행 단계)'를 구분한다.
+    # hard_blocker("live 후보 없음" 등)는 장애가 아니라 승격 파이프라인의 상태이며,
+    # 알파 없음이 정착 결론인 현 체제에서는 상시 NO-GO가 정상이다 — 이것을 전체
+    # BLOCKED로 합산하면 운영자가 매일 빨강을 보다가 진짜 장애를 못 알아본다(알람
+    # 피로). 게이트 차원에서는 '장애성' 신호(artifact 부재/stale/표기 불일치)만
+    # ATTENTION으로 합산하고, NO-GO 자체는 헤드라인의 게이트 라벨로 보고한다.
     verdict = "OK"
     for s in strat_summaries:
         verdict = _worst(verdict, s["verdict"])
-    verdict = _worst(verdict, blocker_summary["verdict"])
+    # 문자열 매칭 대신 구조 플래그 — 노트 문구가 바뀌어도 강등 로직이 깨지지 않는다.
+    gate_health_notes = (
+        list(blocker_summary["notes"]) if blocker_summary.get("gate_health_issue") else []
+    )
+    if gate_health_notes:
+        verdict = _worst(verdict, "ATTENTION")
     if basket_summary is not None:
         verdict = _worst(verdict, basket_summary["verdict"])
 
@@ -217,17 +236,30 @@ def build_operator_health(
     for s in strat_summaries:
         if s["verdict"] != "OK":
             attention_items.append(f"{s['strategy']}: {', '.join(s['notes']) or s['state']}")
-    if blocker_summary["notes"]:
-        attention_items.append("blockers: " + ", ".join(blocker_summary["notes"]))
+    if gate_health_notes:
+        attention_items.append("blockers: " + ", ".join(gate_health_notes))
     if basket_summary is not None and basket_summary["verdict"] != "OK":
         attention_items.append("basket: " + ", ".join(basket_summary["notes"]))
+
+    if blocker_summary["go_live"]:
+        gate_label = "GO"
+    elif blocker_summary["hard_blocker_count"]:
+        gate_label = (
+            f"NO-GO (hard_blockers={blocker_summary['hard_blocker_count']} — "
+            "live 후보 없음은 연구 결론상 정상)"
+        )
+    else:
+        gate_label = "NO-GO"
 
     n = len(strat_summaries)
     n_ok = sum(1 for s in strat_summaries if s["verdict"] == "OK")
     if verdict == "OK":
-        headline = f"전체 정상 — 전략 {n}개 모두 OK, go_live={blocker_summary['go_live']}"
+        headline = f"운영 정상 — 전략 {n}개 OK | live 승격 게이트: {gate_label}"
     elif verdict == "ATTENTION":
-        headline = f"주의 필요 — 전략 {n}개 중 {n_ok}개 OK, 확인 항목 {len(attention_items)}건"
+        headline = (
+            f"주의 필요 — 전략 {n}개 중 {n_ok}개 OK, 확인 항목 {len(attention_items)}건 "
+            f"| live 승격 게이트: {gate_label}"
+        )
     else:
         headline = f"차단 상태 — 운영 개입 필요, 확인 항목 {len(attention_items)}건"
 
