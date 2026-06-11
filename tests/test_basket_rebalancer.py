@@ -661,6 +661,45 @@ class TestBasketAccountIsolation:
         assert len(issues) == 1 and "fail-closed" in issues[0]
 
 
+class TestUnfillableSlotWarning:
+    """1주 가격 > 목표 거래금액이라 0주가 되는 슬롯의 침묵 스킵 가시화.
+
+    실사례(2026-06-11): 자본 1,000만·실효 목표 8%=80만원 < SK하이닉스 1주 213만원
+    → 000660 슬롯이 경고 없이 영원히 비었다. 운영자 결정(자본 증액/비중 조정)이
+    필요한 상태는 반드시 경고로 드러나야 한다.
+    """
+
+    def test_warns_when_single_share_exceeds_target_amount(self, caplog):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core.basket_rebalancer import BasketRebalancer
+
+        rb = BasketRebalancer.__new__(BasketRebalancer)
+        rb.basket_name = "t"
+        rb.basket_cfg = {
+            "holdings": {"000660": 0.5, "005930": 0.5},
+            "rebalance": {"trigger": "drift", "drift_threshold": 0.08,
+                          "min_trade_amount": 200000, "max_turnover_ratio": 1.0},
+        }
+        rb.rebalance_cfg = rb.basket_cfg["rebalance"]
+        rb.account_key = "t"
+        rb.execution_strategy = "t"
+        rb.portfolio_mgr = SimpleNamespace(
+            get_portfolio_summary=lambda current_prices=None: {"total_value": 1_000_000},
+        )
+        rb._is_live = lambda: False
+        rb._stock_fraction = lambda: 1.0
+        rb.get_target_weights = lambda: {"000660": 0.5, "005930": 0.5}
+        rb.get_current_weights = lambda prices=None: {}
+
+        prices = {"000660": 2_129_000, "005930": 60_000}
+        with patch("core.basket_rebalancer.get_all_positions", return_value=[]):
+            orders = rb.plan_rebalance(prices=prices)
+
+        # 005930은 매수 가능(50만/6만=8주), 000660은 0주 — 주문엔 없어야 한다
+        symbols = [o.symbol for o in orders]
+        assert "005930" in symbols and "000660" not in symbols
+
 class TestPerBasketInitialCapital:
     """바스켓별 initial_capital 레버 + portfolio_mgr 계정 키 전달 회귀."""
 
