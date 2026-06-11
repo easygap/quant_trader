@@ -182,8 +182,8 @@ def collect_basket_paper_evaluation(
         basket_name = enabled[0]
     basket_key = rebalance_live_strategy_id(basket_name)
 
+    basket_cfg = BasketRebalancer._load_baskets_config().get(basket_name) or {}
     if min_days is None:
-        basket_cfg = BasketRebalancer._load_baskets_config().get(basket_name) or {}
         min_days = int((basket_cfg.get("promotion") or {}).get("min_trading_days", 60))
 
     session = get_session()
@@ -230,10 +230,19 @@ def collect_basket_paper_evaluation(
     total_costs = sum(
         float(t.commission or 0) + float(t.tax or 0) + float(t.slippage or 0) for t in trades
     )
+    # 자본 해석은 운영(BasketRebalancer→PortfolioManager)과 동일해야 한다 — 바스켓별
+    # initial_capital(레버)이 설정됐는데 평가가 전역 자본으로 나누면 비용 드래그가
+    # 수 배 과대(예: 30M 매입 비용 / 10M)되어 거짓 FAIL_REVIEW, NAV 수익률도 왜곡된다.
+    # (자기검토 2라운드 HIGH — 레버와 같은 날 정합 수정)
+    basket_capital = basket_cfg.get("initial_capital")
     initial_capital = float(
-        (config.risk_params.get("position_sizing") or {}).get("initial_capital")
-        or config.trading.get("initial_capital")
-        or 10_000_000
+        basket_capital
+        if basket_capital is not None
+        else (
+            (config.risk_params.get("position_sizing") or {}).get("initial_capital")
+            or config.trading.get("initial_capital")
+            or 10_000_000
+        )
     )
 
     nav_return_pct = None

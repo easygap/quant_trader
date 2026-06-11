@@ -384,6 +384,15 @@ class BasketRebalancer:
             drift = target_w - actual_w
             trade_value = abs(investable * target_w - investable * actual_w)
             if trade_value < min_trade:
+                if drift > 0 and actual_w <= 0:
+                    # 미보유 슬롯의 목표 금액이 min_trade_amount보다 작으면 이 분기에서
+                    # 영원히 침묵 스킵된다 — 채움 불가(아래 quantity<=0)와 같은 부류의
+                    # 구조 문제이므로 동일하게 드러낸다(작은 비중·낮은 자본 조합에서 발생).
+                    logger.warning(
+                        "종목 {} 채움 불가: 목표 거래금액 {:,.0f}원 < 최소 거래금액 {:,.0f}원 "
+                        "— 비중/자본/min_trade_amount 조정 필요 (현재 미보유 비중 {:.1%})",
+                        symbol, trade_value, min_trade, drift,
+                    )
                 continue
             price = prices.get(symbol, 0)
             if price <= 0:
