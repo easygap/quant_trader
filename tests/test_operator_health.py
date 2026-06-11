@@ -93,7 +93,7 @@ class TestBuildOperatorHealth:
         assert out["verdict"] == "OK"
         assert out["strategy_count"] == 2
         assert out["attention_items"] == []
-        assert "전체 정상" in out["headline"]
+        assert "운영 정상" in out["headline"]
 
     def test_one_frozen_makes_blocked(self):
         states = [_state("scoring", "normal"), _state("rotation", "frozen")]
@@ -110,12 +110,27 @@ class TestBuildOperatorHealth:
         out = build_operator_health(states, blockers)
         assert out["verdict"] == "ATTENTION"
 
-    def test_hard_blocker_dominates_even_if_strategies_ok(self):
+    def test_hard_blocker_is_gate_status_not_operational_failure(self):
+        """승격 게이트 NO-GO(hard_blocker)는 '진행 단계'지 장애가 아니다 — 알파 없음이
+        정착 결론인 체제에서 상시 NO-GO를 전체 BLOCKED로 합산하면 운영자가 매일
+        빨강을 보다가 진짜 장애를 못 알아본다(알람 피로). 전체 verdict는 운영
+        건강 기준, 게이트 상태는 헤드라인 라벨로 보고한다."""
         states = [_state("scoring", "normal")]
         blockers = {"go_live": False, "hard_blockers": ["paper_evidence_insufficient"],
                     "live_candidates": [], "promotion_artifact_freshness": {"stale": False}}
         out = build_operator_health(states, blockers)
-        assert out["verdict"] == "BLOCKED"
+        assert out["verdict"] == "OK"
+        assert "NO-GO" in out["headline"]
+        assert out["blockers"]["hard_blocker_count"] == 1  # 게이트 차원 정보는 보존
+
+    def test_stale_artifact_still_degrades_overall_verdict(self):
+        """게이트 차원이라도 '장애성' 신호(artifact stale)는 전체 verdict에 반영."""
+        states = [_state("scoring", "normal")]
+        blockers = {"go_live": False, "hard_blockers": [],
+                    "live_candidates": [], "promotion_artifact_freshness": {"stale": True}}
+        out = build_operator_health(states, blockers)
+        assert out["verdict"] == "ATTENTION"
+        assert any("artifact_stale" in i for i in out["attention_items"])
 
     def test_empty_strategies_with_clean_blockers(self):
         out = build_operator_health([], {
