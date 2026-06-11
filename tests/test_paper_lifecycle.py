@@ -204,7 +204,7 @@ class TestFullPaperLifecycle:
         session.close()
 
 
-def test_generate_lifecycle_report():
+def test_generate_lifecycle_report(tmp_path):
     """테스트 결과를 JSON 리포트로 저장."""
     from database.models import init_database, get_session, TradeHistory, OperationEvent
     from core.order_executor import OrderExecutor
@@ -259,8 +259,9 @@ def test_generate_lifecycle_report():
         })
     session.close()
 
-    out = Path("reports")
-    out.mkdir(exist_ok=True)
+    # 운영 추적 파일(reports/full_paper_lifecycle_test.json)을 덮어쓰지 않도록
+    # 테스트 산출물은 임시 경로에 쓴다 — 추적 파일은 과거 검증 증빙으로 보존.
+    out = tmp_path
     (out / "full_paper_lifecycle_test.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
