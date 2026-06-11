@@ -75,3 +75,37 @@ def test_dry_run_rebalance_skips_db_backup(patched_rebalance, monkeypatch):
     )
     main_mod.run_rebalance(_args(dry_run=True))
     assert "backup" not in called
+
+
+def test_paper_rebalance_sends_daily_discord_report(patched_rebalance, monkeypatch):
+    """일일 CLI 사이클이 디스코드 일일 리포트를 발송한다(상시 스케줄러 없이도
+    운영자가 매일 푸시를 받도록). 실패해도 사이클에는 영향 없어야 한다."""
+    import main as main_mod
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = {
+        "total_value": 9_800_000, "cash": 2_000_000, "total_return": -2.0,
+        "mdd": 2.0, "position_count": 9,
+    }
+    main_mod.run_rebalance(_args(dry_run=False))
+    assert fake_notifier.send_daily_report.called
+    payload = fake_notifier.send_daily_report.call_args.args[0]
+    assert payload["total_value"] == 9_800_000
+    assert payload["position_count"] == 9
+    # 시장가 평가 계약: current_prices 없이 부르면 paper 포지션이 avg_price로 평가돼
+    # 누적수익 -0.0%/MDD 0%가 60일 내내 표시된다(자기검토 2라운드 HIGH) — 가격 전달 고정.
+    summary_kwargs = patched_rebalance.portfolio_mgr.get_portfolio_summary.call_args.kwargs
+    assert summary_kwargs.get("current_prices") == {"005930": 61000.0}
+
+
+def test_dry_run_rebalance_does_not_send_daily_report(patched_rebalance, monkeypatch):
+    import main as main_mod
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    main_mod.run_rebalance(_args(dry_run=True))
+    assert not fake_notifier.send_daily_report.called
