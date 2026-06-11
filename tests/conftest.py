@@ -49,3 +49,23 @@ def pytest_configure(config):
         pass
 
     atexit.register(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
+
+
+# ---------------------------------------------------------------------------
+# 운영 추적 파일 일괄 격리 (DB 격리와 같은 원리, reports/ 오염 방지)
+#
+# 섹터 맵 캐시(reports/sector_map_cache.json)는 git 추적되는 운영 캐시인데
+# (상관관계 리스크 체크가 소비), 개별 테스트가 monkeypatch를 잊으면 테스트
+# 데이터가 운영 캐시를 덮어쓴다 — 백업 오염(2026-06-11 발견)과 동형의 경로.
+# autouse로 전 테스트에서 임시 경로로 강제한다.
+# ---------------------------------------------------------------------------
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sector_map_cache(tmp_path, monkeypatch):
+    try:
+        import core.data_collector as _dc
+        monkeypatch.setattr(_dc, "SECTOR_MAP_CACHE_PATH", tmp_path / "sector_map_cache.json")
+    except Exception:
+        pass
