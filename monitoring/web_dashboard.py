@@ -185,6 +185,12 @@ def _html_page() -> str:
   </section>
 
   <section>
+    <h2>바스켓 paper 승격 진행률</h2>
+    <div class="grid" id="basketEval"></div>
+    <p class="meta" id="basketEvalIssues"></p>
+  </section>
+
+  <section>
     <h2>웹소켓 갭 모니터링</h2>
     <div class="grid" id="wsGapSummary"></div>
     <div id="wsGapTableWrap" style="display:none;">
@@ -448,6 +454,27 @@ def _html_page() -> str:
       } catch (e) {
         renderRuntime(null); renderWsGap(null);
       }
+      try {
+        const evRes = await fetch('/api/basket_evaluation');
+        const evEl = document.getElementById('basketEval');
+        const evIssues = document.getElementById('basketEvalIssues');
+        if (evRes.ok) {
+          const evData = await evRes.json();
+          const evs = evData.evaluations || [];
+          if (!evs.length) { evEl.innerHTML = '<p class="muted">enabled 바스켓 없음</p>'; evIssues.textContent = ''; }
+          else {
+            evEl.innerHTML = evs.map(ev => {
+              const cls = ev.verdict === 'PASS_CANDIDATE' ? 'positive' : (ev.verdict === 'FAIL_REVIEW' ? 'negative' : '');
+              const cov = ev.snapshot_coverage != null ? Math.round(ev.snapshot_coverage * 100) + '%' : '-';
+              return card(escHtml(ev.basket) + ' 판정', '<span class="' + cls + '">' + escHtml(ev.verdict || '-') + '</span>')
+                + card('진행', escHtml(String(ev.progress_days ?? '-')) + ' / ' + escHtml(String(ev.min_trading_days ?? '-')) + '일')
+                + card('스냅샷 커버리지', cov);
+            }).join('');
+            const allIssues = evs.flatMap(ev => (ev.issues || []).map(i => escHtml(ev.basket) + ': ' + escHtml(i)));
+            evIssues.textContent = allIssues.join(' · ');
+          }
+        } else { evEl.innerHTML = '<p class="error">평가 조회 불가</p>'; }
+      } catch (e) { /* 평가 카드만 스킵 */ }
       lastUpdate.textContent = ts;
     }
 
@@ -490,6 +517,35 @@ async def handle_api_snapshots(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
+    """바스켓 paper 운영 평가(승격 진행률) — 게이트와 같은 수집기라 판정이 동일하다.
+
+    read-only. include_benchmark=False로 네트워크(KS11 조회)를 피한다 — 대시보드는
+    10초 폴링이므로 외부 조회를 섞으면 안 된다.
+    """
+    try:
+        from core.basket_evaluation import collect_basket_paper_evaluation
+        from core.basket_rebalancer import BasketRebalancer
+
+        out = []
+        for name in BasketRebalancer.get_enabled_baskets():
+            result, basket_name = collect_basket_paper_evaluation(
+                include_benchmark=False, basket_name=name,
+            )
+            out.append({
+                "basket": basket_name,
+                "verdict": result.get("verdict"),
+                "progress_days": result.get("progress_days"),
+                "min_trading_days": result.get("min_trading_days"),
+                "snapshot_coverage": result.get("snapshot_coverage"),
+                "issues": result.get("issues", []),
+            })
+        return web.json_response({"evaluations": out})
+    except Exception as e:
+        logger.exception("API /api/basket_evaluation 오류: {}", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
 def create_app() -> web.Application:
     web_mod = _require_aiohttp_web()
     app = web_mod.Application()
@@ -497,6 +553,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/portfolio", handle_api_portfolio)
     app.router.add_get("/api/runtime", handle_api_runtime)
     app.router.add_get("/api/snapshots", handle_api_snapshots)
+    app.router.add_get("/api/basket_evaluation", handle_api_basket_evaluation)
     return app
 
 
