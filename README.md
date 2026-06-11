@@ -166,6 +166,9 @@ python main.py --mode dashboard
 # 운영 통합 헬스 점검 (전 전략 runtime + current_blockers 한눈에)
 python main.py --mode health
 # 종료코드 0=OK / 1=ATTENTION / 2=BLOCKED — 모니터링 스크립트에서 분기 가능.
+# 주의: verdict는 '운영 건강' 기준이다. live 승격 게이트의 NO-GO(live 후보 없음 —
+# 연구 결론상 정상 상태)는 BLOCKED로 합산하지 않고 헤드라인 라벨로만 보고한다.
+# 게이트 artifact의 장애성 신호(부재/stale/표기 불일치)는 ATTENTION(1)으로 강등된다.
 # 같은 점검을 tools/paper_runtime_status.py --health (--json) 으로도 실행할 수 있습니다.
 
 # 휴장일 갱신
