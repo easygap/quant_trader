@@ -11,6 +11,10 @@ class DummyConfig:
         self.auto_entry = False
         self.auto_entry_source = "test"
 
+    def enforce_live_auto_entry_policy(self):
+        # 실제 Config 인터페이스 반영 — live 진입 시 ENV auto_entry 켜기 무시 정책(no-op 더블)
+        pass
+
 
 def test_run_live_trading_blocks_when_registry_disallows_live(monkeypatch):
     import main as main_mod
