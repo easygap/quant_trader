@@ -58,3 +58,9 @@
 - 일일: 스케줄 작업(`daily-basket-paper-rebalance`)이 리밸런싱+스냅샷 실행
 - 상시: `--mode health`가 스냅샷 끊김(4일+)을 ATTENTION으로 승격
 - 수시: `tools/basket_paper_evaluation.py` — 현재 진행률과 중간 이슈 확인
+- **주간: 백업 복원 리허설** — 백업은 복원 리허설까지가 백업이다(존재 확인 ≠ 검증).
+  실제로 2026-06-10 당일 백업이 빈 DB로 대체된 사고를 복원 리허설이 적발했다.
+  절차: 최신 `data/backups/quant_trader_*.db`를 임시 경로에 복사 →
+  `PRAGMA integrity_check` = ok 확인 → 바스켓 키(`basket_rebalance:<name>`)의
+  trade_history/positions/portfolio_snapshots 카운트가 운영 DB와 대등한지 비교.
+  비거나 크게 적으면 그 백업은 신뢰 불가 — 즉시 `run_daily_backup` 재실행 후 재검증.
