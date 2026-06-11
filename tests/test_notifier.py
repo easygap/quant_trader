@@ -20,6 +20,11 @@ class _MockConfig:
 
 
 class _FailingDiscord:
+    # 실제 DiscordBot 인터페이스 반영: 활성+웹훅 설정 상태(전달 가능)에서의 '발송 실패'.
+    # (비활성 콘솔 폴백과 구분 — 비활성은 실패 카운트가 오르지 않는다)
+    enabled = True
+    webhook_url = "https://example.invalid/webhook"
+
     def __init__(self):
         self.embeds = []
 
