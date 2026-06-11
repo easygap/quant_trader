@@ -115,7 +115,18 @@ class BasketRebalancer:
         self.holdings: dict[str, float] = self.basket.get("holdings", {})
         self.rebalance_cfg = self.basket.get("rebalance", {})
 
-        self.portfolio_mgr = PortfolioManager(self.config, account_key=account_key)
+        # 바스켓별 자본: baskets.yaml의 initial_capital이 있으면 이 바스켓 계정의
+        # 초기 자본으로 사용(전역 risk_params 값 대신). 고가 종목 슬롯(1주 가격 >
+        # 목표 거래금액)을 채우려면 자본 규모가 설계의 일부여야 한다 — 운영자 레버.
+        basket_capital = self.basket.get("initial_capital")
+        # self.account_key(기본 키 적용 후)를 전달한다 — 원시 파라미터(account_key)를
+        # 그대로 넘기면 인자 생략 시 portfolio_mgr가 ''(전 계정 합산 뷰)를 보게 되는
+        # 잠재 버그(호출부들이 항상 명시 전달해 와서 가려져 있었다).
+        self.portfolio_mgr = PortfolioManager(
+            self.config,
+            account_key=self.account_key,
+            initial_capital=float(basket_capital) if basket_capital is not None else None,
+        )
         self.data_collector = DataCollector(self.config)
 
         self._risk_params = self.config.risk_params
