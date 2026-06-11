@@ -82,3 +82,26 @@ def test_basket_evaluation_endpoint_fails_soft():
                 await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_index_page_serves_200_with_progress_section():
+    """메인 페이지 '/' 서빙 회귀 — aiohttp 3.13+에서 content_type에 charset을 섞으면
+    ValueError로 페이지 전체가 500이 된다(실제로 그렇게 죽어 있던 운영 결함).
+    API만 검증하고 페이지를 안 보면 이런 결함이 가려진다."""
+    from aiohttp.test_utils import TestClient, TestServer
+    import asyncio
+    from monitoring import web_dashboard as wd
+
+    async def run():
+        client = TestClient(TestServer(wd.create_app()))
+        await client.start_server()
+        try:
+            res = await client.get("/")
+            assert res.status == 200
+            html = await res.text()
+        finally:
+            await client.close()
+        assert "basketEval" in html and "승격 진행률" in html
+
+    asyncio.run(run())
