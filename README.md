@@ -1,10 +1,68 @@
 # QUANT TRADER
 
-국내 주식 자동매매를 공부하고 실험보려고 만든 개인 프로젝트입니다.  
-지표·펀더멘털 기반으로 신호를 만들고, 백테스트부터 모의투자·실전 매매까지 한 흐름으로 실행할 수 있게 구성했습니다.
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB)
+![Market](https://img.shields.io/badge/Market-KR%20stocks-0F766E)
+![Mode](https://img.shields.io/badge/Modes-backtest%20%7C%20paper%20%7C%20live--gated-7C3AED)
+![Focus](https://img.shields.io/badge/Focus-risk%20first-E11D48)
 
-실전 주문과 잔고 조회는 KIS API를 사용합니다.  
-데이터 수집, 리스크 관리, 알림, 대시보드, 리밸런싱 기능도 함께 붙여가며 확장하고 있습니다.
+데이터 기반 알고리즘 트레이딩을 공부하면서 만든 Python 자동매매 실험실입니다.
+지표·펀더멘털 기반 신호 생성부터 백테스트, 모의투자, 리스크 관리, 운영 대시보드, KIS API 연동까지 한 저장소에서 재현할 수 있게 구성했습니다.
+
+> 이 프로젝트는 학습·연구용입니다. 투자 조언이 아니며, 실전 주문 경로는 여러 fail-closed gate를 통과해야만 열리도록 설계했습니다.
+
+## Why This Repo Exists
+
+자동매매 프로젝트는 "수익률 그래프"보다 운영 안전성이 먼저라고 생각합니다.
+`quant_trader`는 전략을 바로 실계좌로 보내지 않고, 아래 흐름을 강제합니다.
+
+1. 데이터 수집과 지표 계산
+2. 비용·슬리피지·look-ahead guard가 들어간 백테스트
+3. paper evidence와 runtime health 축적
+4. promotion gate 검증
+5. live 시작 전 KIS 연결, 잔고 동기화, current blockers 재확인
+
+## Highlights
+
+- 한국 주식 중심 백테스트, 포트폴리오 백테스트, 바스켓 리밸런싱
+- scoring, mean reversion, trend following, fundamental factor, relative strength rotation 전략
+- paper trading runtime state machine과 60영업일 evidence 기반 promotion workflow
+- KIS REST/WebSocket 연동, 주문 중복 방지, 미체결 reconcile, emergency liquidation guard
+- Discord 알림, SQLite 백업, web dashboard, operator health check
+- pytest 기반 회귀 테스트와 다양한 research sweep 도구
+
+## Quick Start
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+# 사용 가능한 실행 모드 보기
+python main.py --mode guide
+
+# 단일 종목 백테스트
+python main.py --mode backtest --strategy scoring --symbol 005930
+
+# 운영 헬스 점검
+python main.py --mode health
+
+# 테스트
+pytest tests/ -q
+```
+
+## Good First Reads
+
+| 문서 | 내용 |
+|------|------|
+| [`docs/PROFITABILITY_FINDINGS.md`](docs/PROFITABILITY_FINDINGS.md) | 수익성 정직 점검과 현재 결론 |
+| [`docs/BASKET_PAPER_EVALUATION.md`](docs/BASKET_PAPER_EVALUATION.md) | 바스켓 paper→live 승격 기준 |
+| [`docs/BASKET_LIVE_RUNBOOK.md`](docs/BASKET_LIVE_RUNBOOK.md) | 바스켓 live 전환 절차 |
+| [`docs/PROJECT_GUIDE.md`](docs/PROJECT_GUIDE.md) | 파일 구조와 실행 흐름 |
+| [`quant_trader_design.md`](quant_trader_design.md) | 아키텍처와 전략 설계 |
+
+## English Summary
+
+`quant_trader` is a Python research project for risk-first algorithmic trading on Korean equities. It includes backtesting, paper trading, strategy validation, KIS API integration, portfolio rebalancing, operational health checks, and live-trading gates that fail closed unless the evidence package is current and consistent.
 
 > **현재 상태 (2026-06-10)**:
 > - **바스켓 paper 운영 개시**: `kr_diversified_hold`(분산 대형주 buy&hold, 주식 80%/현금 20%) enabled — 일일 자동 사이클(리밸런싱 → NAV 스냅샷 → DB 백업 → 승격 진행률 보고)로 60영업일 트랙레코드 축적 중. `--mode health`가 사이클 끊김(스냅샷 4일+)을 자동 경고
