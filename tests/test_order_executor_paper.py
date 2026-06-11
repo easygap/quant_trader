@@ -1613,3 +1613,46 @@ def test_daily_loss_baseline_skips_when_only_today_snapshot(fresh_db):
     session.commit()
     session.close()
     assert executor._daily_loss_baseline_value() == 10_000_000
+
+
+def test_mdd_hysteresis_keeps_blocking_until_half_recovery(fresh_db, monkeypatch):
+    """MDD 한도 돌파로 halt된 뒤에는 한도 바로 아래로 깜빡 회복해도 신규 BUY를
+    계속 차단하고(히스테리시스), 한도의 절반 아래로 회복해야 재개한다.
+
+    상시 스케줄러(장기 프로세스)용 2차 방어 — 1회성 CLI에서는 peak이 현재값에서
+    시작하므로 정적 한도 체크와 동일하게 동작한다(추가 차단 없음).
+    """
+    from core.order_executor import OrderExecutor
+
+    values = {"total_value": 10_000_000, "mdd": 0.0}
+
+    class FakePortfolioManager:
+        def __init__(self, config=None, account_key=""):
+            pass
+
+        def get_portfolio_summary(self):
+            return dict(values)
+
+    executor = OrderExecutor(account_key="mdd_hyst_test")
+    executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = 0.15
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
+
+    def check(total, mdd_pct):
+        values["total_value"] = total
+        values["mdd"] = mdd_pct
+        return executor._drawdown_pre_order_check("BUY")
+
+    # 1) peak 형성(10M, MDD 0) → 허용
+    assert check(10_000_000, 0.0)["allowed"] is True
+    # 2) -16% 하락 → 한도 돌파, halt 진입(in-memory peak 10M 기준 16% ≥ 15%)
+    r = check(8_400_000, 16.0)
+    assert r["allowed"] is False
+    assert r["drawdown_guard_type"] in ("mdd", "mdd_hysteresis")
+    # 3) 한도 바로 아래(-14%)로 깜빡 회복 → 정적 체크는 통과지만 히스테리시스가 차단 유지
+    r = check(8_600_000, 14.0)
+    assert r["allowed"] is False
+    assert r["drawdown_guard_type"] == "mdd_hysteresis"
+    assert "halt 유지" in r["reason"]
+    # 4) 한도의 절반(7.5%) 아래(-7%)로 회복 → 재개
+    r = check(9_300_000, 7.0)
+    assert r["allowed"] is True

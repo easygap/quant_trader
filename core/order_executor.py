@@ -465,6 +465,32 @@ class OrderExecutor:
 
             mdd_pct = abs(float(summary.get("mdd") or 0))
             mdd_limit_pct = max_mdd * 100
+
+            # 히스테리시스 게이트(상시 프로세스용 2차 방어): 상태 갱신(peak·halt 진입/해제)을
+            # 정적 한도 체크보다 먼저 수행해야 한도 돌파 시 halt가 실제로 진입한다.
+            # halt된 뒤에는 MDD가 한도의 절반 아래로 회복할 때까지 신규 BUY를 계속 차단 —
+            # 한도 경계 바로 아래로 깜빡 회복했을 때 재진입→재돌파 반복을 막는다.
+            # RiskManager 인스턴스 내 상태라 1회성 CLI에서는 peak이 현재값에서 시작해
+            # 정적 체크와 동일하게 동작하고(추가 차단 없음), 상시 스케줄러에서만 누적된다.
+            # 정적 체크보다 느슨해질 수는 없다(엄격히 추가 차단만).
+            if max_mdd > 0:
+                halt_state = self.risk_manager.check_mdd(total_value)
+                if halt_state.get("is_halted"):
+                    reason = (
+                        f"MDD halt 유지 중(히스테리시스): 현재 MDD {halt_state.get('mdd', 0):.2f}% — "
+                        f"한도의 절반({mdd_limit_pct / 2:.2f}%) 아래로 회복해야 신규 매수 재개"
+                    )
+                    logger.warning("신규 매수 차단: {}", reason)
+                    return {
+                        "allowed": False,
+                        "reason": reason,
+                        "drawdown_guard_blocked": True,
+                        "drawdown_guard_type": "mdd_hysteresis",
+                        "mdd": halt_state.get("mdd", 0),
+                        "mdd_limit": round(mdd_limit_pct, 2),
+                        "mode": self.mode,
+                    }
+
             if max_mdd > 0 and mdd_pct >= mdd_limit_pct:
                 reason = f"MDD 한도 도달: {mdd_pct:.2f}% >= {mdd_limit_pct:.2f}%"
                 logger.warning("신규 매수 차단: {}", reason)
