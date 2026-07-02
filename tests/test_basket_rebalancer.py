@@ -729,3 +729,85 @@ class TestPerBasketInitialCapital:
         """인자 생략 시 portfolio_mgr는 ''(전 계정 합산)가 아니라 바스켓 키를 봐야 한다."""
         rb = self._make(monkeypatch, {"holdings": {"005930": 1.0}})
         assert rb.portfolio_mgr.account_key == "basket_rebalance:t"
+
+
+class TestDiagnoseDeployment:
+    """읽기전용 배치 진단(리포트 v2용): 집계 배치율 + 미체결 슬롯(#422)."""
+
+    def _prep(self, rebalancer, *, total_value, cash, prices, actual_weights):
+        rebalancer._fetch_current_prices = MagicMock(return_value=prices)
+        rebalancer.portfolio_mgr.get_portfolio_summary = MagicMock(
+            return_value={"total_value": total_value, "cash": cash}
+        )
+        rebalancer.get_current_weights = MagicMock(return_value=actual_weights)
+
+    def test_deployment_ratio_from_cash(self, rebalancer):
+        self._prep(
+            rebalancer,
+            total_value=1_000_000, cash=400_000,
+            prices={"005930": 60_000, "000660": 2_129_000, "035420": 100_000},
+            actual_weights={"005930": 0.5, "000660": 0.0, "035420": 0.0},
+        )
+        d = rebalancer.diagnose_deployment()
+        assert d["total_value"] == 1_000_000
+        assert d["stock_value"] == 600_000
+        assert d["deployment_ratio"] == pytest.approx(0.60)
+        assert d["design_fraction"] == pytest.approx(0.80)  # min_cash_ratio 0.20
+
+    def test_unfilled_slot_when_share_exceeds_slot(self, rebalancer):
+        # investable = 1M*0.8 = 800k. 000660 슬롯 280k < 1주 2.13M → 미체결.
+        # 035420 슬롯 200k > 1주 10만 → 채움 가능(미체결 아님).
+        self._prep(
+            rebalancer,
+            total_value=1_000_000, cash=400_000,
+            prices={"005930": 60_000, "000660": 2_129_000, "035420": 100_000},
+            actual_weights={"005930": 0.5, "000660": 0.0, "035420": 0.0},
+        )
+        d = rebalancer.diagnose_deployment()
+        syms = [s["symbol"] for s in d["unfilled_slots"]]
+        assert syms == ["000660"]
+        assert d["unfilled_slots"][0]["price"] == 2_129_000
+
+    def test_held_slot_not_flagged(self, rebalancer):
+        # 전 종목 보유(actual>0) → 미체결 없음
+        self._prep(
+            rebalancer,
+            total_value=1_000_000, cash=200_000,
+            prices={"005930": 60_000, "000660": 100_000, "035420": 100_000},
+            actual_weights={"005930": 0.5, "000660": 0.5, "035420": 0.5},
+        )
+        assert rebalancer.diagnose_deployment()["unfilled_slots"] == []
+
+    def test_unfilled_when_slot_below_min_trade(self, rebalancer):
+        # 두 번째 판정 arm: 슬롯 목표금액 < 최소 거래금액(50k)이라 1주는 살 수 있어도 못 채움.
+        # 총자산 100k → investable 80k. 035420 슬롯 = 80k*0.25 = 20k < 50k → 미체결(가격은 저렴해도).
+        self._prep(
+            rebalancer,
+            total_value=100_000, cash=80_000,
+            prices={"005930": 5_000, "000660": 5_000, "035420": 5_000},
+            actual_weights={"005930": 0.0, "000660": 0.0, "035420": 0.0},
+        )
+        d = rebalancer.diagnose_deployment()
+        # 세 슬롯 모두 목표금액(32k/28k/20k)이 min_trade 50k 미만 → 전부 미체결
+        assert {s["symbol"] for s in d["unfilled_slots"]} == {"005930", "000660", "035420"}
+
+    def test_zero_price_symbol_skipped(self, rebalancer):
+        # 가격 미확보(0)는 판정 보류(스냅샷 스킵이 별도로 처리) — 미체결로 잘못 표기하지 않음.
+        self._prep(
+            rebalancer,
+            total_value=1_000_000, cash=1_000_000,
+            prices={"005930": 0, "000660": 0, "035420": 0},
+            actual_weights={"005930": 0.0, "000660": 0.0, "035420": 0.0},
+        )
+        assert rebalancer.diagnose_deployment()["unfilled_slots"] == []
+
+    def test_zero_total_value_ratio_is_zero(self, rebalancer):
+        self._prep(
+            rebalancer,
+            total_value=0, cash=0,
+            prices={"005930": 60_000, "000660": 100_000, "035420": 100_000},
+            actual_weights={"005930": 0.0, "000660": 0.0, "035420": 0.0},
+        )
+        d = rebalancer.diagnose_deployment()
+        assert d["deployment_ratio"] == 0.0
+        assert d["total_value"] == 0
