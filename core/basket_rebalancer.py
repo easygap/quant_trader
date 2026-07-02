@@ -307,6 +307,58 @@ class BasketRebalancer:
 
         return result
 
+    def diagnose_deployment(self, prices: dict[str, float] = None) -> dict:
+        """읽기전용 배치 진단 — 일일 리포트 v2용. 주문을 만들지 않는다.
+
+        한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md)에서 드러난 문제:
+        종목별 드리프트 트리거는 '집계 배치율' 이탈(예: 실효 61% vs 설계 80%)을
+        영영 못 본다. 이 진단은 총자산 대비 실제 주식 비중과, 현재 자본으로는
+        영원히 못 채우는 슬롯(#422)을 함께 드러낸다.
+
+        반환: {total_value, stock_value, cash, deployment_ratio(실제 주식비중),
+               design_fraction(설계 주식비중), unfilled_slots(list[dict])}
+        unfilled_slots 각 항목: {symbol, price, slot_amount, target_weight}
+        """
+        prices = prices or self._fetch_current_prices()
+        summary = self.portfolio_mgr.get_portfolio_summary(current_prices=prices)
+        total_value = float(summary.get("total_value", 0) or 0)
+        cash = float(summary.get("cash", 0) or 0)
+        stock_value = max(0.0, total_value - cash)
+        deployment_ratio = (stock_value / total_value) if total_value > 0 else 0.0
+        design_fraction = self._stock_fraction()
+
+        investable = total_value * design_fraction
+        targets = self.get_target_weights()
+        actuals = self.get_current_weights(prices)
+        min_trade = self.rebalance_cfg.get("min_trade_amount", 100000)
+
+        unfilled: list[dict] = []
+        for symbol, target_w in targets.items():
+            if actuals.get(symbol, 0.0) > 0:
+                continue  # 이미 보유 — 슬롯 채워짐
+            price = prices.get(symbol, 0)
+            if price <= 0:
+                continue  # 가격 미확보는 별도 문제(스냅샷 스킵) — 여기선 판정 보류
+            slot_amount = investable * target_w
+            # plan_rebalance와 같은 판정: 슬롯 목표금액이 최소 거래금액 미만이거나
+            # 1주 가격이 슬롯 목표금액을 초과하면 현재 자본으론 못 채운다.
+            if slot_amount < min_trade or price > slot_amount:
+                unfilled.append({
+                    "symbol": symbol,
+                    "price": float(price),
+                    "slot_amount": float(slot_amount),
+                    "target_weight": float(target_w),
+                })
+
+        return {
+            "total_value": total_value,
+            "stock_value": stock_value,
+            "cash": cash,
+            "deployment_ratio": deployment_ratio,
+            "design_fraction": design_fraction,
+            "unfilled_slots": unfilled,
+        }
+
     # ------------------------------------------------------------------
     # 트리거 판단
     # ------------------------------------------------------------------
