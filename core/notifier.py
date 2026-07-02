@@ -314,6 +314,18 @@ class Notifier:
             {"name": "📋 보유 종목", "value": f"{report.get('position_count', 0)}개", "inline": True},
             {"name": "🔄 당일 매매", "value": f"{report.get('total_trades', 0)}건", "inline": True},
         ]
+        # 리포트 v2 부가 필드(있을 때만) — 시장/설계/일정 대비 판단용.
+        # 값은 core.basket_evaluation.build_daily_report_extras가 만든 문자열이다.
+        for key, label, inline in (
+            ("benchmark_gap", "📊 vs KS11", False),
+            ("deployment", "🎯 주식 배치율", False),
+            ("progress", "📅 진행률", False),
+            ("cost", "💸 누적 비용", True),
+            ("slot_warning", "⚠️ 미체결 슬롯", False),
+        ):
+            val = report.get(key)
+            if val:
+                fields.append({"name": label, "value": str(val), "inline": inline})
         diag = report.get("strategy_diagnosis")
         if diag:
             if isinstance(diag, (list, tuple)):
