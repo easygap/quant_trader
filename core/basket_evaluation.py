@@ -91,6 +91,7 @@ def evaluate_basket_paper_operation(
         "operation_start": str(operation_start),
         "today": str(today),
         "progress_days": trading_days_total,
+        "snapshot_days": snapshot_days,
         "min_trading_days": min_trading_days,
         "progress_pct": min(1.0, trading_days_total / min_trading_days) if min_trading_days > 0 else 1.0,
         "snapshot_coverage": round(coverage, 4),
@@ -143,6 +144,101 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
         lines.append("  다음: 운영자 최종 승인 + live gate(basket_rebalance:<name>) 통과 후 live 전환 가능")
     lines.append("=" * 60)
     return "\n".join(lines)
+
+
+def build_daily_report_extras(
+    *,
+    eval_result: dict[str, Any] | None = None,
+    deployment: dict[str, Any] | None = None,
+    nav_return_pct: float | None = None,
+) -> dict[str, str]:
+    """일일 리포트 v2의 부가 필드(문자열)를 만든다 — 순수 함수(테스트 용이).
+
+    한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md)의 결론: 기존 리포트는
+    절대 수익만 있어 "시장 대비/설계 대비/일정 대비" 판단이 불가능했다. 이 함수는
+    그 세 축을 한눈에 보이게 한다.
+
+      - 시장 대비: NAV vs KS11 격차 (benchmark_gap)
+      - 설계 대비: 주식 배치율, 미체결 슬롯 (deployment, slot_warning)
+      - 일정 대비: 진행률·커버리지·잔여 결측 예산 (progress)
+      - 실행 품질: 누적 비용 (cost)
+
+    nav_return_pct를 명시하면 그 값으로 NAV 격차를 계산한다 — 호출부(리포트 카드)의
+    '누적 수익률'과 같은 소스를 쓰게 해, 스냅샷 결측일에 카드의 '누적 수익률'(오늘 시가
+    기준)과 평가의 nav(직전 스냅샷 기준)가 갈려 같은 카드에 📊 수치 두 개가 어긋나는 것을
+    막는다(미지정 시 평가결과의 nav 사용).
+
+    데이터 부재 시 해당 키를 생략한다(리포트가 조용히 축소 — 표시할 게 없으면 안 낸다).
+    notifier.send_daily_report가 이 키들을 선택 필드로 렌더링한다.
+    """
+    extras: dict[str, str] = {}
+
+    if eval_result:
+        m = eval_result.get("metrics") or {}
+
+        # 시장 대비 — NAV vs KS11 격차 (베타 전략이라 격차가 '판정'은 아니지만 가시화 대상)
+        nav = nav_return_pct if nav_return_pct is not None else m.get("nav_return_pct")
+        bench = m.get("benchmark_return_pct")
+        if nav is not None:
+            if bench is not None:
+                extras["benchmark_gap"] = (
+                    f"NAV {nav:+.2f}% vs KS11 {bench:+.2f}% (격차 {nav - bench:+.2f}%p)"
+                )
+            else:
+                extras["benchmark_gap"] = f"NAV {nav:+.2f}% (KS11 조회 불가)"
+
+        # 일정 대비 — 진행률·커버리지·잔여 결측 예산
+        progress_days = int(eval_result.get("progress_days", 0) or 0)
+        min_days_raw = eval_result.get("min_trading_days")
+        min_days = int(min_days_raw) if min_days_raw not in (None, "") else 60
+        snapshot_days = int(eval_result.get("snapshot_days", 0) or 0)
+        coverage = float(eval_result.get("snapshot_coverage", 0.0) or 0.0)
+        pct = float(eval_result.get("progress_pct", 0.0) or 0.0)
+        # 최종 커버리지 95%를 지키며 앞으로 더 놓쳐도 되는 영업일 수.
+        # 허용 결측은 실제 게이트와 같은 기준(운영일수의 5%)이라 기간을 넘겨 운영하면
+        # 분모가 늘어난다 — max(min_days, progress_days)로 게이트와 일치시킨다.
+        denom_days = max(min_days, progress_days)
+        max_allowed_miss = int(denom_days * 0.05)
+        already_missed = max(0, progress_days - snapshot_days)
+        budget = max(0, max_allowed_miss - already_missed)
+        # 표시 분모는 목표 기간(min_days) — 기간 진척을 보여준다. 0(무의미 설정)이면
+        # 운영일수로 폴백해 '5/0일' 같은 문자열을 피한다.
+        disp_denom = min_days if min_days > 0 else progress_days
+        extras["progress"] = (
+            f"{progress_days}/{disp_denom}일 ({pct:.0%}) · 커버리지 {coverage:.0%} · 결측예산 {budget}일"
+        )
+
+        # 실행 품질 — 누적 비용 (연환산은 기간 미충족 시 과장되므로 라벨로 구분)
+        cum = eval_result.get("cost_drag_cum")
+        ann = eval_result.get("cost_drag_annualized")
+        if cum is not None:
+            cost = f"누적 {cum:.3%}"
+            if ann is not None:
+                period_complete = progress_days >= min_days
+                cost += f" · 연환산 {ann:.2%}" + ("" if period_complete else " (참고)")
+            extras["cost"] = cost
+
+    if deployment:
+        actual = float(deployment.get("deployment_ratio", 0.0) or 0.0)
+        design = float(deployment.get("design_fraction", 0.0) or 0.0)
+        extras["deployment"] = (
+            f"주식 {actual:.0%} / 설계 {design:.0%} ({(actual - design) * 100:+.1f}%p)"
+        )
+        slots = deployment.get("unfilled_slots") or []
+        if slots:
+            # Discord 필드값 1024자 한도 — 최대 3개만 명시하고 나머지는 요약.
+            shown = slots[:3]
+            parts = [
+                f"{s.get('symbol')} 1주 {float(s.get('price', 0)):,.0f}원 > 슬롯 "
+                f"{float(s.get('slot_amount', 0)):,.0f}원"
+                for s in shown
+            ]
+            more = f" 외 {len(slots) - len(shown)}개" if len(slots) > len(shown) else ""
+            extras["slot_warning"] = (
+                f"미체결 {len(slots)}개: " + "; ".join(parts) + more + " — 자본 결정 대기(#422)"
+            )
+
+    return extras
 
 
 def collect_basket_paper_evaluation(

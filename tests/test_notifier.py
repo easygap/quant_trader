@@ -121,6 +121,40 @@ def test_daily_report_uses_fallback_when_discord_embed_fails(monkeypatch):
     assert Notifier._discord_fail_count == 1
 
 
+def test_daily_report_v2_extra_fields_rendered(monkeypatch):
+    """v2 부가 필드(벤치마크 격차·배치율·진행률·비용·미체결)가 있으면 embed 필드로 렌더링."""
+    notifier, _ = _notifier_with_failing_discord(monkeypatch)
+    notifier.send_daily_report({
+        "total_value": 9_452_986, "cash": 3_887_986,
+        "daily_return": -0.47, "cumulative_return": -5.47,
+        "mdd": -10.69, "position_count": 9, "total_trades": 0,
+        "benchmark_gap": "NAV -5.47% vs KS11 +0.71% (격차 -6.18%p)",
+        "deployment": "주식 59% / 설계 80% (-21.0%p)",
+        "progress": "17/60일 (28%) · 커버리지 94% · 결측예산 2일",
+        "cost": "누적 0.096% · 연환산 1.43%(참고)",
+        "slot_warning": "미체결 1개: 000660 1주 2,424,000원 > 슬롯 756,239원 — 자본 결정 대기(#422)",
+    })
+    names = [f["name"] for f in notifier.discord.embeds[0]["fields"]]
+    assert "📊 vs KS11" in names
+    assert "🎯 주식 배치율" in names
+    assert "📅 진행률" in names
+    assert "💸 누적 비용" in names
+    assert "⚠️ 미체결 슬롯" in names
+
+
+def test_daily_report_omits_absent_v2_fields(monkeypatch):
+    """v2 키가 없으면 기존 카드 그대로 — 부가 필드 미표시(하위 호환)."""
+    notifier, _ = _notifier_with_failing_discord(monkeypatch)
+    notifier.send_daily_report({
+        "total_value": 10_000_000, "cash": 2_000_000,
+        "daily_return": 0.1, "cumulative_return": 1.2, "mdd": -3.0,
+        "position_count": 2, "total_trades": 1,
+    })
+    names = [f["name"] for f in notifier.discord.embeds[0]["fields"]]
+    assert "📊 vs KS11" not in names
+    assert "⚠️ 미체결 슬롯" not in names
+
+
 def test_signal_alert_uses_fallback_and_hold_is_silent(monkeypatch):
     notifier, emails = _notifier_with_failing_discord(monkeypatch)
 
