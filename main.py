@@ -1724,6 +1724,102 @@ def run_health_check() -> int:
     return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
 
 
+def run_weekly_report() -> int:
+    """주간 요약 리포트 — 판단 주기(주 1회) 다이제스트를 Discord로 발송.
+
+    일일 숫자는 노이즈가 커서 매일 판단하기엔 부적합하다(P1-7). 주간 성과·귀속 분해
+    (실행/구성 격차)·진행률·주간 이벤트를 한 장으로 모아 오너가 주 1회 이것만 봐도
+    운영 판단이 되게 한다. 금요일 스케줄 작업에 추가해 쓴다. 반환: 0 정상.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from core.notifier import Notifier
+    from core.basket_evaluation import collect_basket_paper_evaluation
+    from core.weekly_report import build_weekly_summary
+    from core.cycle_observability import detect_snapshot_gaps_for_account
+    from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
+    from database.models import get_session, PortfolioSnapshot, OperationEvent, init_database
+
+    init_database()
+    config = Config.get()
+    notifier = Notifier(config)
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+
+    def _d(v):
+        return v.date() if hasattr(v, "date") and callable(getattr(v, "date")) else v
+
+    names = BasketRebalancer.get_enabled_baskets()
+    if not names:
+        logger.warning("enabled 바스켓 없음 — 주간 리포트 생략")
+        return 0
+
+    for name in names:
+        try:
+            eval_result, basket_name = collect_basket_paper_evaluation(
+                basket_name=name, include_attribution=True,
+            )
+            key = rebalance_live_strategy_id(name)
+            session = get_session()
+            try:
+                snaps = (
+                    session.query(PortfolioSnapshot)
+                    .filter(PortfolioSnapshot.account_key == key)
+                    .order_by(PortfolioSnapshot.date.asc())
+                    .all()
+                )
+                since = now_kst - timedelta(days=7)
+                cycle_errors = (
+                    session.query(OperationEvent)
+                    .filter(OperationEvent.strategy == key)
+                    .filter(OperationEvent.event_type == "CYCLE_ERROR")
+                    .filter(OperationEvent.created_at >= since)
+                    .count()
+                )
+            finally:
+                session.close()
+
+            # 주간 NAV 변화: 마지막 스냅샷 vs '약 1주 전' 스냅샷.
+            # 기준 스냅샷이 7일 전 근방(±3일 밴드) 안에 있을 때만 '주간'으로 표기한다 —
+            # 스냅샷 공백으로 기준이 2~4주 전이면 다주간 수익을 주간으로 오표기하게 되므로
+            # 그 경우 주간 항을 생략한다(누적은 유지). (적대적 리뷰 low)
+            week_change = None
+            if len(snaps) >= 2:
+                last_val = float(snaps[-1].total_value)
+                last_date = _d(snaps[-1].date)
+                band = [
+                    s for s in snaps
+                    if last_date - timedelta(days=10) <= _d(s.date) <= last_date - timedelta(days=4)
+                ]
+                if band:
+                    ref_val = float(band[-1].total_value)
+                    if ref_val > 0:
+                        week_change = (last_val / ref_val - 1) * 100
+
+            # 결측은 '고유 일수'로 집계(SNAPSHOT_GAP 이벤트는 미복구 결측을 매 사이클
+            # 재경보해 부풀려짐 → 최근 7일 실제 빠진 영업일 수를 직접 센다).
+            try:
+                missing_days = len(detect_snapshot_gaps_for_account(
+                    config, key, now_kst, lookback_calendar_days=7,
+                ))
+            except Exception:
+                missing_days = 0
+
+            summary = build_weekly_summary(
+                basket_name=basket_name, eval_result=eval_result,
+                week_nav_change_pct=week_change,
+                missing_days=missing_days, cycle_errors=cycle_errors,
+            )
+            logger.info("\n{}", summary["text"])
+            try:
+                notifier.send_embed(summary["title"], "", fields=summary["fields"])
+            except Exception as e:
+                logger.debug("주간 리포트 발송 실패(무시): {}", e)
+        except Exception as exc:
+            logger.warning("바스켓 '{}' 주간 리포트 생성 실패: {}", name, exc)
+
+    return 0
+
+
 def _build_cli_guide(args) -> str:
     """인자 없이 실행하거나 --mode guide 일 때 보여줄 사용 가이드.
 
@@ -1862,6 +1958,7 @@ def main():
             "rebalance",
             "health",
             "deploy_check",
+            "weekly_report",
             "guide",
         ],
         help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers). deploy_check: 바스켓 배포 점검(계획·비용·활성화 절차).",
@@ -2054,6 +2151,8 @@ def main():
             raise SystemExit(run_health_check())
         elif args.mode == "deploy_check":
             raise SystemExit(run_deploy_check(args))
+        elif args.mode == "weekly_report":
+            raise SystemExit(run_weekly_report())
         else:
             logger.error("알 수 없는 모드: {}", args.mode)
     except KeyboardInterrupt:
