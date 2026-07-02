@@ -791,7 +791,7 @@ def run_rebalance(args):
                                 daily_ret = (last / prev - 1) * 100
                     except Exception:
                         pass
-                    notifier.send_daily_report({
+                    report_card = {
                         "total_value": summary_data.get("total_value", 0),
                         "cash": summary_data.get("cash", 0),
                         "daily_return": daily_ret,
@@ -800,7 +800,26 @@ def run_rebalance(args):
                         "position_count": summary_data.get("position_count", 0),
                         "total_trades": (result.get("executed", 0) if executed else 0),
                         "strategy_diagnosis": f"바스켓 {name} · paper 트랙레코드 일일 사이클",
-                    })
+                    }
+                    # 리포트 v2 부가 필드(시장/설계/일정 대비) — 실패해도 기본 카드는 발송.
+                    try:
+                        from core.basket_evaluation import (
+                            build_daily_report_extras,
+                            collect_basket_paper_evaluation,
+                        )
+                        deployment = rebalancer.diagnose_deployment(_prices or None)
+                        eval_result, _ = collect_basket_paper_evaluation(basket_name=name)
+                        report_card.update(
+                            build_daily_report_extras(
+                                eval_result=eval_result, deployment=deployment,
+                                # 카드의 '누적 수익률'과 같은 소스(오늘 시가 기준)로 격차 계산
+                                # — 스냅샷 결측일에 📊 수치가 어긋나지 않게.
+                                nav_return_pct=summary_data.get("total_return"),
+                            )
+                        )
+                    except Exception as e:
+                        logger.debug("바스켓 '{}' 리포트 v2 부가필드 생략: {}", name, e)
+                    notifier.send_daily_report(report_card)
                 except Exception as e:
                     logger.debug("바스켓 '{}' 일일 리포트 발송 실패(무시): {}", name, e)
 
