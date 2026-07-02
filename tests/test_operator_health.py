@@ -197,6 +197,55 @@ class TestSummarizeBasketOperation:
         )
         assert out["verdict"] == "OK"
 
+    def test_underdeployment_escalates_to_attention(self):
+        # 신선한 스냅샷이라도 배치율 미달(59% vs 설계 80%, -21%p > 5%p)이면 ATTENTION
+        out = self._summ(deployment_ratio=0.59, design_fraction=0.80)
+        assert out["verdict"] == "ATTENTION"
+        assert any("배치율" in n for n in out["notes"])
+        assert out["deployment_ratio"] == 0.59
+
+    def test_deployment_within_tolerance_stays_ok(self):
+        out = self._summ(deployment_ratio=0.77, design_fraction=0.80)  # -3%p ≤ 5%p
+        assert out["verdict"] == "OK"
+
+    def test_deployment_none_is_ok(self):
+        out = self._summ(deployment_ratio=None, design_fraction=None)
+        assert out["verdict"] == "OK"
+
+
+class TestSummarizeDeployment:
+    """집계 배치율 미달 판정(순수 함수)."""
+
+    def _f(self, ratio, design, **kw):
+        from core.operator_health import summarize_deployment
+        return summarize_deployment(ratio, design, **kw)
+
+    def test_shortfall_beyond_tolerance_is_attention(self):
+        out = self._f(0.61, 0.80)
+        assert out["verdict"] == "ATTENTION"
+        assert "61%" in out["note"] and "80%" in out["note"]
+
+    def test_within_tolerance_ok(self):
+        assert self._f(0.76, 0.80)["verdict"] == "OK"
+
+    def test_overdeployment_is_ok(self):
+        # 초과 배치는 리밸런서가 자연 교정 — 감시 대상 아님
+        assert self._f(0.90, 0.80)["verdict"] == "OK"
+
+    def test_none_inputs_ok(self):
+        assert self._f(None, 0.80)["verdict"] == "OK"
+        assert self._f(0.6, None)["verdict"] == "OK"
+
+    def test_custom_tolerance(self):
+        assert self._f(0.75, 0.80, tolerance=0.10)["verdict"] == "OK"   # -5%p ≤ 10%p
+        assert self._f(0.68, 0.80, tolerance=0.10)["verdict"] == "ATTENTION"  # -12%p
+
+    def test_exact_boundary_is_ok_strict_comparison(self):
+        # shortfall == tolerance 이면 OK(엄격 '>' 고정). tolerance=0으로 부동소수 오차 없이
+        # 경계를 못박는다 — '>'를 '>='로 바꾸면 완벽 배치도 ATTENTION이 되어 이 테스트가 잡는다.
+        assert self._f(0.80, 0.80, tolerance=0.0)["verdict"] == "OK"
+        assert self._f(0.79, 0.80, tolerance=0.0)["verdict"] == "ATTENTION"
+
 
 class TestBuildOperatorHealthWithBasket:
     def test_basket_attention_escalates_overall_verdict(self):
