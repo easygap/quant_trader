@@ -1631,11 +1631,30 @@ def run_health_check() -> int:
 
         from core.basket_rebalancer import rebalance_live_strategy_id
 
+        config = Config.get()
         enabled_baskets = BasketRebalancer.get_enabled_baskets()
+        baskets_cfg = BasketRebalancer._load_baskets_config()
+        min_cash_ratio = (
+            config.risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
+        )
+
+        def _design_fraction(cfg: dict) -> float:
+            """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산)."""
+            max_stock = 1.0 - min_cash_ratio
+            tsw = cfg.get("target_stock_weight")
+            if tsw is None:
+                return max_stock
+            return max(0.0, min(float(tsw), max_stock))
+
         # 바스켓별 전용 계정 키(basket_rebalance:<name>) 기준으로 조회한다.
         # 복수 바스켓이면 '가장 오래된 최신 스냅샷'을 기준으로(가장 뒤처진 사이클 감시).
         last_dates = []
         position_count = 0
+        # 집계 배치율 미달 감시: 최신 스냅샷으로 실제 주식비중을 계산(네트워크 불필요),
+        # 설계 대비 가장 크게 미달인 바스켓을 대표로 넘긴다(가장 뒤처진 배치 감시).
+        worst_shortfall = None
+        worst_dep_ratio = None
+        worst_design = None
         session = get_session()
         try:
             for name in enabled_baskets:
@@ -1648,6 +1667,20 @@ def run_health_check() -> int:
                 )
                 last_dates.append(snap.date if snap else None)
                 position_count += len(get_all_positions(account_key=key) or [])
+                # 배치율은 부가 신호 — 계산 실패(예: baskets.yaml에 float 불가한
+                # target_stock_weight 오타)가 핵심 신호인 결측/staleness 감지를
+                # 통째로 삼키지 않도록 자체 try로 격리한다.
+                try:
+                    if snap and snap.total_value and snap.total_value > 0:
+                        dep_ratio = max(0.0, (snap.total_value - (snap.cash or 0)) / snap.total_value)
+                        design = _design_fraction(baskets_cfg.get(name) or {})
+                        shortfall = design - dep_ratio
+                        if worst_shortfall is None or shortfall > worst_shortfall:
+                            worst_shortfall = shortfall
+                            worst_dep_ratio = dep_ratio
+                            worst_design = design
+                except Exception as dep_exc:
+                    logger.debug("바스켓 '{}' 배치율 계산 생략: {}", name, dep_exc)
         finally:
             session.close()
         oldest_last = (
@@ -1659,6 +1692,8 @@ def run_health_check() -> int:
             "last_snapshot_date": oldest_last,
             "position_count": position_count,
             "today": date.today(),
+            "deployment_ratio": worst_dep_ratio,
+            "design_fraction": worst_design,
         }
     except Exception as exc:
         logger.warning("바스켓 운영 상태 조회 실패: {}", exc)

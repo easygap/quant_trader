@@ -126,12 +126,51 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def summarize_deployment(
+    deployment_ratio: float | None,
+    design_fraction: float | None,
+    *,
+    tolerance: float = 0.05,
+) -> dict[str, Any]:
+    """집계 배치율(총자산 중 실제 주식비중)이 설계 대비 크게 미달인지 판정(순수 함수).
+
+    한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md P1-5)의 배경: 종목별 드리프트
+    트리거는 '집계 배치율' 이탈(예: 실효 61% vs 설계 80%)을 영영 못 본다. 여기서 그 이탈을
+    운영자 헬스로 표면화한다. 실제가 설계보다 tolerance(기본 5%p) 초과로 낮으면 ATTENTION.
+    (초과 배치는 리밸런서가 자연 교정하므로 '미달'만 감시한다.)
+
+    반환: {verdict(OK|ATTENTION), note(str|None), deployment_ratio, design_fraction, shortfall}
+    """
+    if deployment_ratio is None or design_fraction is None:
+        return {
+            "verdict": "OK", "note": None,
+            "deployment_ratio": deployment_ratio, "design_fraction": design_fraction,
+            "shortfall": None,
+        }
+    shortfall = float(design_fraction) - float(deployment_ratio)
+    verdict, note = "OK", None
+    if shortfall > tolerance:
+        verdict = "ATTENTION"
+        note = (
+            f"주식 배치율 {deployment_ratio:.0%} < 설계 {design_fraction:.0%} "
+            f"({-shortfall * 100:.1f}%p) — 미체결 슬롯/자본 점검"
+        )
+    return {
+        "verdict": verdict, "note": note,
+        "deployment_ratio": float(deployment_ratio), "design_fraction": float(design_fraction),
+        "shortfall": shortfall,
+    }
+
+
 def summarize_basket_operation(
     enabled_baskets: list[str],
     last_snapshot_date: Any,
     position_count: int,
     today: Any,
     max_stale_calendar_days: int = 4,
+    deployment_ratio: float | None = None,
+    design_fraction: float | None = None,
+    deployment_tolerance: float = 0.05,
 ) -> dict[str, Any]:
     """바스켓 paper 운영(트랙레코드 축적) 상태를 verdict + 요약으로 환원한다.
 
@@ -158,6 +197,8 @@ def summarize_basket_operation(
             "last_snapshot_date": None,
             "position_count": int(position_count or 0),
             "stale_days": None,
+            "deployment_ratio": None,
+            "design_fraction": None,
             "notes": ["enabled 바스켓 없음(운영 안 함)"],
         }
 
@@ -176,12 +217,23 @@ def summarize_basket_operation(
                 "일일 사이클 중단 의심"
             )
 
+    # 집계 배치율 미달 감시 — 종목별 드리프트가 못 보는 설계 대비 이탈을 표면화.
+    dep = summarize_deployment(
+        deployment_ratio, design_fraction, tolerance=deployment_tolerance,
+    )
+    if dep["verdict"] == "ATTENTION":
+        verdict = "ATTENTION"
+        if dep["note"]:
+            notes.append(dep["note"])
+
     return {
         "verdict": verdict,
         "enabled_baskets": list(enabled_baskets),
         "last_snapshot_date": _as_date(last_snapshot_date) if last_snapshot_date is not None else None,
         "position_count": int(position_count or 0),
         "stale_days": stale_days,
+        "deployment_ratio": dep["deployment_ratio"],
+        "design_fraction": dep["design_fraction"],
         "notes": notes,
     }
 
