@@ -136,6 +136,15 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
         )
         lines.append(f"  성과(참고): NAV {m['nav_return_pct']:+.2f}%{bench}")
         lines.append("    ※ 베타 전략 — '시장을 이겼는가'는 합격 기준이 아님(비용·무결성·추종이 기준)")
+        # 성과 귀속(있을 때만): 벤치마크 격차를 실행 격차/구성 격차로 분해.
+        if m.get("design_return_pct") is not None:
+            exe = m.get("execution_gap_pct")
+            comp = m.get("composition_gap_pct")
+            lines.append(f"  귀속 분해: 설계 NAV {m['design_return_pct']:+.2f}%")
+            if exe is not None:
+                lines.append(f"    - 실행 격차 {exe:+.2f}%p (통제 가능: 미체결 슬롯·진입 타이밍·비용)")
+            if comp is not None:
+                lines.append(f"    - 구성 격차 {comp:+.2f}%p (설계 수용: 균등가중 vs 시총지수)")
     if result["issues"]:
         lines.append("  이슈:")
         for issue in result["issues"]:
@@ -241,11 +250,79 @@ def build_daily_report_extras(
     return extras
 
 
+def decompose_return_gap(
+    nav_return_pct: float | None,
+    design_return_pct: float | None,
+    benchmark_return_pct: float | None,
+) -> dict[str, float | None]:
+    """실제 NAV 수익을 설계·벤치마크 대비로 분해한다(순수 함수).
+
+    한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md §2)의 핵심 분석을 자동화한다.
+      execution_gap = 실제 NAV - 설계 NAV
+        → 통제 가능한 몫(미체결 슬롯·진입 타이밍·비용). 0에 가까워야 정상.
+      composition_gap = 설계 NAV - 벤치마크
+        → 설계가 수용한 변동(균등가중 vs 시총 편중 지수). 전략 성격이지 사고가 아님.
+      total_gap = 실제 NAV - 벤치마크 (= execution + composition)
+    입력 중 None이 있으면 해당 격차는 None.
+    """
+    def _sub(a: float | None, b: float | None) -> float | None:
+        return (a - b) if (a is not None and b is not None) else None
+
+    return {
+        "execution_gap_pct": _sub(nav_return_pct, design_return_pct),
+        "composition_gap_pct": _sub(design_return_pct, benchmark_return_pct),
+        "total_gap_pct": _sub(nav_return_pct, benchmark_return_pct),
+    }
+
+
+def compute_design_portfolio_return(
+    holdings: dict[str, float],
+    design_stock_fraction: float,
+    operation_start: Any,
+    today: Any,
+    *,
+    fetch: Any = None,
+) -> float | None:
+    """설계 포트폴리오(목표비중 buy&hold, 주식 비중 design_stock_fraction)의 구간 수익%(단위: %).
+
+    각 종목의 구간 수익률(%)을 fetch(start, end, symbol=...)로 얻어 목표비중 가중평균한 뒤
+    주식 비중을 곱한다(현금 슬리브는 0% 수익). 조회 실패 종목은 제외하고 나머지 비중으로
+    재정규화한다 — 실행(실제 NAV)과의 격차 분해에서 '설계 NAV' 기준선으로 쓴다.
+    fetch 기본값은 DataCollector.fetch_benchmark_return(임의 종목도 조회 가능). 주입 가능(테스트).
+    """
+    if not holdings:
+        return None
+    total_w = sum(float(w) for w in holdings.values())
+    if total_w <= 0:
+        return None
+    if fetch is None:
+        from core.data_collector import DataCollector
+        fetch = DataCollector.fetch_benchmark_return
+
+    weighted_sum = 0.0
+    used_weight = 0.0
+    for symbol, weight in holdings.items():
+        try:
+            r = fetch(str(operation_start), str(today), symbol=str(symbol))
+        except Exception:
+            r = None
+        if r is None:
+            continue
+        wn = float(weight) / total_w
+        weighted_sum += wn * float(r)
+        used_weight += wn
+    if used_weight <= 0:
+        return None
+    stock_leg_return = weighted_sum / used_weight  # 조회 성공 종목 재정규화 가중평균(%)
+    return stock_leg_return * float(design_stock_fraction)
+
+
 def collect_basket_paper_evaluation(
     config=None,
     min_days: int | None = None,
     include_benchmark: bool = True,
     basket_name: str | None = None,
+    include_attribution: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """DB·설정에서 **특정 바스켓**의 paper 운영 데이터를 수집해 (평가결과, 바스켓 이름) 반환.
 
@@ -345,12 +422,17 @@ def collect_basket_paper_evaluation(
     if snaps:
         nav_return_pct = (float(snaps[-1].total_value) / initial_capital - 1.0) * 100
 
+    # NAV는 마지막 스냅샷 시점의 값이다 — 벤치마크·설계 조회도 같은 종료일로 맞춰야
+    # 세 값을 비교할 때 하루치 시장 변동이 실행 격차로 오귀속되지 않는다(적대적 리뷰 medium).
+    # 스냅샷이 없으면 today로 폴백.
+    nav_end = _d(snaps[-1].date) if snaps else today
+
     benchmark_return_pct = None
     if include_benchmark:
         try:
             from core.data_collector import DataCollector
             benchmark_return_pct = DataCollector.fetch_benchmark_return(
-                str(operation_start), str(today), symbol="KS11",
+                str(operation_start), str(nav_end), symbol="KS11",
             )
         except Exception:
             benchmark_return_pct = None  # 참고 지표 — 실패해도 평가는 진행
@@ -369,4 +451,29 @@ def collect_basket_paper_evaluation(
         benchmark_return_pct=benchmark_return_pct,
         min_trading_days=min_days,
     )
+
+    # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
+    # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
+    if include_attribution:
+        max_stock = 1.0 - (
+            config.risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
+        )
+        tsw = basket_cfg.get("target_stock_weight")
+        design_fraction = max_stock if tsw is None else max(0.0, min(float(tsw), max_stock))
+        holdings = basket_cfg.get("holdings") or {}
+        design_return_pct = None
+        if snaps and holdings:
+            try:
+                # 벤치마크·NAV와 같은 종료일(nav_end)로 조회 — 창 불일치 방지.
+                design_return_pct = compute_design_portfolio_return(
+                    holdings, design_fraction, operation_start, nav_end,
+                )
+            except Exception:
+                design_return_pct = None  # 참고 지표 — 실패해도 평가는 진행
+        gaps = decompose_return_gap(nav_return_pct, design_return_pct, benchmark_return_pct)
+        result["metrics"]["design_return_pct"] = design_return_pct
+        result["metrics"]["execution_gap_pct"] = gaps["execution_gap_pct"]
+        result["metrics"]["composition_gap_pct"] = gaps["composition_gap_pct"]
+        result["metrics"]["total_gap_pct"] = gaps["total_gap_pct"]
+
     return result, basket_name
