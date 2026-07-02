@@ -28,6 +28,10 @@ def main() -> int:
         help="필요 운영 영업일 수 (미지정 시 바스켓 설정 promotion.min_trading_days, 기본 60 — 게이트와 동일 기준)",
     )
     parser.add_argument("--out", type=str, default=None, help="평가 리포트 저장 경로 (Markdown)")
+    parser.add_argument(
+        "--no-attribution", action="store_true",
+        help="성과 귀속 분해(실행/구성 격차) 생략 — 종목별 시세 조회(네트워크)를 건너뛴다",
+    )
     args = parser.parse_args()
 
     from core.basket_evaluation import (
@@ -49,6 +53,7 @@ def main() -> int:
     for name in names:
         result, basket_name = collect_basket_paper_evaluation(
             min_days=args.min_days, basket_name=name,
+            include_attribution=not args.no_attribution,
         )
         report = format_evaluation_report(result, basket_name=basket_name)
         print(report)
