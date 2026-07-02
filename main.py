@@ -654,8 +654,15 @@ def run_deploy_check(args) -> int:
 
 def run_rebalance(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
     from core.basket_rebalancer import BasketRebalancer
     from core.notifier import Notifier
+    from core.cycle_observability import (
+        detect_snapshot_gaps_for_account,
+        format_gap_alert,
+        record_cycle_event,
+    )
 
     config = Config.get()
     notifier = Notifier(config)
@@ -713,6 +720,13 @@ def run_rebalance(args):
     logger.info("🔄 바스켓 리밸런싱 시작 (바스켓: {}, dry_run: {})", basket_names, dry_run)
     logger.info("=" * 50)
 
+    # 사이클 하트비트: 결측이 나도 '언제 멈췄는지' 추적 가능하게 시작을 남긴다(6/26 교훈).
+    if not dry_run:
+        record_cycle_event(
+            "CYCLE_START", f"리밸런싱 사이클 시작: {basket_names}", mode=mode,
+        )
+    cycle_snapshots_saved = 0
+
     for name in basket_names:
         try:
             live_strategy_name = _rebalance_live_strategy_id(name)
@@ -728,10 +742,16 @@ def run_rebalance(args):
             if mode == "live" and not dry_run:
                 sync_result = rebalancer.portfolio_mgr.sync_with_broker()
                 if not sync_result.get("ok"):
+                    msg = sync_result.get("message", "sync failed")
                     logger.error(
-                        "바스켓 '{}' live 리밸런싱 전 포지션 동기화 실패: {}",
-                        name,
-                        sync_result.get("message", "sync failed"),
+                        "바스켓 '{}' live 리밸런싱 전 포지션 동기화 실패: {}", name, msg,
+                    )
+                    # sys.exit는 SystemExit(BaseException)라 아래 except Exception에 안 걸려
+                    # CYCLE_END가 안 남는다 — 중도 사망 breadcrumb을 여기서 명시로 남긴다.
+                    record_cycle_event(
+                        "CYCLE_ERROR",
+                        f"바스켓 '{name}' live 동기화 실패로 사이클 중단: {msg}",
+                        severity="error", strategy=live_strategy_name, mode=mode,
                     )
                     sys.exit(1)
 
@@ -764,7 +784,42 @@ def run_rebalance(args):
             # 트랙레코드: 거래 여부와 무관하게 바스켓 계정의 일일 NAV 스냅샷을 남긴다.
             # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
             if not dry_run:
-                rebalancer.save_daily_nav_snapshot()
+                snapshot_saved = rebalancer.save_daily_nav_snapshot()
+                # 사이클 관측·경보: 스냅샷 저장/스킵을 기록하고, 최근 영업일 결측을
+                # 당일 경보로 노출한다(6/26류 조용한 누락 재발 방지). best-effort.
+                try:
+                    if snapshot_saved:
+                        cycle_snapshots_saved += 1
+                        record_cycle_event(
+                            "SNAPSHOT_SAVED", f"바스켓 '{name}' NAV 스냅샷 저장",
+                            strategy=live_strategy_name, mode=mode,
+                        )
+                    else:
+                        record_cycle_event(
+                            "SNAPSHOT_SKIPPED",
+                            f"바스켓 '{name}' NAV 스냅샷 스킵 — 가격 미확보 등",
+                            severity="warning", strategy=live_strategy_name, mode=mode,
+                        )
+                    # 스냅샷 귀속(_nav_attribution_date)이 KST 기준이므로 결측 판정의
+                    # '오늘'도 KST로 맞춘다 — 호스트 TZ가 KST가 아니면(클라우드/CI) 당일
+                    # 결측 경보가 엉뚱한 날을 보거나 안 울리는 것을 방지(적대적 리뷰 medium).
+                    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+                    gaps = detect_snapshot_gaps_for_account(
+                        config, live_strategy_name, now,
+                    )
+                    if gaps:
+                        alert = format_gap_alert(name, gaps, today=now)
+                        today_missing = now.date() in gaps
+                        # 오늘 결측은 즉시 조치(critical), 과거 결측 재알림은 경고 수준
+                        # — 복구 불가한 과거 결측을 매일 critical로 울리는 피로 방지.
+                        record_cycle_event(
+                            "SNAPSHOT_GAP", alert,
+                            severity="critical" if today_missing else "warning",
+                            strategy=live_strategy_name, mode=mode,
+                        )
+                        notifier.send_message(alert, critical=today_missing)
+                except Exception as e:
+                    logger.debug("바스켓 '{}' 스냅샷 관측/경보 생략: {}", name, e)
                 # 일일 디스코드 리포트: 상시 스케줄러의 장마감 리포트는 일일 CLI 운영
                 # 에서는 돌지 않아 운영자가 받는 푸시가 0건이었다 — 사이클마다 바스켓
                 # NAV 요약 카드를 보낸다. 실패해도 사이클에는 영향 없음(채널은 보조).
@@ -826,6 +881,20 @@ def run_rebalance(args):
         except Exception as e:
             logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)
             notifier.send_message(f"바스켓 '{name}' 리밸런싱 오류: {e}")
+            if not dry_run:
+                # 사이클이 이 바스켓에서 죽었음을 남긴다 — 결측 원인 추적의 핵심.
+                record_cycle_event(
+                    "CYCLE_ERROR", f"바스켓 '{name}' 리밸런싱 실패: {e}",
+                    severity="error", strategy=_rebalance_live_strategy_id(name), mode=mode,
+                )
+
+    if not dry_run:
+        # 사이클 정상 종료 기록: START는 있는데 END가 없으면 중도 사망으로 판별된다.
+        record_cycle_event(
+            "CYCLE_END",
+            f"리밸런싱 사이클 종료: 스냅샷 {cycle_snapshots_saved}/{len(basket_names)} 저장",
+            mode=mode,
+        )
 
     # DB 일일 백업: 트랙레코드(거래·포지션·NAV 시계열)가 단일 SQLite 파일이라
     # 손상 시 60영업일 증거가 통째로 소실된다. 기존엔 상시 스케줄러 장마감에서만
