@@ -109,3 +109,99 @@ def test_dry_run_rebalance_does_not_send_daily_report(patched_rebalance, monkeyp
     monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
     main_mod.run_rebalance(_args(dry_run=True))
     assert not fake_notifier.send_daily_report.called
+
+
+# --- P0-1 사이클 관측성 배선(run_rebalance 통합) ---
+
+def _summary(**over):
+    base = {"total_value": 1_000_000, "cash": 1_000_000, "total_return": 0.0,
+            "mdd": 0.0, "position_count": 0}
+    base.update(over)
+    return base
+
+
+def test_cycle_events_emitted_on_normal_paper_cycle(patched_rebalance, monkeypatch):
+    """정상 사이클: CYCLE_START → SNAPSHOT_SAVED → CYCLE_END(1/1 저장)."""
+    import main as main_mod
+    import core.cycle_observability as co
+
+    events = []
+    monkeypatch.setattr(co, "record_cycle_event",
+                        lambda et, msg, **kw: events.append((et, msg, kw.get("severity", "info"))) or True)
+    monkeypatch.setattr(co, "detect_snapshot_gaps_for_account", lambda *a, **k: [])
+    patched_rebalance.save_daily_nav_snapshot.return_value = True
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = _summary()
+
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    types = [e[0] for e in events]
+    assert "CYCLE_START" in types
+    assert "SNAPSHOT_SAVED" in types
+    assert "SNAPSHOT_SKIPPED" not in types
+    end = [e for e in events if e[0] == "CYCLE_END"]
+    assert end and "1/1" in end[0][1]
+
+
+def test_snapshot_skipped_path_records_warning_and_undercounts(patched_rebalance, monkeypatch):
+    """스냅샷 스킵(가격 미확보 등): SNAPSHOT_SKIPPED(warning) + CYCLE_END 0/1 저장."""
+    import main as main_mod
+    import core.cycle_observability as co
+
+    events = []
+    monkeypatch.setattr(co, "record_cycle_event",
+                        lambda et, msg, **kw: events.append((et, msg, kw.get("severity", "info"))) or True)
+    monkeypatch.setattr(co, "detect_snapshot_gaps_for_account", lambda *a, **k: [])
+    patched_rebalance.save_daily_nav_snapshot.return_value = False
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = _summary()
+
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    skipped = [e for e in events if e[0] == "SNAPSHOT_SKIPPED"]
+    assert skipped and skipped[0][2] == "warning"
+    assert "SNAPSHOT_SAVED" not in [e[0] for e in events]
+    end = [e for e in events if e[0] == "CYCLE_END"]
+    assert end and "0/1" in end[0][1]
+
+
+def test_gap_today_missing_pages_critical(patched_rebalance, monkeypatch):
+    """오늘 결측이면 critical 경보(즉시 조치)."""
+    import main as main_mod
+    import core.cycle_observability as co
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    # detect가 '오늘'을 결측으로 반환 → today_missing True
+    monkeypatch.setattr(co, "detect_snapshot_gaps_for_account",
+                        lambda cfg, key, today, **k: [today.date()])
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = _summary()
+
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    calls = fake_notifier.send_message.call_args_list
+    assert any(c.kwargs.get("critical") is True for c in calls)
+
+
+def test_gap_prior_only_not_critical(patched_rebalance, monkeypatch):
+    """복구 불가한 과거 결측은 매일 critical로 울리지 않는다(피로 방지)."""
+    import main as main_mod
+    import core.cycle_observability as co
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    fake_notifier = MagicMock()
+    monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
+    monkeypatch.setattr(co, "detect_snapshot_gaps_for_account",
+                        lambda cfg, key, today, **k: [date(2020, 1, 2)])  # 먼 과거
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = _summary()
+
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    calls = fake_notifier.send_message.call_args_list
+    # gap 경보는 발송되되 critical은 아니어야 한다
+    assert any(c.kwargs.get("critical") is False for c in calls)
+    assert all(c.kwargs.get("critical") is not True for c in calls)
