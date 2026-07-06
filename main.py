@@ -1860,7 +1860,11 @@ def _build_cli_guide(args) -> str:
         "  python main.py --mode dashboard",
         "      실시간 웹 대시보드 (기본 http://127.0.0.1:8080).",
         "  python main.py --mode health",
-        "      전 전략 운영 헬스·blocker 점검.",
+        "      전 전략 운영 헬스·blocker 점검 (배치율 미달·스냅샷 끊김 포함).",
+        "  python main.py --mode deploy_check --basket <이름>",
+        "      바스켓 배포 점검 (계획 주문·예상 비용·활성화 절차).",
+        "  python main.py --mode weekly_report",
+        "      주간 요약 디스코드 발송 (성과·귀속 분해·진행률·주간 이벤트).",
         "",
         "  [실전 — 신중히]",
         f"  python main.py --mode live --strategy {strategy} --confirm-live",
@@ -1961,7 +1965,7 @@ def main():
             "weekly_report",
             "guide",
         ],
-        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers). deploy_check: 바스켓 배포 점검(계획·비용·활성화 절차).",
+        help="실행 모드. backtest_momentum_top: 모멘텀 상위 동일비중 멀티종목. portfolio_backtest: 멀티종목 포트폴리오 백테스트. paper: 워치리스트 1회. schedule: 모의 스케줄 무한 루프(상시 서버). rebalance: 바스켓 리밸런싱. health: 운영 통합 헬스 점검(전 전략 runtime + blockers). deploy_check: 바스켓 배포 점검(계획·비용·활성화 절차). weekly_report: 주간 요약 디스코드 발송(성과·귀속 분해·진행률·이벤트).",
     )
     from strategies import get_strategy_names
     parser.add_argument(

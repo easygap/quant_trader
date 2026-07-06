@@ -37,3 +37,14 @@ def test_guide_mode_accepts_strategy_and_symbol_defaults():
     assert result.returncode == 0
     assert "python main.py --mode guide" in result.stdout
     assert "python main.py --mode backtest --strategy scoring --symbol 000660" in result.stdout
+
+
+def test_guide_lists_operation_modes():
+    # 운영 모드(health/deploy_check/weekly_report)가 가이드에 빠지면 운영자가
+    # 존재 자체를 모른다 — 가이드 노출을 고정한다.
+    result = _run_main("--mode", "guide")
+
+    assert result.returncode == 0
+    assert "python main.py --mode health" in result.stdout
+    assert "python main.py --mode deploy_check" in result.stdout
+    assert "python main.py --mode weekly_report" in result.stdout
