@@ -14,7 +14,24 @@ from database.repositories import (
     save_portfolio_snapshot,
     get_latest_peak_value,
     get_strategy_performance_summary,
+    get_cash_flow_total,
+    get_cash_flow_total_between,
+    get_max_cumulative_return,
+    get_latest_snapshot_summary,
+    has_cash_flows,
 )
+
+
+def twr_period_return(v_prev: float, v_now: float, flow: float = 0.0) -> float:
+    """구간 시간가중수익률(소수). 외부 현금 흐름(flow, +입금)은 구간 시작에 유입으로 간주.
+
+    r = v_now / (v_prev + flow) - 1  — 입금은 수익이 아니므로 분모에 더해 중화한다.
+    분모가 0 이하이면 판정 불가로 0을 반환한다(신규 계정 초기 상태 등).
+    """
+    base = float(v_prev) + float(flow)
+    if base <= 0:
+        return 0.0
+    return float(v_now) / base - 1.0
 
 
 class LiveBrokerBalanceUnavailable(RuntimeError):
@@ -102,9 +119,12 @@ class PortfolioManager:
             mode=mode,
             account_key=self.account_key if self.account_key else None,
         )
-        cash = self.initial_capital + cash_summary["cash_delta"]
+        # 외부 현금 흐름(입금/출금)은 현금에 더하되 손익에서는 제외한다 —
+        # 입금은 수익이 아니다(적립식 지원, docs/POCKET_TRACK_PLAN.md §4).
+        deposits = get_cash_flow_total(account_key=self.account_key)
+        cash = self.initial_capital + deposits + cash_summary["cash_delta"]
         total_value = cash + current_value
-        realized_pnl = cash + invested - self.initial_capital
+        realized_pnl = cash + invested - self.initial_capital - deposits
         unrealized_pnl = current_value - invested
         return {
             "cash": cash,
@@ -154,6 +174,8 @@ class PortfolioManager:
                 broker_balance_error = str(e)
                 logger.warning("KIS 잔고 조회 실패 — DB 기준으로 대체: {}", e)
 
+        deposits_total = get_cash_flow_total(account_key=self.account_key)
+
         if cash is None or total_value is None:
             financials = self._get_db_financials(
                 invested,
@@ -166,13 +188,47 @@ class PortfolioManager:
             unrealized_pnl = financials["unrealized_pnl"]
         else:
             unrealized_pnl = current_value - invested
-            realized_pnl = total_value - self.initial_capital - unrealized_pnl
+            realized_pnl = total_value - self.initial_capital - deposits_total - unrealized_pnl
 
-        total_return = ((total_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0
+        # 분기는 순합이 아니라 '흐름 존재 여부'로 — 순합 0(+100/-100)이어도 구간
+        # 수익률은 이미 흐름의 영향을 받았으므로 TWR 경로를 유지해야 한다.
+        account_has_flows = deposits_total != 0 or has_cash_flows(self.account_key)
 
-        if total_value > self._peak_value:
-            self._peak_value = total_value
-        mdd = ((self._peak_value - total_value) / self._peak_value) * 100 if self._peak_value > 0 else 0
+        if not account_has_flows:
+            # 무입금 계정: 기존 산식 그대로 (하위 호환 — 결과 불변)
+            total_return = ((total_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0
+
+            if total_value > self._peak_value:
+                self._peak_value = total_value
+            mdd = ((self._peak_value - total_value) / self._peak_value) * 100 if self._peak_value > 0 else 0
+        else:
+            # 적립식 계정: 시간가중수익률(TWR) — 입금은 수익이 아니다.
+            # 직전 스냅샷과 이번 측정 사이 유입(flow)을 분모에 더해 중화하고,
+            # 누적은 직전 스냅샷의 누적수익률에 구간 수익률을 연결한다.
+            from datetime import datetime as _dt
+            prev = get_latest_snapshot_summary(account_key=self.account_key)
+            if prev is None:
+                # 첫 측정: 초기자본이 첫 유입, 그간의 입금 전액이 구간 유입
+                r = twr_period_return(self.initial_capital, total_value, deposits_total)
+                total_return = r * 100
+            else:
+                # 경계는 실제 측정 시각(created_at) — date(자정 귀속)를 쓰면 스냅샷
+                # 이전의 같은 날 입금이 이중 산입된다.
+                boundary = prev.get("created_at") or prev.get("date")
+                flow_since = get_cash_flow_total_between(
+                    self.account_key, boundary, _dt.now(),
+                )
+                r = twr_period_return(prev["total_value"], total_value, flow_since)
+                total_return = ((1 + prev["cumulative_return"] / 100) * (1 + r) - 1) * 100
+
+            # MDD도 TWR 지수 기준 — 원화 피크로 재면 입금이 낙폭을 가짜 회복시킨다.
+            index_now = 1 + total_return / 100
+            hist_max = get_max_cumulative_return(account_key=self.account_key)
+            peak_index = max(1.0, index_now, 1 + (hist_max or 0.0) / 100)
+            mdd = ((peak_index - index_now) / peak_index) * 100 if peak_index > 0 else 0
+            # 원화 피크(peak_value 컬럼)는 스냅샷 연속성 위해 기존대로 계속 기록
+            if total_value > self._peak_value:
+                self._peak_value = total_value
 
         return {
             "total_value": round(total_value, 0),
@@ -184,6 +240,8 @@ class PortfolioManager:
             "position_count": len(positions),
             "realized_pnl": round(realized_pnl, 0),
             "unrealized_pnl": round(unrealized_pnl, 0),
+            "deposits_total": round(deposits_total, 0),
+            "principal": round(self.initial_capital + deposits_total, 0),
             "positions": position_details,
             "broker_balance_ok": broker_balance_ok,
             "broker_balance_source": broker_balance_source,

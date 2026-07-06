@@ -16,7 +16,7 @@ from loguru import logger
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
     Position, PortfolioSnapshot, DailyReport, FailedOrder,
-    PendingOrderGuard, OrderRecord as DbOrderRecord,
+    PendingOrderGuard, OrderRecord as DbOrderRecord, CashFlow,
 )
 
 
@@ -726,6 +726,10 @@ def save_portfolio_snapshot(
             existing.mdd = mdd
             existing.peak_value = peak_value
             existing.position_count = position_count
+            # created_at은 '이 값이 마지막으로 측정된 시각'이다 — TWR 체인의 유입 경계가
+            # 이 시각을 쓰므로, 같은 날 재실행(upsert) 때 갱신하지 않으면 재실행 전에
+            # 반영된 입금이 다음 날 구간에 이중 산입돼 수익률이 영구 왜곡된다(적대적 리뷰 HIGH).
+            existing.created_at = datetime.now()
         else:
             session.add(snapshot)
         session.commit()
@@ -759,6 +763,162 @@ def get_latest_peak_value(account_key: str = "") -> float | None:
         session.close()
 
 
+# =============================================================
+# 외부 현금 흐름 (입금/출금) — 적립식 지원 (docs/POCKET_TRACK_PLAN.md §4)
+# =============================================================
+
+@with_retry
+def record_cash_flow(
+    amount: float,
+    account_key: str = "",
+    occurred_at: Optional[datetime] = None,
+    note: str = "",
+    mode: str = "paper",
+) -> int:
+    """외부 현금 흐름(+입금/-출금)을 기록하고 id를 반환한다.
+
+    입금은 수익이 아니다 — TWR 계산이 이 기록으로 구간을 나눈다. amount=0은 무의미
+    하므로 ValueError.
+    """
+    if not amount:
+        raise ValueError("amount는 0이 아니어야 합니다 (+입금 / -출금)")
+    session = get_session()
+    try:
+        row = CashFlow(
+            account_key=account_key or "",
+            amount=float(amount),
+            occurred_at=occurred_at or datetime.now(),
+            note=note or "",
+            mode=mode,
+        )
+        session.add(row)
+        session.commit()
+        return int(row.id)
+    finally:
+        session.close()
+
+
+@with_retry
+def has_cash_flows(account_key: str = "") -> bool:
+    """계정에 외부 현금 흐름 기록이 하나라도 있는가 — TWR 분기 판정용.
+
+    순합(net)이 아니라 존재 여부로 판정한다: +100 뒤 -100처럼 순합 0이어도 구간
+    수익률은 이미 흐름의 영향을 받았으므로 TWR 경로를 유지해야 한다(적대적 리뷰 low).
+    """
+    session = get_session()
+    try:
+        return (
+            session.query(CashFlow.id)
+            .filter(CashFlow.account_key == (account_key or ""))
+            .first()
+        ) is not None
+    finally:
+        session.close()
+
+
+@with_retry
+def get_cash_flows(account_key: str = "") -> list:
+    """계정의 외부 현금 흐름 목록 [(occurred_at, amount)...] — 시간가중 자본 계산용."""
+    session = get_session()
+    try:
+        rows = (
+            session.query(CashFlow)
+            .filter(CashFlow.account_key == (account_key or ""))
+            .order_by(CashFlow.occurred_at.asc())
+            .all()
+        )
+        return [(r.occurred_at, float(r.amount or 0)) for r in rows]
+    finally:
+        session.close()
+
+
+@with_retry
+def get_cash_flow_total(
+    account_key: str = "",
+    until: Optional[datetime] = None,
+) -> float:
+    """계정의 외부 현금 흐름 순합(입금-출금). until 지정 시 그 시각 이하만."""
+    session = get_session()
+    try:
+        query = session.query(CashFlow).filter(CashFlow.account_key == (account_key or ""))
+        if until is not None:
+            query = query.filter(CashFlow.occurred_at <= until)
+        return float(sum(r.amount or 0 for r in query.all()))
+    finally:
+        session.close()
+
+
+@with_retry
+def get_cash_flow_total_between(
+    account_key: str,
+    after: datetime,
+    until: datetime,
+) -> float:
+    """(after, until] 구간의 외부 현금 흐름 순합 — TWR 구간 수익률 보정용.
+
+    after는 배타(직전 스냅샷 시각), until은 포함(이번 스냅샷 시각). 스냅샷 날짜는
+    자정 정규화이므로 같은 날 입금은 그 날 스냅샷 구간에 귀속된다.
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(CashFlow)
+            .filter(CashFlow.account_key == (account_key or ""))
+            .filter(CashFlow.occurred_at > after)
+            .filter(CashFlow.occurred_at <= until)
+            .all()
+        )
+        return float(sum(r.amount or 0 for r in rows))
+    finally:
+        session.close()
+
+
+@with_retry
+def get_latest_snapshot_summary(account_key: str = "") -> Optional[dict]:
+    """가장 최근 스냅샷의 (date, created_at, total_value, cumulative_return) 요약.
+
+    TWR 체인 계산용 — created_at은 실제 측정 시각이라 '직전 측정 이후 유입' 경계로
+    쓴다(date는 자정 귀속이라 같은 날 이른 입금을 이중 산입할 수 있음).
+    """
+    session = get_session()
+    try:
+        row = (
+            session.query(PortfolioSnapshot)
+            .filter(PortfolioSnapshot.account_key == (account_key or ""))
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "date": row.date,
+            "created_at": row.created_at,
+            "total_value": float(row.total_value),
+            "cumulative_return": float(row.cumulative_return or 0.0),
+        }
+    finally:
+        session.close()
+
+
+@with_retry
+def get_max_cumulative_return(account_key: str = "") -> Optional[float]:
+    """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용."""
+    session = get_session()
+    try:
+        row = (
+            session.query(PortfolioSnapshot.cumulative_return)
+            .filter(
+                PortfolioSnapshot.account_key == (account_key or ""),
+                PortfolioSnapshot.cumulative_return.isnot(None),
+            )
+            .order_by(PortfolioSnapshot.cumulative_return.desc())
+            .first()
+        )
+        return float(row[0]) if row and row[0] is not None else None
+    finally:
+        session.close()
+
+
 @with_retry
 def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
     """최근 N일간 포트폴리오 스냅샷 조회 (account_key 지정 시 해당 계좌만)."""
@@ -775,6 +935,7 @@ def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -
 
         data = [{
             "date": r.date,
+            "created_at": r.created_at,   # 실제 측정 시각 — TWR 유입 경계용
             "total_value": r.total_value,
             "cash": r.cash,
             "invested": r.invested,

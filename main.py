@@ -832,18 +832,39 @@ def run_rebalance(args):
                     summary_data = rebalancer.portfolio_mgr.get_portfolio_summary(
                         current_prices=_prices or None,
                     )
-                    # 일간 수익률: 직전 스냅샷 대비 (summary에는 누적치만 있다)
+                    # 일간 수익률: 직전 스냅샷 대비 (summary에는 누적치만 있다).
+                    # 적립식 계정은 입금을 분모에 더해 중화한다 — 입금일에 +33% 같은
+                    # 가짜 일간 수익 방지(docs/POCKET_TRACK_PLAN.md §4).
                     daily_ret = 0.0
                     try:
-                        from database.repositories import get_portfolio_snapshots
+                        from database.repositories import (
+                            get_portfolio_snapshots,
+                            get_cash_flow_total_between,
+                        )
+                        from core.portfolio_manager import twr_period_return
                         snaps = get_portfolio_snapshots(
                             days=7, account_key=live_strategy_name,
                         )
                         if snaps is not None and len(snaps) >= 2:
-                            vals = snaps.sort_values("date")["total_value"].astype(float)
-                            prev, last = float(vals.iloc[-2]), float(vals.iloc[-1])
+                            sdf = snaps.sort_values("date")
+                            prev = float(sdf["total_value"].iloc[-2])
+                            last = float(sdf["total_value"].iloc[-1])
+                            # 유입 경계는 자정 귀속(date)이 아니라 실제 측정 시각
+                            # (created_at) — 직전 스냅샷 '이전'의 같은 날 입금을
+                            # 이중 중화하지 않게(적대적 리뷰 medium).
+                            if "created_at" in sdf.columns and sdf["created_at"].iloc[-2] is not None:
+                                prev_boundary = sdf["created_at"].iloc[-2]
+                            else:
+                                prev_boundary = sdf["date"].iloc[-2]
                             if prev > 0:
-                                daily_ret = (last / prev - 1) * 100
+                                flow = 0.0
+                                try:
+                                    flow = get_cash_flow_total_between(
+                                        live_strategy_name, prev_boundary, datetime.now(),
+                                    )
+                                except Exception:
+                                    pass
+                                daily_ret = twr_period_return(prev, last, flow) * 100
                     except Exception:
                         pass
                     report_card = {
@@ -856,6 +877,10 @@ def run_rebalance(args):
                         "total_trades": (result.get("executed", 0) if executed else 0),
                         "strategy_diagnosis": f"바스켓 {name} · paper 트랙레코드 일일 사이클",
                     }
+                    # 적립식 계정이면 누적 원금(초기+입금)을 함께 표기 — 평가액과 원금을
+                    # 분리해야 '내가 넣은 돈 대비 얼마'가 한눈에 보인다.
+                    if float(summary_data.get("deposits_total", 0) or 0) > 0:
+                        report_card["principal"] = summary_data.get("principal", 0)
                     # 리포트 v2 부가 필드(시장/설계/일정 대비) — 실패해도 기본 카드는 발송.
                     try:
                         from core.basket_evaluation import (
@@ -1782,6 +1807,8 @@ def run_weekly_report() -> int:
             # 기준 스냅샷이 7일 전 근방(±3일 밴드) 안에 있을 때만 '주간'으로 표기한다 —
             # 스냅샷 공백으로 기준이 2~4주 전이면 다주간 수익을 주간으로 오표기하게 되므로
             # 그 경우 주간 항을 생략한다(누적은 유지). (적대적 리뷰 low)
+            # 적립식 계정은 구간 입금을 분모에 더해 중화한다 — 입금 주에 '주간 +10%'
+            # 같은 가짜 수익 방지(적대적 리뷰 medium).
             week_change = None
             if len(snaps) >= 2:
                 last_val = float(snaps[-1].total_value)
@@ -1791,9 +1818,19 @@ def run_weekly_report() -> int:
                     if last_date - timedelta(days=10) <= _d(s.date) <= last_date - timedelta(days=4)
                 ]
                 if band:
-                    ref_val = float(band[-1].total_value)
+                    ref = band[-1]
+                    ref_val = float(ref.total_value)
                     if ref_val > 0:
-                        week_change = (last_val / ref_val - 1) * 100
+                        from core.portfolio_manager import twr_period_return
+                        from database.repositories import get_cash_flow_total_between
+                        flow = 0.0
+                        try:
+                            ref_boundary = ref.created_at or ref.date
+                            last_boundary = snaps[-1].created_at or now_kst
+                            flow = get_cash_flow_total_between(key, ref_boundary, last_boundary)
+                        except Exception:
+                            pass
+                        week_change = twr_period_return(ref_val, last_val, flow) * 100
 
             # 결측은 '고유 일수'로 집계(SNAPSHOT_GAP 이벤트는 미복구 결측을 매 사이클
             # 재경보해 부풀려짐 → 최근 7일 실제 빠진 영업일 수를 직접 센다).
