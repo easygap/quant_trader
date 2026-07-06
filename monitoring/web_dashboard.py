@@ -75,6 +75,94 @@ def get_snapshots_json(days: int = 30, account_key: Optional[str] = None) -> dic
     return {"snapshots": _serialize_snapshots(df), "days": days}
 
 
+def get_baskets_json() -> dict:
+    """enabled 바스켓별 '내 돈' 요약 — 최신 스냅샷·원금(입금 포함)·배치율·보유 (DB 전용).
+
+    대시보드는 10초 폴링이므로 네트워크 조회를 섞지 않는다 — 평가금·수익률은
+    일일 사이클이 저장한 최신 스냅샷 값(TWR 반영), 보유는 DB 포지션(평균단가 기준).
+    적립식 계정(kr_pocket)의 핵심 질문 "내가 넣은 돈 대비 얼마"에 답하는 화면 데이터다.
+    """
+    from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
+    from database.repositories import (
+        get_all_positions,
+        get_cash_flow_total,
+        get_latest_snapshot_summary,
+    )
+    from database.models import PortfolioSnapshot, get_session
+
+    config = Config.get()
+    baskets_cfg = BasketRebalancer._load_baskets_config()
+    min_cash = (config.risk_params.get("diversification") or {}).get("min_cash_ratio", 0.20)
+    global_capital = (config.risk_params.get("position_sizing") or {}).get(
+        "initial_capital", 10_000_000
+    )
+
+    out = []
+    for name in BasketRebalancer.get_enabled_baskets():
+        cfg = baskets_cfg.get(name) or {}
+        key = rebalance_live_strategy_id(name)
+        initial = float(cfg.get("initial_capital") or global_capital)
+        deposits = float(get_cash_flow_total(account_key=key) or 0)
+        principal = initial + deposits
+
+        # 최신 스냅샷 (mdd 포함해 직접 조회 — get_latest_snapshot_summary는 TWR용 최소 필드)
+        session = get_session()
+        try:
+            snap = (
+                session.query(PortfolioSnapshot)
+                .filter(PortfolioSnapshot.account_key == key)
+                .order_by(PortfolioSnapshot.date.desc())
+                .first()
+            )
+            snapshot = None
+            deployment_ratio = None
+            if snap is not None:
+                total = float(snap.total_value or 0)
+                cash = float(snap.cash or 0)
+                deployment_ratio = ((total - cash) / total) if total > 0 else None
+                snapshot = {
+                    "date": str(snap.date)[:10],
+                    "total_value": total,
+                    "cash": cash,
+                    "cumulative_return": float(snap.cumulative_return or 0),
+                    "mdd": float(snap.mdd or 0),
+                }
+        finally:
+            session.close()
+
+        max_stock = 1.0 - float(min_cash)
+        tsw = cfg.get("target_stock_weight")
+        design_fraction = max_stock if tsw is None else max(0.0, min(float(tsw), max_stock))
+
+        positions = [
+            {
+                "symbol": p.symbol,
+                "quantity": int(p.quantity or 0),
+                "avg_price": float(p.avg_price or 0),
+                "invested": float((p.quantity or 0) * (p.avg_price or 0)),
+            }
+            for p in (get_all_positions(account_key=key) or [])
+            if (p.quantity or 0) > 0
+        ]
+
+        out.append({
+            "basket": name,
+            "account_key": key,
+            "display_name": cfg.get("name") or name,
+            "initial_capital": initial,
+            "deposits_total": deposits,
+            "principal": principal,
+            "snapshot": snapshot,
+            "profit_vs_principal": (
+                (snapshot["total_value"] - principal) if snapshot else None
+            ),
+            "deployment_ratio": deployment_ratio,
+            "design_fraction": design_fraction,
+            "positions": positions,
+        })
+    return {"baskets": out, "timestamp": datetime.now().isoformat()}
+
+
 def get_runtime_json() -> dict:
     """
     시장 국면(실시간 조회) + 스케줄러가 기록한 신호·루프·블랙스완·KIS 통계(JSON 파일).
@@ -185,6 +273,11 @@ def _html_page() -> str:
   </section>
 
   <section>
+    <h2>바스켓 트랙 — 내 돈 화면</h2>
+    <div id="basketTracks"><p class="muted">불러오는 중...</p></div>
+  </section>
+
+  <section>
     <h2>바스켓 paper 승격 진행률</h2>
     <div class="grid" id="basketEval"></div>
     <p class="meta" id="basketEvalIssues"></p>
@@ -231,7 +324,7 @@ def _html_page() -> str:
   </section>
 
   <section>
-    <h2>수익률 추이 (최근 30일)</h2>
+    <h2>수익률 추이 (최근 30일) · 계정: <select id="chartAccount" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;"></select></h2>
     <div class="chart-wrap"><canvas id="chartEquity"></canvas></div>
   </section>
 
@@ -390,6 +483,54 @@ def _html_page() -> str:
       }).join('');
     }
 
+    const basketTracksEl = document.getElementById('basketTracks');
+    const chartAccountSel = document.getElementById('chartAccount');
+
+    function renderBasketTracks(data) {
+      const baskets = (data && data.baskets) || [];
+      if (!baskets.length) {
+        basketTracksEl.innerHTML = '<p class="muted">enabled 바스켓 없음</p>';
+        return;
+      }
+      basketTracksEl.innerHTML = baskets.map(function(b) {
+        const s = b.snapshot;
+        const na = '<span class="muted">스냅샷 없음</span>';
+        const ret = s ? Number(s.cumulative_return) : null;
+        const pvp = b.profit_vs_principal;
+        const dep = b.deployment_ratio != null ? Math.round(b.deployment_ratio * 100) + '% / 설계 ' + Math.round(b.design_fraction * 100) + '%' : '-';
+        const pos = (b.positions || []).map(function(p) { return escHtml(p.symbol) + ' ' + p.quantity + '주'; }).join(', ') || '없음';
+        const depositLine = b.deposits_total > 0 ? ' (입금 ' + fmtNum(b.deposits_total) + '원 포함)' : '';
+        const cards =
+          card('평가금' + (s ? ' (' + escHtml(s.date) + ')' : ''), s ? fmtNum(s.total_value) + '원' : na, '') +
+          card('누적 원금', fmtNum(b.principal) + '원' + depositLine, '') +
+          card('원금 대비', pvp != null ? ((pvp >= 0 ? '+' : '') + fmtNum(pvp) + '원') : '-', pvp != null ? (pvp >= 0 ? 'positive' : 'negative') : '') +
+          card('수익률(TWR)', ret != null ? fmtPct(ret) : '-', ret != null ? (ret >= 0 ? 'positive' : 'negative') : '') +
+          card('MDD', s ? fmtPct(-Math.abs(s.mdd)) : '-', 'negative') +
+          card('주식 배치율', escHtml(dep), '') +
+          card('보유', escHtml(pos), '');
+        return '<h3 style="margin:12px 0 8px 0;font-size:0.95rem;">' + escHtml(b.display_name) + ' <span class="muted">(' + escHtml(b.basket) + ')</span></h3><div class="grid">' + cards + '</div>';
+      }).join('');
+    }
+
+    function ensureChartAccountOptions(data) {
+      const baskets = (data && data.baskets) || [];
+      const wanted = baskets.map(function(b) { return { v: b.account_key, t: b.display_name }; });
+      wanted.push({ v: '', t: '기본 계정' });
+      if (chartAccountSel.options.length === wanted.length) return; // 선택 유지
+      const prev = chartAccountSel.value;
+      chartAccountSel.innerHTML = wanted.map(function(w) {
+        return '<option value="' + escHtml(w.v) + '">' + escHtml(w.t) + '</option>';
+      }).join('');
+      // 기본 선택: 이전 선택 유지, 없으면 첫 바스켓(내 돈부터 보이게)
+      chartAccountSel.value = prev && Array.from(chartAccountSel.options).some(o => o.value === prev)
+        ? prev : (wanted[0] ? wanted[0].v : '');
+    }
+
+    chartAccountSel.addEventListener('change', function() {
+      if (chartEquity) { chartEquity.destroy(); chartEquity = null; }
+      fetchData();
+    });
+
     function updateChart(snapshots) {
       if (!snapshots || snapshots.length === 0) return;
       const labels = snapshots.map(s => s.date);
@@ -441,7 +582,19 @@ def _html_page() -> str:
         summaryEl.innerHTML = '<p class="error">포트폴리오 조회 불가</p>';
       }
       try {
-        const snapRes = await fetch('/api/snapshots?days=30');
+        const bkRes = await fetch('/api/baskets');
+        if (bkRes.ok) {
+          const bkData = await bkRes.json();
+          renderBasketTracks(bkData);
+          ensureChartAccountOptions(bkData);
+        } else {
+          basketTracksEl.innerHTML = '<p class="error">바스켓 조회 불가</p>';
+        }
+      } catch (e) { basketTracksEl.innerHTML = '<p class="error">바스켓 조회 불가</p>'; }
+      try {
+        const acct = chartAccountSel.value;
+        const url = '/api/snapshots?days=30' + (acct ? ('&account_key=' + encodeURIComponent(acct)) : '');
+        const snapRes = await fetch(url);
         if (snapRes.ok) {
           const snapData = await snapRes.json();
           updateChart(snapData.snapshots || []);
@@ -498,6 +651,15 @@ async def handle_api_portfolio(_request: web.Request) -> web.Response:
         return web.json_response(data)
     except Exception as e:
         logger.exception("API /api/portfolio 오류: {}", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_api_baskets(_request: web.Request) -> web.Response:
+    """바스켓 트랙 '내 돈' 요약 — DB 전용(네트워크 조회 없음), 10초 폴링 안전."""
+    try:
+        return web.json_response(get_baskets_json())
+    except Exception as e:
+        logger.exception("API /api/baskets 오류: {}", e)
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -576,6 +738,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/portfolio", handle_api_portfolio)
     app.router.add_get("/api/runtime", handle_api_runtime)
     app.router.add_get("/api/snapshots", handle_api_snapshots)
+    app.router.add_get("/api/baskets", handle_api_baskets)
     app.router.add_get("/api/basket_evaluation", handle_api_basket_evaluation)
     return app
 
