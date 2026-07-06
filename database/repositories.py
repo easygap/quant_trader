@@ -733,9 +733,11 @@ def save_portfolio_snapshot(
         else:
             session.add(snapshot)
         session.commit()
+        return True
     except Exception as e:
         session.rollback()
         logger.error("포트폴리오 스냅샷 저장 실패: {}", e)
+        return False  # 호출부가 실패를 인지해야 한다 — 삼키면 거짓 SNAPSHOT_SAVED가 기록됨
     finally:
         session.close()
 

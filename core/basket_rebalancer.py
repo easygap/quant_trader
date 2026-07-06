@@ -181,11 +181,13 @@ class BasketRebalancer:
                     self.basket_name, missing,
                 )
                 return False
-            self.portfolio_mgr.save_daily_snapshot(
+            ok = self.portfolio_mgr.save_daily_snapshot(
                 current_prices=prices or None,
                 snapshot_date=self._nav_attribution_date(),
             )
-            return True
+            # 저장 실패(예: DB 제약 충돌)를 성공으로 보고하면 관측성이 거짓
+            # SNAPSHOT_SAVED를 남긴다 — 반환값을 그대로 전파한다.
+            return bool(ok)
         except Exception as e:
             logger.warning("바스켓 '{}' NAV 스냅샷 저장 실패: {}", self.basket_name, e)
             return False
