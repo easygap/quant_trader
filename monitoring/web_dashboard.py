@@ -228,333 +228,337 @@ def get_runtime_json() -> dict:
 
 
 def _html_page() -> str:
-    """대시보드 단일 페이지 HTML (인라인 CSS/JS, Chart.js CDN)"""
+    """대시보드 단일 페이지 HTML — 2026-07 UI 개편(벤토 그리드·다크 글래스·Pretendard).
+
+    원칙: ① 내 돈(바스켓 트랙)이 첫 화면 ② 웹의 쓰기 권한은 '입금 기록' 하나
+    (매매·설정 변경은 웹에 두지 않는다) ③ 폴링 경로에 네트워크 조회 없음(DB 전용 API).
+    """
     return """<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>퀀트 트레이더 대시보드</title>
+  <title>퀀트 트레이더</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    :root { --bg: #0f1419; --card: #1a2332; --text: #e6edf3; --muted: #8b949e; --up: #3fb950; --down: #f85149; --border: #30363d; }
+    :root {
+      --bg: #0b0f14; --bg2: #0e141b; --surface: rgba(255,255,255,0.03);
+      --surface2: rgba(255,255,255,0.055); --border: rgba(255,255,255,0.08);
+      --text: #e8edf4; --muted: #8b97a5; --dim: #5c6773;
+      --up: #34d399; --down: #f87171; --accent: #818cf8; --warn: #fbbf24;
+      --radius: 16px; --radius-sm: 10px;
+    }
     * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: var(--text); min-height: 100vh; }
-    h1 { font-size: 1.5rem; margin: 0 0 8px 0; }
-    .meta { color: var(--muted); font-size: 0.875rem; margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-    .card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; margin-bottom: 4px; }
-    .card .value { font-size: 1.25rem; font-weight: 600; }
-    .card .value.positive { color: var(--up); }
-    .card .value.negative { color: var(--down); }
-    section { margin-bottom: 24px; }
-    section h2 { font-size: 1.1rem; margin: 0 0 12px 0; color: var(--muted); }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    .num { text-align: right; }
-    .positive { color: var(--up); }
-    .negative { color: var(--down); }
-    .chart-wrap { max-width: 800px; height: 260px; }
-    .error { color: var(--down); font-size: 0.875rem; }
-    #loading { color: var(--muted); }
-    .muted { color: var(--muted); }
+    html { scrollbar-color: #2a3441 transparent; }
+    body {
+      font-family: 'Pretendard Variable', Pretendard, 'Segoe UI', system-ui, sans-serif;
+      margin: 0; background:
+        radial-gradient(1200px 500px at 15% -10%, rgba(129,140,248,0.08), transparent 60%),
+        radial-gradient(900px 400px at 95% 0%, rgba(52,211,153,0.05), transparent 55%),
+        var(--bg);
+      color: var(--text); min-height: 100vh; font-size: 15px; letter-spacing: -0.01em;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
+
+    /* 상단바 */
+    .topbar {
+      position: sticky; top: 0; z-index: 40; backdrop-filter: blur(14px);
+      background: rgba(11,15,20,0.75); border-bottom: 1px solid var(--border);
+    }
+    .topbar-in { max-width: 1180px; margin: 0 auto; padding: 14px 20px; display: flex; align-items: center; gap: 14px; }
+    .brand { font-weight: 800; font-size: 1.05rem; letter-spacing: -0.02em; }
+    .brand small { color: var(--muted); font-weight: 500; margin-left: 8px; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--up); box-shadow: 0 0 8px rgba(52,211,153,0.7); animation: pulse 2.4s infinite; }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+    .topbar .meta { color: var(--muted); font-size: 0.8rem; margin-left: auto; }
+    .btn {
+      border: 1px solid var(--border); background: var(--surface2); color: var(--text);
+      padding: 8px 16px; border-radius: 999px; font: inherit; font-size: 0.85rem; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .btn:hover { background: rgba(255,255,255,0.1); transform: translateY(-1px); }
+    .btn-primary { background: linear-gradient(135deg, #34d399, #10b981); color: #06281c; border: none; }
+    .btn-primary:hover { filter: brightness(1.08); }
+
+    section { margin-top: 36px; }
+    section > h2 { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0 0 14px 2px; display:flex; align-items:center; gap:10px; }
+
+    /* 패널·카드 */
+    .panel {
+      background: linear-gradient(180deg, var(--surface2), var(--surface));
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 22px;
+    }
+    .bento { display: grid; gap: 16px; }
+    .basket-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .basket-head .name { font-size: 1.05rem; font-weight: 700; }
+    .basket-head .tag { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; }
+    .hero-num { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+    .hero-sub { color: var(--muted); font-size: 0.82rem; margin-top: 4px; }
+    .delta { font-size: 0.95rem; font-weight: 700; }
+    .positive { color: var(--up); } .negative { color: var(--down); } .muted { color: var(--muted); }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 10px; margin-top: 18px; }
+    .stat { background: rgba(0,0,0,0.18); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
+    .stat .k { color: var(--dim); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat .v { font-size: 0.98rem; font-weight: 700; margin-top: 3px; }
+
+    .flows { margin-top: 14px; font-size: 0.8rem; color: var(--muted); }
+    .flows span { margin-right: 12px; }
+
+    /* 진행률 바 */
+    .prog-row { margin-bottom: 14px; }
+    .prog-row .lbl { display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--muted); margin-bottom: 6px; }
+    .bar { height: 8px; background: rgba(255,255,255,0.06); border-radius: 999px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #818cf8, #34d399); transition: width .5s; }
+
+    /* 카드 그리드(운영 상태) */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 13px 14px; }
+    .card .label { color: var(--dim); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px; }
+    .card .value { font-size: 1.02rem; font-weight: 700; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--dim); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .chart-wrap { height: 280px; }
+    .error { color: var(--down); font-size: 0.85rem; }
+    select {
+      background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 0.8rem;
+    }
+    details { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 18px; background: var(--surface); }
+    details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; font-weight: 600; }
+
+    /* 입금 모달 */
+    .overlay { position: fixed; inset: 0; background: rgba(4,7,10,0.7); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .overlay.open { display: flex; }
+    .modal { width: min(420px, calc(100vw - 40px)); background: var(--bg2); border: 1px solid var(--border); border-radius: 20px; padding: 26px; }
+    .modal h3 { margin: 0 0 4px; font-size: 1.15rem; }
+    .modal .hint { color: var(--muted); font-size: 0.8rem; margin-bottom: 18px; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 0.75rem; color: var(--muted); font-weight: 600; margin-bottom: 6px; }
+    .field input, .field select { width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 10px 12px; font: inherit; }
+    .presets { display: flex; gap: 8px; margin-top: 8px; }
+    .chip { flex: 1; text-align: center; padding: 8px 0; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); font-size: 0.82rem; font-weight: 600; cursor: pointer; }
+    .chip:hover, .chip.on { border-color: var(--up); color: var(--up); }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+
+    /* 토스트 */
+    #toast { position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg2); border: 1px solid var(--border); border-radius: 999px; padding: 11px 22px; font-size: 0.86rem; font-weight: 600; opacity: 0; transition: all .25s; z-index: 200; pointer-events: none; }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.ok { border-color: rgba(52,211,153,0.5); color: var(--up); }
+    #toast.err { border-color: rgba(248,113,113,0.5); color: var(--down); }
   </style>
 </head>
 <body>
-  <h1>📊 퀀트 트레이더 대시보드</h1>
-  <p class="meta">마지막 갱신: <span id="lastUpdate">-</span> · <span id="loading">자동 갱신 중 (10초 간격)</span></p>
+  <div class="topbar"><div class="topbar-in">
+    <div class="live-dot"></div>
+    <div class="brand">퀀트 트레이더<small>paper 운영</small></div>
+    <span class="meta">갱신 <span id="lastUpdate">-</span></span>
+    <button class="btn btn-primary" onclick="openDeposit()">+ 적립 입금</button>
+  </div></div>
+
+  <div class="wrap">
 
   <section>
-    <h2>시장 국면 · 리스크 · API · 루프</h2>
+    <h2>내 자산</h2>
+    <div class="bento" id="basketTracks"><div class="panel muted">불러오는 중...</div></div>
+  </section>
+
+  <section>
+    <h2>수익률 추이 <select id="chartAccount"></select></h2>
+    <div class="panel"><div class="chart-wrap"><canvas id="chartEquity"></canvas></div></div>
+  </section>
+
+  <section>
+    <h2>승격 진행률 <span class="muted" style="text-transform:none;letter-spacing:0;">60영업일 트랙레코드</span></h2>
+    <div class="panel" id="basketEval"></div>
+  </section>
+
+  <section>
+    <h2>운영 상태</h2>
     <div class="grid" id="runtimeOps"></div>
-    <p class="meta" id="runtimeMeta"></p>
+    <p class="flows" id="runtimeMeta"></p>
   </section>
 
   <section>
-    <h2>바스켓 트랙 — 내 돈 화면</h2>
-    <div id="basketTracks"><p class="muted">불러오는 중...</p></div>
-  </section>
-
-  <section>
-    <h2>바스켓 paper 승격 진행률</h2>
-    <div class="grid" id="basketEval"></div>
-    <p class="meta" id="basketEvalIssues"></p>
-  </section>
-
-  <section>
-    <h2>웹소켓 갭 모니터링</h2>
-    <div class="grid" id="wsGapSummary"></div>
-    <div id="wsGapTableWrap" style="display:none;">
-      <table>
-        <thead><tr><th>끊김 시각</th><th>재연결 시각</th><th class="num">갭(초)</th><th>영향 종목</th><th>REST 보충</th><th>관측 변동률</th><th>블랙스완 쿨다운</th></tr></thead>
-        <tbody id="wsGapRows"></tbody>
-      </table>
+    <h2>오늘 신호</h2>
+    <div class="panel">
+      <div id="signalsTableWrap">
+        <table>
+          <thead><tr><th>시각</th><th>종목</th><th>신호</th><th class="num">점수</th><th>출처</th></tr></thead>
+          <tbody id="signalRows"></tbody>
+        </table>
+      </div>
+      <p id="signalEmpty" class="muted" style="display:none;">기록된 신호 없음</p>
+      <p id="signalError" class="error" style="display:none;">조회 불가</p>
     </div>
-    <p id="wsGapEmpty" class="meta" style="display:none;">갭 이벤트 없음</p>
-    <p id="wsGapNA" class="meta" style="display:none;">웹소켓 정보 없음 (N/A)</p>
   </section>
 
   <section>
-    <h2>오늘 발생 신호</h2>
-    <div id="signalsTableWrap">
-      <table>
-        <thead><tr><th>시각</th><th>종목</th><th>신호</th><th class="num">점수</th><th>출처</th></tr></thead>
-        <tbody id="signalRows"></tbody>
-      </table>
+    <details>
+      <summary>웹소켓 갭 · 레거시 기본 계정</summary>
+      <div style="margin-top:14px;">
+        <div class="grid" id="wsGapSummary"></div>
+        <div id="wsGapTableWrap" style="display:none; margin-top:12px;">
+          <table>
+            <thead><tr><th>끊김</th><th>재연결</th><th class="num">갭(초)</th><th>영향 종목</th><th>REST 보충</th><th>블랙스완</th></tr></thead>
+            <tbody id="wsGapRows"></tbody>
+          </table>
+        </div>
+        <p id="wsGapEmpty" class="muted" style="display:none;">갭 이벤트 없음</p>
+        <p id="wsGapNA" class="muted" style="display:none;">웹소켓 정보 없음</p>
+        <div class="grid" id="summary" style="margin-top:16px;"></div>
+        <div id="positionsWrap" style="margin-top:12px;">
+          <table>
+            <thead><tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th><th class="num">평가액</th><th class="num">수익률</th></tr></thead>
+            <tbody id="positions"></tbody>
+          </table>
+        </div>
+        <p id="noPositions" class="muted" style="display:none;">보유 종목 없음</p>
+      </div>
+    </details>
+  </section>
+
+  </div>
+
+  <!-- 입금 모달 -->
+  <div class="overlay" id="depositOverlay" onclick="if(event.target===this)closeDeposit()">
+    <div class="modal">
+      <h3>적립 입금 기록</h3>
+      <p class="hint">paper는 기록 = 입금. 입금은 수익률(TWR)이 중화하므로 성과가 왜곡되지 않습니다. 다음 사이클이 새 현금을 흡수합니다.</p>
+      <div class="field"><label>바스켓</label><select id="depBasket"></select></div>
+      <div class="field">
+        <label>금액 (원)</label>
+        <input id="depAmount" type="number" min="1" step="10000" placeholder="100000">
+        <div class="presets">
+          <div class="chip" onclick="setAmt(50000,this)">5만</div>
+          <div class="chip" onclick="setAmt(100000,this)">10만</div>
+          <div class="chip" onclick="setAmt(200000,this)">20만</div>
+        </div>
+      </div>
+      <div class="field"><label>메모 (선택)</label><input id="depNote" type="text" placeholder="7월 적립"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeDeposit()">취소</button>
+        <button class="btn btn-primary" id="depSubmit" onclick="submitDeposit()">기록</button>
+      </div>
     </div>
-    <p id="signalEmpty" class="meta" style="display:none;">기록된 신호 없음 (스케줄러 장전 분석 이후 누적)</p>
-    <p id="signalError" class="error" style="display:none;">조회 불가</p>
-  </section>
+  </div>
 
-  <section>
-    <div class="grid" id="summary"></div>
-  </section>
-
-  <section>
-    <h2>보유 포지션</h2>
-    <div id="positionsWrap">
-      <table>
-        <thead><tr><th>종목</th><th class="num">수량</th><th class="num">평균가</th><th class="num">현재가</th><th class="num">평가액</th><th class="num">수익률</th></tr></thead>
-        <tbody id="positions"></tbody>
-      </table>
-    </div>
-    <p id="noPositions" style="display:none; color: var(--muted);">보유 종목 없음</p>
-  </section>
-
-  <section>
-    <h2>수익률 추이 (최근 30일) · 계정: <select id="chartAccount" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;"></select></h2>
-    <div class="chart-wrap"><canvas id="chartEquity"></canvas></div>
-  </section>
+  <div id="toast"></div>
 
   <script>
-    const summaryEl = document.getElementById('summary');
-    const runtimeOps = document.getElementById('runtimeOps');
-    const runtimeMeta = document.getElementById('runtimeMeta');
-    const signalRows = document.getElementById('signalRows');
-    const signalEmpty = document.getElementById('signalEmpty');
-    const signalError = document.getElementById('signalError');
-    const signalsTableWrap = document.getElementById('signalsTableWrap');
-    const positionsEl = document.getElementById('positions');
-    const positionsWrap = document.getElementById('positionsWrap');
-    const noPositions = document.getElementById('noPositions');
-    const lastUpdate = document.getElementById('lastUpdate');
+    const $ = (id) => document.getElementById(id);
+    const basketTracksEl = $('basketTracks');
+    const chartAccountSel = $('chartAccount');
     let chartEquity = null;
+    let lastBaskets = [];
+    const flowsCache = {};   // basket → flows(입금 내역)
 
-    function fmtNum(n) { return Number(n).toLocaleString('ko-KR'); }
-    function fmtPct(n) { return (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'; }
-    function escHtml(t) {
-      const d = document.createElement('div');
-      d.textContent = t == null ? '' : String(t);
-      return d.innerHTML;
+    const fmtNum = (n) => Number(n).toLocaleString('ko-KR');
+    const fmtPct = (n) => (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
+    function escHtml(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : String(t); return d.innerHTML; }
+    const card = (label, value, cls) => `<div class="card"><div class="label">${escHtml(label)}</div><div class="value ${cls || ''}">${value}</div></div>`;
+    const stat = (k, v, cls) => `<div class="stat"><div class="k">${escHtml(k)}</div><div class="v ${cls || ''}">${v}</div></div>`;
+
+    function toast(msg, ok) {
+      const t = $('toast');
+      t.textContent = msg; t.className = 'show ' + (ok ? 'ok' : 'err');
+      setTimeout(() => { t.className = ''; }, 3200);
     }
 
-    function card(label, value, cls) {
-      return '<div class="card"><div class="label">' + escHtml(label) + '</div><div class="value ' + (cls || '') + '">' + value + '</div></div>';
-    }
-
-    function renderRuntime(rt) {
-      const na = '<span class="muted">조회 불가</span>';
-      if (!rt) {
-        runtimeOps.innerHTML = card('시장 국면', na, '') + card('블랙스완', na, '') + card('KIS 60초 요청', na, '') + card('KIS 분당 활용률', na, '') + card('10분 루프(최근5회 평균)', na, '');
-        runtimeMeta.textContent = '';
-        signalsTableWrap.style.display = 'none';
-        signalEmpty.style.display = 'none';
-        signalError.style.display = 'block';
-        return;
-      }
-      const mr = rt.market_regime;
-      const mrTxt = mr && mr.regime ? String(mr.regime) : null;
-      const bs = rt.blackswan;
-      const bsTxt = bs && bs.display ? String(bs.display) : null;
-      const kis = rt.kis_stats;
-      const k60 = kis && (kis.requests_last_60s != null) ? String(kis.requests_last_60s) : null;
-      const kpct = kis && (kis.minute_utilization_pct != null) ? (Number(kis.minute_utilization_pct).toFixed(1) + '%') : null;
-      const lm = rt.loop_metrics;
-      const loopAvg = lm && (lm.recent_avg_elapsed_s != null) ? (Number(lm.recent_avg_elapsed_s).toFixed(1) + '초') : null;
-      const loopDetail = lm && Array.isArray(lm.recent_elapsed_last5) && lm.recent_elapsed_last5.length
-        ? ' (' + lm.recent_elapsed_last5.map(function(x) { return Number(x).toFixed(0); }).join(', ') + '초)'
-        : '';
-
-      runtimeOps.innerHTML =
-        card('시장 국면', mrTxt ? escHtml(mrTxt) : na, mrTxt === 'bearish' ? 'negative' : (mrTxt === 'bullish' ? 'positive' : '')) +
-        card('블랙스완', bsTxt ? escHtml(bsTxt) : na, bs && bs.state === 'cooldown' ? 'negative' : '') +
-        card('KIS 최근 60초 요청 수', k60 != null ? escHtml(k60) : na, '') +
-        card('KIS 분당 활용률', kpct != null ? escHtml(kpct) : na, '') +
-        card('10분 루프 평균(최근 5회)', loopAvg ? (escHtml(loopAvg + loopDetail)) : na, '');
-
-      let metaParts = [];
-      if (rt.runtime_file_updated_at) metaParts.push('스케줄러 스냅샷: ' + new Date(rt.runtime_file_updated_at).toLocaleString('ko-KR'));
-      if (rt.kis_stats_source) metaParts.push('KIS 통계 출처: ' + rt.kis_stats_source);
-      if (rt.strategy) metaParts.push('전략: ' + rt.strategy);
-      runtimeMeta.textContent = metaParts.join(' · ');
-
-      signalError.style.display = 'none';
-      if (rt.signals_today === null || rt.signals_today === undefined) {
-        signalsTableWrap.style.display = 'none';
-        signalEmpty.style.display = 'none';
-        signalError.style.display = 'block';
-        return;
-      }
-      signalsTableWrap.style.display = 'block';
-      const sigs = rt.signals_today;
-      if (!sigs.length) {
-        signalRows.innerHTML = '';
-        signalEmpty.style.display = 'block';
-        return;
-      }
-      signalEmpty.style.display = 'none';
-      signalRows.innerHTML = sigs.map(function(r) {
-        return '<tr><td>' + escHtml(r.at) + '</td><td>' + escHtml(r.symbol) + '</td><td>' + escHtml(r.signal) + '</td><td class="num">' + escHtml(Number(r.score).toFixed(2)) + '</td><td>' + escHtml(r.source || '') + '</td></tr>';
-      }).join('');
-    }
-
-    const wsGapSummary = document.getElementById('wsGapSummary');
-    const wsGapRows = document.getElementById('wsGapRows');
-    const wsGapTableWrap = document.getElementById('wsGapTableWrap');
-    const wsGapEmpty = document.getElementById('wsGapEmpty');
-    const wsGapNA = document.getElementById('wsGapNA');
-
-    function renderWsGap(rt) {
-      const g = rt && rt.ws_gap;
-      if (!g || !g.available) {
-        wsGapSummary.innerHTML = card('웹소켓 상태', '<span class="muted">N/A</span>', '');
-        wsGapTableWrap.style.display = 'none';
-        wsGapEmpty.style.display = 'none';
-        wsGapNA.style.display = 'block';
-        return;
-      }
-      wsGapNA.style.display = 'none';
-      const connTxt = g.is_connected ? '연결됨' : '끊김';
-      const connCls = g.is_connected ? 'positive' : 'negative';
-      const gapSince = g.current_gap_since ? new Date(g.current_gap_since).toLocaleString('ko-KR') : '-';
-      wsGapSummary.innerHTML =
-        card('웹소켓 상태', escHtml(connTxt), connCls) +
-        card('총 갭 횟수', String(g.total_gap_count || 0), g.total_gap_count > 0 ? 'negative' : '') +
-        card('진행 중 갭 시작', g.current_gap_since ? escHtml(gapSince) : '-', g.current_gap_since ? 'negative' : '');
-
-      const gaps = g.recent_gaps || [];
-      if (gaps.length === 0) {
-        wsGapTableWrap.style.display = 'none';
-        wsGapEmpty.style.display = 'block';
-        return;
-      }
-      wsGapEmpty.style.display = 'none';
-      wsGapTableWrap.style.display = 'block';
-      wsGapRows.innerHTML = gaps.slice().reverse().map(function(ev) {
-        const dAt = ev.disconnect_at ? new Date(ev.disconnect_at).toLocaleString('ko-KR') : '-';
-        const rAt = ev.reconnect_at ? new Date(ev.reconnect_at).toLocaleString('ko-KR') : '-';
-        const syms = (ev.affected_symbols || []).join(', ') || '-';
-        const rest = ev.rest_backfill_performed ? (ev.rest_backfill_count + '건 조회') : '미수행';
-        const vol = ev.observed_volatility && Object.keys(ev.observed_volatility).length
-          ? Object.entries(ev.observed_volatility).map(function(e) { return e[0] + ': ' + e[1] + '%'; }).join(', ')
-          : '-';
-        const bsCool = ev.blackswan_cooldown_triggered ? '<span class="negative">발동</span>' : (ev.blackswan_checked ? '정상' : '-');
-        return '<tr><td>' + escHtml(dAt) + '</td><td>' + escHtml(rAt) + '</td><td class="num">' + escHtml(String(ev.gap_seconds)) + '</td><td>' + escHtml(syms) + '</td><td>' + escHtml(rest) + '</td><td>' + escHtml(vol) + '</td><td>' + bsCool + '</td></tr>';
-      }).join('');
-    }
-
-    function renderSummary(data) {
-      const items = [
-        { label: '총 평가금', value: fmtNum(data.total_value) + '원', cls: '' },
-        { label: '총 수익률', value: fmtPct(data.total_return), cls: data.total_return >= 0 ? 'positive' : 'negative' },
-        { label: '현금', value: fmtNum(data.cash) + '원', cls: '' },
-        { label: '투자금', value: fmtNum(data.invested) + '원', cls: '' },
-        { label: '실현 손익', value: fmtNum(data.realized_pnl) + '원', cls: data.realized_pnl >= 0 ? 'positive' : 'negative' },
-        { label: '미실현 손익', value: fmtNum(data.unrealized_pnl) + '원', cls: data.unrealized_pnl >= 0 ? 'positive' : 'negative' },
-        { label: 'MDD', value: fmtPct(-Math.abs(data.mdd)), cls: 'negative' },
-        { label: '보유 종목', value: data.position_count + '개', cls: '' },
-      ];
-      summaryEl.innerHTML = items.map(i => '<div class="card"><div class="label">' + i.label + '</div><div class="value ' + i.cls + '">' + i.value + '</div></div>').join('');
-    }
-
-    function renderPositions(positions) {
-      if (!positions || positions.length === 0) {
-        positionsWrap.style.display = 'none';
-        noPositions.style.display = 'block';
-        return;
-      }
-      positionsWrap.style.display = 'block';
-      noPositions.style.display = 'none';
-      positionsEl.innerHTML = positions.map(p => {
-        const cls = (p.pnl_rate >= 0 ? 'positive' : 'negative');
-        return '<tr><td>' + (p.symbol || '-') + '</td><td class="num">' + (p.quantity ?? '-') + '</td><td class="num">' + fmtNum(p.avg_price) + '</td><td class="num">' + fmtNum(p.current_price) + '</td><td class="num">' + fmtNum(p.current_value) + '</td><td class="num ' + cls + '">' + fmtPct(p.pnl_rate) + '</td></tr>';
-      }).join('');
-    }
-
-    const basketTracksEl = document.getElementById('basketTracks');
-    const chartAccountSel = document.getElementById('chartAccount');
-
+    /* ── 내 자산 (바스켓 트랙) ── */
     function renderBasketTracks(data) {
       const baskets = (data && data.baskets) || [];
-      if (!baskets.length) {
-        basketTracksEl.innerHTML = '<p class="muted">enabled 바스켓 없음</p>';
-        return;
-      }
+      lastBaskets = baskets;
+      if (!baskets.length) { basketTracksEl.innerHTML = '<div class="panel muted">enabled 바스켓 없음</div>'; return; }
       basketTracksEl.innerHTML = baskets.map(function(b) {
         const s = b.snapshot;
-        const na = '<span class="muted">스냅샷 없음</span>';
         const ret = s ? Number(s.cumulative_return) : null;
         const pvp = b.profit_vs_principal;
-        const dep = b.deployment_ratio != null ? Math.round(b.deployment_ratio * 100) + '% / 설계 ' + Math.round(b.design_fraction * 100) + '%' : '-';
-        const pos = (b.positions || []).map(function(p) { return escHtml(p.symbol) + ' ' + p.quantity + '주'; }).join(', ') || '없음';
-        const depositLine = b.deposits_total > 0 ? ' (입금 ' + fmtNum(b.deposits_total) + '원 포함)' : '';
-        const cards =
-          card('평가금' + (s ? ' (' + escHtml(s.date) + ')' : ''), s ? fmtNum(s.total_value) + '원' : na, '') +
-          card('누적 원금', fmtNum(b.principal) + '원' + depositLine, '') +
-          card('원금 대비', pvp != null ? ((pvp >= 0 ? '+' : '') + fmtNum(pvp) + '원') : '-', pvp != null ? (pvp >= 0 ? 'positive' : 'negative') : '') +
-          card('수익률(TWR)', ret != null ? fmtPct(ret) : '-', ret != null ? (ret >= 0 ? 'positive' : 'negative') : '') +
-          card('MDD', s ? fmtPct(-Math.abs(s.mdd)) : '-', 'negative') +
-          card('주식 배치율', escHtml(dep), '') +
-          card('보유', escHtml(pos), '');
-        return '<h3 style="margin:12px 0 8px 0;font-size:0.95rem;">' + escHtml(b.display_name) + ' <span class="muted">(' + escHtml(b.basket) + ')</span></h3><div class="grid">' + cards + '</div>';
+        const retCls = ret == null ? 'muted' : (ret >= 0 ? 'positive' : 'negative');
+        const pvpCls = pvp == null ? 'muted' : (pvp >= 0 ? 'positive' : 'negative');
+        const dep = b.deployment_ratio != null
+          ? Math.round(b.deployment_ratio * 100) + '% <span class="muted">/ ' + Math.round(b.design_fraction * 100) + '%</span>' : '-';
+        const pos = (b.positions || []).map(p => escHtml(p.symbol) + ' ' + p.quantity + '주').join(' · ') || '보유 없음';
+        const fl = flowsCache[b.basket] || [];
+        const flowsHtml = fl.length
+          ? '<div class="flows">최근 입금: ' + fl.slice(0, 3).map(f => `<span>${escHtml(f.occurred_at.slice(0, 10))} +${fmtNum(f.amount)}원${f.note ? ' (' + escHtml(f.note) + ')' : ''}</span>`).join('') + '</div>'
+          : '';
+        return `<div class="panel">
+          <div class="basket-head">
+            <span class="name">${escHtml(b.display_name)}</span>
+            <span class="tag">${escHtml(b.basket)}</span>
+            ${s ? '<span class="tag">' + escHtml(s.date) + '</span>' : ''}
+          </div>
+          <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
+            <div>
+              <div class="hero-num">${s ? fmtNum(s.total_value) + '<span style="font-size:1rem;color:var(--muted);font-weight:600;"> 원</span>' : '<span class="muted">스냅샷 없음</span>'}</div>
+              <div class="hero-sub">원금 ${fmtNum(b.principal)}원${b.deposits_total > 0 ? ' (입금 ' + fmtNum(b.deposits_total) + '원 포함)' : ''}</div>
+            </div>
+            <div class="delta ${pvpCls}">${pvp != null ? ((pvp >= 0 ? '+' : '') + fmtNum(pvp) + '원') : ''}</div>
+            <div class="delta ${retCls}">${ret != null ? fmtPct(ret) : ''}</div>
+          </div>
+          <div class="stats">
+            ${stat('수익률 (TWR)', ret != null ? fmtPct(ret) : '-', retCls)}
+            ${stat('MDD', s ? (Number(s.mdd) === 0 ? '0.00%' : fmtPct(-Math.abs(s.mdd))) : '-', 'negative')}
+            ${stat('현금', s ? fmtNum(s.cash) + '원' : '-', '')}
+            ${stat('주식 배치율', dep, '')}
+            ${stat('보유', escHtml(pos), '')}
+          </div>
+          ${flowsHtml}
+        </div>`;
       }).join('');
     }
 
+    async function refreshFlows() {
+      for (const b of lastBaskets) {
+        if (b.deposits_total > 0 || b.basket.indexOf('pocket') >= 0) {
+          try {
+            const r = await fetch('/api/cash_flows?basket=' + encodeURIComponent(b.basket));
+            if (r.ok) { flowsCache[b.basket] = (await r.json()).flows || []; }
+          } catch (e) { /* skip */ }
+        }
+      }
+    }
+
+    /* ── 차트 계정 선택 ── */
     function ensureChartAccountOptions(data) {
       const baskets = (data && data.baskets) || [];
-      const wanted = baskets.map(function(b) { return { v: b.account_key, t: b.display_name }; });
+      const wanted = baskets.map(b => ({ v: b.account_key, t: b.display_name }));
       wanted.push({ v: '', t: '기본 계정' });
-      if (chartAccountSel.options.length === wanted.length) return; // 선택 유지
+      if (chartAccountSel.options.length === wanted.length) return;
       const prev = chartAccountSel.value;
-      chartAccountSel.innerHTML = wanted.map(function(w) {
-        return '<option value="' + escHtml(w.v) + '">' + escHtml(w.t) + '</option>';
-      }).join('');
-      // 기본 선택: 이전 선택 유지, 없으면 첫 바스켓(내 돈부터 보이게)
-      chartAccountSel.value = prev && Array.from(chartAccountSel.options).some(o => o.value === prev)
-        ? prev : (wanted[0] ? wanted[0].v : '');
+      chartAccountSel.innerHTML = wanted.map(w => `<option value="${escHtml(w.v)}">${escHtml(w.t)}</option>`).join('');
+      chartAccountSel.value = prev && Array.from(chartAccountSel.options).some(o => o.value === prev) ? prev : (wanted[0] ? wanted[0].v : '');
     }
-
-    chartAccountSel.addEventListener('change', function() {
-      if (chartEquity) { chartEquity.destroy(); chartEquity = null; }
-      fetchData();
-    });
+    chartAccountSel.addEventListener('change', () => { if (chartEquity) { chartEquity.destroy(); chartEquity = null; } fetchData(); });
 
     function updateChart(snapshots) {
-      if (!snapshots || snapshots.length === 0) return;
-      const labels = snapshots.map(s => s.date);
+      if (!snapshots || snapshots.length === 0) { if (chartEquity) { chartEquity.destroy(); chartEquity = null; } return; }
+      const labels = snapshots.map(s => String(s.date).slice(0, 10));
       const values = snapshots.map(s => Number(s.total_value));
       const returns = snapshots.map(s => Number(s.cumulative_return || 0));
-
       if (!chartEquity) {
-        const ctx = document.getElementById('chartEquity').getContext('2d');
+        const ctx = $('chartEquity').getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, 0, 260);
+        grad.addColorStop(0, 'rgba(129,140,248,0.28)'); grad.addColorStop(1, 'rgba(129,140,248,0)');
         chartEquity = new Chart(ctx, {
           type: 'line',
-          data: {
-            labels: labels,
-            datasets: [
-              { label: '총 평가금 (원)', data: values, borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.1)', fill: true, yAxisID: 'y' },
-              { label: '누적 수익률 (%)', data: returns, borderColor: '#3fb950', borderDash: [4,2], yAxisID: 'y1' }
-            ]
-          },
+          data: { labels, datasets: [
+            { label: '평가금 (원)', data: values, borderColor: '#818cf8', backgroundColor: grad, fill: true, tension: 0.35, pointRadius: 2, borderWidth: 2, yAxisID: 'y' },
+            { label: '누적 수익률 (%)', data: returns, borderColor: '#34d399', borderDash: [5, 3], tension: 0.35, pointRadius: 0, borderWidth: 2, yAxisID: 'y1' }
+          ]},
           options: {
-            responsive: true,
-            maintainAspectRatio: false,
+            responsive: true, maintainAspectRatio: false,
             interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { labels: { color: '#8b97a5', usePointStyle: true, boxWidth: 8 } } },
             scales: {
-              y: { type: 'linear', position: 'left', title: { display: true, text: '평가금' } },
-              y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '수익률 %' } }
+              x: { ticks: { color: '#5c6773', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+              y: { position: 'left', ticks: { color: '#5c6773' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+              y1: { position: 'right', ticks: { color: '#34d399' }, grid: { drawOnChartArea: false } }
             }
           }
         });
@@ -566,73 +570,177 @@ def _html_page() -> str:
       }
     }
 
-    async function fetchData() {
-      let ts = '-';
-      try {
-        const portRes = await fetch('/api/portfolio');
-        if (portRes.ok) {
-          const portfolio = await portRes.json();
-          ts = portfolio.timestamp ? new Date(portfolio.timestamp).toLocaleString('ko-KR') : '-';
-          renderSummary(portfolio);
-          renderPositions(portfolio.positions || []);
-        } else {
-          summaryEl.innerHTML = '<p class="error">포트폴리오 조회 불가</p>';
-        }
-      } catch (e) {
-        summaryEl.innerHTML = '<p class="error">포트폴리오 조회 불가</p>';
-      }
-      try {
-        const bkRes = await fetch('/api/baskets');
-        if (bkRes.ok) {
-          const bkData = await bkRes.json();
-          renderBasketTracks(bkData);
-          ensureChartAccountOptions(bkData);
-        } else {
-          basketTracksEl.innerHTML = '<p class="error">바스켓 조회 불가</p>';
-        }
-      } catch (e) { basketTracksEl.innerHTML = '<p class="error">바스켓 조회 불가</p>'; }
-      try {
-        const acct = chartAccountSel.value;
-        const url = '/api/snapshots?days=30' + (acct ? ('&account_key=' + encodeURIComponent(acct)) : '');
-        const snapRes = await fetch(url);
-        if (snapRes.ok) {
-          const snapData = await snapRes.json();
-          updateChart(snapData.snapshots || []);
-        }
-      } catch (e) { /* 차트만 스킵 */ }
-      try {
-        const rtRes = await fetch('/api/runtime');
-        if (rtRes.ok) { const rtData = await rtRes.json(); renderRuntime(rtData); renderWsGap(rtData); }
-        else { renderRuntime(null); renderWsGap(null); }
-      } catch (e) {
-        renderRuntime(null); renderWsGap(null);
-      }
-      try {
-        const evRes = await fetch('/api/basket_evaluation');
-        const evEl = document.getElementById('basketEval');
-        const evIssues = document.getElementById('basketEvalIssues');
-        if (evRes.ok) {
-          const evData = await evRes.json();
-          const evs = evData.evaluations || [];
-          if (!evs.length) { evEl.innerHTML = '<p class="muted">enabled 바스켓 없음</p>'; evIssues.textContent = ''; }
-          else {
-            evEl.innerHTML = evs.map(ev => {
-              const cls = ev.verdict === 'PASS_CANDIDATE' ? 'positive' : (ev.verdict === 'FAIL_REVIEW' ? 'negative' : '');
-              const cov = ev.snapshot_coverage != null ? Math.round(ev.snapshot_coverage * 100) + '%' : '-';
-              return card(escHtml(ev.basket) + ' 판정', '<span class="' + cls + '">' + escHtml(ev.verdict || '-') + '</span>')
-                + card('진행', escHtml(String(ev.progress_days ?? '-')) + ' / ' + escHtml(String(ev.min_trading_days ?? '-')) + '일')
-                + card('스냅샷 커버리지', cov);
-            }).join('');
-            const allIssues = evs.flatMap(ev => (ev.issues || []).map(i => escHtml(ev.basket) + ': ' + escHtml(i)));
-            evIssues.textContent = allIssues.join(' · ');
-          }
-        } else { evEl.innerHTML = '<p class="error">평가 조회 불가</p>'; }
-      } catch (e) { /* 평가 카드만 스킵 */ }
-      lastUpdate.textContent = ts;
+    /* ── 승격 진행률 (프로그레스 바) ── */
+    function renderEval(evs) {
+      const el = $('basketEval');
+      if (!evs || !evs.length) { el.innerHTML = '<p class="muted">enabled 바스켓 없음</p>'; return; }
+      el.innerHTML = evs.map(function(ev) {
+        const pd = ev.progress_days || 0, md = ev.min_trading_days || 60;
+        const pct = Math.min(100, Math.round(pd / md * 100));
+        const cov = ev.snapshot_coverage != null ? Math.round(ev.snapshot_coverage * 100) : null;
+        const vCls = ev.verdict === 'PASS_CANDIDATE' ? 'positive' : (ev.verdict === 'FAIL_REVIEW' ? 'negative' : 'muted');
+        const issues = (ev.issues || []).map(i => '<div class="flows">⚠ ' + escHtml(i) + '</div>').join('');
+        return `<div class="prog-row">
+          <div class="lbl"><span><b style="color:var(--text)">${escHtml(ev.basket)}</b> · <span class="${vCls}">${escHtml(ev.verdict || '-')}</span></span>
+          <span>${pd}/${md}일 (${pct}%)${cov != null ? ' · 커버리지 ' + cov + '%' : ''}</span></div>
+          <div class="bar"><i style="width:${pct}%"></i></div>
+          ${issues}
+        </div>`;
+      }).join('');
     }
 
-    fetchData();
-    setInterval(fetchData, 10000);
+    /* ── 운영 상태 ── */
+    function renderRuntime(rt) {
+      const ops = $('runtimeOps'), meta = $('runtimeMeta');
+      const na = '<span class="muted">조회 불가</span>';
+      if (!rt) {
+        ops.innerHTML = card('시장 국면', na) + card('블랙스완', na) + card('KIS 요청(60초)', na) + card('루프', na);
+        $('signalsTableWrap').style.display = 'none'; $('signalEmpty').style.display = 'none'; $('signalError').style.display = 'block';
+        meta.textContent = ''; return;
+      }
+      const mr = rt.market_regime, bs = rt.blackswan, kis = rt.kis_stats, lm = rt.loop_metrics;
+      const mrTxt = mr && mr.regime ? String(mr.regime) : null;
+      ops.innerHTML =
+        card('시장 국면', mrTxt ? escHtml(mrTxt) : na, mrTxt === 'bearish' ? 'negative' : (mrTxt === 'bullish' ? 'positive' : '')) +
+        card('블랙스완', bs && bs.display ? escHtml(bs.display) : na, bs && bs.state === 'cooldown' ? 'negative' : '') +
+        card('KIS 요청(60초)', kis && kis.requests_last_60s != null ? escHtml(String(kis.requests_last_60s)) : na) +
+        card('KIS 분당 활용률', kis && kis.minute_utilization_pct != null ? escHtml(Number(kis.minute_utilization_pct).toFixed(1) + '%') : na) +
+        card('10분 루프 평균', lm && lm.recent_avg_elapsed_s != null ? escHtml(Number(lm.recent_avg_elapsed_s).toFixed(1) + '초') : na);
+      let mp = [];
+      if (rt.runtime_file_updated_at) mp.push('스케줄러 스냅샷 ' + new Date(rt.runtime_file_updated_at).toLocaleString('ko-KR'));
+      if (rt.strategy) mp.push('전략 ' + rt.strategy);
+      meta.textContent = mp.join(' · ');
+
+      $('signalError').style.display = 'none';
+      if (rt.signals_today == null) { $('signalsTableWrap').style.display = 'none'; $('signalEmpty').style.display = 'none'; $('signalError').style.display = 'block'; return; }
+      const sigs = rt.signals_today;
+      $('signalsTableWrap').style.display = sigs.length ? 'block' : 'none';
+      $('signalEmpty').style.display = sigs.length ? 'none' : 'block';
+      $('signalRows').innerHTML = sigs.map(r =>
+        `<tr><td>${escHtml(r.at)}</td><td>${escHtml(r.symbol)}</td><td>${escHtml(r.signal)}</td><td class="num">${escHtml(Number(r.score).toFixed(2))}</td><td>${escHtml(r.source || '')}</td></tr>`
+      ).join('');
+    }
+
+    function renderWsGap(rt) {
+      const g = rt && rt.ws_gap;
+      const sum = $('wsGapSummary');
+      if (!g || !g.available) { sum.innerHTML = card('웹소켓', '<span class="muted">N/A</span>'); $('wsGapTableWrap').style.display = 'none'; $('wsGapEmpty').style.display = 'none'; $('wsGapNA').style.display = 'block'; return; }
+      $('wsGapNA').style.display = 'none';
+      sum.innerHTML =
+        card('웹소켓 상태', g.is_connected ? '연결됨' : '끊김', g.is_connected ? 'positive' : 'negative') +
+        card('총 갭 횟수', String(g.total_gap_count || 0), g.total_gap_count > 0 ? 'negative' : '');
+      const gaps = g.recent_gaps || [];
+      $('wsGapTableWrap').style.display = gaps.length ? 'block' : 'none';
+      $('wsGapEmpty').style.display = gaps.length ? 'none' : 'block';
+      $('wsGapRows').innerHTML = gaps.slice().reverse().map(ev =>
+        `<tr><td>${ev.disconnect_at ? new Date(ev.disconnect_at).toLocaleString('ko-KR') : '-'}</td>
+        <td>${ev.reconnect_at ? new Date(ev.reconnect_at).toLocaleString('ko-KR') : '-'}</td>
+        <td class="num">${escHtml(String(ev.gap_seconds))}</td>
+        <td>${escHtml((ev.affected_symbols || []).join(', ') || '-')}</td>
+        <td>${ev.rest_backfill_performed ? escHtml(ev.rest_backfill_count + '건') : '미수행'}</td>
+        <td>${ev.blackswan_cooldown_triggered ? '<span class="negative">발동</span>' : (ev.blackswan_checked ? '정상' : '-')}</td></tr>`
+      ).join('');
+    }
+
+    /* ── 레거시 기본 계정 ── */
+    function renderSummary(d) {
+      $('summary').innerHTML =
+        card('총 평가금', fmtNum(d.total_value) + '원') +
+        card('총 수익률', fmtPct(d.total_return), d.total_return >= 0 ? 'positive' : 'negative') +
+        card('현금', fmtNum(d.cash) + '원') +
+        card('실현 손익', fmtNum(d.realized_pnl) + '원', d.realized_pnl >= 0 ? 'positive' : 'negative') +
+        card('MDD', fmtPct(-Math.abs(d.mdd)), 'negative') +
+        card('보유', d.position_count + '개');
+    }
+    function renderPositions(ps) {
+      const has = ps && ps.length;
+      $('positionsWrap').style.display = has ? 'block' : 'none';
+      $('noPositions').style.display = has ? 'none' : 'block';
+      if (!has) return;
+      $('positions').innerHTML = ps.map(p => {
+        const cls = p.pnl_rate >= 0 ? 'positive' : 'negative';
+        return `<tr><td>${p.symbol || '-'}</td><td class="num">${p.quantity ?? '-'}</td><td class="num">${fmtNum(p.avg_price)}</td><td class="num">${fmtNum(p.current_price)}</td><td class="num">${fmtNum(p.current_value)}</td><td class="num ${cls}">${fmtPct(p.pnl_rate)}</td></tr>`;
+      }).join('');
+    }
+
+    /* ── 입금 모달 ── */
+    function openDeposit() {
+      const sel = $('depBasket');
+      sel.innerHTML = lastBaskets.map(b => `<option value="${escHtml(b.basket)}">${escHtml(b.display_name)}</option>`).join('');
+      // 기본 선택: pocket(적립 트랙)이 있으면 그것
+      const pocket = lastBaskets.find(b => b.basket.indexOf('pocket') >= 0);
+      if (pocket) sel.value = pocket.basket;
+      $('depAmount').value = ''; $('depNote').value = '';
+      document.querySelectorAll('.chip').forEach(c => c.classList.remove('on'));
+      $('depositOverlay').classList.add('open');
+    }
+    function closeDeposit() { $('depositOverlay').classList.remove('open'); }
+    function setAmt(v, el) {
+      $('depAmount').value = v;
+      document.querySelectorAll('.chip').forEach(c => c.classList.remove('on'));
+      el.classList.add('on');
+    }
+    async function submitDeposit() {
+      const basket = $('depBasket').value;
+      const amount = Number($('depAmount').value);
+      if (!basket) { toast('바스켓을 선택하세요', false); return; }
+      if (!amount || amount <= 0) { toast('금액을 입력하세요 (양수)', false); return; }
+      const btn = $('depSubmit'); btn.disabled = true; btn.textContent = '기록 중...';
+      try {
+        const res = await fetch('/api/deposit', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ basket, amount, note: $('depNote').value || '' })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          toast('입금 기록 완료: +' + fmtNum(data.amount) + '원 (누적 입금 ' + fmtNum(data.deposits_total) + '원)', true);
+          closeDeposit();
+          await refreshFlows();
+          fetchData();
+        } else {
+          toast('실패: ' + (data.error || res.status), false);
+        }
+      } catch (e) { toast('요청 실패: ' + e, false); }
+      finally { btn.disabled = false; btn.textContent = '기록'; }
+    }
+
+    /* ── 폴링 ── */
+    async function fetchData() {
+      let ts = new Date().toLocaleTimeString('ko-KR');
+      try {
+        const bkRes = await fetch('/api/baskets');
+        if (bkRes.ok) { const bk = await bkRes.json(); ensureChartAccountOptions(bk); renderBasketTracks(bk); }
+        else { basketTracksEl.innerHTML = '<div class="panel error">바스켓 조회 불가</div>'; }
+      } catch (e) { basketTracksEl.innerHTML = '<div class="panel error">바스켓 조회 불가</div>'; }
+      try {
+        const acct = chartAccountSel.value;
+        const url = '/api/snapshots?days=30' + (acct ? '&account_key=' + encodeURIComponent(acct) : '');
+        const r = await fetch(url);
+        if (r.ok) updateChart((await r.json()).snapshots || []);
+      } catch (e) { /* skip */ }
+      try {
+        const r = await fetch('/api/basket_evaluation');
+        if (r.ok) renderEval((await r.json()).evaluations || []);
+        else $('basketEval').innerHTML = '<p class="error">평가 조회 불가</p>';
+      } catch (e) { /* skip */ }
+      try {
+        const r = await fetch('/api/runtime');
+        if (r.ok) { const rt = await r.json(); renderRuntime(rt); renderWsGap(rt); } else { renderRuntime(null); renderWsGap(null); }
+      } catch (e) { renderRuntime(null); renderWsGap(null); }
+      try {
+        const r = await fetch('/api/portfolio');
+        if (r.ok) { const p = await r.json(); renderSummary(p); renderPositions(p.positions || []); }
+      } catch (e) { /* skip */ }
+      $('lastUpdate').textContent = ts;
+    }
+
+    (async function boot() {
+      await fetchData();
+      await refreshFlows();
+      fetchData();  // 입금 내역 반영 재렌더
+      setInterval(fetchData, 10000);
+      setInterval(refreshFlows, 60000);
+    })();
   </script>
 </body>
 </html>"""
@@ -660,6 +768,53 @@ async def handle_api_baskets(_request: web.Request) -> web.Response:
         return web.json_response(get_baskets_json())
     except Exception as e:
         logger.exception("API /api/baskets 오류: {}", e)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_api_deposit(request: web.Request) -> web.Response:
+    """적립 입금 기록 (POST {basket, amount, note?}) — CLI와 동일한 단일 검증 경로.
+
+    웹에서 가능한 쓰기는 이것 하나다(기록·조회까지가 웹의 권한 — 매매·설정 변경은
+    웹에 두지 않는다). occurred_at은 서버 시각 고정이라 소급 조작이 불가능하고,
+    금액 양수·바스켓 존재·TWR 체인 보호(마지막 스냅샷 이후) 검증은 공유 함수가 한다.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "JSON 본문이 필요합니다"}, status=400)
+    try:
+        from tools.record_deposit import record_basket_deposit
+
+        result = record_basket_deposit(
+            str(body.get("basket") or ""),
+            body.get("amount"),
+            note=str(body.get("note") or ""),
+        )
+        if not result.get("ok"):
+            return web.json_response(result, status=400)
+        logger.info(
+            "웹 입금 기록: {} +{:,.0f}원 (누적 입금 {:,.0f}원)",
+            result["account_key"], result["amount"], result["deposits_total"],
+        )
+        return web.json_response(result)
+    except Exception as e:
+        logger.exception("API /api/deposit 오류: {}", e)
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def handle_api_cash_flows(request: web.Request) -> web.Response:
+    """바스켓 입금 내역 (GET ?basket=) — 최근 12건."""
+    try:
+        from core.basket_rebalancer import rebalance_live_strategy_id
+        from database.repositories import get_recent_cash_flows
+
+        basket = request.query.get("basket") or ""
+        if not basket:
+            return web.json_response({"error": "basket 파라미터 필요"}, status=400)
+        key = rebalance_live_strategy_id(basket)
+        return web.json_response({"basket": basket, "flows": get_recent_cash_flows(key)})
+    except Exception as e:
+        logger.exception("API /api/cash_flows 오류: {}", e)
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -739,6 +894,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/runtime", handle_api_runtime)
     app.router.add_get("/api/snapshots", handle_api_snapshots)
     app.router.add_get("/api/baskets", handle_api_baskets)
+    app.router.add_post("/api/deposit", handle_api_deposit)
+    app.router.add_get("/api/cash_flows", handle_api_cash_flows)
     app.router.add_get("/api/basket_evaluation", handle_api_basket_evaluation)
     return app
 

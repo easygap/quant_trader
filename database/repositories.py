@@ -835,6 +835,30 @@ def get_cash_flows(account_key: str = "") -> list:
 
 
 @with_retry
+def get_recent_cash_flows(account_key: str = "", limit: int = 12) -> list:
+    """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용."""
+    session = get_session()
+    try:
+        rows = (
+            session.query(CashFlow)
+            .filter(CashFlow.account_key == (account_key or ""))
+            .order_by(CashFlow.occurred_at.desc())
+            .limit(int(limit))
+            .all()
+        )
+        return [
+            {
+                "occurred_at": str(r.occurred_at)[:16],
+                "amount": float(r.amount or 0),
+                "note": r.note or "",
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+@with_retry
 def get_cash_flow_total(
     account_key: str = "",
     until: Optional[datetime] = None,
