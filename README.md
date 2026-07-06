@@ -229,6 +229,15 @@ python main.py --mode health
 # 게이트 artifact의 장애성 신호(부재/stale/표기 불일치)는 ATTENTION(1)으로 강등된다.
 # 같은 점검을 tools/paper_runtime_status.py --health (--json) 으로도 실행할 수 있습니다.
 
+# 주간 요약 리포트 (성과 · 귀속 분해(실행/구성 격차) · 진행률 · 주간 이벤트 → 디스코드)
+python main.py --mode weekly_report
+
+# 바스켓 배포 점검 (계획 주문·예상 비용·활성화 절차)
+python main.py --mode deploy_check
+
+# 바스켓 paper 운영 평가 (승격 판정 + 성과 귀속 분해)
+.venv\Scripts\python.exe tools/basket_paper_evaluation.py
+
 # 휴장일 갱신
 python main.py --update-holidays
 ```
