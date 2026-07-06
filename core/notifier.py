@@ -314,6 +314,14 @@ class Notifier:
             {"name": "📋 보유 종목", "value": f"{report.get('position_count', 0)}개", "inline": True},
             {"name": "🔄 당일 매매", "value": f"{report.get('total_trades', 0)}건", "inline": True},
         ]
+        # 적립식 계정: 누적 원금(초기+입금)을 평가액과 분리 표기(있을 때만) —
+        # '내가 넣은 돈 대비 얼마'가 한눈에 보이게.
+        if report.get("principal") is not None:
+            fields.insert(1, {
+                "name": "💳 누적 원금",
+                "value": f"{report.get('principal', 0):,.0f}원",
+                "inline": True,
+            })
         # 리포트 v2 부가 필드(있을 때만) — 시장/설계/일정 대비 판단용.
         # 값은 core.basket_evaluation.build_daily_report_extras가 만든 문자열이다.
         for key, label, inline in (
