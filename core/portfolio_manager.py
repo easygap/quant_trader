@@ -248,15 +248,15 @@ class PortfolioManager:
             "broker_balance_error": broker_balance_error,
         }
 
-    def save_daily_snapshot(self, current_prices: dict = None, snapshot_date=None):
-        """일일 포트폴리오 스냅샷 저장.
+    def save_daily_snapshot(self, current_prices: dict = None, snapshot_date=None) -> bool:
+        """일일 포트폴리오 스냅샷 저장. 성공 여부를 반환한다.
 
         snapshot_date: 귀속 날짜 지정(미지정 시 오늘). 비거래일 보충 실행에서
         NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
         """
         summary = self.get_portfolio_summary(current_prices)
 
-        save_portfolio_snapshot(
+        ok = save_portfolio_snapshot(
             total_value=summary["total_value"],
             cash=summary["cash"],
             invested=summary["invested"],
@@ -268,10 +268,17 @@ class PortfolioManager:
             snapshot_date=snapshot_date,
         )
 
-        logger.info(
-            "포트폴리오 스냅샷 저장: 총={:,.0f}원 | 수익={:.2f}% | MDD={:.2f}%",
-            summary["total_value"], summary["total_return"], summary["mdd"],
-        )
+        if ok:
+            logger.info(
+                "포트폴리오 스냅샷 저장: 총={:,.0f}원 | 수익={:.2f}% | MDD={:.2f}%",
+                summary["total_value"], summary["total_return"], summary["mdd"],
+            )
+        else:
+            logger.warning(
+                "포트폴리오 스냅샷 저장 실패 (계좌: {}) — 커버리지에 빠진다",
+                self.account_key or "default",
+            )
+        return bool(ok)
 
     def get_paper_performance_report(self, days: int = 30) -> dict:
         """

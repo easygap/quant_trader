@@ -590,6 +590,70 @@ def _migrate_positions_partial_tp_done(engine):
                 raise
 
 
+def _migrate_snapshot_unique_constraint(engine):
+    """portfolio_snapshots의 구버전 UNIQUE(date) 단독 제약을 (account_key, date)로 재구축.
+
+    account_key 도입 전 스키마의 유산: date 단독 유니크라 두 번째 계정(예: kr_pocket)이
+    같은 날 스냅샷을 저장하는 순간 IntegrityError로 조용히 유실된다(2026-07-06 실측).
+    SQLite는 인라인 UNIQUE 삭제가 불가하므로 표준 재구축(rename → 신 스키마 생성 →
+    복사 → 검증 → 구 테이블 삭제)을 쓴다. 멱등이며, 중간 중단 시 다음 초기화에서
+    legacy 테이블을 감지해 복사부터 재개한다(INSERT OR IGNORE + PK로 중복 안전).
+    """
+    from sqlalchemy import text
+
+    if engine.url.get_dialect().name != "sqlite":
+        return
+    cols = (
+        "id, date, total_value, cash, invested, daily_return, cumulative_return, "
+        "mdd, position_count, created_at, account_key, peak_value"
+    )
+    legacy_name = "portfolio_snapshots_legacy_uq"
+
+    with engine.connect() as conn:
+        legacy_exists = conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:n"
+        ), {"n": legacy_name}).scalar()
+
+        if not legacy_exists:
+            ddl = conn.execute(text(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='portfolio_snapshots'"
+            )).scalar()
+            if not ddl:
+                return
+            normalized = " ".join(str(ddl).split()).lower()
+            is_legacy = (
+                "unique (date)" in normalized
+                and "uq_snapshots_account_date" not in normalized
+            )
+            if not is_legacy:
+                return
+            logger.warning(
+                "portfolio_snapshots 구버전 UNIQUE(date) 감지 — (account_key, date) 복합 제약으로 재구축"
+            )
+            conn.execute(text(
+                f"ALTER TABLE portfolio_snapshots RENAME TO {legacy_name}"
+            ))
+            conn.commit()
+
+    # 신 스키마 재생성 (rename으로 본 테이블이 사라졌으므로 create_all이 새로 만든다)
+    Base.metadata.create_all(engine)
+
+    with engine.connect() as conn:
+        before = conn.execute(text(f"SELECT COUNT(*) FROM {legacy_name}")).scalar()
+        conn.execute(text(
+            f"INSERT OR IGNORE INTO portfolio_snapshots ({cols}) SELECT {cols} FROM {legacy_name}"
+        ))
+        after = conn.execute(text("SELECT COUNT(*) FROM portfolio_snapshots")).scalar()
+        if after < before:
+            conn.rollback()
+            raise RuntimeError(
+                f"스냅샷 재구축 검증 실패: 복사 후 {after} < 원본 {before} — legacy 테이블 보존"
+            )
+        conn.execute(text(f"DROP TABLE {legacy_name}"))
+        conn.commit()
+        logger.info("portfolio_snapshots 재구축 완료: {}행, 복합 유니크(account_key, date)", after)
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -603,6 +667,9 @@ def init_database():
         _migrate_add_account_key(engine)
     except Exception:
         pass
+    # 구버전 UNIQUE(date) 재구축 — 실패 시 조용히 넘기지 않는다(두 번째 계정의
+    # 스냅샷이 계속 유실되는 상태를 숨기면 안 됨). 단, legacy가 아니면 no-op.
+    _migrate_snapshot_unique_constraint(engine)
     try:
         _migrate_trade_history_slippage_columns(engine)
     except Exception:
