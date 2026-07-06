@@ -754,8 +754,11 @@ async def handle_index(_request: web.Request) -> web.Response:
 
 
 async def handle_api_portfolio(_request: web.Request) -> web.Response:
+    # live 모드에서는 KIS 잔고 조회(동기 네트워크)가 섞일 수 있다 — 스레드로 격리.
+    import asyncio
+
     try:
-        data = get_portfolio_json()
+        data = await asyncio.to_thread(get_portfolio_json)
         return web.json_response(data)
     except Exception as e:
         logger.exception("API /api/portfolio 오류: {}", e)
@@ -819,8 +822,14 @@ async def handle_api_cash_flows(request: web.Request) -> web.Response:
 
 
 async def handle_api_runtime(_request: web.Request) -> web.Response:
+    # get_runtime_json은 시장 국면 실시간 조회(동기 네트워크, 수십 초 가능)를 포함한다 —
+    # 이벤트 루프에서 직접 부르면 그동안 '/'·내 자산·차트까지 전부 멈춘다(첫 로드 체감 저하).
+    # 스레드로 내려 다른 엔드포인트는 즉시 응답하게 한다.
+    import asyncio
+
     try:
-        return web.json_response(get_runtime_json())
+        data = await asyncio.to_thread(get_runtime_json)
+        return web.json_response(data)
     except Exception as e:
         logger.exception("API /api/runtime 오류: {}", e)
         return web.json_response({"error": str(e)}, status=500)
@@ -851,16 +860,10 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
     read-only. include_benchmark=False로 네트워크(KS11 조회)를 피한다 — 대시보드는
     10초 폴링이므로 외부 조회를 섞으면 안 된다. 결과는 60초 TTL 캐시.
     """
+    import asyncio
     import time as _time
 
-    try:
-        now = _time.monotonic()
-        if (
-            _BASKET_EVAL_CACHE["data"] is not None
-            and now - _BASKET_EVAL_CACHE["at"] < _BASKET_EVAL_TTL_SEC
-        ):
-            return web.json_response(_BASKET_EVAL_CACHE["data"])
-
+    def _collect_all() -> dict:
         from core.basket_evaluation import collect_basket_paper_evaluation
         from core.basket_rebalancer import BasketRebalancer
 
@@ -877,7 +880,19 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
                 "snapshot_coverage": result.get("snapshot_coverage"),
                 "issues": result.get("issues", []),
             })
-        payload = {"evaluations": out}
+        return {"evaluations": out}
+
+    try:
+        now = _time.monotonic()
+        if (
+            _BASKET_EVAL_CACHE["data"] is not None
+            and now - _BASKET_EVAL_CACHE["at"] < _BASKET_EVAL_TTL_SEC
+        ):
+            return web.json_response(_BASKET_EVAL_CACHE["data"])
+
+        # 수집기는 TradingHours 초기화·(잠재) pykrx 갱신 등 동기 작업 — 스레드로 내려
+        # 캐시 미스 시에도 이벤트 루프가 다른 요청을 계속 처리하게 한다.
+        payload = await asyncio.to_thread(_collect_all)
         _BASKET_EVAL_CACHE["at"] = now
         _BASKET_EVAL_CACHE["data"] = payload
         return web.json_response(payload)
