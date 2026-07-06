@@ -1,8 +1,8 @@
 # QUANT TRADER — 프로젝트 가이드
 
 > **목적**: 코드를 볼 때 **파일별 역할**, **프로그램 흐름**, **알고리즘·설정**을 세세히 알 수 있도록 정리한 문서.
-> **문서 버전**: v6.1
-> **최종 수정**: 2026-06-10 (guide/health/deploy_check 모드, 바스켓 paper 운영 개시·승격 기준·일일 스냅샷/백업 반영)
+> **문서 버전**: v6.2
+> **최종 수정**: 2026-07-06 (weekly_report 모드, 사이클 관측성·집계 배치율 감시·성과 귀속 분해 반영 — 한 달 운영 리뷰 후속. 이전: 2026-06-10 guide/health/deploy_check)
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
 ---
@@ -66,6 +66,7 @@
 | **rebalance** | `run_rebalance(args)` | BasketRebalancer (baskets.yaml 기반 목표 비중 vs 실제 비중 드리프트 체크 → 주문 생성·실행). `--basket`, `--dry-run` 옵션 지원. live 실행은 바스켓별 `basket_rebalance:<basket>` 승인 단위로 live gate/account/order tag가 일치해야 한다. **종료 시(비 dry-run) paper 일일 NAV 스냅샷 저장 + DB 일일 백업**(`database.backup_path` 설정 시) — 상시 스케줄러 없이 일일 CLI만으로 트랙레코드 시계열·백업이 쌓인다 |
 | **health** | `run_health_check()` | core.operator_health — 전 전략 runtime state + current_blockers + **바스켓 paper 운영(스냅샷 끊김 감시)**을 단일 verdict(OK/ATTENTION/BLOCKED)로 요약. 반환 코드 0/1/2 |
 | **deploy_check** | `run_deploy_check(args)` | 바스켓 배포 점검 — 계획 주문·예상 비용·회전율·활성화 절차 출력. `--as-of`, `--json` 지원 |
+| **weekly_report** | `run_weekly_report()` | core.weekly_report — 주간 다이제스트 디스코드 발송(주간/누적 성과 · vs KS11 · **귀속 분해(실행/구성 격차)** · 진행률/커버리지 · 주간 이벤트[결측 고유일수·사이클 오류]). 금요일 크론용 |
 | **guide** | (인자 없이 실행과 동일) | 사용 가이드 치트시트 출력 후 종료. 시스템 초기화 없음 |
 
 ---
@@ -74,7 +75,7 @@
 
 ```
 quant_trader/
-├── main.py                      # CLI 진입점, --mode 분기 (17개 모드; 무인자 실행 시 가이드 출력)
+├── main.py                      # CLI 진입점, --mode 분기 (18개 모드; 무인자 실행 시 가이드 출력)
 ├── test_integration.py          # 통합 검증 스크립트 (단일 실행, pytest 아님)
 ├── pyproject.toml               # 프로젝트 메타데이터 (Python >=3.11,<3.13, 패키지, pytest 설정)
 ├── requirements.txt             # pip 의존성 목록
@@ -126,8 +127,10 @@ quant_trader/
 │   ├── target_weight_rotation.py # Portfolio-level target-weight plan 생성/검증, 가격 최신성 진단
 │   ├── evidence_collector.py    # Deprecated v1 collector no-op shim (v2 paper_evidence 사용)
 │   ├── promotion_engine.py      # metrics 기반 전략 승격 판정 (research→paper→live)
-│   ├── operator_health.py       # 운영 통합 헬스 요약 (전략 runtime + blockers + 바스켓 운영 → OK/ATTENTION/BLOCKED)
-│   ├── basket_evaluation.py     # 바스켓 paper→live 승격 판정 (60영업일·커버리지·dead-letter·비용 드래그 → WAIT/PASS_CANDIDATE/FAIL_REVIEW)
+│   ├── operator_health.py       # 운영 통합 헬스 요약 (전략 runtime + blockers + 바스켓 운영·집계 배치율 → OK/ATTENTION/BLOCKED)
+│   ├── basket_evaluation.py     # 바스켓 paper→live 승격 판정 (60영업일·커버리지·dead-letter·비용 드래그 → WAIT/PASS_CANDIDATE/FAIL_REVIEW) + 리포트 v2 부가필드 + 성과 귀속 분해(실행/구성 격차)
+│   ├── cycle_observability.py   # 일일 사이클 관측성 (CYCLE_START/END/ERROR·SNAPSHOT_* 이벤트 기록, 스냅샷 결측 감지·당일 경보)
+│   ├── weekly_report.py         # 주간 요약 다이제스트 포맷터 (성과·귀속·진행률·주간 이벤트 — --mode weekly_report)
 │   ├── position_lock.py         # threading.RLock (포지션/주문 동시 접근 제어)
 │   └── order_guard.py           # 동일 종목 TTL(기본 600초) 동안 중복 주문 차단
 ├── tools/
