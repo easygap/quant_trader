@@ -250,6 +250,31 @@ def build_daily_report_extras(
     return extras
 
 
+def time_weighted_capital(
+    initial_capital: float,
+    flows: list,
+    operation_start: Any,
+    today: Any,
+) -> float:
+    """기간 시간가중 평균 자본 (Modified Dietz 분모) — 비용 드래그 연환산의 공정한 분모.
+
+    flows: [(occurred_at, amount)...]. 각 유입은 '남은 기간 비율'만큼만 자본에 기여한다 —
+    말기 입금이 전 기간 분모를 부풀려 비용 게이트를 느슨하게 만드는 것을 막는다
+    (예: 59일차 3M 입금이 60일치 비용의 분모가 되면 안 된다).
+    """
+    def _d(v):
+        return v.date() if hasattr(v, "date") and callable(getattr(v, "date")) else v
+
+    start_d, end_d = _d(operation_start), _d(today)
+    period_days = max(1, (end_d - start_d).days)
+    weighted = float(initial_capital)
+    for occurred_at, amount in flows or []:
+        remain = (end_d - _d(occurred_at)).days
+        frac = min(1.0, max(0.0, remain / period_days))
+        weighted += float(amount) * frac
+    return max(weighted, 1.0)
+
+
 def decompose_return_gap(
     nav_return_pct: float | None,
     design_return_pct: float | None,
@@ -418,9 +443,23 @@ def collect_basket_paper_evaluation(
         )
     )
 
+    # 적립식 계정(외부 현금 흐름 존재): 총평가/초기자본은 입금을 수익으로 오표기하므로
+    # 스냅샷의 TWR 누적수익률을 쓰고, 비용 분모는 시간가중 평균 자본(Modified Dietz)으로
+    # 바꾼다 — 말기 입금이 전 기간 비용의 분모를 부풀려 게이트를 느슨하게 만들지 않게.
+    # 흐름 0건이면 아래 두 값은 기존과 완전히 동일하다(하위 호환).
+    from database.repositories import get_cash_flows, has_cash_flows
+    account_has_flows = has_cash_flows(account_key=basket_key)
+    if account_has_flows:
+        initial_capital = time_weighted_capital(
+            initial_capital, get_cash_flows(account_key=basket_key), operation_start, today,
+        )
+
     nav_return_pct = None
     if snaps:
-        nav_return_pct = (float(snaps[-1].total_value) / initial_capital - 1.0) * 100
+        if account_has_flows:
+            nav_return_pct = float(snaps[-1].cumulative_return or 0.0)
+        else:
+            nav_return_pct = (float(snaps[-1].total_value) / initial_capital - 1.0) * 100
 
     # NAV는 마지막 스냅샷 시점의 값이다 — 벤치마크·설계 조회도 같은 종료일로 맞춰야
     # 세 값을 비교할 때 하루치 시장 변동이 실행 격차로 오귀속되지 않는다(적대적 리뷰 medium).

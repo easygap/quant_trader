@@ -223,6 +223,29 @@ class FailedOrder(Base):
         return f"<FailedOrder({self.symbol} {self.action} {self.quantity}주 @{self.price}, status={self.status})>"
 
 
+class CashFlow(Base):
+    """
+    외부 현금 흐름(입금/출금) 테이블 — 적립식 운영 지원.
+
+    수익률 계산에서 입금은 수익이 아니다: 시간가중수익률(TWR) 계산이 이 기록으로
+    입금 구간을 분리한다(docs/POCKET_TRACK_PLAN.md §4). paper는
+    tools/record_deposit.py로 기록하고, live도 실제 입금 후 같은 도구로 기록해야
+    TWR이 맞는다(증권사 잔고는 현금만 알지, 언제 얼마가 외부에서 왔는지는 모른다).
+    """
+    __tablename__ = "cash_flows"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_key = Column(String(64), default="", nullable=False, index=True)
+    amount = Column(Float, nullable=False)                       # +입금 / -출금 (원)
+    occurred_at = Column(DateTime, nullable=False, index=True)   # 발생 시각(귀속 기준)
+    note = Column(String(200), default="")                       # 메모 (예: 7월 적립)
+    mode = Column(String(20), default="paper")
+    created_at = Column(DateTime, default=datetime.now)
+
+    def __repr__(self):
+        return f"<CashFlow({self.account_key}, {self.amount:+,.0f}, {self.occurred_at})>"
+
+
 class OperationEvent(Base):
     """
     운영 이벤트 로그 테이블.

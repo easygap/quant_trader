@@ -37,6 +37,7 @@ def main() -> int:
 
     from core.basket_rebalancer import rebalance_live_strategy_id
     from database.models import (
+        CashFlow,
         OrderRecord,
         PortfolioSnapshot,
         Position,
@@ -75,9 +76,12 @@ def main() -> int:
                 return 1
 
         moves = []
+        # CashFlow(입금 기록)도 함께 이전한다 — 남기면 재시작한 새 트랙의 현금·TWR이
+        # 옛 입금을 계속 반영해 왜곡된다(적립식 지원과 동시 도입).
         for model, has_strategy in [
             (TradeHistory, True), (Position, True),
             (PortfolioSnapshot, False), (OrderRecord, True),
+            (CashFlow, False),
         ]:
             rows = (
                 session.query(model)
