@@ -339,6 +339,29 @@ class TestShippedBasketsConfig:
         # --confirm-live + basket_rebalance:<name> readiness gate)를 통과해야 한다.
         assert b["enabled"] is True
 
+    def test_pocket_basket_small_capital_invariants(self):
+        """소액 적립 바스켓(docs/POCKET_TRACK_PLAN.md §3) — 소액 특화 불변식.
+
+        이 값들이 '일반' 기본값으로 되돌아가면 바스켓이 조용히 죽는다:
+        min_trade 20만이면 슬롯(15만)이 미체결 판정, 회전상한 15%면 한도(4.5만)가
+        ETF 1주가(약 12.6만)보다 작아 영원히 매수 불가.
+        """
+        baskets = self._load()
+        assert "kr_pocket" in baskets, "소액 적립 바스켓 누락"
+        b = baskets["kr_pocket"]
+        assert b["enabled"] is True
+        capital = float(b["initial_capital"])
+        assert capital == 300_000
+        tsw = float(b["target_stock_weight"])
+        assert tsw == 0.5
+        rb = b["rebalance"]
+        slot = capital * tsw  # 단일 종목이므로 슬리브 전체가 한 슬롯
+        assert float(rb["min_trade_amount"]) <= slot, "최소거래가 슬롯보다 크면 미체결"
+        # 첫 사이클에 주식 슬리브를 채울 수 있어야 한다(회전 한도 ≥ 슬리브 비중)
+        assert float(rb["max_turnover_ratio"]) >= tsw, "회전 한도 < 슬리브면 초기 매수 불가"
+        # ETF 단일 구성(1주 = 200종목 분산)
+        assert list(b["holdings"].keys()) == ["069500"]
+
     def test_all_basket_symbols_are_6digit_kr_codes(self):
         baskets = self._load()
         for name, cfg in baskets.items():
