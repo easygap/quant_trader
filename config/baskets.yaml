@@ -80,6 +80,29 @@ baskets:
       "051910": 0.20
       # 합계 = 1.00 (이 비중은 "주식 슬리브 내부" 기준; 주식 슬리브 자체가 총자산의 50%)
 
+  # --- 소액 적립 트랙 (용돈 엔진) — docs/POCKET_TRACK_PLAN.md ---
+  # 소액(30만 시작 + 월 10만 적립)의 유일한 분산 수단은 ETF다: KODEX 200 1주가
+  # 그 자체로 200종목 분산이고, 국내 주식형 ETF는 매도 거래세 면제라 비용도 유리.
+  # 주식 50/현금 50으로 낙폭을 절반으로 누른다(STATIC_ALLOCATION.md).
+  # 파라미터 주의(소액 특화):
+  #   - max_turnover_ratio 0.6: 15%면 회전 한도(30만×15%=4.5만)가 ETF 1주가(약 12.6만)보다
+  #     작아 영원히 매수 불가. 0.6이면 첫 사이클에 주식 슬리브(50%)를 채울 수 있다.
+  #   - min_trade_amount 50000: 기본 20만이면 슬롯(15만)이 최소거래 미달로 미체결 판정.
+  # 월 적립은 tools/record_deposit.py --basket kr_pocket --amount 100000 으로 기록
+  # (입금은 TWR이 중화 — 수익률 왜곡 없음). 다음 사이클이 새 현금을 흡수한다.
+  kr_pocket:
+    name: "소액 적립 (KODEX200 50/50)"
+    enabled: true
+    initial_capital: 300000        # 시작 자본 30만원 (paper — live 전환 시 실자본과 일치)
+    target_stock_weight: 0.5       # 주식 50% / 현금 50% — 낙폭 절반이 목적
+    rebalance:
+      trigger: drift
+      drift_threshold: 0.08
+      min_trade_amount: 50000
+      max_turnover_ratio: 0.6
+    holdings:
+      "069500": 1.0    # KODEX 200 — 주식 슬리브 전체(슬리브 자체가 총자산의 50%)
+
   # --- 예시 2: 신호 가중 리밸런싱 바스켓 ---
   # signal_weighted: true 시, 스코어링 전략 점수에 따라 목표 비중을 동적 조정
   kr_signal_weighted:
