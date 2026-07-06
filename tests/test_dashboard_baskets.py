@@ -155,3 +155,108 @@ def test_html_page_contains_basket_tracks_section():
     assert "basketTracks" in html          # 섹션
     assert "/api/baskets" in html          # 폴링 대상
     assert "chartAccount" in html          # 차트 계정 선택기
+    assert "/api/deposit" in html          # 웹 입금 폼
+    assert "depositOverlay" in html        # 입금 모달
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+class TestDepositEndpoint:
+    """POST /api/deposit — 웹의 유일한 쓰기. CLI와 동일한 검증 경로 계약."""
+
+    def _serve(self, coro):
+        import asyncio
+        asyncio.run(coro)
+
+    def test_deposit_records_and_returns_totals(self):
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+        from database.repositories import get_cash_flow_total
+
+        name = "kr_pocket_dep"
+        init_database()
+
+        async def run():
+            with patch(
+                "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                return_value=_cfg(name),
+            ):
+                app = wd.create_app()
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    res = await client.post(
+                        "/api/deposit",
+                        json={"basket": name, "amount": 100000, "note": "웹 테스트"},
+                    )
+                    assert res.status == 200
+                    data = await res.json()
+                finally:
+                    await client.close()
+                assert data["ok"] is True
+                assert data["deposits_total"] == 100000
+                assert data["principal"] == 400000  # 초기 30만 + 입금 10만
+
+        asyncio.run(run())
+        from core.basket_rebalancer import rebalance_live_strategy_id
+        assert get_cash_flow_total(
+            account_key=rebalance_live_strategy_id(name)
+        ) == pytest.approx(100_000)
+
+    def test_deposit_rejects_bad_amount_and_unknown_basket(self):
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+
+        init_database()
+
+        async def run():
+            with patch(
+                "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                return_value=_cfg("kr_pocket_dep2"),
+            ):
+                app = wd.create_app()
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    r1 = await client.post("/api/deposit", json={"basket": "kr_pocket_dep2", "amount": 0})
+                    r2 = await client.post("/api/deposit", json={"basket": "no_such", "amount": 1000})
+                    r3 = await client.post("/api/deposit", data=b"not-json")
+                    assert r1.status == 400 and (await r1.json())["ok"] is False
+                    assert r2.status == 400 and (await r2.json())["ok"] is False
+                    assert r3.status == 400
+                finally:
+                    await client.close()
+
+        asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_cash_flows_endpoint_lists_recent():
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+    from database.repositories import record_cash_flow
+    from core.basket_rebalancer import rebalance_live_strategy_id
+
+    name = "kr_pocket_flows"
+    init_database()
+    record_cash_flow(
+        100_000, account_key=rebalance_live_strategy_id(name),
+        occurred_at=datetime(2026, 7, 6, 9, 0), note="7월 적립",
+    )
+
+    async def run():
+        app = wd.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            res = await client.get("/api/cash_flows?basket=" + name)
+            assert res.status == 200
+            data = await res.json()
+        finally:
+            await client.close()
+        assert data["flows"][0]["amount"] == 100000
+        assert data["flows"][0]["note"] == "7월 적립"
+
+    asyncio.run(run())
