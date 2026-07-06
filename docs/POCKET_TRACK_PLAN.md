@@ -76,11 +76,44 @@
 
 - 기존 scoring 전략 + paper 인프라(preflight·runtime gate) 재사용. 실돈 게이트는
   건드리지 않는다 — live 전환 요건(60일 트랙레코드 + PASS_CANDIDATE)은 그대로.
-- 저가 종목 워치리스트(1주 5만원 이하 위주)로 구성해 소액 체결 현실성 유지.
 - 운영 규칙: ① 페이퍼 전용 ② 60일 평가에서 비용 차감 후 EW 벤치마크를 못 이기면
   그 구성은 폐기(재미는 남고 돈은 지켜진다) ③ 통과 시에만 소액 투입을 별도 결정.
 - 기대치 정직하게: 통과 확률은 검증 이력상 낮다. 이 트랙의 목적은 수익이 아니라
   **욕구 해소와 학습**이다 — 그래서 돈이 걸리지 않는다.
+
+### 실행 절차 (2026-07-06 실CLI 검증 — 명령은 전부 실제 도구)
+
+샌드박스는 자동화하지 않는다 — 재미는 오너가 직접 돌릴 때 나온다. 워치리스트는
+전역 설정(시총 상위 20 자동 생성)을 그대로 쓴다: 전역을 바꾸면 기존 실험 우주가
+바뀌므로 건드리지 않는다. 페이퍼 자본은 가상이라 종목 가격대 제약이 없다.
+
+```powershell
+# 0) 현재 상태 확인
+.venv\Scripts\python.exe tools/paper_pilot_control.py --strategy scoring --status
+.venv\Scripts\python.exe tools/paper_pilot_control.py --strategy scoring --check-prerequisites
+
+# 1) 워밍업 — 진입 해제 전제조건: clean evidence 3일 (2026-07-06 현재 1/3일)
+#    며칠간 signal-only로 돌리면 evidence가 쌓인다 (신호만 기록, 주문 없음 — 이미 안전)
+.venv\Scripts\python.exe tools/paper_preflight.py --strategy scoring
+.venv\Scripts\python.exe main.py --mode paper --strategy scoring
+
+# 2) 전제조건 충족 후 — 파일럿 승인 (시한·상한 필수: 이것이 샌드박스의 안전벨트)
+.venv\Scripts\python.exe tools/paper_pilot_control.py --strategy scoring --enable `
+    --to <YYYY-MM-DD 만료일> --max-orders 5 --max-positions 3 `
+    --max-notional 2000000 --max-exposure 0.3 --reason "단타 샌드박스 (취미, paper 전용)"
+
+# 3) 샌드박스 세션 (재미 구간 — 원할 때 수동 실행)
+.venv\Scripts\python.exe tools/paper_preflight.py --strategy scoring --with-pilot-check
+.venv\Scripts\python.exe main.py --mode paper --strategy scoring
+
+# 4) 성적 확인 (비용 포함 정직 성적)
+.venv\Scripts\python.exe tools/paper_runtime_status.py
+```
+
+- 게이트 워밍업(3일)은 결함이 아니라 설계다 — 검증 안 된 전략이 승인 없이 페이퍼
+  진입하는 것을 막는 거버넌스가 샌드박스에도 그대로 적용된다.
+- 폐기 판정은 §5 운영 규칙 ②를 따른다. 주간 리포트에 샌드박스 성적 병기는
+  거래가 실제로 쌓인 뒤 별도 PR로 붙인다(데이터 없는 필드는 만들지 않는다).
 
 ## 6. 기존 10M 트랙(kr_diversified_hold) 처리
 
