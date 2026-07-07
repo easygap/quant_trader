@@ -100,9 +100,11 @@ baskets:
     enabled: true
     initial_capital: 300000        # 시작 자본 30만원 (paper — live 전환 시 실자본과 일치)
     target_stock_weight: 0.5       # 주식 50% / 현금 50% — 낙폭 절반이 목적
-    # 소액 구조적 절사: ETF 1주(약 12.8만) 단위라 30만 시점 배치율이 -7.3%p 상시 미달
-    # (docs/POCKET_TRACK_PLAN.md §3 — 적립 누적 시 자연 수렴). 기본 허용 5%p면 매일
-    # 무의미한 ATTENTION이라 10%p로 완화 — 이걸 넘으면 절사가 아니라 진짜 이상이다.
+    # 소액 구조적 절사: ETF 1주(약 12.8만) 단위라 배치율 미달이 상시 존재하고, 적립
+    # 직후에는 '부족분 < 1주'로 매수가 보류돼 미달이 최대 1주가/총액(잔고 40만 시점
+    # 32%p)까지 벌어진다(docs/POCKET_TRACK_PLAN.md §3 — 정상, 적립 누적 시 수렴).
+    # 이 값은 '하한(floor)'이고, 헬스가 구조 하한(1주가/총액)과의 max로 자동 완화·
+    # 조임한다 — 잔고가 커지면 이 값이 다시 지배한다.
     monitoring:
       deployment_tolerance: 0.10
     rebalance:
