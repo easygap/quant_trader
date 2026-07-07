@@ -54,9 +54,31 @@ class PortfolioManager:
         if initial_capital is not None:
             self.initial_capital = float(initial_capital)
         else:
-            self.initial_capital = self.config.risk_params.get(
-                "position_sizing", {}
-            ).get("initial_capital", 10000000)
+            # 바스켓 계정(basket_rebalance:<name>)은 baskets.yaml의 바스켓별 자본이
+            # 진실이다 — account_key만으로 이 계정을 여는 모든 경로(주문 리스크 가드
+            # 등)가 전역 자본(10M)으로 폴백하면 분모가 틀어져, 소액 바스켓(예: 30만
+            # kr_pocket)에서 MDD·일일 손실 한도가 사실상 무력화된다(#426이 평가기는
+            # 고쳤지만 이 폴백은 남아 있었다 — 6차 점검 E2E에서 실측). 중앙 해석으로
+            # 현재·미래 호출부를 일괄 커버한다. 해석 실패 시 기존 폴백 유지.
+            resolved = None
+            if (self.account_key or "").startswith("basket_rebalance:"):
+                try:
+                    from core.basket_rebalancer import BasketRebalancer
+
+                    _basket = self.account_key.split(":", 1)[1]
+                    _cap = (
+                        BasketRebalancer._load_baskets_config().get(_basket) or {}
+                    ).get("initial_capital")
+                    resolved = float(_cap) if _cap is not None else None
+                except Exception as exc:
+                    logger.debug("바스켓 자본 해석 실패(전역 폴백): {}", exc)
+            self.initial_capital = (
+                resolved
+                if resolved is not None
+                else self.config.risk_params.get(
+                    "position_sizing", {}
+                ).get("initial_capital", 10000000)
+            )
         self._is_live = self.config.trading.get("mode", "paper") == "live"
 
         # Peak value 복구: DB 스냅샷에서 이전 세션의 peak을 가져와 MDD 연속성 유지
