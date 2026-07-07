@@ -126,6 +126,31 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def structural_deployment_tolerance(
+    max_share_price: float | None,
+    total_value: float | None,
+    floor_tolerance: float = 0.05,
+) -> float:
+    """배치율 허용 오차의 구조 하한 — 정수 주식 절사가 만드는 불가피한 미달을 반영(순수).
+
+    적립 직후에는 '부족분 < 1주 가격'인 동안 매수가 보류되므로(설계), 미달폭이 최대
+    1주 가격/총액까지 벌어진다(예: 잔고 40만·ETF 1주 12.8만 → 32%p). 이 구간을 고정
+    허용치로 재면 정상 적립 과정이 매일 ATTENTION을 울린다(경보 피로). 반대로 잔고가
+    커지면 구조 하한이 저절로 조여져(200만 → 6.4%p) floor가 다시 지배한다 —
+    진짜 이상(예: 매수 자체 불능 → 미달 50%p)은 어느 시점에도 잡힌다.
+
+    반환: max(floor_tolerance, max_share_price/total_value). 입력 불충분 시 floor.
+    """
+    try:
+        price = float(max_share_price or 0)
+        total = float(total_value or 0)
+    except (TypeError, ValueError):
+        return float(floor_tolerance)
+    if price <= 0 or total <= 0:
+        return float(floor_tolerance)
+    return max(float(floor_tolerance), price / total)
+
+
 def summarize_deployment(
     deployment_ratio: float | None,
     design_fraction: float | None,
