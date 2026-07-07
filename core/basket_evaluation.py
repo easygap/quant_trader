@@ -494,11 +494,8 @@ def collect_basket_paper_evaluation(
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
     if include_attribution:
-        max_stock = 1.0 - (
-            config.risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
-        )
-        tsw = basket_cfg.get("target_stock_weight")
-        design_fraction = max_stock if tsw is None else max(0.0, min(float(tsw), max_stock))
+        from core.basket_deploy import effective_stock_fraction
+        design_fraction = effective_stock_fraction(basket_cfg, config.risk_params)
         holdings = basket_cfg.get("holdings") or {}
         design_return_pct = None
         if snaps and holdings:

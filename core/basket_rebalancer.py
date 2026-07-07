@@ -129,13 +129,11 @@ class BasketRebalancer:
         self.data_collector = DataCollector(self.config)
 
         self._risk_params = self.config.risk_params
-        self._min_cash_ratio = (
-            self._risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
-        )
         # target_stock_weight: 바스켓이 명시하는 주식 목표 비중(총자산 대비). 나머지는 현금으로
         # 보유한다. 미지정(None)이면 기존 동작(min_cash_ratio만 현금 유보)을 유지한다.
         # 정적 자산배분(docs/STATIC_ALLOCATION.md) 결론을 실행 기능으로 구현: 예) 0.5면 주식 50%
-        # 보유 + 50% 현금 → 낙폭을 절반으로 줄인다. min_cash_ratio가 더 큰 현금을 요구하면 그쪽을 따른다.
+        # 보유 + 50% 현금 → 낙폭을 절반으로 줄인다. min_cash_ratio가 더 큰 현금을 요구하면 그쪽을
+        # 따르되, 하한 자체는 바스켓별 오버라이드 가능(effective_stock_fraction 참고).
         tsw = self.basket.get("target_stock_weight")
         self._target_stock_weight = float(tsw) if tsw is not None else None
 
@@ -146,12 +144,10 @@ class BasketRebalancer:
         )
 
     def _stock_fraction(self) -> float:
-        """총자산 중 주식에 배정할 비중. target_stock_weight가 있으면 그것을(단, min_cash_ratio
-        가 요구하는 현금 하한은 항상 지킴), 없으면 (1 - min_cash_ratio)."""
-        max_stock = 1.0 - self._min_cash_ratio
-        if self._target_stock_weight is None:
-            return max_stock
-        return max(0.0, min(self._target_stock_weight, max_stock))
+        """총자산 중 주식에 배정할 비중 — 규칙은 effective_stock_fraction 한 곳에만 둔다
+        (리밸런서·평가·헬스가 각자 계산하면 '설계 비중'이 서로 어긋난다)."""
+        from core.basket_deploy import effective_stock_fraction
+        return effective_stock_fraction(self.basket, self._risk_params)
 
     def _is_live(self) -> bool:
         """실전(live) 모드 여부."""

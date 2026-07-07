@@ -343,8 +343,11 @@ class TestShippedBasketsConfig:
         """소액 적립 바스켓(docs/POCKET_TRACK_PLAN.md §3) — 소액 특화 불변식.
 
         이 값들이 '일반' 기본값으로 되돌아가면 바스켓이 조용히 죽는다:
-        min_trade 20만이면 슬롯(15만)이 미체결 판정, 회전상한 15%면 한도(4.5만)가
-        ETF 1주가(약 12.6만)보다 작아 영원히 매수 불가.
+        min_trade 20만이면 슬롯(약 14만)이 미체결 판정, 회전상한 15%면 한도(4.5만)가
+        ETF 1주가(약 12.4만)보다 작아 영원히 매수 불가.
+
+        v2 (2026-07-07): 위험자산 절반 원칙은 유지하되 나머지 절반을 무수익 현금
+        대신 CD금리 파킹 ETF(357870)로 — 지수 47.5 / 파킹 47.5 / 현금 5.
         """
         baskets = self._load()
         assert "kr_pocket" in baskets, "소액 적립 바스켓 누락"
@@ -353,16 +356,26 @@ class TestShippedBasketsConfig:
         capital = float(b["initial_capital"])
         assert capital == 300_000
         tsw = float(b["target_stock_weight"])
-        assert tsw == 0.5
+        assert tsw == 0.95
+        # 파킹 ETF 바스켓은 전역 현금 하한(20%)이 과잉 — 바스켓별 5% 오버라이드.
+        # 이 키가 사라지면 배치 목표가 80%로 조용히 깎여 파킹 슬롯이 못 찬다.
+        assert float(b["min_cash_ratio"]) == 0.05
         rb = b["rebalance"]
-        slot = capital * tsw  # 단일 종목이므로 슬리브 전체가 한 슬롯
+        # 지수/파킹 각 슬롯(총자산의 47.5%)이 최소거래 이상이어야 미체결 판정을 피한다
+        slot = capital * tsw * 0.5
         assert float(rb["min_trade_amount"]) <= slot, "최소거래가 슬롯보다 크면 미체결"
-        # 첫 사이클에 주식 슬리브를 채울 수 있어야 한다(회전 한도 ≥ 슬리브 비중)
-        assert float(rb["max_turnover_ratio"]) >= tsw, "회전 한도 < 슬리브면 초기 매수 불가"
-        # ETF 단일 구성(1주 = 200종목 분산)
-        assert list(b["holdings"].keys()) == ["069500"]
-        # 소액 구조적 절사(1주 단위 -7.3%p) 허용 — 기본 5%p면 매일 무의미 ATTENTION
+        # 첫 사이클에 최소 큰 슬롯 하나는 채울 수 있어야 한다(회전 한도 ≥ 슬롯 비중)
+        assert float(rb["max_turnover_ratio"]) >= tsw * 0.5, "회전 한도 < 슬롯이면 초기 매수 불가"
+        # 지수(위험자산) + CD금리 파킹 반반 — 위험 노출은 종전 50/50 설계와 동일 수준
+        assert b["holdings"] == {"069500": 0.5, "357870": 0.5}
+        # 소액 구조적 절사(1주 단위) 허용 — 기본 5%p면 매일 무의미 ATTENTION
         assert float(b["monitoring"]["deployment_tolerance"]) == 0.10
+        # 두 ETF 모두 매도 거래세 면제 목록에 있어야 비용이 과대계상되지 않는다
+        from config.config_loader import Config
+        exempt = {str(s) for s in (
+            Config.get().risk_params.get("transaction_costs", {}).get("tax_exempt_symbols") or []
+        )}
+        assert {"069500", "357870"} <= exempt
 
     def test_observation_track_deployment_alarm_disabled(self):
         """관찰용 강등(kr_diversified_hold): 종결된 자본 결정의 잔상인 배치율 미달이
