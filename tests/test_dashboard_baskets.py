@@ -230,6 +230,63 @@ class TestDepositEndpoint:
 
         asyncio.run(run())
 
+    def test_deposit_rejects_nonfinite_json_literals(self):
+        # python json.loads는 Infinity/NaN 리터럴을 기본 허용 — float('inf')>0 은 True,
+        # nan<=0 은 False라 기존 양수 검사를 둘 다 통과해 무한대/NaN 입금이 기록되던
+        # 실제 구멍. isfinite 검증으로 400이어야 한다.
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+        from core.basket_rebalancer import rebalance_live_strategy_id
+        from database.repositories import get_cash_flow_total
+
+        name = "kr_pocket_inf"
+        init_database()
+
+        async def run():
+            with patch(
+                "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                return_value=_cfg(name),
+            ):
+                app = wd.create_app()
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    for payload in (
+                        b'{"basket": "kr_pocket_inf", "amount": Infinity}',
+                        b'{"basket": "kr_pocket_inf", "amount": NaN}',
+                        b'{"basket": "kr_pocket_inf", "amount": -Infinity}',
+                    ):
+                        res = await client.post(
+                            "/api/deposit", data=payload,
+                            headers={"Content-Type": "application/json"},
+                        )
+                        assert res.status == 400, f"payload {payload!r} → {res.status}"
+                finally:
+                    await client.close()
+
+        asyncio.run(run())
+        assert get_cash_flow_total(
+            account_key=rebalance_live_strategy_id(name)
+        ) == 0.0  # 아무것도 기록되지 않아야 한다
+
+    def test_deposit_trims_overlong_note(self):
+        # SQLite는 String(200)을 강제하지 않는다 — 서버측 절단 계약.
+        from tools.record_deposit import record_basket_deposit
+        from core.basket_rebalancer import rebalance_live_strategy_id
+        from database.repositories import get_recent_cash_flows
+
+        name = "kr_pocket_note"
+        init_database()
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=_cfg(name),
+        ):
+            out = record_basket_deposit(name, 10_000, note="가" * 500)
+        assert out["ok"] is True
+        flows = get_recent_cash_flows(rebalance_live_strategy_id(name))
+        assert len(flows[0]["note"]) == 200
+
 
 @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
 def test_cash_flows_endpoint_lists_recent():
