@@ -220,7 +220,7 @@ def test_paper_buy_blocks_when_earnings_lookup_unknown(fresh_db, monkeypatch):
     monkeypatch.setattr(
         executor.risk_manager,
         "calculate_transaction_costs",
-        lambda price, quantity, action, avg_daily_volume=None: {
+        lambda price, quantity, action, avg_daily_volume=None, symbol=None: {
             "execution_price": float(price),
             "commission": 0.0,
             "tax": 0.0,

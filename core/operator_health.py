@@ -135,28 +135,32 @@ def summarize_blockers(blockers: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def structural_deployment_tolerance(
-    max_share_price: float | None,
+    truncation_unit_value: float | None,
     total_value: float | None,
     floor_tolerance: float = 0.05,
 ) -> float:
     """배치율 허용 오차의 구조 하한 — 정수 주식 절사가 만드는 불가피한 미달을 반영(순수).
 
-    적립 직후에는 '부족분 < 1주 가격'인 동안 매수가 보류되므로(설계), 미달폭이 최대
-    1주 가격/총액까지 벌어진다(예: 잔고 40만·ETF 1주 12.8만 → 32%p). 이 구간을 고정
-    허용치로 재면 정상 적립 과정이 매일 ATTENTION을 울린다(경보 피로). 반대로 잔고가
-    커지면 구조 하한이 저절로 조여져(200만 → 6.4%p) floor가 다시 지배한다 —
-    진짜 이상(예: 매수 자체 불능 → 미달 50%p)은 어느 시점에도 잡힌다.
+    적립 직후에는 '부족분 < 1주 가격'인 동안 매수가 보류되므로(설계), 미달폭이
+    슬롯마다 최대 1주 가격까지 벌어진다. truncation_unit_value는 그 상한의 합 —
+    **보유 슬롯별 1주 가격의 합**이다(예: 잔고 40만·ETF 1주 12.8만 단일 슬롯 → 32%p;
+    지수 12.4만+파킹 5.8만 2슬롯 잔고 70만 → 26%p). 최고가 1주만 재면 다중 슬롯
+    바스켓이 정상 적립 중(모든 슬롯이 부족분 < 1주)에도 허용을 초과해 몇 주씩
+    거짓 ATTENTION이 울린다. 잔고가 커지면 구조 하한이 저절로 조여져 floor가 다시
+    지배한다 — 진짜 이상(미달이 절사 상한을 초과)은 규모가 커지는 즉시 잡힌다.
+    완전히 빈 슬롯은 절사가 아니라 실패이므로 합산에 넣지 않는다(호출부는 '보유'
+    포지션의 1주 가격만 합산할 것).
 
-    반환: max(floor_tolerance, max_share_price/total_value). 입력 불충분 시 floor.
+    반환: max(floor_tolerance, truncation_unit_value/total_value). 입력 불충분 시 floor.
     """
     try:
-        price = float(max_share_price or 0)
+        unit = float(truncation_unit_value or 0)
         total = float(total_value or 0)
     except (TypeError, ValueError):
         return float(floor_tolerance)
-    if price <= 0 or total <= 0:
+    if unit <= 0 or total <= 0:
         return float(floor_tolerance)
-    return max(float(floor_tolerance), price / total)
+    return max(float(floor_tolerance), unit / total)
 
 
 def summarize_deployment(

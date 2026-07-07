@@ -142,10 +142,10 @@ def main() -> int:
     holdings = basket_cfg.get("holdings") or {}
     min_trade = float((basket_cfg.get("rebalance") or {}).get("min_trade_amount", 0) or 0)
 
-    min_cash = (config.risk_params.get("diversification") or {}).get("min_cash_ratio", 0.20)
-    max_stock = 1.0 - float(min_cash)
-    tsw = basket_cfg.get("target_stock_weight")
-    stock_fraction = max_stock if tsw is None else max(0.0, min(float(tsw), max_stock))
+    # 실제 사이클과 같은 단일 규칙(바스켓별 min_cash_ratio 오버라이드 포함) — 여기만
+    # 다르면 '이 자본으로 슬롯이 차는가'라는 이 도구의 답 자체가 틀린다.
+    from core.basket_deploy import effective_stock_fraction
+    stock_fraction = effective_stock_fraction(basket_cfg, config.risk_params)
 
     # 현재가 조회 (읽기 전용) — 실제 사이클과 동일 소스(BasketRebalancer 시세 경로) 재사용.
     rebalancer = BasketRebalancer(basket_name=basket_name, config=config)

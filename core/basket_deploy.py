@@ -15,6 +15,31 @@ from typing import Any
 DEFAULT_COMMISSION_RATE = 0.00015   # 0.015% 양방향
 DEFAULT_TAX_RATE = 0.0020           # 0.20% 매도만
 
+DEFAULT_MIN_CASH_RATIO = 0.20       # diversification.min_cash_ratio 기본값과 동일
+
+
+def effective_stock_fraction(basket_cfg: dict[str, Any], risk_params: dict[str, Any]) -> float:
+    """바스켓의 유효 투자 비중(총자산 대비). 리밸런서·평가·헬스가 같은 규칙을 써야
+    '설계 비중'이 서로 어긋나지 않으므로 여기 한 곳에 둔다.
+
+    - target_stock_weight: 바스켓이 명시한 투자 목표 비중. 미지정이면 (1 - 현금 하한).
+    - min_cash_ratio: 전역(diversification.min_cash_ratio, 기본 20%)이 하한이지만
+      바스켓별로 오버라이드할 수 있다. 전역 20%는 개별 주식 바스켓의 안전판인데,
+      보유분 절반이 현금성(CD금리 파킹 ETF)인 바스켓에는 과잉이라 유휴 현금만 남긴다.
+    """
+    div_cfg = (risk_params or {}).get("diversification", {}) or {}
+    mcr_raw = basket_cfg.get("min_cash_ratio", div_cfg.get("min_cash_ratio", DEFAULT_MIN_CASH_RATIO))
+    try:
+        mcr = float(mcr_raw)
+    except (TypeError, ValueError):
+        mcr = float(div_cfg.get("min_cash_ratio", DEFAULT_MIN_CASH_RATIO))
+    mcr = max(0.0, min(1.0, mcr))
+    max_stock = 1.0 - mcr
+    tsw = basket_cfg.get("target_stock_weight")
+    if tsw is None:
+        return max_stock
+    return max(0.0, min(float(tsw), max_stock))
+
 
 def estimate_order_costs(
     orders: list[Any],

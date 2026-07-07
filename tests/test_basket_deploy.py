@@ -2,7 +2,10 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from core.basket_deploy import (
+    effective_stock_fraction,
     estimate_order_costs,
     summarize_basket_deployment,
     DEFAULT_COMMISSION_RATE,
@@ -107,3 +110,41 @@ class TestSummarizeBasketDeployment:
         joined = " ".join(out["next_steps"])
         assert "--dry-run" in joined
         assert "live" in joined.lower()
+
+
+class TestEffectiveStockFraction:
+    """유효 투자 비중 — 리밸런서·평가·헬스가 공유하는 단일 규칙."""
+
+    RISK = {"diversification": {"min_cash_ratio": 0.20}}
+
+    def test_no_target_uses_global_cash_floor(self):
+        assert effective_stock_fraction({}, self.RISK) == pytest.approx(0.80)
+
+    def test_target_clamped_by_global_floor(self):
+        # 오버라이드 없으면 전역 20% 하한이 그대로 상한을 만든다 (기존 동작 회귀 pin)
+        cfg = {"target_stock_weight": 0.95}
+        assert effective_stock_fraction(cfg, self.RISK) == pytest.approx(0.80)
+
+    def test_legacy_5050_unchanged(self):
+        cfg = {"target_stock_weight": 0.5}
+        assert effective_stock_fraction(cfg, self.RISK) == pytest.approx(0.5)
+
+    def test_basket_override_allows_higher_deployment(self):
+        # kr_pocket v2: 보유분 절반이 현금성(파킹 ETF)이라 현금 하한 5%로 낮춰 95% 배치
+        cfg = {"target_stock_weight": 0.95, "min_cash_ratio": 0.05}
+        assert effective_stock_fraction(cfg, self.RISK) == pytest.approx(0.95)
+
+    def test_override_still_floors_target(self):
+        cfg = {"target_stock_weight": 0.99, "min_cash_ratio": 0.05}
+        assert effective_stock_fraction(cfg, self.RISK) == pytest.approx(0.95)
+
+    def test_invalid_override_falls_back_to_global(self):
+        cfg = {"target_stock_weight": 0.95, "min_cash_ratio": "잘못된값"}
+        assert effective_stock_fraction(cfg, self.RISK) == pytest.approx(0.80)
+
+    def test_out_of_range_override_clamped(self):
+        assert effective_stock_fraction({"min_cash_ratio": -0.5}, self.RISK) == pytest.approx(1.0)
+        assert effective_stock_fraction({"min_cash_ratio": 1.5}, self.RISK) == pytest.approx(0.0)
+
+    def test_empty_risk_params_uses_default(self):
+        assert effective_stock_fraction({}, {}) == pytest.approx(0.80)

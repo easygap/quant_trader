@@ -249,3 +249,55 @@ def test_correlation_risk_blocks_when_existing_position_data_is_insufficient(ris
     assert result["blocked"] is True
     assert result["scale"] == 0.0
     assert result["missing_symbols"] == ["000660"]
+
+
+class TestEtfSellTaxExemption:
+    """국내 상장 ETF 매도세 면제 — tax_exempt_symbols 등록 종목은 매도세 0.
+
+    개별 주식 세율(0.20%)을 ETF에 일괄 적용하면 kr_pocket 같은 ETF 전용 바스켓의
+    매도 비용이 과대계상돼 승격 게이트의 비용 상한(연 1%) 판정까지 왜곡된다.
+    """
+
+    @pytest.fixture
+    def rm(self):
+        class _Cfg:
+            risk_params = {
+                "transaction_costs": {
+                    "commission_rate": 0.00015,
+                    "tax_rate": 0.0020,
+                    # yaml에서 숫자로 적혀도(따옴표 누락) 문자열 비교로 매칭돼야 한다
+                    "tax_exempt_symbols": ["069500", 357870],
+                    "slippage": 0.0005,
+                    "slippage_ticks": 1,
+                    "dynamic_slippage": {"enabled": False},
+                },
+            }
+        return RiskManager(_Cfg())
+
+    def test_exempt_symbol_sell_has_no_tax(self, rm):
+        out = rm.calculate_transaction_costs(57715, 2, "SELL", symbol="069500")
+        assert out["tax"] == 0
+
+    def test_int_coded_yaml_entry_still_matches(self, rm):
+        out = rm.calculate_transaction_costs(57715, 2, "SELL", symbol="357870")
+        assert out["tax"] == 0
+
+    def test_non_exempt_symbol_keeps_tax(self, rm):
+        out = rm.calculate_transaction_costs(70000, 10, "SELL", symbol="005930")
+        assert out["tax"] == round(700000 * 0.0020, 0)
+
+    def test_no_symbol_keeps_legacy_behavior(self, rm):
+        # symbol 미전달 호출부(백테스트·스크립트)는 기존 일괄 과세 유지
+        out = rm.calculate_transaction_costs(70000, 10, "SELL")
+        assert out["tax"] == round(700000 * 0.0020, 0)
+
+    def test_exempt_sell_effective_price_excludes_tax(self, rm):
+        exempt = rm.calculate_transaction_costs(57715, 2, "SELL", symbol="069500")
+        taxed = rm.calculate_transaction_costs(57715, 2, "SELL", symbol="005930")
+        assert exempt["effective_price"] > taxed["effective_price"]
+
+    def test_buy_unaffected_by_exemption(self, rm):
+        etf = rm.calculate_transaction_costs(57715, 2, "BUY", symbol="069500")
+        stock = rm.calculate_transaction_costs(57715, 2, "BUY", symbol="005930")
+        assert etf["tax"] == 0 and stock["tax"] == 0
+        assert etf["total_cost"] == stock["total_cost"]

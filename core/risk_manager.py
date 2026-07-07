@@ -667,6 +667,7 @@ class RiskManager:
         action: str = "BUY",
         avg_daily_volume: float = None,
         avg_price: float = None,
+        symbol: str = None,
     ) -> dict:
         """
         거래 비용 계산 (수수료 + 증권거래세 + 슬리피지 + 양도소득세(선택))
@@ -677,6 +678,10 @@ class RiskManager:
             action: "BUY" 또는 "SELL"
             avg_daily_volume: 일평균 거래량 (동적 슬리피지용)
             avg_price: 매도 시 평균 매입 단가 (양도소득세 계산용; 대주주 해당 시)
+            symbol: 종목코드 (선택). transaction_costs.tax_exempt_symbols에 있으면
+                매도세를 면제한다 — 국내 상장 ETF는 증권거래세 비과세인데 개별 주식
+                세율을 일괄 적용하면 ETF 바스켓의 비용이 과대계상된다(승격 게이트의
+                비용 상한 판정까지 왜곡). 미전달 시 기존 동작(일괄 과세) 유지.
 
         Returns:
             commission(수수료), tax(증권거래세+농특세 매도 시 0.20%), capital_gains_tax(양도소득세, 설정 시),
@@ -684,6 +689,11 @@ class RiskManager:
         """
         costs = self.risk_params.get("transaction_costs", {})
         amount = price * quantity
+
+        sell_tax_rate = costs.get("tax_rate", 0.0020)
+        exempt = costs.get("tax_exempt_symbols") or []
+        if symbol is not None and str(symbol) in {str(s) for s in exempt}:
+            sell_tax_rate = 0.0
 
         commission = amount * costs.get("commission_rate", 0.00015)
         dynamic = costs.get("dynamic_slippage", {})
@@ -713,10 +723,10 @@ class RiskManager:
         slippage = slippage_per_share * quantity
         slippage_rate_effective = slippage_per_share / price if price > 0 else 0
 
-        # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일)
+        # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일; ETF는 면제)
         tax = 0
         if action.upper() == "SELL":
-            tax = amount * costs.get("tax_rate", 0.0020)
+            tax = amount * sell_tax_rate
 
         # 양도소득세 (대주주 해당 시만; enabled 시 실현 이익에 대해 부과)
         capital_gains_tax = 0
@@ -735,7 +745,7 @@ class RiskManager:
             execution_price = price + slippage_per_share
         else:
             effective_price = price * (
-                1 - costs.get("commission_rate", 0) - slippage_rate_effective - costs.get("tax_rate", 0)
+                1 - costs.get("commission_rate", 0) - slippage_rate_effective - sell_tax_rate
             )
             execution_price = max(0, price - slippage_per_share)
 
