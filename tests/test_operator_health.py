@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from core.operator_health import (
     summarize_runtime_state,
     summarize_blockers,
@@ -223,6 +225,39 @@ class TestSummarizeBasketOperation:
         assert ok["verdict"] == "OK"
         bad = self._summ(deployment_ratio=0.38, design_fraction=0.50, deployment_tolerance=0.10)
         assert bad["verdict"] == "ATTENTION"
+
+
+class TestStructuralDeploymentTolerance:
+    """적립 직후 구조적 미달(부족분 < 1주 → 매수 보류)의 허용 하한 — 8/1 입금 시나리오."""
+
+    def _f(self, price, total, floor=0.10):
+        from core.operator_health import structural_deployment_tolerance
+        return structural_deployment_tolerance(price, total, floor)
+
+    def test_month2_deposit_scenario_not_alarmed(self):
+        # 잔고 40만(30만+입금 10만), KODEX 1주 12.8만 보유: 부족분 7.2만 < 1주라
+        # 매수 보류가 설계 — 미달 18%p는 구조 하한 32%p 이내여야 한다(무경보).
+        from core.operator_health import summarize_deployment
+        tol = self._f(128_000, 400_000)          # = 0.32
+        assert tol == pytest.approx(0.32)
+        out = summarize_deployment(0.32, 0.50, tolerance=tol)  # 미달 18%p
+        assert out["verdict"] == "OK"
+
+    def test_genuine_failure_still_caught(self):
+        # 매수 자체가 안 된 이상 상태(주식 0): 미달 50%p > 구조 하한 32%p → ATTENTION
+        from core.operator_health import summarize_deployment
+        tol = self._f(128_000, 400_000)
+        out = summarize_deployment(0.0, 0.50, tolerance=tol)
+        assert out["verdict"] == "ATTENTION"
+
+    def test_tightens_as_balance_grows(self):
+        # 잔고 200만이면 구조 하한 6.4%p < floor 10%p → floor가 지배(자동 조임)
+        assert self._f(128_000, 2_000_000) == pytest.approx(0.10)
+
+    def test_floor_when_inputs_missing(self):
+        assert self._f(None, 400_000) == pytest.approx(0.10)
+        assert self._f(128_000, 0) == pytest.approx(0.10)
+        assert self._f("x", 400_000) == pytest.approx(0.10)
 
 
 class TestSummarizeDeployment:

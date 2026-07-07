@@ -1722,20 +1722,32 @@ def run_health_check() -> int:
                     .first()
                 )
                 last_dates.append(snap.date if snap else None)
-                position_count += len(get_all_positions(account_key=key) or [])
+                positions_b = get_all_positions(account_key=key) or []
+                position_count += len(positions_b)
                 # 배치율은 부가 신호 — 계산 실패(예: baskets.yaml에 float 불가한
                 # target_stock_weight 오타)가 핵심 신호인 결측/staleness 감지를
                 # 통째로 삼키지 않도록 자체 try로 격리한다.
-                # 바스켓별 허용 오차(monitoring.deployment_tolerance, 기본 5%p)를
-                # 반영해 '허용 초과분'이 가장 큰 바스켓을 고른다 — 원시 미달폭
-                # 최대로 고르면 관찰용 트랙(허용 완화)이 진짜 감시 대상을 가린다.
+                # 허용 오차 = max(바스켓 설정값, 구조 하한 1주가/총액) — 적립 직후
+                # '부족분 < 1주'로 매수가 보류되는 동안의 불가피한 미달(예: 잔고
+                # 40만·ETF 12.8만 → 32%p)이 정상인데 매일 울리는 것을 방지. 잔고가
+                # 크면 구조 하한이 저절로 조여져 설정값이 다시 지배한다.
+                # '허용 초과분'이 가장 큰 바스켓을 고른다 — 원시 미달폭 최대로
+                # 고르면 관찰용 트랙(허용 완화)이 진짜 감시 대상을 가린다.
                 try:
                     if snap and snap.total_value and snap.total_value > 0:
+                        from core.operator_health import structural_deployment_tolerance
+
                         cfg_b = baskets_cfg.get(name) or {}
                         dep_ratio = max(0.0, (snap.total_value - (snap.cash or 0)) / snap.total_value)
                         design = _design_fraction(cfg_b)
-                        tol_b = float(
+                        floor_tol = float(
                             (cfg_b.get("monitoring") or {}).get("deployment_tolerance", 0.05)
+                        )
+                        max_price = max(
+                            (float(p.avg_price or 0) for p in positions_b), default=0.0,
+                        )
+                        tol_b = structural_deployment_tolerance(
+                            max_price, float(snap.total_value), floor_tol,
                         )
                         violation = (design - dep_ratio) - tol_b
                         if worst_shortfall is None or violation > worst_shortfall:
