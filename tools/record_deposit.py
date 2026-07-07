@@ -35,12 +35,21 @@ def record_basket_deposit(basket_name: str, amount: float, note: str = "") -> di
         record_cash_flow,
     )
 
+    import math
+
     try:
         amount = float(amount)
     except (TypeError, ValueError):
         return {"ok": False, "error": "금액이 숫자가 아닙니다"}
+    # isfinite 필수: json.loads는 Infinity/NaN 리터럴을 기본 허용하고, NaN은
+    # `<= 0` 비교가 False라 양수 검사를 그대로 통과한다 — 기록되면 현금·원금·TWR
+    # 합산이 전부 오염된다(웹 POST·CLI --amount inf 둘 다 실제로 뚫리던 구멍).
+    if not math.isfinite(amount):
+        return {"ok": False, "error": "금액이 유한한 숫자가 아닙니다"}
     if amount <= 0:
         return {"ok": False, "error": "입금액은 양수여야 합니다"}
+    # note는 컬럼 정의가 200자지만 SQLite는 길이를 강제하지 않는다 — 서버측 절단.
+    note = str(note or "")[:200]
 
     init_database()
     config = Config.get()
@@ -102,8 +111,10 @@ def main() -> int:
         return 0
 
     # --account-key 직접 지정 경로 (바스켓 문맥 없음 — 원금 표기 생략)
-    if args.amount <= 0:
-        logger.error("입금액은 양수여야 합니다: {}", args.amount)
+    import math
+
+    if not math.isfinite(args.amount) or args.amount <= 0:
+        logger.error("입금액은 유한한 양수여야 합니다: {}", args.amount)
         return 1
 
     from database.models import init_database
