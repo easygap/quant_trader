@@ -668,6 +668,7 @@ def run_rebalance(args):
     notifier = Notifier(config)
     basket_name = getattr(args, "basket", None)
     dry_run = getattr(args, "dry_run", False)
+    force_rebalance = getattr(args, "force_rebalance", False)
     mode = str(config.trading.get("mode", "paper")).lower()
     live_rebalance_confirmed = False
 
@@ -758,28 +759,57 @@ def run_rebalance(args):
             report = rebalancer.get_status_report()
             logger.info("\n{}", report)
 
-            should, reason = rebalancer.should_rebalance()
+            # 1일 1매매 패스 원칙 강제: 같은 날 두 번째 실행(중복 스케줄·수동 재실행)이
+            # 회전 상한(1회 15%)을 사실상 2배로 만드는 것을 차단한다 — 6/10 진입 뭉침
+            # (하루 4회 실행 → 61% 집중 매입, 타이밍 비용 -1%p)의 재발 방지를 코드로.
+            # 실측: 7/3·7/7 일일 태스크가 사이클을 2회 연속 실행함. 결측 복구 재시도
+            # 크론은 목적이 스냅샷이라 이 가드로 오히려 더 안전해진다(매매 없이 복구).
+            # 판정 실패 시 기존 동작 유지(가드는 방어선이지 게이트가 아님).
+            # 우회: --force-rebalance (운영자 명시 결정).
+            already_traded_today = False
+            if not dry_run and not force_rebalance:
+                try:
+                    from database.repositories import get_trade_history
+                    today0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    already_traded_today = bool(get_trade_history(
+                        mode=mode, start_date=today0, account_key=live_strategy_name,
+                    ))
+                except Exception as guard_exc:
+                    logger.debug("바스켓 '{}' 당일 체결 판정 실패(가드 생략): {}", name, guard_exc)
+
             executed = False
-            if not should and not dry_run:
-                logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
+            if already_traded_today:
+                logger.info(
+                    "바스켓 '{}' 오늘 이미 체결 있음 — 1일 1매매 패스 원칙으로 매매 건너뜀 "
+                    "(스냅샷·리포트는 진행, 우회: --force-rebalance)", name,
+                )
+                record_cycle_event(
+                    "REBALANCE_SKIPPED_DAILY_LIMIT",
+                    f"바스켓 '{name}' 당일 재실행 — 매매 생략(1일 1매매 패스)",
+                    strategy=live_strategy_name, mode=mode,
+                )
             else:
-                orders = rebalancer.plan_rebalance()
-                if not orders:
-                    logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
+                should, reason = rebalancer.should_rebalance()
+                if not should and not dry_run:
+                    logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
                 else:
-                    result = rebalancer.execute(
-                        orders,
-                        dry_run=dry_run,
-                        live_confirmed=live_rebalance_confirmed,
-                    )
-                    executed = True
-                    summary = (
-                        f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
-                        f"완료: 실행 {result['executed']}건, 스킵 {result['skipped']}건, "
-                        f"실패 {result['failed']}건"
-                    )
-                    logger.info(summary)
-                    notifier.send_message(summary)
+                    orders = rebalancer.plan_rebalance()
+                    if not orders:
+                        logger.info("바스켓 '{}' 리밸런싱 주문 없음", name)
+                    else:
+                        result = rebalancer.execute(
+                            orders,
+                            dry_run=dry_run,
+                            live_confirmed=live_rebalance_confirmed,
+                        )
+                        executed = True
+                        summary = (
+                            f"바스켓 '{name}' 리밸런싱 {'(DRY RUN) ' if dry_run else ''}"
+                            f"완료: 실행 {result['executed']}건, 스킵 {result['skipped']}건, "
+                            f"실패 {result['failed']}건"
+                        )
+                        logger.info(summary)
+                        notifier.send_message(summary)
 
             # 트랙레코드: 거래 여부와 무관하게 바스켓 계정의 일일 NAV 스냅샷을 남긴다.
             # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
@@ -2090,6 +2120,10 @@ def main():
     parser.add_argument(
         "--dry-run", action="store_true",
         help="[rebalance 모드] 실제 주문 없이 계획만 출력",
+    )
+    parser.add_argument(
+        "--force-rebalance", action="store_true",
+        help="[rebalance 모드] 1일 1매매 패스 가드 우회 — 같은 날 이미 체결이 있어도 매매 재실행 (운영자 명시 결정)",
     )
     parser.add_argument(
         "--as-of", type=str, default=None,
