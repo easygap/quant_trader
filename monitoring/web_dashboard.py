@@ -102,7 +102,6 @@ def get_baskets_json() -> dict:
 
     config = Config.get()
     baskets_cfg = BasketRebalancer._load_baskets_config()
-    min_cash = (config.risk_params.get("diversification") or {}).get("min_cash_ratio", 0.20)
     global_capital = (config.risk_params.get("position_sizing") or {}).get(
         "initial_capital", 10_000_000
     )
@@ -141,9 +140,10 @@ def get_baskets_json() -> dict:
         finally:
             session.close()
 
-        max_stock = 1.0 - float(min_cash)
-        tsw = cfg.get("target_stock_weight")
-        design_fraction = max_stock if tsw is None else max(0.0, min(float(tsw), max_stock))
+        # 설계 비중은 리밸런서·평가·헬스와 같은 단일 규칙을 쓴다 — 여기만 다르게
+        # 계산하면 대시보드와 디스코드 카드가 서로 다른 '설계 %'를 보여준다.
+        from core.basket_deploy import effective_stock_fraction
+        design_fraction = effective_stock_fraction(cfg, config.risk_params)
 
         positions = [
             {
