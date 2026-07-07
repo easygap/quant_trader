@@ -32,26 +32,37 @@ def _require_aiohttp_web():
 
 
 def _serialize_snapshots(df):
-    """DataFrame 스냅샷을 JSON 직렬화 가능한 리스트로 변환"""
+    """DataFrame 스냅샷을 JSON 직렬화 가능한 리스트로 변환.
+
+    날짜형은 컬럼을 특정하지 않고 전부 문자열화한다 — 'date'만 처리하던 시절
+    created_at 컬럼 추가(일간 수익률 경계용)로 pd.Timestamp가 그대로 새어나가
+    /api/snapshots가 매 폴링 500이 나고 수익률 차트가 조용히 죽었다(빈 DF만
+    쓰는 테스트는 통과해서 못 잡던 회귀).
+    """
     if df.empty:
         return []
     out = []
     for _, row in df.iterrows():
         d = row.to_dict()
-        if "date" in d and hasattr(d["date"], "strftime"):
-            d["date"] = d["date"].strftime("%Y-%m-%d")
-        # numpy 타입 → Python 네이티브
         for k, v in d.items():
-            if hasattr(v, "item"):
+            if hasattr(v, "strftime"):          # date/datetime/pd.Timestamp
+                d[k] = v.strftime("%Y-%m-%d %H:%M:%S") if k != "date" else v.strftime("%Y-%m-%d")
+            elif hasattr(v, "item"):            # numpy 타입 → Python 네이티브
                 d[k] = v.item()
         out.append(d)
     return out
 
 
+_DASH = None  # 폴링(10초)마다 Dashboard/PortfolioManager를 새로 만들면 초기화 INFO가 스팸이 된다
+
+
 def get_portfolio_json(current_prices: Optional[dict] = None) -> dict:
     """현재 포트폴리오 요약을 JSON 친화적 dict로 반환"""
+    global _DASH
     config = Config.get()
-    dash = Dashboard(config=config)
+    if _DASH is None:
+        _DASH = Dashboard(config=config)
+    dash = _DASH
     summary = dash.portfolio_manager.get_portfolio_summary(current_prices or {})
     return {
         "timestamp": datetime.now().isoformat(),
@@ -86,7 +97,6 @@ def get_baskets_json() -> dict:
     from database.repositories import (
         get_all_positions,
         get_cash_flow_total,
-        get_latest_snapshot_summary,
     )
     from database.models import PortfolioSnapshot, get_session
 
@@ -216,15 +226,9 @@ def get_runtime_json() -> dict:
         logger.debug("get_runtime_json read_state: {}", e)
         out["signals_today"] = None
 
-    if out["kis_stats"] is None:
-        try:
-            from api.kis_api import KISApi
-
-            out["kis_stats"] = KISApi().get_rate_limit_stats()
-            out["kis_stats_source"] = "dashboard_process"
-        except Exception as e:
-            logger.debug("get_runtime_json KISApi: {}", e)
-
+    # KIS 통계 폴백(대시보드 프로세스에서 KISApi 신규 생성) 제거 — 레이트리미터
+    # 상태가 인스턴스별이라 항상 0(아무것도 측정 안 함)에 폴링마다 초기화 로그만
+    # 남겼다. 스케줄러 파일에 없으면 정직하게 '조회 불가'로 둔다.
     return out
 
 
@@ -460,7 +464,12 @@ def _html_page() -> str:
 
     const fmtNum = (n) => Number(n).toLocaleString('ko-KR');
     const fmtPct = (n) => (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
-    function escHtml(t) { const d = document.createElement('div'); d.textContent = t == null ? '' : String(t); return d.innerHTML; }
+    function escHtml(t) {
+      const d = document.createElement('div');
+      d.textContent = t == null ? '' : String(t);
+      // textContent→innerHTML은 &<>만 이스케이프 — value="..." 속성에도 쓰이므로 따옴표까지.
+      return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
     const card = (label, value, cls) => `<div class="card"><div class="label">${escHtml(label)}</div><div class="value ${cls || ''}">${value}</div></div>`;
     const stat = (k, v, cls) => `<div class="stat"><div class="k">${escHtml(k)}</div><div class="v ${cls || ''}">${v}</div></div>`;
 
@@ -530,7 +539,10 @@ def _html_page() -> str:
       const baskets = (data && data.baskets) || [];
       const wanted = baskets.map(b => ({ v: b.account_key, t: b.display_name }));
       wanted.push({ v: '', t: '기본 계정' });
-      if (chartAccountSel.options.length === wanted.length) return;
+      // 개수만 비교하면 바스켓 교체/개명 시 스테일 옵션이 남는다 — 값 시그니처로 비교.
+      const sig = wanted.map(w => w.v + '' + w.t).join('');
+      if (chartAccountSel.dataset.sig === sig) return;
+      chartAccountSel.dataset.sig = sig;
       const prev = chartAccountSel.value;
       chartAccountSel.innerHTML = wanted.map(w => `<option value="${escHtml(w.v)}">${escHtml(w.t)}</option>`).join('');
       chartAccountSel.value = prev && Array.from(chartAccountSel.options).some(o => o.value === prev) ? prev : (wanted[0] ? wanted[0].v : '');
@@ -660,7 +672,7 @@ def _html_page() -> str:
       if (!has) return;
       $('positions').innerHTML = ps.map(p => {
         const cls = p.pnl_rate >= 0 ? 'positive' : 'negative';
-        return `<tr><td>${p.symbol || '-'}</td><td class="num">${p.quantity ?? '-'}</td><td class="num">${fmtNum(p.avg_price)}</td><td class="num">${fmtNum(p.current_price)}</td><td class="num">${fmtNum(p.current_value)}</td><td class="num ${cls}">${fmtPct(p.pnl_rate)}</td></tr>`;
+        return `<tr><td>${escHtml(p.symbol || '-')}</td><td class="num">${p.quantity ?? '-'}</td><td class="num">${fmtNum(p.avg_price)}</td><td class="num">${fmtNum(p.current_price)}</td><td class="num">${fmtNum(p.current_value)}</td><td class="num ${cls}">${fmtPct(p.pnl_rate)}</td></tr>`;
       }).join('');
     }
 
@@ -689,7 +701,9 @@ def _html_page() -> str:
       const btn = $('depSubmit'); btn.disabled = true; btn.textContent = '기록 중...';
       try {
         const res = await fetch('/api/deposit', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          // X-Requested-With: 서버의 CSRF 방어(커스텀 헤더 필수)와 한 쌍
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'quant-dashboard' },
           body: JSON.stringify({ basket, amount, note: $('depNote').value || '' })
         });
         const data = await res.json();
@@ -706,7 +720,13 @@ def _html_page() -> str:
     }
 
     /* ── 폴링 ── */
+    let _polling = false;  // 오버랩 가드 — 느린 응답(운영 상태 수십 초)이 폴링을 적체시키지 않게
     async function fetchData() {
+      if (_polling) return;
+      _polling = true;
+      try { await _fetchDataInner(); } finally { _polling = false; }
+    }
+    async function _fetchDataInner() {
       let ts = new Date().toLocaleTimeString('ko-KR');
       try {
         const bkRes = await fetch('/api/baskets');
@@ -714,8 +734,10 @@ def _html_page() -> str:
         else { basketTracksEl.innerHTML = '<div class="panel error">바스켓 조회 불가</div>'; }
       } catch (e) { basketTracksEl.innerHTML = '<div class="panel error">바스켓 조회 불가</div>'; }
       try {
+        // account_key는 빈 값이어도 항상 보낸다 — 파라미터 부재는 '무필터(전 계정 혼합)'라
+        // 기본 계정('')과 의미가 다르다.
         const acct = chartAccountSel.value;
-        const url = '/api/snapshots?days=30' + (acct ? '&account_key=' + encodeURIComponent(acct) : '');
+        const url = '/api/snapshots?days=30&account_key=' + encodeURIComponent(acct);
         const r = await fetch(url);
         if (r.ok) updateChart((await r.json()).snapshots || []);
       } catch (e) { /* skip */ }
@@ -781,7 +803,17 @@ async def handle_api_deposit(request: web.Request) -> web.Response:
     웹에서 가능한 쓰기는 이것 하나다(기록·조회까지가 웹의 권한 — 매매·설정 변경은
     웹에 두지 않는다). occurred_at은 서버 시각 고정이라 소급 조작이 불가능하고,
     금액 양수·바스켓 존재·TWR 체인 보호(마지막 스냅샷 이후) 검증은 공유 함수가 한다.
+
+    CSRF 방어: 커스텀 헤더(X-Requested-With) 필수 — 루프백 바인딩이어도 브라우저
+    경유 cross-site 요청은 막지 못한다(악성 페이지가 text/plain fetch로 127.0.0.1에
+    POST 가능, aiohttp request.json()은 Content-Type을 보지 않음). 커스텀 헤더는
+    CORS preflight를 강제하는데 이 서버는 preflight에 응답하지 않으므로 외부
+    오리진에서는 실을 수 없다. 대시보드 프론트만 이 헤더를 보낸다.
     """
+    if request.headers.get("X-Requested-With") != "quant-dashboard":
+        return web.json_response(
+            {"ok": False, "error": "대시보드 외 요청 차단(CSRF 방어)"}, status=403,
+        )
     try:
         body = await request.json()
     except Exception:
@@ -839,7 +871,11 @@ async def handle_api_runtime(_request: web.Request) -> web.Response:
 async def handle_api_snapshots(request: web.Request) -> web.Response:
     try:
         days = int(request.query.get("days", 30))
-        account_key = request.query.get("account_key") or None
+        # 파라미터 '존재'와 '빈 값'을 구분한다: account_key=(빈)은 기본 계정('')의
+        # 시계열을 뜻한다 — `or None`으로 강등하면 전 계정이 무필터로 섞여
+        # 10M/30만 스케일이 한 차트에 뒤엉킨 톱니가 나온다.
+        raw_key = request.query.get("account_key")
+        account_key = raw_key if raw_key is not None else None
         data = get_snapshots_json(days=days, account_key=account_key)
         return web.json_response(data)
     except Exception as e:

@@ -148,6 +148,90 @@ def test_baskets_endpoint_serves_json():
     asyncio.run(run())
 
 
+class TestSnapshotsSerialization:
+    """HIGH 회귀 고정: created_at(pd.Timestamp) 컬럼 추가 후 /api/snapshots가
+    매 폴링 500이 나고 차트가 조용히 죽던 문제 — 비어 있지 않은 DF로 검증해야 잡힌다."""
+
+    def test_serializer_handles_all_datetime_columns(self):
+        import json
+        import pandas as pd
+        from monitoring.web_dashboard import _serialize_snapshots
+
+        df = pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-07"),
+            "created_at": pd.Timestamp("2026-07-07 10:07:12"),
+            "total_value": 300_126.0,
+            "cumulative_return": 0.04,
+        }])
+        out = _serialize_snapshots(df)
+        json.dumps(out)  # 직렬화 가능해야 한다 (회귀 시 TypeError)
+        assert out[0]["date"] == "2026-07-07"
+        assert out[0]["created_at"].startswith("2026-07-07 10:07")
+
+    @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+    def test_snapshots_endpoint_200_with_real_rows(self):
+        # 실제 스냅샷 행(created_at 포함)이 있을 때 200 — 빈 DF 경로만 타던 구멍 방지.
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+
+        name = "kr_pocket_snap200"
+        acct = _seed_pocket(name)
+
+        async def run():
+            app = wd.create_app()
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                res = await client.get(
+                    "/api/snapshots?days=30&account_key=" + acct
+                )
+                assert res.status == 200
+                data = await res.json()
+            finally:
+                await client.close()
+            assert len(data["snapshots"]) == 1
+            assert data["snapshots"][0]["total_value"] == 400_126
+
+        asyncio.run(run())
+
+    @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+    def test_empty_account_key_filters_default_account_only(self):
+        # account_key=(빈 값)은 기본 계정('')만 — 무필터(전 계정 혼합)로 강등되면
+        # 10M/30만 스케일 시계열이 한 차트에 섞인다.
+        import asyncio
+        from datetime import datetime as _dt
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+        from database.models import PortfolioSnapshot, get_session
+
+        _seed_pocket("kr_pocket_mix")  # 바스켓 계정 행
+        session = get_session()
+        try:
+            session.add(PortfolioSnapshot(
+                account_key="", date=_dt(2026, 7, 7),
+                total_value=10_000_000, cash=10_000_000, invested=0,
+            ))
+            session.commit()
+        finally:
+            session.close()
+
+        async def run():
+            app = wd.create_app()
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                res = await client.get("/api/snapshots?days=30&account_key=")
+                assert res.status == 200
+                data = await res.json()
+            finally:
+                await client.close()
+            vals = [s["total_value"] for s in data["snapshots"]]
+            assert vals == [10_000_000]  # 기본 계정 행만 — 바스켓 행 미포함
+
+        asyncio.run(run())
+
+
 def test_html_page_contains_basket_tracks_section():
     from monitoring.web_dashboard import _html_page
 
@@ -188,6 +272,7 @@ class TestDepositEndpoint:
                     res = await client.post(
                         "/api/deposit",
                         json={"basket": name, "amount": 100000, "note": "웹 테스트"},
+                        headers={"X-Requested-With": "quant-dashboard"},
                     )
                     assert res.status == 200
                     data = await res.json()
@@ -219,9 +304,10 @@ class TestDepositEndpoint:
                 client = TestClient(TestServer(app))
                 await client.start_server()
                 try:
-                    r1 = await client.post("/api/deposit", json={"basket": "kr_pocket_dep2", "amount": 0})
-                    r2 = await client.post("/api/deposit", json={"basket": "no_such", "amount": 1000})
-                    r3 = await client.post("/api/deposit", data=b"not-json")
+                    h = {"X-Requested-With": "quant-dashboard"}
+                    r1 = await client.post("/api/deposit", json={"basket": "kr_pocket_dep2", "amount": 0}, headers=h)
+                    r2 = await client.post("/api/deposit", json={"basket": "no_such", "amount": 1000}, headers=h)
+                    r3 = await client.post("/api/deposit", data=b"not-json", headers=h)
                     assert r1.status == 400 and (await r1.json())["ok"] is False
                     assert r2.status == 400 and (await r2.json())["ok"] is False
                     assert r3.status == 400
@@ -229,6 +315,39 @@ class TestDepositEndpoint:
                     await client.close()
 
         asyncio.run(run())
+
+    def test_deposit_without_csrf_header_is_403(self):
+        # CSRF 방어: 커스텀 헤더 없는 POST(브라우저 경유 cross-site 요청 모사)는
+        # 검증 전에 차단되고 아무것도 기록되지 않아야 한다.
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+        from core.basket_rebalancer import rebalance_live_strategy_id
+        from database.repositories import get_cash_flow_total
+
+        name = "kr_pocket_csrf"
+        init_database()
+
+        async def run():
+            with patch(
+                "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+                return_value=_cfg(name),
+            ):
+                app = wd.create_app()
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    res = await client.post(
+                        "/api/deposit", json={"basket": name, "amount": 100000},
+                    )
+                    assert res.status == 403
+                finally:
+                    await client.close()
+
+        asyncio.run(run())
+        assert get_cash_flow_total(
+            account_key=rebalance_live_strategy_id(name)
+        ) == 0.0
 
     def test_deposit_rejects_nonfinite_json_literals(self):
         # python json.loads는 Infinity/NaN 리터럴을 기본 허용 — float('inf')>0 은 True,
@@ -259,7 +378,10 @@ class TestDepositEndpoint:
                     ):
                         res = await client.post(
                             "/api/deposit", data=payload,
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-Requested-With": "quant-dashboard",
+                            },
                         )
                         assert res.status == 400, f"payload {payload!r} → {res.status}"
                 finally:
