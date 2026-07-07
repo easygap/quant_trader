@@ -361,6 +361,15 @@ class TestShippedBasketsConfig:
         assert float(rb["max_turnover_ratio"]) >= tsw, "회전 한도 < 슬리브면 초기 매수 불가"
         # ETF 단일 구성(1주 = 200종목 분산)
         assert list(b["holdings"].keys()) == ["069500"]
+        # 소액 구조적 절사(1주 단위 -7.3%p) 허용 — 기본 5%p면 매일 무의미 ATTENTION
+        assert float(b["monitoring"]["deployment_tolerance"]) == 0.10
+
+    def test_observation_track_deployment_alarm_disabled(self):
+        """관찰용 강등(kr_diversified_hold): 종결된 자본 결정의 잔상인 배치율 미달이
+        상시 ATTENTION으로 남아 다른 바스켓 감시를 가리지 않도록 허용 오차 해제."""
+        baskets = self._load()
+        b = baskets["kr_diversified_hold"]
+        assert float(b["monitoring"]["deployment_tolerance"]) >= 1.0
 
     def test_all_basket_symbols_are_6digit_kr_codes(self):
         baskets = self._load()

@@ -212,6 +212,18 @@ class TestSummarizeBasketOperation:
         out = self._summ(deployment_ratio=None, design_fraction=None)
         assert out["verdict"] == "OK"
 
+    def test_per_basket_tolerance_relaxes_attention(self):
+        # 관찰용 강등 바스켓: 허용 오차 완화 시 큰 미달도 OK (경보 피로 방지)
+        out = self._summ(
+            deployment_ratio=0.59, design_fraction=0.80, deployment_tolerance=1.0,
+        )
+        assert out["verdict"] == "OK"
+        # 소액 구조적 절사(10%p 허용): -7.3%p는 OK, -12%p는 ATTENTION
+        ok = self._summ(deployment_ratio=0.427, design_fraction=0.50, deployment_tolerance=0.10)
+        assert ok["verdict"] == "OK"
+        bad = self._summ(deployment_ratio=0.38, design_fraction=0.50, deployment_tolerance=0.10)
+        assert bad["verdict"] == "ATTENTION"
+
 
 class TestSummarizeDeployment:
     """집계 배치율 미달 판정(순수 함수)."""

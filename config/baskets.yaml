@@ -40,6 +40,11 @@ baskets:
   kr_diversified_hold:
     name: "분산 대형주 buy&hold (저회전)"
     enabled: true
+    # 관찰용 강등(docs/POCKET_TRACK_PLAN.md §6): 소액 전환으로 자본 증액 결정이 종결돼
+    # 배치율 미달(-21%p, 하이닉스 슬롯+절사)은 조치 대상이 아니다 — 상시 ATTENTION은
+    # 경보 피로만 남기고 다른 바스켓의 배치율 이탈을 가린다. 감시 사실상 해제(1.0).
+    monitoring:
+      deployment_tolerance: 1.0
     rebalance:
       trigger: drift               # 분기 점검을 권장하나 drift로 큰 이탈만 교정
       drift_threshold: 0.08        # 8%p 이상 이탈 시에만 리밸런싱(잦은 매매 억제)
@@ -95,6 +100,11 @@ baskets:
     enabled: true
     initial_capital: 300000        # 시작 자본 30만원 (paper — live 전환 시 실자본과 일치)
     target_stock_weight: 0.5       # 주식 50% / 현금 50% — 낙폭 절반이 목적
+    # 소액 구조적 절사: ETF 1주(약 12.8만) 단위라 30만 시점 배치율이 -7.3%p 상시 미달
+    # (docs/POCKET_TRACK_PLAN.md §3 — 적립 누적 시 자연 수렴). 기본 허용 5%p면 매일
+    # 무의미한 ATTENTION이라 10%p로 완화 — 이걸 넘으면 절사가 아니라 진짜 이상이다.
+    monitoring:
+      deployment_tolerance: 0.10
     rebalance:
       trigger: drift
       drift_threshold: 0.08
