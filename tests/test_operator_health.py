@@ -34,9 +34,23 @@ class TestSummarizeRuntimeState:
         out = summarize_runtime_state(_state("scoring", "degraded"))
         assert out["verdict"] == "ATTENTION"
 
-    def test_blocked_insufficient_evidence_is_attention(self):
+    def test_blocked_insufficient_evidence_is_expected_idle_ok(self):
+        # 승격 파이프라인 대기 = 단계 표시지 장애가 아니다 — verdict를 올리면 헬스가
+        # 영원히 ATTENTION이 되어 진짜 장애를 못 알아본다(게이트 NO-GO 강등과 동일 원칙).
         out = summarize_runtime_state(_state("rotation", "blocked_insufficient_evidence"))
-        assert out["verdict"] == "ATTENTION"
+        assert out["verdict"] == "OK"
+        assert any("승격 대기" in n for n in out["notes"])  # 라벨로는 계속 표시
+
+    def test_idle_state_with_freeze_or_anomaly_still_alarms(self):
+        # 대기 상태여도 수동 동결·이상 징후는 실제 개입 신호 — 경보 유지
+        frozen = summarize_runtime_state(
+            _state("rotation", "blocked_insufficient_evidence", manual_freeze=True)
+        )
+        assert frozen["verdict"] == "ATTENTION"
+        anom = summarize_runtime_state(
+            _state("rotation", "blocked_insufficient_evidence", anomalies=["x"])
+        )
+        assert anom["verdict"] == "ATTENTION"
 
     def test_manual_freeze_on_normal_is_attention(self):
         out = summarize_runtime_state(_state("scoring", "normal", manual_freeze=True))
