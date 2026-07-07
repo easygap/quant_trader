@@ -101,6 +101,54 @@ def _pm(monkeypatch, account, initial=300_000, cash_delta=0.0, deposits=0.0,
     return pm
 
 
+class TestBasketCapitalResolution:
+    """바스켓 계정 키만으로 PM을 열어도 baskets.yaml 자본이 분모여야 한다.
+
+    6차 점검 E2E 실측: 주문 리스크 가드(_drawdown_pre_order_check)가 account_key만으로
+    PM을 열어 전역 10M 폴백 → 30만 pocket의 손실 한도가 사실상 무력화되던 결함.
+    """
+
+    def test_basket_key_resolves_basket_capital(self, monkeypatch):
+        import core.portfolio_manager as pm_mod
+
+        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        from unittest.mock import patch
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value={"kr_pocket": {"initial_capital": 300_000}},
+        ):
+            pm = PortfolioManager(account_key="basket_rebalance:kr_pocket")
+        assert pm.initial_capital == 300_000
+
+    def test_unknown_basket_falls_back_to_global(self, monkeypatch):
+        import core.portfolio_manager as pm_mod
+
+        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        from unittest.mock import patch
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value={},
+        ):
+            pm = PortfolioManager(account_key="basket_rebalance:no_such")
+        assert pm.initial_capital >= 1_000_000  # 전역 폴백(설정값)
+
+    def test_non_basket_key_unchanged(self, monkeypatch):
+        import core.portfolio_manager as pm_mod
+
+        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        pm = PortfolioManager(account_key="scoring")
+        assert pm.initial_capital >= 1_000_000  # 기존 동작 그대로
+
+    def test_explicit_capital_still_wins(self, monkeypatch):
+        import core.portfolio_manager as pm_mod
+
+        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        pm = PortfolioManager(
+            account_key="basket_rebalance:kr_pocket", initial_capital=777,
+        )
+        assert pm.initial_capital == 777
+
+
 class TestSummaryWithDeposits:
     def test_no_flows_keeps_legacy_formula(self, monkeypatch):
         # 입금 0건: 총평가/초기자본 그대로 (하위 호환)
