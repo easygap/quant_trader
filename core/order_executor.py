@@ -779,6 +779,7 @@ class OrderExecutor:
             1,
             "BUY",
             avg_daily_volume=avg_daily_volume,
+            symbol=symbol,
         )
         sizing_entry_price = float(sizing_costs.get("execution_price", price) or price)
 
@@ -867,7 +868,9 @@ class OrderExecutor:
             return {"success": False, "reason": perf_check.get("reason", "성과 열화로 매수 중단")}
 
         # 거래 비용 계산 (avg_daily_volume 있으면 거래량 기반 동적 슬리피지 적용)
-        costs = self.risk_manager.calculate_transaction_costs(price, quantity, "BUY", avg_daily_volume=avg_daily_volume)
+        costs = self.risk_manager.calculate_transaction_costs(
+            price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
+        )
         available_cash = capital if available_cash is None else available_cash
         estimated_fill_price = float(costs.get("execution_price", price) or price)
 
@@ -984,7 +987,7 @@ class OrderExecutor:
             order.transition(OrderStatus.ACKED)
             # Paper에서는 슬리피지 적용 후 즉시 FILLED (simulated fill)
             costs = self.risk_manager.calculate_transaction_costs(
-                expected_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+                expected_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
             )
             fill_price = costs["execution_price"]
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
@@ -994,7 +997,7 @@ class OrderExecutor:
 
         if self.mode == "live":
             costs = self.risk_manager.calculate_transaction_costs(
-                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
             )
 
         stop_loss = self.risk_manager.calculate_stop_loss(
@@ -1128,7 +1131,7 @@ class OrderExecutor:
             return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
 
         costs = self.risk_manager.calculate_transaction_costs(
-            price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+            price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
         )
         expected_price = float(price)
         fill_price = float(costs["execution_price"])
@@ -1232,7 +1235,7 @@ class OrderExecutor:
             OrderGuard.clear(symbol)
             # 체결가 기준 비용 재계산
             costs = self.risk_manager.calculate_transaction_costs(
-                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume,
+                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
             )
         else:
             order.transition(OrderStatus.SUBMITTED)
@@ -1464,6 +1467,7 @@ class OrderExecutor:
                 "SELL",
                 avg_daily_volume=avg_daily_volume,
                 avg_price=float(position.avg_price),
+                symbol=symbol,
             )
             fill_price = float(costs["execution_price"])
             order.transition(OrderStatus.SUBMITTED)
@@ -1480,6 +1484,7 @@ class OrderExecutor:
                 "SELL",
                 avg_daily_volume=avg_daily_volume,
                 avg_price=float(position.avg_price),
+                symbol=symbol,
             )
         total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
         pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax

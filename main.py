@@ -1689,17 +1689,11 @@ def run_health_check() -> int:
         config = Config.get()
         enabled_baskets = BasketRebalancer.get_enabled_baskets()
         baskets_cfg = BasketRebalancer._load_baskets_config()
-        min_cash_ratio = (
-            config.risk_params.get("diversification", {}).get("min_cash_ratio", 0.20)
-        )
 
         def _design_fraction(cfg: dict) -> float:
             """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산)."""
-            max_stock = 1.0 - min_cash_ratio
-            tsw = cfg.get("target_stock_weight")
-            if tsw is None:
-                return max_stock
-            return max(0.0, min(float(tsw), max_stock))
+            from core.basket_deploy import effective_stock_fraction
+            return effective_stock_fraction(cfg, config.risk_params)
 
         # 바스켓별 전용 계정 키(basket_rebalance:<name>) 기준으로 조회한다.
         # 복수 바스켓이면 '가장 오래된 최신 스냅샷'을 기준으로(가장 뒤처진 사이클 감시).
@@ -1743,11 +1737,14 @@ def run_health_check() -> int:
                         floor_tol = float(
                             (cfg_b.get("monitoring") or {}).get("deployment_tolerance", 0.05)
                         )
-                        max_price = max(
-                            (float(p.avg_price or 0) for p in positions_b), default=0.0,
+                        # 보유 슬롯별 1주 가격의 합 — 슬롯마다 '부족분 < 1주' 절사가
+                        # 동시에 존재할 수 있으므로 최고가 1주만 재면 다중 슬롯 바스켓이
+                        # 정상 적립 중에 거짓 ATTENTION을 울린다. 빈 슬롯은 실패이므로 제외.
+                        truncation_unit = sum(
+                            float(p.avg_price or 0) for p in positions_b
                         )
                         tol_b = structural_deployment_tolerance(
-                            max_price, float(snap.total_value), floor_tol,
+                            truncation_unit, float(snap.total_value), floor_tol,
                         )
                         violation = (design - dep_ratio) - tol_b
                         if worst_shortfall is None or violation > worst_shortfall:

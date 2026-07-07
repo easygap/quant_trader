@@ -273,6 +273,25 @@ class TestStructuralDeploymentTolerance:
         assert self._f(128_000, 0) == pytest.approx(0.10)
         assert self._f("x", 400_000) == pytest.approx(0.10)
 
+    def test_multi_slot_accumulation_not_alarmed(self):
+        # kr_pocket v2(지수+파킹 2슬롯) 적립 4개월차: 지수 2주+파킹 5주 보유,
+        # 잔고 70만, 양쪽 슬롯 모두 '부족분 < 1주'로 매수 보류(정상) — 미달 18.4%p.
+        # 절사 상한은 슬롯당 1주씩 쌓이므로 '보유 슬롯별 1주 가격의 합'으로 재야 한다:
+        # 최고가 1주(12.4만)만 재면 17.7% < 18.4%p → 정상 적립이 몇 주간 거짓 ATTENTION.
+        from core.operator_health import summarize_deployment
+        tol = self._f(123_710 + 57_715, 700_000)   # 합산 = 25.9%
+        assert tol == pytest.approx(0.2592, abs=1e-3)
+        out = summarize_deployment(0.95 - 0.1843, 0.95, tolerance=tol)
+        assert out["verdict"] == "OK"
+
+    def test_multi_slot_whole_slot_missing_still_caught(self):
+        # 파킹 슬롯(47.5%)이 통째로 미체결이면 절사가 아니라 실패 — 빈 슬롯은
+        # 합산에서 빠지므로(보유 1주 가격만 합산) 미달 47.5%p > 하한이 잡는다.
+        from core.operator_health import summarize_deployment
+        tol = self._f(123_710, 700_000)            # 보유는 지수뿐 → 17.7%
+        out = summarize_deployment(0.95 - 0.475, 0.95, tolerance=tol)
+        assert out["verdict"] == "ATTENTION"
+
 
 class TestSummarizeDeployment:
     """집계 배치율 미달 판정(순수 함수)."""
