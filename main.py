@@ -1710,6 +1710,7 @@ def run_health_check() -> int:
         worst_shortfall = None
         worst_dep_ratio = None
         worst_design = None
+        worst_tolerance = 0.05
         session = get_session()
         try:
             for name in enabled_baskets:
@@ -1725,15 +1726,23 @@ def run_health_check() -> int:
                 # 배치율은 부가 신호 — 계산 실패(예: baskets.yaml에 float 불가한
                 # target_stock_weight 오타)가 핵심 신호인 결측/staleness 감지를
                 # 통째로 삼키지 않도록 자체 try로 격리한다.
+                # 바스켓별 허용 오차(monitoring.deployment_tolerance, 기본 5%p)를
+                # 반영해 '허용 초과분'이 가장 큰 바스켓을 고른다 — 원시 미달폭
+                # 최대로 고르면 관찰용 트랙(허용 완화)이 진짜 감시 대상을 가린다.
                 try:
                     if snap and snap.total_value and snap.total_value > 0:
+                        cfg_b = baskets_cfg.get(name) or {}
                         dep_ratio = max(0.0, (snap.total_value - (snap.cash or 0)) / snap.total_value)
-                        design = _design_fraction(baskets_cfg.get(name) or {})
-                        shortfall = design - dep_ratio
-                        if worst_shortfall is None or shortfall > worst_shortfall:
-                            worst_shortfall = shortfall
+                        design = _design_fraction(cfg_b)
+                        tol_b = float(
+                            (cfg_b.get("monitoring") or {}).get("deployment_tolerance", 0.05)
+                        )
+                        violation = (design - dep_ratio) - tol_b
+                        if worst_shortfall is None or violation > worst_shortfall:
+                            worst_shortfall = violation
                             worst_dep_ratio = dep_ratio
                             worst_design = design
+                            worst_tolerance = tol_b
                 except Exception as dep_exc:
                     logger.debug("바스켓 '{}' 배치율 계산 생략: {}", name, dep_exc)
         finally:
@@ -1749,6 +1758,7 @@ def run_health_check() -> int:
             "today": date.today(),
             "deployment_ratio": worst_dep_ratio,
             "design_fraction": worst_design,
+            "deployment_tolerance": worst_tolerance,
         }
     except Exception as exc:
         logger.warning("바스켓 운영 상태 조회 실패: {}", exc)
