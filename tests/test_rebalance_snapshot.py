@@ -14,8 +14,11 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def _args(basket="kr_test", dry_run=False):
-    return SimpleNamespace(basket=basket, dry_run=dry_run, confirm_live=False)
+def _args(basket="kr_test", dry_run=False, force_rebalance=False):
+    return SimpleNamespace(
+        basket=basket, dry_run=dry_run, confirm_live=False,
+        force_rebalance=force_rebalance,
+    )
 
 
 @pytest.fixture
@@ -109,6 +112,82 @@ def test_dry_run_rebalance_does_not_send_daily_report(patched_rebalance, monkeyp
     monkeypatch.setattr("core.notifier.Notifier", MagicMock(return_value=fake_notifier))
     main_mod.run_rebalance(_args(dry_run=True))
     assert not fake_notifier.send_daily_report.called
+
+
+# --- 1일 1매매 패스 가드 (같은 날 재실행 시 회전상한 우회 차단) ---
+
+def _one_trade_today():
+    """당일 체결 1건짜리 조회 결과 흉내(내용은 안 봄 — truthy 여부만 판정)."""
+    return [SimpleNamespace(symbol="069500")]
+
+
+def test_second_run_same_day_skips_trading_but_keeps_snapshot(patched_rebalance, monkeypatch):
+    """당일 체결이 이미 있으면 plan/execute 생략 — 회전 상한이 2배로 뚫리는 것 차단.
+    스냅샷·리포트는 그대로 진행(재시도 크론의 결측 복구가 매매 없이 안전해짐)."""
+    import main as main_mod
+
+    monkeypatch.setattr(
+        "database.repositories.get_trade_history",
+        lambda **kw: _one_trade_today(),
+    )
+    patched_rebalance._market_snapshot = {"005930": {"price": 61000.0}}
+    patched_rebalance.portfolio_mgr.get_portfolio_summary.return_value = {
+        "total_value": 1_000_000, "cash": 1_000_000, "total_return": 0.0,
+        "mdd": 0.0, "position_count": 0,
+    }
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    patched_rebalance.should_rebalance.assert_not_called()
+    patched_rebalance.plan_rebalance.assert_not_called()
+    patched_rebalance.execute.assert_not_called()
+    patched_rebalance.save_daily_nav_snapshot.assert_called_once()  # 스냅샷은 유지
+
+
+def test_force_rebalance_bypasses_daily_guard(patched_rebalance, monkeypatch):
+    import main as main_mod
+
+    monkeypatch.setattr(
+        "database.repositories.get_trade_history",
+        lambda **kw: _one_trade_today(),
+    )
+    main_mod.run_rebalance(_args(dry_run=False, force_rebalance=True))
+
+    patched_rebalance.should_rebalance.assert_called_once()  # 가드 우회 → 정상 경로
+
+
+def test_no_trades_today_runs_normal_path(patched_rebalance, monkeypatch):
+    import main as main_mod
+
+    monkeypatch.setattr("database.repositories.get_trade_history", lambda **kw: [])
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    patched_rebalance.should_rebalance.assert_called_once()
+    patched_rebalance.save_daily_nav_snapshot.assert_called_once()
+
+
+def test_dry_run_ignores_daily_guard(patched_rebalance, monkeypatch):
+    """dry-run은 계획 확인 용도 — 당일 체결과 무관하게 항상 허용."""
+    import main as main_mod
+
+    monkeypatch.setattr(
+        "database.repositories.get_trade_history",
+        lambda **kw: _one_trade_today(),
+    )
+    main_mod.run_rebalance(_args(dry_run=True))
+
+    patched_rebalance.should_rebalance.assert_called_once()
+
+
+def test_guard_check_failure_falls_back_to_normal_path(patched_rebalance, monkeypatch):
+    """가드 판정 실패는 기존 동작 유지(방어선이지 게이트가 아님)."""
+    import main as main_mod
+
+    def _boom(**kw):
+        raise RuntimeError("db glitch")
+    monkeypatch.setattr("database.repositories.get_trade_history", _boom)
+    main_mod.run_rebalance(_args(dry_run=False))
+
+    patched_rebalance.should_rebalance.assert_called_once()
 
 
 # --- P0-1 사이클 관측성 배선(run_rebalance 통합) ---
