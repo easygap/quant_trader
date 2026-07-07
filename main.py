@@ -645,7 +645,7 @@ def run_deploy_check(args) -> int:
         print(f"  포트폴리오 대비 회전율: {summary['turnover_pct_of_portfolio']}%")
     for p in summary["plan"][:10]:
         print(f"    {p['action']:4} {p['symbol']} {p['quantity']}주 @ {p['price']:,.0f} = {p['amount']:,.0f}원")
-    print(f"\n  다음 절차:")
+    print("\n  다음 절차:")
     for i, s in enumerate(summary["next_steps"], 1):
         print(f"    {i}. {s}")
     print()
