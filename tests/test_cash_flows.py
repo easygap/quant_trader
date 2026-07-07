@@ -48,6 +48,15 @@ class TestCashFlowRepo:
         with pytest.raises(ValueError):
             record_cash_flow(0, account_key="basket_rebalance:test_cf_zero")
 
+    def test_nonfinite_amount_rejected_at_repo_layer(self):
+        # NaN은 truthy라 `if not amount`를 통과하고, 기록되면 모든 합산이 오염된다
+        # — 최종 방어선(repo)에서 차단.
+        init_database()
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError):
+                record_cash_flow(bad, account_key="basket_rebalance:test_cf_nonfinite")
+        assert get_cash_flow_total(account_key="basket_rebalance:test_cf_nonfinite") == 0.0
+
     def test_between_boundaries(self):
         # after 배타 / until 포함
         init_database()
