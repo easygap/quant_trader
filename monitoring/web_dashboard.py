@@ -119,7 +119,8 @@ def get_baskets_json() -> dict:
             if snap is not None:
                 total = float(snap.total_value or 0)
                 cash = float(snap.cash or 0)
-                deployment_ratio = ((total - cash) / total) if total > 0 else None
+                # 음수 클램프 — 헬스(run_health_check)와 동일 규칙(현금>총액 이상치 방어)
+                deployment_ratio = (max(0.0, (total - cash) / total)) if total > 0 else None
                 snapshot = {
                     "date": str(snap.date)[:10],
                     "total_value": total,

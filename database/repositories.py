@@ -780,10 +780,13 @@ def record_cash_flow(
     """외부 현금 흐름(+입금/-출금)을 기록하고 id를 반환한다.
 
     입금은 수익이 아니다 — TWR 계산이 이 기록으로 구간을 나눈다. amount=0은 무의미
-    하므로 ValueError.
+    하므로 ValueError. NaN/Inf는 합산(현금·원금·TWR)을 통째로 오염시키므로 최종
+    방어선인 여기서도 차단한다(NaN은 truthy라 `if not amount`를 통과한다).
     """
-    if not amount:
-        raise ValueError("amount는 0이 아니어야 합니다 (+입금 / -출금)")
+    import math
+
+    if not amount or not math.isfinite(float(amount)):
+        raise ValueError("amount는 0이 아닌 유한한 숫자여야 합니다 (+입금 / -출금)")
     session = get_session()
     try:
         row = CashFlow(
