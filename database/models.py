@@ -654,6 +654,74 @@ def _migrate_snapshot_unique_constraint(engine):
         logger.info("portfolio_snapshots 재구축 완료: {}행, 복합 유니크(account_key, date)", after)
 
 
+def _migrate_position_unique_constraint(engine):
+    """positions의 구버전 UNIQUE(symbol) 단독 제약을 (account_key, symbol)로 재구축.
+
+    account_key 도입 전 스키마의 유산(스냅샷 UNIQUE(date)와 같은 계열): symbol 단독
+    유니크라 서로 다른 계좌가 같은 종목을 드는 순간 IntegrityError — 매매 기록은
+    남는데 포지션만 유실돼 평가액이 현금만 남는다(2026-07-07 실측: 트랙 재시작으로
+    아카이브 키에 069500이 남은 상태에서 본 키가 069500 재매수 → 스냅샷 -41%).
+    아카이브/본 키 조합만이 아니라 바스켓·전략 트랙이 같은 종목을 겹쳐 들 수 없는
+    구조적 지뢰다. 모델은 이미 복합 제약인데 물리 테이블만 낡았다(create_all은
+    기존 테이블을 못 바꾼다). 표준 재구축(rename → 생성 → 복사 → 검증 → 삭제),
+    멱등·중단 재개 가능 — 스냅샷 마이그레이션과 동일 절차.
+    """
+    from sqlalchemy import text
+
+    if engine.url.get_dialect().name != "sqlite":
+        return
+    cols = (
+        "id, symbol, avg_price, quantity, total_invested, stop_loss_price, "
+        "take_profit_price, trailing_stop_price, highest_price, strategy, "
+        "bought_at, updated_at, account_key, partial_tp_done"
+    )
+    legacy_name = "positions_legacy_uq"
+
+    with engine.connect() as conn:
+        legacy_exists = conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:n"
+        ), {"n": legacy_name}).scalar()
+
+        if not legacy_exists:
+            ddl = conn.execute(text(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
+            )).scalar()
+            if not ddl:
+                return
+            normalized = " ".join(str(ddl).split()).lower()
+            is_legacy = (
+                "unique (symbol)" in normalized
+                and "uq_positions_account_symbol" not in normalized
+            )
+            if not is_legacy:
+                return
+            logger.warning(
+                "positions 구버전 UNIQUE(symbol) 감지 — (account_key, symbol) 복합 제약으로 재구축"
+            )
+            conn.execute(text(
+                f"ALTER TABLE positions RENAME TO {legacy_name}"
+            ))
+            conn.commit()
+
+    # 신 스키마 재생성 (rename으로 본 테이블이 사라졌으므로 create_all이 새로 만든다)
+    Base.metadata.create_all(engine)
+
+    with engine.connect() as conn:
+        before = conn.execute(text(f"SELECT COUNT(*) FROM {legacy_name}")).scalar()
+        conn.execute(text(
+            f"INSERT OR IGNORE INTO positions ({cols}) SELECT {cols} FROM {legacy_name}"
+        ))
+        after = conn.execute(text("SELECT COUNT(*) FROM positions")).scalar()
+        if after < before:
+            conn.rollback()
+            raise RuntimeError(
+                f"포지션 재구축 검증 실패: 복사 후 {after} < 원본 {before} — legacy 테이블 보존"
+            )
+        conn.execute(text(f"DROP TABLE {legacy_name}"))
+        conn.commit()
+        logger.info("positions 재구축 완료: {}행, 복합 유니크(account_key, symbol)", after)
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -686,6 +754,10 @@ def init_database():
         _migrate_positions_partial_tp_done(engine)
     except Exception:
         pass
+    # 구버전 UNIQUE(symbol) 재구축 — 스냅샷 UNIQUE(date)와 같은 이유로 조용히 넘기지
+    # 않는다(계좌 간 동일 종목 보유가 막혀 매수 포지션이 유실되는 상태). legacy가
+    # 아니면 no-op. partial_tp_done 컬럼 추가 이후에 실행해야 복사 컬럼이 갖춰진다.
+    _migrate_position_unique_constraint(engine)
 
     if "sqlite" in engine.url.drivername:
         from sqlalchemy import text
