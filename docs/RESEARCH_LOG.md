@@ -1,12 +1,12 @@
 # 연구·운영 로그 (아카이브)
 
-README에 쌓이던 상세 이력을 이 파일로 옮겼다. 이 문서는 시간순 기록 원본이라 길고,
-요약된 현재 결론은 [README](../README.md)와
-[PROFITABILITY_FINDINGS](PROFITABILITY_FINDINGS.md)를 먼저 보는 편이 낫다.
+README에 쌓이던 상세 이력을 이 파일로 옮겨왔다. 시간순 기록 원본이라 길다.
+요약된 결론만 필요하면 [README](../README.md)나
+[PROFITABILITY_FINDINGS](PROFITABILITY_FINDINGS.md)를 먼저 보는 게 낫다.
 
-- 능동 alpha 탐색은 2026-04~05에 걸쳐 candidate family 단위로 체계적으로 수행했고,
-  전부 승격 게이트(벤치마크 초과·MDD·회전율)를 넘지 못했다 — 그 실패 기록 전체가 여기 있다.
-- 2026-06 이후 운영은 분산 베타(바스켓) + 소액 적립 트랙으로 전환됐다.
+- 알파 탐색은 2026-04~05에 candidate family 단위로 돌렸고 전부 승격 게이트(벤치마크
+  초과, MDD, 회전율)에서 막혔다. 그 실패 기록 전체가 아래에 있다.
+- 2026-06부터는 분산 베타(바스켓)와 소액 적립 트랙 운영으로 전환.
 
 ---
 
