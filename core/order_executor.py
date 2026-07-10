@@ -17,7 +17,7 @@ from config.config_loader import Config
 from api.kis_api import KISApi, KISOrderResponseUnknown
 from core.risk_manager import RiskManager
 from database.repositories import (
-    save_trade, save_position, delete_position, reduce_position,
+    save_trade, save_position, delete_position, reduce_position, delete_trade_by_id,
     get_position, get_all_positions, save_failed_order, count_monthly_buy_trades,
     save_order_record, get_open_order_records, reconcile_order_record,
 )
@@ -1012,7 +1012,7 @@ class OrderExecutor:
         trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
 
         _order_at = datetime.now()
-        save_trade(
+        _trade = save_trade(
             symbol=symbol, action="BUY", price=fill_price, quantity=quantity,
             commission=costs["commission"], tax=0, slippage=costs["slippage"],
             strategy=strategy, signal_score=signal_score, reason=reason,
@@ -1026,12 +1026,18 @@ class OrderExecutor:
         _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
                        symbol=symbol, strategy=strategy, mode=self.mode)
 
-        save_position(
-            symbol=symbol, avg_price=fill_price, quantity=quantity,
-            stop_loss_price=stop_loss, take_profit_price=tp_info["target_final"],
-            trailing_stop_price=trailing_stop, strategy=strategy,
-            account_key=self.account_key,
-        )
+        try:
+            save_position(
+                symbol=symbol, avg_price=fill_price, quantity=quantity,
+                stop_loss_price=stop_loss, take_profit_price=tp_info["target_final"],
+                trailing_stop_price=trailing_stop, strategy=strategy,
+                account_key=self.account_key,
+            )
+        except Exception:
+            # 원장 보상 롤백: 매매만 남으면 현금만 차감된 반쪽 원장 — 유령 낙폭과
+            # 가드 오발동의 뿌리(2026-07-07 실측). 되돌리고 실패를 위로 알린다.
+            delete_trade_by_id(_trade.id)
+            raise
 
         # 매매 로그
         log_trade("BUY", symbol, fill_price, quantity, reason)
@@ -1248,7 +1254,7 @@ class OrderExecutor:
         trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
 
         _order_at = datetime.now()
-        save_trade(
+        _trade = save_trade(
             symbol=symbol,
             action="BUY",
             price=fill_price,
@@ -1275,16 +1281,22 @@ class OrderExecutor:
             strategy=strategy,
             mode=self.mode,
         )
-        save_position(
-            symbol=symbol,
-            avg_price=fill_price,
-            quantity=quantity,
-            stop_loss_price=stop_loss,
-            take_profit_price=tp_info["target_final"],
-            trailing_stop_price=trailing_stop,
-            strategy=strategy,
-            account_key=self.account_key,
-        )
+        try:
+            save_position(
+                symbol=symbol,
+                avg_price=fill_price,
+                quantity=quantity,
+                stop_loss_price=stop_loss,
+                take_profit_price=tp_info["target_final"],
+                trailing_stop_price=trailing_stop,
+                strategy=strategy,
+                account_key=self.account_key,
+            )
+        except Exception:
+            # 원장 보상 롤백: 매매만 남으면 현금만 차감된 반쪽 원장 — 유령 낙폭과
+            # 가드 오발동의 뿌리(2026-07-07 실측). 되돌리고 실패를 위로 알린다.
+            delete_trade_by_id(_trade.id)
+            raise
         log_trade("BUY", symbol, fill_price, quantity, reason)
 
         result = {
@@ -1490,7 +1502,7 @@ class OrderExecutor:
         pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
         pnl_rate = ((fill_price / position.avg_price) - 1) * 100
 
-        save_trade(
+        _trade = save_trade(
             symbol=symbol, action="SELL", price=fill_price, quantity=sell_qty,
             commission=costs["commission"], tax=total_tax, slippage=costs["slippage"],
             strategy=strategy, signal_score=signal_score,
@@ -1502,19 +1514,28 @@ class OrderExecutor:
             order_id=order.order_id,
         )
 
-        if sell_qty >= position.quantity:
-            delete_position(symbol, account_key=self.account_key)
-        else:
-            remaining_pos = reduce_position(symbol, sell_qty, account_key=self.account_key)
-            if remaining_pos and reason == "TAKE_PROFIT_PARTIAL":
-                from database.repositories import update_position_targets
-                tp_config = self.risk_manager.risk_params.get("take_profit", {})
-                final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
-                # 부분 익절 완료 표시를 영속화해 다음 모니터링 사이클에서 재발동되지 않게 한다.
-                update_position_targets(
-                    symbol, take_profit_price=round(final_target, 0),
-                    account_key=self.account_key, partial_tp_done=True,
-                )
+        remaining_pos = None
+        try:
+            if sell_qty >= position.quantity:
+                delete_position(symbol, account_key=self.account_key)
+            else:
+                remaining_pos = reduce_position(symbol, sell_qty, account_key=self.account_key)
+        except Exception:
+            # 원장 보상 롤백(매수와 대칭): 매도 기록만 남고 포지션이 그대로면
+            # 현금이 이중 계상된 반쪽 원장이 된다. 되돌리고 실패를 위로 알린다.
+            delete_trade_by_id(_trade.id)
+            raise
+        # 부분 익절 플래그 갱신은 보상 범위 밖 — 이 시점엔 매도·포지션 반영이 모두
+        # 끝나 원장이 정합이고, 플래그 실패에 매매를 되돌리면 오히려 원장이 깨진다.
+        if remaining_pos and reason == "TAKE_PROFIT_PARTIAL":
+            from database.repositories import update_position_targets
+            tp_config = self.risk_manager.risk_params.get("take_profit", {})
+            final_target = position.avg_price * (1 + tp_config.get("fixed_rate", 0.08))
+            # 부분 익절 완료 표시를 영속화해 다음 모니터링 사이클에서 재발동되지 않게 한다.
+            update_position_targets(
+                symbol, take_profit_price=round(final_target, 0),
+                account_key=self.account_key, partial_tp_done=True,
+            )
 
         # 매매 로그
         log_trade("SELL", symbol, fill_price, sell_qty, f"{reason} (수익: {pnl_rate:.2f}%)")

@@ -167,11 +167,42 @@ def save_trade(
         )
         session.add(trade)
         session.commit()
+        # 커밋으로 만료된 속성 재적재 — 호출부(보상 롤백)가 세션 밖에서 id를 읽는다.
+        # 이거 없으면 반환 객체 접근이 DetachedInstanceError.
+        session.refresh(trade)
+        session.expunge(trade)
         logger.info("매매 기록 저장: {} {} {}주 @ {:,.0f}원", action, symbol, quantity, price)
         return trade
     except Exception as e:
         session.rollback()
         logger.error("매매 기록 저장 실패: {}", e)
+        raise
+    finally:
+        session.close()
+
+
+def delete_trade_by_id(trade_id: int) -> bool:
+    """매매 기록 1건 삭제 — 체결 반영(포지션 저장) 실패 시의 보상 롤백 전용.
+
+    매매만 남고 포지션이 없으면 현금만 차감된 반쪽 원장이 돼 유령 낙폭과
+    리스크 가드 오발동을 만든다(2026-07-07 실측: -41% 스냅샷 4일). 일반 삭제
+    용도로 쓰지 말 것 — 트랙레코드는 불변이 원칙이다.
+    """
+    session = get_session()
+    try:
+        row = session.query(TradeHistory).filter(TradeHistory.id == trade_id).first()
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        logger.warning(
+            "매매 기록 보상 삭제: id={} {} {} {}주 — 포지션 반영 실패에 따른 원장 정합 복구",
+            trade_id, row.action, row.symbol, row.quantity,
+        )
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error("매매 기록 보상 삭제 실패: id={} — {}", trade_id, e)
         raise
     finally:
         session.close()
