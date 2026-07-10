@@ -1656,3 +1656,66 @@ def test_mdd_hysteresis_keeps_blocking_until_half_recovery(fresh_db, monkeypatch
     # 4) 한도의 절반(7.5%) 아래(-7%)로 회복 → 재개
     r = check(9_300_000, 7.0)
     assert r["allowed"] is True
+
+
+def test_delete_trade_by_id_compensation_helper(fresh_db):
+    """보상 삭제 헬퍼 — 존재하면 삭제 True, 없으면 False (멱등)."""
+    from database.repositories import save_trade, delete_trade_by_id
+    from database.models import get_session, TradeHistory
+
+    t = save_trade(symbol="005930", action="BUY", price=1000, quantity=1,
+                   account_key="del_trade_test")
+    assert delete_trade_by_id(t.id) is True
+    assert delete_trade_by_id(t.id) is False  # 이미 없음 — 재호출 안전
+    session = get_session()
+    try:
+        n = session.query(TradeHistory).filter(
+            TradeHistory.account_key == "del_trade_test"
+        ).count()
+    finally:
+        session.close()
+    assert n == 0
+
+
+def test_buy_position_save_failure_compensates_trade(fresh_db, monkeypatch):
+    """포지션 반영 실패 시 방금 저장한 매매 기록을 되돌린다 — 반쪽 원장 방지.
+
+    2026-07-07 실측 재연: 매매만 남고 포지션이 유실되면 현금만 차감돼 유령
+    -41% 낙폭이 찍히고 리스크 가드가 이후 매수를 전부 차단했다. 이제 포지션
+    저장 실패는 매매 기록을 보상 삭제한 뒤 위로 전파돼야 한다(원장 무변화).
+    """
+    from core.order_executor import OrderExecutor
+    from database.models import get_session, TradeHistory
+
+    executor = OrderExecutor(account_key="ledger_atomicity_test")
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    monkeypatch.setattr(
+        "core.paper_preflight.load_preflight_status",
+        lambda strategy, strict=False: _passing_preflight(),
+    )
+    monkeypatch.setattr(
+        "core.paper_runtime.get_paper_runtime_state",
+        lambda *a, **kw: _normal_runtime_state(),
+    )
+
+    def _fail_position(*a, **kw):
+        raise RuntimeError("포지션 저장 실패 주입")
+
+    monkeypatch.setattr("core.order_executor.save_position", _fail_position)
+
+    with pytest.raises(RuntimeError, match="포지션 저장 실패 주입"):
+        executor.execute_buy_quantity(
+            symbol="069500", price=123_710, quantity=1,
+            capital=300_000, available_cash=300_000,
+            reason="보상 롤백 테스트", strategy="ledger_test",
+            avg_daily_volume=1_000_000,
+        )
+
+    session = get_session()
+    try:
+        n = session.query(TradeHistory).filter(
+            TradeHistory.account_key == "ledger_atomicity_test"
+        ).count()
+    finally:
+        session.close()
+    assert n == 0, "매매 기록이 남아 있으면 반쪽 원장(현금만 차감)"

@@ -810,6 +810,27 @@ def run_rebalance(args):
                         )
                         logger.info(summary)
                         notifier.send_message(summary)
+                        # 예외성 실패(status=error)는 가드 거부(보호 동작, 통상 요약)와
+                        # 달리 원장 불일치 가능성이 있는 인프라 실패 — 즉시 critical로
+                        # 승격한다. 7/7 포지션 유실이 통상 요약에 묻혀 3일 지난 교훈.
+                        error_details = [
+                            d for d in result.get("details", [])
+                            if d.get("status") == "error"
+                        ]
+                        if error_details and not dry_run:
+                            err_msg = (
+                                f"🚨 바스켓 '{name}' 주문 실행 예외 {len(error_details)}건 "
+                                f"— 원장 정합성 확인 필요: "
+                                + "; ".join(
+                                    str(d.get("reason", ""))[:80]
+                                    for d in error_details[:3]
+                                )
+                            )
+                            record_cycle_event(
+                                "ORDER_ERROR", err_msg, severity="critical",
+                                strategy=live_strategy_name, mode=mode,
+                            )
+                            notifier.send_message(err_msg, critical=True)
 
             # 트랙레코드: 거래 여부와 무관하게 바스켓 계정의 일일 NAV 스냅샷을 남긴다.
             # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
