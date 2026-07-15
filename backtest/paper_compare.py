@@ -252,7 +252,10 @@ def check_live_readiness(
 
     account_key = strategy_name or ""
     snapshots = get_portfolio_snapshots_between(
-        start_date, end_date, account_key=account_key if account_key else None,
+        start_date,
+        end_date,
+        account_key=account_key if account_key else None,
+        mode="paper",
     )
     if len(snapshots) < 2:
         base["message"] = "포트폴리오 스냅샷이 부족하여 실전 전환 평가 불가 (최소 2일 필요)."

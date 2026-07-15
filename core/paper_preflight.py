@@ -370,7 +370,7 @@ def _check_db_health(checks):
 def _check_positions_orders(strategy, result, checks, actions):
     try:
         from database.repositories import get_all_positions, get_pending_failed_orders
-        positions = get_all_positions(account_key=strategy)
+        positions = get_all_positions(account_key=strategy, mode="paper")
         result.open_positions = len(positions) if positions else 0
         pending = get_pending_failed_orders()
         result.pending_orders = len(pending) if pending else 0

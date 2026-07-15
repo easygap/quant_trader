@@ -82,7 +82,17 @@ def get_portfolio_json(current_prices: Optional[dict] = None) -> dict:
 
 def get_snapshots_json(days: int = 30, account_key: Optional[str] = None) -> dict:
     """최근 N일 스냅샷을 JSON으로 반환"""
-    df = get_portfolio_snapshots(days=days, account_key=account_key)
+    config = Config.get()
+    ledger_mode = (
+        "live"
+        if str(config.trading.get("mode", "paper")).lower() == "live"
+        else "paper"
+    )
+    df = get_portfolio_snapshots(
+        days=days,
+        account_key=account_key,
+        mode=ledger_mode,
+    )
     return {"snapshots": _serialize_snapshots(df), "days": days}
 
 
@@ -101,6 +111,11 @@ def get_baskets_json() -> dict:
     from database.models import PortfolioSnapshot, get_session
 
     config = Config.get()
+    ledger_mode = (
+        "live"
+        if str(config.trading.get("mode", "paper")).lower() == "live"
+        else "paper"
+    )
     baskets_cfg = BasketRebalancer._load_baskets_config()
     global_capital = (config.risk_params.get("position_sizing") or {}).get(
         "initial_capital", 10_000_000
@@ -111,7 +126,9 @@ def get_baskets_json() -> dict:
         cfg = baskets_cfg.get(name) or {}
         key = rebalance_live_strategy_id(name)
         initial = float(cfg.get("initial_capital") or global_capital)
-        deposits = float(get_cash_flow_total(account_key=key) or 0)
+        deposits = float(
+            get_cash_flow_total(account_key=key, mode=ledger_mode) or 0
+        )
         principal = initial + deposits
 
         # 최신 스냅샷 (mdd 포함해 직접 조회 — get_latest_snapshot_summary는 TWR용 최소 필드)
@@ -119,7 +136,10 @@ def get_baskets_json() -> dict:
         try:
             snap = (
                 session.query(PortfolioSnapshot)
-                .filter(PortfolioSnapshot.account_key == key)
+                .filter(
+                    PortfolioSnapshot.mode == ledger_mode,
+                    PortfolioSnapshot.account_key == key,
+                )
                 .order_by(PortfolioSnapshot.date.desc())
                 .first()
             )
@@ -152,7 +172,9 @@ def get_baskets_json() -> dict:
                 "avg_price": float(p.avg_price or 0),
                 "invested": float((p.quantity or 0) * (p.avg_price or 0)),
             }
-            for p in (get_all_positions(account_key=key) or [])
+            for p in (
+                get_all_positions(account_key=key, mode=ledger_mode) or []
+            )
             if (p.quantity or 0) > 0
         ]
 
@@ -848,7 +870,16 @@ async def handle_api_cash_flows(request: web.Request) -> web.Response:
         if not basket:
             return web.json_response({"error": "basket 파라미터 필요"}, status=400)
         key = rebalance_live_strategy_id(basket)
-        return web.json_response({"basket": basket, "flows": get_recent_cash_flows(key)})
+        config = Config.get()
+        ledger_mode = (
+            "live"
+            if str(config.trading.get("mode", "paper")).lower() == "live"
+            else "paper"
+        )
+        return web.json_response({
+            "basket": basket,
+            "flows": get_recent_cash_flows(key, mode=ledger_mode),
+        })
     except Exception as e:
         logger.exception("API /api/cash_flows 오류: {}", e)
         return web.json_response({"error": str(e)}, status=500)

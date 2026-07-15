@@ -35,6 +35,21 @@ def _blocked_runtime_state():
     )
 
 
+def _allow_fixed_quantity_strategy_filters(monkeypatch, executor):
+    """다른 주문 계약 테스트에서는 시점 의존 진입 필터를 고정한다."""
+    executor.config.risk_params.setdefault("gap_risk", {})["enabled"] = False
+    executor.config.trading["skip_earnings_days"] = 0
+    monkeypatch.setattr(
+        executor.risk_manager,
+        "check_correlation_risk",
+        lambda *args, **kwargs: {
+            "scale": 1.0,
+            "high_corr_symbols": [],
+            "reason": "",
+        },
+    )
+
+
 def test_order_executor_import():
     """OrderExecutor 임포트 및 paper 모드 초기화 가능"""
     from core.order_executor import OrderExecutor
@@ -82,6 +97,7 @@ def test_execute_buy_quantity_records_exact_paper_quantity(fresh_db, monkeypatch
     from database.repositories import get_position, get_daily_trade_summary
 
     executor = OrderExecutor(account_key="exact_qty_test")
+    _allow_fixed_quantity_strategy_filters(monkeypatch, executor)
     monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
     monkeypatch.setattr("core.paper_preflight.load_preflight_status", lambda strategy, strict=False: _passing_preflight())
     monkeypatch.setattr("core.paper_runtime.get_paper_runtime_state", lambda *a, **kw: _normal_runtime_state())
@@ -638,6 +654,7 @@ def test_paper_buy_quantity_basket_strategy_exempt_from_preflight(fresh_db, monk
     from database.repositories import get_position
 
     executor = OrderExecutor(account_key="basket_exempt_test")
+    _allow_fixed_quantity_strategy_filters(monkeypatch, executor)
     monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
     # preflight 산출물 없음 + runtime 조회도 실패하는 환경 (바스켓은 상태머신 밖)
     monkeypatch.setattr("core.paper_preflight.load_preflight_status", lambda strategy, strict=False: None)
@@ -702,6 +719,7 @@ def test_paper_buy_quantity_allows_pilot_override(fresh_db, monkeypatch):
     from database.repositories import get_position
 
     executor = OrderExecutor(account_key="pilot_override_test")
+    _allow_fixed_quantity_strategy_filters(monkeypatch, executor)
     monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
     monkeypatch.setattr(
         "core.paper_preflight.load_preflight_status",
@@ -865,6 +883,7 @@ def test_monthly_buy_cap_is_scoped_by_account_mode_and_symbol(fresh_db, monkeypa
     _seed_buy_trades("scoped_cap_test", "005930", "live", 2)
 
     executor = OrderExecutor(account_key="scoped_cap_test")
+    _allow_fixed_quantity_strategy_filters(monkeypatch, executor)
     _set_monthly_buy_cap(executor, 2)
     monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
     _allow_paper_entry(monkeypatch)
@@ -1026,7 +1045,7 @@ def test_buy_blocks_when_daily_loss_limit_reached(fresh_db, monkeypatch):
     monkeypatch.setattr("core.portfolio_manager.PortfolioManager", FakePortfolioManager)
     monkeypatch.setattr(
         "database.repositories.get_portfolio_snapshots",
-        lambda days=30, account_key=None: pd.DataFrame(
+        lambda days=30, account_key=None, mode="paper": pd.DataFrame(
             [
                 {
                     "date": datetime.now() - timedelta(days=1),
@@ -1143,6 +1162,40 @@ def test_execute_buy_blocks_when_market_regime_disallows_new_buys(fresh_db, monk
     assert result["market_regime_blocked"] is True
     assert result["market_regime"] == "unknown"
     assert "시장 국면" in result["reason"]
+
+
+def test_execute_buy_blocks_when_market_regime_module_raises(fresh_db, monkeypatch):
+    """필터 활성 상태에서 국면 모듈 예외가 나도 BUY를 허용하지 않는다."""
+    from core.order_executor import OrderExecutor
+
+    executor = OrderExecutor(account_key="market_regime_exception_test")
+    executor.config.trading["market_regime_filter"] = True
+    executor.config.trading["skip_earnings_days"] = 0
+    executor.config.risk_params["gap_risk"]["enabled"] = False
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+
+    def raise_regime_error(config):
+        raise RuntimeError("regime dependency unavailable")
+
+    monkeypatch.setattr(
+        "core.market_regime.get_regime_adjusted_params",
+        raise_regime_error,
+    )
+
+    result = executor.execute_buy(
+        symbol="005930",
+        price=60_000,
+        capital=10_000_000,
+        available_cash=10_000_000,
+        reason="market regime exception fail closed test",
+        strategy="scoring",
+        avg_daily_volume=1_000_000,
+    )
+
+    assert result["success"] is False
+    assert result["market_regime_blocked"] is True
+    assert result["market_regime"] == "unknown"
+    assert result["market_regime_details"]["fail_closed"] is True
 
 
 def test_paper_sell_ignores_drawdown_guard(fresh_db, monkeypatch):
@@ -1688,6 +1741,7 @@ def test_buy_position_save_failure_compensates_trade(fresh_db, monkeypatch):
     from database.models import get_session, TradeHistory
 
     executor = OrderExecutor(account_key="ledger_atomicity_test")
+    _allow_fixed_quantity_strategy_filters(monkeypatch, executor)
     monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
     monkeypatch.setattr(
         "core.paper_preflight.load_preflight_status",
@@ -1706,7 +1760,7 @@ def test_buy_position_save_failure_compensates_trade(fresh_db, monkeypatch):
     with pytest.raises(RuntimeError, match="포지션 저장 실패 주입"):
         executor.execute_buy_quantity(
             symbol="069500", price=123_710, quantity=1,
-            capital=300_000, available_cash=300_000,
+            capital=1_000_000, available_cash=1_000_000,
             reason="보상 롤백 테스트", strategy="ledger_test",
             avg_daily_volume=1_000_000,
         )

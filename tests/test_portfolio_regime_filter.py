@@ -63,6 +63,7 @@ class TestBearishRegimeBlocksBuys:
             all_dates=all_dates,
             initial_capital=100_000_000,
             regime_series=bearish_series,
+            execution_model="legacy_same_close",
         )
 
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
@@ -100,6 +101,7 @@ class TestCautionRegimeScalesPosition:
             all_dates=all_dates,
             initial_capital=capital,
             regime_series=regime_series,
+            execution_model="legacy_same_close",
         )
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
         return buy_trades, result
@@ -343,6 +345,41 @@ def _make_portfolio_guard_df(close, *, open_=None, signals=None, volume=1_000_00
     return df
 
 
+def test_portfolio_strategy_signals_execute_one_bar_later_at_next_open():
+    """포트폴리오 전략 주문도 신호일 다음 거래일의 시가를 사용한다."""
+    from backtest.portfolio_backtester import PortfolioBacktester
+
+    sym = "CAUSAL01"
+    df = _make_portfolio_guard_df(
+        [100.0, 125.0, 126.0, 130.0],
+        open_=[90.0, 123.0, 126.0, 124.0],
+        signals=["BUY", "HOLD", "SELL", "HOLD"],
+    )
+    pbt = PortfolioBacktester(_PortfolioGuardConfig(gap_enabled=False))
+
+    result = pbt._simulate_portfolio(
+        symbols=[sym],
+        signals={sym: df},
+        data={},
+        all_dates=list(df.index),
+        initial_capital=100_000.0,
+    )
+
+    assert result["execution_model"] == "next_open"
+    assert [trade["action"] for trade in result["trades"]] == ["BUY", "SELL"]
+    buy, sell = result["trades"]
+    assert buy["signal_date"] == df.index[0]
+    assert buy["date"] == df.index[1]
+    assert buy["price"] == pytest.approx(123.0)
+    assert sell["signal_date"] == df.index[2]
+    assert sell["date"] == df.index[3]
+    assert sell["price"] == pytest.approx(124.0)
+    assert not any(trade["date"] in {df.index[0], df.index[2]} for trade in result["trades"])
+
+    metrics = pbt._calculate_portfolio_metrics(result, initial_capital=100_000.0)
+    assert metrics["execution_model"] == "next_open"
+
+
 class TestPortfolioRiskEventGuards:
     """paper/live 리스크 이벤트를 포트폴리오 백테스트에도 반영한다."""
 
@@ -363,6 +400,7 @@ class TestPortfolioRiskEventGuards:
             data={},
             all_dates=list(df.index),
             initial_capital=100_000.0,
+            execution_model="legacy_same_close",
         )
 
         assert [t["action"] for t in result["trades"]] == []
@@ -387,6 +425,7 @@ class TestPortfolioRiskEventGuards:
             data={},
             all_dates=list(df.index),
             initial_capital=100_000.0,
+            execution_model="legacy_same_close",
         )
 
         assert [t["action"] for t in result["trades"]] == []
@@ -410,6 +449,7 @@ class TestPortfolioRiskEventGuards:
             data={},
             all_dates=list(df.index),
             initial_capital=100_000.0,
+            execution_model="legacy_same_close",
         )
 
         assert [t["action"] for t in result["trades"]] == ["BUY", "GAP_DOWN"]
@@ -439,6 +479,7 @@ class TestPortfolioRiskEventGuards:
             data={},
             all_dates=list(df.index),
             initial_capital=100_000.0,
+            execution_model="legacy_same_close",
         )
 
         assert [t["action"] for t in result["trades"]] == ["BUY", "BLACKSWAN", "BUY"]
@@ -505,6 +546,7 @@ def test_portfolio_backtester_passes_avg_daily_volume_to_transaction_costs():
             action="BUY",
             avg_daily_volume=None,
             avg_price=None,
+            symbol=None,
         ):
             self.calls.append(
                 {
@@ -512,6 +554,7 @@ def test_portfolio_backtester_passes_avg_daily_volume_to_transaction_costs():
                     "avg_daily_volume": avg_daily_volume,
                     "quantity": quantity,
                     "avg_price": avg_price,
+                    "symbol": symbol,
                 }
             )
             participation = quantity / avg_daily_volume if avg_daily_volume else 0
@@ -543,12 +586,14 @@ def test_portfolio_backtester_passes_avg_daily_volume_to_transaction_costs():
         data={},
         all_dates=list(df.index),
         initial_capital=100_000.0,
+        execution_model="legacy_same_close",
     )
 
     actions = [call["action"] for call in recorder.calls]
     assert actions == ["BUY", "SELL"]
     assert recorder.calls[0]["avg_daily_volume"] == 100.0
     assert recorder.calls[1]["avg_daily_volume"] == 200.0
+    assert [call["symbol"] for call in recorder.calls] == [sym, sym]
     buy_trade, sell_trade = result["trades"]
     assert [buy_trade["action"], sell_trade["action"]] == ["BUY", "SELL"]
     assert buy_trade["participation_rate"] == pytest.approx(2.0)

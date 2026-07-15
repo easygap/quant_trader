@@ -9,6 +9,7 @@ from backtest.backtester import Backtester
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.scoring_strategy import ScoringStrategy
 from strategies.trend_following import TrendFollowingStrategy
+from strategies.volatility_condition import VolatilityConditionStrategy
 from core.strategy_ensemble import StrategyEnsemble
 
 
@@ -35,6 +36,7 @@ def test_strategy_analyze_contract_produces_signal_column():
         ScoringStrategy,
         MeanReversionStrategy,
         TrendFollowingStrategy,
+        VolatilityConditionStrategy,
         StrategyEnsemble,
     ):
         analyzed = strategy_cls().analyze(df.copy())
@@ -50,3 +52,30 @@ def test_backtester_runs_for_all_strategies():
         result = bt.run(df.copy(), strategy_name=strategy_name)
         assert result.get("metrics")
         assert "total_return" in result["metrics"]
+
+
+def test_volatility_condition_aligns_boolean_masks_to_input_index():
+    """pandas 2/3 모두에서 롤링 변동성 마스크는 원본 인덱스와 일치한다."""
+
+    class _VolatilityConfig:
+        strategies = {
+            "volatility_condition": {
+                "lookback_days": 20,
+                "low_vol_max_pct": 5.0,
+                "high_vol_min_pct": 30.0,
+            }
+        }
+
+    low_vol_returns = np.full(50, 0.0001)
+    high_vol_returns = np.resize(np.array([0.05, -0.05]), 50)
+    prices = 100 * np.cumprod(1 + np.concatenate([low_vol_returns, high_vol_returns]))
+    index = pd.bdate_range("2025-01-02", periods=len(prices))
+    df = pd.DataFrame({"close": prices}, index=index)
+
+    analyzed = VolatilityConditionStrategy(_VolatilityConfig()).analyze(df)
+
+    assert analyzed.index.equals(df.index)
+    assert analyzed["realized_vol_pct"].index.equals(df.index)
+    assert analyzed.iloc[0]["signal"] == "HOLD"
+    assert "BUY" in analyzed["signal"].values
+    assert "SELL" in analyzed["signal"].values

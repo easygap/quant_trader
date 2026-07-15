@@ -103,6 +103,34 @@ def _make_guard_df(close, *, open_=None, signals=None, volume=1_000_000):
     return df
 
 
+def test_strategy_signals_execute_one_bar_later_at_next_open():
+    """종가로 확정된 전략 BUY/SELL은 신호일이 아닌 다음 거래일 시가에 체결된다."""
+    from backtest.backtester import Backtester
+
+    bt = Backtester(_BacktestGuardConfig(gap_enabled=False))
+    df = _make_guard_df(
+        [100.0, 125.0, 126.0, 130.0],
+        open_=[90.0, 123.0, 126.0, 124.0],
+        signals=["BUY", "HOLD", "SELL", "HOLD"],
+    )
+
+    result = bt._simulate(df, initial_capital=100_000.0)
+
+    assert result["execution_model"] == "next_open"
+    assert [trade["action"] for trade in result["trades"]] == ["BUY", "SELL"]
+    buy, sell = result["trades"]
+    assert buy["signal_date"] == df.index[0]
+    assert buy["date"] == df.index[1]
+    assert buy["price"] == pytest.approx(123.0)
+    assert sell["signal_date"] == df.index[2]
+    assert sell["date"] == df.index[3]
+    assert sell["price"] == pytest.approx(124.0)
+    assert not any(trade["date"] in {df.index[0], df.index[2]} for trade in result["trades"])
+
+    metrics = bt._calculate_metrics(result, initial_capital=100_000.0)
+    assert metrics["execution_model"] == "next_open"
+
+
 class TestLiquidityFilter:
     """백테스터 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소."""
 
@@ -125,7 +153,9 @@ class TestLiquidityFilter:
         df.iloc[30, df.columns.get_loc("signal")] = "BUY"
         df.iloc[55, df.columns.get_loc("signal")] = "SELL"
 
-        result = bt._simulate(df, initial_capital=100_000_000)
+        result = bt._simulate(
+            df, initial_capital=100_000_000, execution_model="legacy_same_close"
+        )
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
 
         if buy_trades:
@@ -150,7 +180,9 @@ class TestLiquidityFilter:
         df["signal"] = "HOLD"
         df.iloc[30, df.columns.get_loc("signal")] = "BUY"
 
-        result = bt._simulate(df, initial_capital=100_000_000)
+        result = bt._simulate(
+            df, initial_capital=100_000_000, execution_model="legacy_same_close"
+        )
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
 
         if buy_trades:
@@ -192,7 +224,9 @@ class TestMonthlyTradeLimit:
             df.iloc[buy_day, df.columns.get_loc("signal")] = "BUY"
             df.iloc[sell_day, df.columns.get_loc("signal")] = "SELL"
 
-        result = bt._simulate(df, initial_capital=100_000_000)
+        result = bt._simulate(
+            df, initial_capital=100_000_000, execution_model="legacy_same_close"
+        )
         buy_trades = [t for t in result["trades"] if t["action"] == "BUY"]
 
         # 월 2회 제한이므로 3번째 매수는 차단되어야 함
@@ -251,7 +285,9 @@ class TestBacktestRiskEventGuards:
             signals=["HOLD", "BUY", "HOLD"],
         )
 
-        result = bt._simulate(df, initial_capital=100_000.0)
+        result = bt._simulate(
+            df, initial_capital=100_000.0, execution_model="legacy_same_close"
+        )
 
         assert [t["action"] for t in result["trades"]] == []
         assert result["gap_up_buy_blocks"] == 1
@@ -267,7 +303,9 @@ class TestBacktestRiskEventGuards:
         df["earnings_date"] = pd.NaT
         df.loc[df.index[1], "earnings_date"] = df.index[1]
 
-        result = bt._simulate(df, initial_capital=100_000.0)
+        result = bt._simulate(
+            df, initial_capital=100_000.0, execution_model="legacy_same_close"
+        )
 
         assert [t["action"] for t in result["trades"]] == []
         assert result["earnings_buy_blocks"] == 1
@@ -282,7 +320,9 @@ class TestBacktestRiskEventGuards:
             signals=["BUY", "HOLD", "HOLD"],
         )
 
-        result = bt._simulate(df, initial_capital=100_000.0)
+        result = bt._simulate(
+            df, initial_capital=100_000.0, execution_model="legacy_same_close"
+        )
         actions = [t["action"] for t in result["trades"]]
 
         assert actions == ["BUY", "GAP_DOWN"]
@@ -304,7 +344,9 @@ class TestBacktestRiskEventGuards:
             signals=["BUY", "HOLD", "BUY", "BUY"],
         )
 
-        result = bt._simulate(df, initial_capital=100_000.0)
+        result = bt._simulate(
+            df, initial_capital=100_000.0, execution_model="legacy_same_close"
+        )
         actions = [t["action"] for t in result["trades"]]
 
         assert actions == ["BUY", "BLACKSWAN", "BUY"]

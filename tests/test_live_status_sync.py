@@ -15,6 +15,10 @@ class DummyConfig:
         # 실제 Config 인터페이스 반영 — live 진입 시 ENV auto_entry 켜기 무시 정책(no-op 더블)
         pass
 
+    def get_account_no(self, strategy=""):
+        assert strategy == "scoring"
+        return "12345678-01"
+
 
 def test_run_live_trading_blocks_when_registry_disallows_live(monkeypatch):
     import main as main_mod
@@ -61,6 +65,9 @@ def test_run_live_trading_starts_after_registry_and_canonical_gate_pass(monkeypa
     )
 
     class DummyKIS:
+        def __init__(self, account_no=None):
+            assert account_no == "12345678-01"
+
         def authenticate(self):
             return True
 
@@ -140,6 +147,9 @@ def test_run_live_trading_blocks_when_kis_connection_check_fails(monkeypatch):
     )
 
     class DummyKIS:
+        def __init__(self, account_no=None):
+            assert account_no == "12345678-01"
+
         def authenticate(self):
             return True
 
@@ -184,6 +194,9 @@ def test_run_live_trading_blocks_when_initial_broker_sync_fails(monkeypatch):
     )
 
     class DummyKIS:
+        def __init__(self, account_no=None):
+            assert account_no == "12345678-01"
+
         def authenticate(self):
             return True
 

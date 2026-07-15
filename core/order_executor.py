@@ -9,6 +9,7 @@
 """
 
 import math
+import os
 import time as time_mod
 from datetime import datetime, timedelta
 from loguru import logger
@@ -20,6 +21,7 @@ from database.repositories import (
     save_trade, save_position, delete_position, reduce_position, delete_trade_by_id,
     get_position, get_all_positions, save_failed_order, count_monthly_buy_trades,
     save_order_record, get_open_order_records, reconcile_order_record,
+    get_trading_halt_state,
 )
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
@@ -94,18 +96,181 @@ class OrderExecutor:
         """live 신규 BUY는 canonical live gate 통과 경로에서만 허용한다."""
         if self.mode != "live" or str(action).upper() != "BUY":
             return {"allowed": True, "reason": ""}
-        if self.live_gate_validated:
-            return {"allowed": True, "reason": ""}
-
-        reason = (
-            "live BUY는 run_live_trading/live rebalance의 readiness gate를 "
-            "통과한 OrderExecutor에서만 실행할 수 있습니다."
-        )
+        # 시작 시 확인만으로 끝내면 장기 실행 중 환경 kill switch를 내려도 다음
+        # 주문이 계속 나갈 수 있다. 실제 돈이 움직이는 경계에서 매번 재확인한다.
+        live_switch_enabled = str(os.getenv("ENABLE_LIVE_TRADING", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not self.live_gate_validated:
+            reason = (
+                "live BUY는 run_live_trading/live rebalance의 readiness gate를 "
+                "통과한 OrderExecutor에서만 실행할 수 있습니다."
+            )
+        elif self._is_real_money_live() and not live_switch_enabled:
+            reason = (
+                "실계좌 신규 BUY kill switch가 비활성입니다: "
+                "ENABLE_LIVE_TRADING=true가 주문 시점에도 필요합니다."
+            )
+        else:
+            profile = self._real_money_live_risk_profile_check()
+            if profile["allowed"]:
+                return {"allowed": True, "reason": ""}
+            reason = profile["reason"]
         logger.error("실전 신규 매수 차단: {}", reason)
         return {
             "allowed": False,
             "reason": reason,
             "live_gate_blocked": True,
+            "mode": self.mode,
+        }
+
+    def _real_money_live_risk_profile_check(self) -> dict:
+        """실계좌에서 필수 손실 제한이 누락·완화되면 주문 시점에 차단한다."""
+        if not self._is_real_money_live():
+            return {"allowed": True, "reason": ""}
+
+        risk = self.config.risk_params or {}
+        ps = risk.get("position_sizing") or {}
+        dd = risk.get("drawdown") or {}
+        div = risk.get("diversification") or {}
+        liquidity = risk.get("liquidity_filter") or {}
+        correlation = div.get("correlation_risk") or {}
+        gap = risk.get("gap_risk") or {}
+        issues: list[str] = []
+
+        def _ratio(
+            label: str,
+            value,
+            *,
+            maximum: float | None = None,
+            minimum: float = 0.0,
+        ) -> None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                issues.append(f"{label}=누락/비숫자")
+                return
+            if (
+                not math.isfinite(number)
+                or number <= minimum
+                or maximum is not None and number > maximum
+            ):
+                upper = f"≤{maximum:.0%}" if maximum is not None else ""
+                issues.append(f"{label}={value!r}(필수 >{minimum:.0%}{upper})")
+
+        _ratio("max_risk_per_trade", ps.get("max_risk_per_trade"), maximum=0.02)
+        _ratio("max_portfolio_mdd", dd.get("max_portfolio_mdd"), maximum=0.20)
+        _ratio("max_daily_loss", dd.get("max_daily_loss"), maximum=0.05)
+        _ratio("max_position_ratio", div.get("max_position_ratio"), maximum=0.25)
+        _ratio("max_investment_ratio", div.get("max_investment_ratio"), maximum=0.85)
+        _ratio("min_cash_ratio", div.get("min_cash_ratio"), minimum=0.05)
+        try:
+            if (
+                float(div.get("max_investment_ratio"))
+                + float(div.get("min_cash_ratio"))
+                > 1.0
+            ):
+                issues.append("max_investment_ratio + min_cash_ratio는 100% 이하여야 함")
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+        try:
+            max_positions = int(div.get("max_positions"))
+            if max_positions <= 0 or max_positions > 20:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            issues.append("max_positions는 1~20 정수여야 함")
+
+        required_true = (
+            ("liquidity_filter.enabled", liquidity.get("enabled")),
+            ("liquidity_filter.check_on_entry", liquidity.get("check_on_entry")),
+            ("liquidity_filter.strict", liquidity.get("strict")),
+            ("correlation_risk.enabled", correlation.get("enabled")),
+            ("correlation_risk.strict", correlation.get("strict")),
+            ("diversification.sector_map_strict", div.get("sector_map_strict")),
+            ("gap_risk.enabled", gap.get("enabled")),
+        )
+        issues.extend(label for label, enabled in required_true if enabled is not True)
+
+        if issues:
+            return {
+                "allowed": False,
+                "reason": "실계좌 리스크 프로필 검증 실패: " + "; ".join(issues),
+                "live_risk_profile_blocked": True,
+            }
+        return {"allowed": True, "reason": ""}
+
+    def _global_trading_halt_check(
+        self,
+        action: str = "BUY",
+        *,
+        symbol: str = "",
+        strategy: str = "",
+    ) -> dict:
+        """영속 전역 HALT와 상태 조회 실패에서 모든 BUY를 fail-closed한다.
+
+        HALT는 청산을 막으면 안 되므로 SELL은 DB 조회 자체를 하지 않고
+        즉시 통과시킨다.
+        """
+        if str(action).upper() != "BUY":
+            return {"allowed": True, "reason": ""}
+
+        try:
+            state = get_trading_halt_state()
+        except Exception as exc:
+            reason = (
+                "전역 거래 HALT 상태를 확인하지 못해 신규 BUY를 "
+                f"fail-closed 차단합니다: {exc}"
+            )
+            logger.exception("신규 BUY 차단: {}", reason)
+            _log_op_event(
+                "TRADING_HALT_CHECK_FAILED",
+                reason,
+                severity="critical",
+                symbol=symbol or None,
+                strategy=strategy or None,
+                detail={"fail_closed": True, "error": str(exc)},
+                mode=self.mode,
+            )
+            return {
+                "allowed": False,
+                "reason": reason,
+                "trading_halt_blocked": True,
+                "trading_halt_check_failed": True,
+                "mode": self.mode,
+            }
+
+        if not state.get("halted", False):
+            return {"allowed": True, "reason": "", "trading_halt_state": state}
+
+        halt_reason = str(state.get("reason") or "운영자 전역 HALT")
+        reason = (
+            f"전역 거래 HALT 활성 중이므로 신규 BUY를 차단합니다: "
+            f"{halt_reason} (event_id={state.get('event_id')})"
+        )
+        logger.critical("신규 BUY 차단: {}", reason)
+        _log_op_event(
+            "TRADING_HALT_BUY_BLOCKED",
+            reason,
+            severity="critical",
+            symbol=symbol or None,
+            strategy=strategy or None,
+            detail={
+                "halt_event_id": state.get("event_id"),
+                "halt_reason": halt_reason,
+                "halt_source": state.get("source"),
+            },
+            mode=self.mode,
+        )
+        return {
+            "allowed": False,
+            "reason": reason,
+            "trading_halt_blocked": True,
+            "trading_halt_check_failed": False,
+            "trading_halt_state": state,
             "mode": self.mode,
         }
 
@@ -162,6 +327,196 @@ class OrderExecutor:
             "persistent_order_block": True,
             "open_order_records": open_records,
         }
+
+    def _claim_live_order_guard(self, symbol: str, order, ttl_seconds: int) -> dict | None:
+        """브로커 호출 직전 동일 종목 주문권을 원자적으로 획득한다."""
+        try:
+            claimed = OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+        except Exception as exc:
+            order.transition(OrderStatus.REJECTED, reason="OrderGuard DB claim 실패")
+            self._persist_order_record(order)
+            logger.exception(
+                "OrderGuard 원자적 획득 실패 — 실전 주문 차단: {} — {}",
+                symbol,
+                exc,
+            )
+            return {
+                "success": False,
+                "reason": (
+                    "중복 주문 가드 상태를 안전하게 기록하지 못해 "
+                    "실전 주문을 보류했습니다."
+                ),
+                "symbol": symbol,
+                "mode": self.mode,
+                "order_guard_blocked": True,
+                "order_guard_check_failed": True,
+            }
+
+        if claimed:
+            return None
+
+        order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
+        self._persist_order_record(order)
+        return {
+            "success": False,
+            "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다.",
+            "symbol": symbol,
+            "mode": self.mode,
+            "order_guard_blocked": True,
+            "order_guard_check_failed": False,
+        }
+
+    def _safe_order_guard_ttl(
+        self,
+        key: str,
+        *,
+        default: int,
+        minimum: int,
+    ) -> int:
+        """잘못된 TTL 설정이 중복 주문 가드를 즉시 만료시키지 않게 한다."""
+        raw = self.config.trading.get(key, default)
+        try:
+            if isinstance(raw, bool):
+                raise ValueError("boolean TTL")
+            ttl = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            ttl = default
+            logger.critical(
+                "잘못된 {}={} — 안전 기본값 {}초 사용",
+                key,
+                raw,
+                default,
+            )
+        if ttl < minimum:
+            logger.critical(
+                "너무 짧은 {}={}초 — 안전 기본값 {}초 사용 (최소 {}초)",
+                key,
+                ttl,
+                default,
+                minimum,
+            )
+            return default
+        return ttl
+
+    def _halt_after_post_fill_ledger_failure(
+        self,
+        *,
+        order,
+        action: str,
+        error: Exception,
+    ) -> None:
+        """브로커 체결 뒤 로컬 장부 반영 실패를 전역 BUY 중단으로 승격한다."""
+        if self.mode != "live":
+            return
+
+        ttl_seconds = self._safe_order_guard_ttl(
+            "ledger_reconcile_guard_ttl_seconds",
+            default=86_400,
+            minimum=3_600,
+        )
+        try:
+            OrderGuard.extend_pending(order.symbol, ttl_seconds=ttl_seconds)
+        except Exception as guard_exc:
+            logger.exception(
+                "체결 후 원장 실패 가드 연장 실패: {} — {}",
+                order.symbol,
+                guard_exc,
+            )
+
+        reason = (
+            f"실전 {action} 체결 후 로컬 원장 반영 실패 — "
+            f"브로커 잔고 재조정 필요: {order.symbol} order_id={order.order_id}"
+        )
+        try:
+            from database.repositories import set_trading_halt
+
+            set_trading_halt(
+                reason,
+                source="core.order_executor.post_fill_ledger",
+                mode="live",
+                detail={
+                    "symbol": order.symbol,
+                    "action": action,
+                    "order_id": order.order_id,
+                    "broker_order_id": order.broker_order_id,
+                    "order_status": order.status.value,
+                    "error": str(error),
+                    "requires_broker_reconcile": True,
+                    "guard_ttl_seconds": ttl_seconds,
+                },
+            )
+        except Exception as halt_exc:
+            logger.exception(
+                "체결 후 원장 실패 global HALT 영속화 실패: {}",
+                halt_exc,
+            )
+
+        logger.critical("{} — error={}", reason, error)
+        try:
+            from core.notifier import Notifier
+
+            Notifier(self.config).send_message(
+                f"🚨 {reason}\n오류: {error}",
+                critical=True,
+            )
+        except Exception as notify_exc:
+            logger.error("체결 후 원장 실패 알림 전송 실패: {}", notify_exc)
+
+    def _halt_for_uncertain_live_execution(
+        self,
+        *,
+        order,
+        action: str,
+        reason: str,
+        execution: dict | None = None,
+    ) -> None:
+        """실계좌 노출이 불명확하면 신규 BUY를 영속 차단한다."""
+        if not self._is_real_money_live():
+            return
+
+        ttl_seconds = self._safe_order_guard_ttl(
+            "ledger_reconcile_guard_ttl_seconds",
+            default=86_400,
+            minimum=3_600,
+        )
+        try:
+            OrderGuard.extend_pending(order.symbol, ttl_seconds=ttl_seconds)
+        except Exception as exc:
+            logger.exception("불명확 체결 OrderGuard 연장 실패: {}", exc)
+        detail = {
+            "symbol": order.symbol,
+            "action": action,
+            "order_id": order.order_id,
+            "broker_order_id": order.broker_order_id,
+            "order_status": order.status.value,
+            "execution_reason": reason,
+            "requires_broker_reconcile": True,
+            "guard_ttl_seconds": ttl_seconds,
+        }
+        if execution:
+            detail["execution"] = execution
+        halt_reason = (
+            f"실전 {action} 주문 체결/잔량 불명확 — 브로커 대조 전 신규 BUY 중단: "
+            f"{order.symbol} order_id={order.order_id} ({reason})"
+        )
+        try:
+            from database.repositories import set_trading_halt
+
+            set_trading_halt(
+                halt_reason,
+                source="core.order_executor.uncertain_execution",
+                mode="live",
+                detail=detail,
+            )
+        except Exception as exc:
+            logger.exception("불명확 체결 global HALT 영속화 실패: {}", exc)
+        logger.critical(halt_reason)
+        try:
+            from core.notifier import Notifier
+
+            Notifier(self.config).send_message(f"🚨 {halt_reason}", critical=True)
+        except Exception as exc:
+            logger.error("불명확 체결 알림 전송 실패: {}", exc)
 
     def _get_sector_map_cached(self) -> dict:
         """업종 매핑을 한 번만 조회하고 캐시한다. 실패 시 빈 dict."""
@@ -383,13 +738,15 @@ class OrderExecutor:
             }
         return {"allowed": True, "reason": ""}
 
-    def _daily_loss_baseline_value(self) -> float | None:
-        """최근 포트폴리오 스냅샷에서 당일 손실 비교 기준값을 가져온다."""
+    def _daily_loss_baseline(self) -> dict | None:
+        """전일 포트폴리오 스냅샷의 값과 현금흐름 경계를 가져온다."""
         from database.repositories import get_portfolio_snapshots
+        from zoneinfo import ZoneInfo
 
         snapshots = get_portfolio_snapshots(
             days=10,
             account_key=self.account_key if self.account_key else None,
+            mode=self.mode,
         )
         if snapshots.empty:
             return None
@@ -401,7 +758,9 @@ class OrderExecutor:
         baseline_rows = snapshots
         if "date" in snapshots.columns:
             try:
-                today = datetime.now().date()
+                # 스냅샷 귀속일과 국내 장 운영일은 KST 기준이다. 배포 호스트가
+                # UTC여도 장중의 "오늘" 판정이 전날로 밀리지 않게 한다.
+                today = datetime.now(ZoneInfo("Asia/Seoul")).date()
                 dated = snapshots.copy()
                 dated["_snapshot_date"] = dated["date"].apply(
                     lambda value: value.date() if hasattr(value, "date") else value
@@ -416,7 +775,33 @@ class OrderExecutor:
 
         latest = baseline_rows.iloc[-1]
         baseline_value = float(latest.get("total_value") or 0)
-        return baseline_value if baseline_value > 0 else None
+        if not math.isfinite(baseline_value) or baseline_value <= 0:
+            return None
+        return {
+            "total_value": baseline_value,
+            "date": latest.get("date"),
+            "created_at": latest.get("created_at"),
+        }
+
+    def _daily_loss_baseline_value(self) -> float | None:
+        """하위 호환용 전일 평가금액 조회."""
+        baseline = self._daily_loss_baseline()
+        return float(baseline["total_value"]) if baseline else None
+
+    def _is_real_money_live(self) -> bool:
+        """실전 또는 모의임을 확신할 수 없는 KIS endpoint인지 판정한다."""
+        kis = self.config.kis_api or {}
+        confirmed_mock = (
+            kis.get("use_mock") is True
+            and "openapivts.koreainvestment.com"
+            in str(
+                kis.get(
+                    "mock_url",
+                    "https://openapivts.koreainvestment.com:29443",
+                )
+            ).strip().lower()
+        )
+        return self.mode == "live" and not confirmed_mock
 
     def _drawdown_pre_order_check(self, action: str = "BUY") -> dict:
         """MDD/일일 손실 한도 도달 시 신규 BUY만 차단한다."""
@@ -424,8 +809,30 @@ class OrderExecutor:
             return {"allowed": True, "reason": ""}
 
         drawdown_cfg = (self.config.risk_params or {}).get("drawdown") or {}
-        max_mdd = float(drawdown_cfg.get("max_portfolio_mdd") or 0)
-        max_daily_loss = float(drawdown_cfg.get("max_daily_loss") or 0)
+        try:
+            max_mdd = float(drawdown_cfg.get("max_portfolio_mdd") or 0)
+            max_daily_loss = float(drawdown_cfg.get("max_daily_loss") or 0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "allowed": False,
+                "reason": f"손실 한도 설정 오류: {exc}",
+                "drawdown_guard_blocked": True,
+                "drawdown_guard_type": "invalid_config",
+                "mode": self.mode,
+            }
+        if (
+            not math.isfinite(max_mdd)
+            or not math.isfinite(max_daily_loss)
+            or max_mdd < 0
+            or max_daily_loss < 0
+        ):
+            return {
+                "allowed": False,
+                "reason": "손실 한도 설정에 NaN/Inf 또는 음수가 포함됨",
+                "drawdown_guard_blocked": True,
+                "drawdown_guard_type": "invalid_config",
+                "mode": self.mode,
+            }
         if max_mdd <= 0 and max_daily_loss <= 0:
             return {"allowed": True, "reason": ""}
 
@@ -452,7 +859,7 @@ class OrderExecutor:
                     "mode": self.mode,
                 }
             total_value = float(summary.get("total_value") or 0)
-            if total_value <= 0:
+            if not math.isfinite(total_value) or total_value <= 0:
                 reason = "손실 한도 확인 실패: 포트폴리오 평가금액 없음"
                 logger.warning("신규 매수 차단: {}", reason)
                 return {
@@ -464,6 +871,8 @@ class OrderExecutor:
                 }
 
             mdd_pct = abs(float(summary.get("mdd") or 0))
+            if not math.isfinite(mdd_pct):
+                raise ValueError("포트폴리오 MDD가 NaN/Inf입니다")
             mdd_limit_pct = max_mdd * 100
 
             # 히스테리시스 게이트(상시 프로세스용 2차 방어): 상태 갱신(peak·halt 진입/해제)을
@@ -504,9 +913,48 @@ class OrderExecutor:
                     "mode": self.mode,
                 }
 
-            baseline_value = self._daily_loss_baseline_value()
-            if max_daily_loss > 0 and baseline_value:
-                daily_pnl = total_value - baseline_value
+            baseline = self._daily_loss_baseline()
+            if max_daily_loss > 0 and baseline is None and self._is_real_money_live():
+                reason = (
+                    "일일 손실 한도 확인 실패: 전일 포트폴리오 스냅샷이 없어 "
+                    "실계좌 신규 매수를 차단합니다."
+                )
+                logger.warning("신규 매수 차단: {}", reason)
+                return {
+                    "allowed": False,
+                    "reason": reason,
+                    "drawdown_guard_blocked": True,
+                    "drawdown_guard_type": "daily_loss_baseline_unavailable",
+                    "mode": self.mode,
+                }
+
+            if max_daily_loss > 0 and baseline:
+                baseline_value = float(baseline["total_value"])
+                if not math.isfinite(baseline_value) or baseline_value <= 0:
+                    raise ValueError("일일 손실 기준 평가금액이 유효하지 않습니다")
+
+                # 입금은 손익이 아니며, 당일 입금이 실제 손실을 가려서도 안 된다.
+                # 전일 스냅샷 측정 뒤의 순현금흐름을 제거한 경제적 PnL로 한도를 본다.
+                boundary = baseline.get("created_at") or baseline.get("date")
+                if hasattr(boundary, "to_pydatetime"):
+                    boundary = boundary.to_pydatetime()
+                cash_flow = 0.0
+                if isinstance(boundary, datetime):
+                    from database.repositories import get_cash_flow_total_between
+
+                    cash_flow = get_cash_flow_total_between(
+                        self.account_key,
+                        boundary,
+                        datetime.now(),
+                        mode=self.mode,
+                    )
+                    cash_flow = float(cash_flow)
+                    if not math.isfinite(cash_flow):
+                        raise ValueError("일일 순현금흐름이 NaN/Inf입니다")
+
+                daily_pnl = total_value - baseline_value - cash_flow
+                if not math.isfinite(daily_pnl):
+                    raise ValueError("일일 손익이 NaN/Inf입니다")
                 daily_allowed = self.risk_manager.check_daily_loss(
                     daily_pnl,
                     baseline_value,
@@ -527,6 +975,7 @@ class OrderExecutor:
                         "daily_loss": round(daily_loss_pct, 2),
                         "daily_loss_limit": round(daily_limit_pct, 2),
                         "daily_loss_baseline": round(baseline_value, 0),
+                        "daily_cash_flow": round(cash_flow, 0),
                         "mode": self.mode,
                     }
         except Exception as exc:
@@ -597,8 +1046,29 @@ class OrderExecutor:
     def _gap_up_entry_check(self, symbol: str, price: float) -> dict:
         """갭업 추격매수 방지용 최근 가격 조회는 실패 시 신규 BUY를 차단한다."""
         gap_cfg = (self.config.risk_params or {}).get("gap_risk", {})
-        if not (gap_cfg.get("enabled", False) and gap_cfg.get("gap_up_entry_block", 0) > 0):
+        enabled = gap_cfg.get("enabled", False)
+        if enabled is False or enabled is None:
             return {"allowed": True, "reason": ""}
+        if enabled is not True:
+            return {
+                "allowed": False,
+                "reason": "갭 리스크 설정 오류: enabled는 boolean이어야 함",
+                "gap_risk_blocked": True,
+            }
+        try:
+            threshold = float(gap_cfg.get("gap_up_entry_block"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "allowed": False,
+                "reason": f"갭 리스크 설정 오류: {exc}",
+                "gap_risk_blocked": True,
+            }
+        if not math.isfinite(threshold) or not (0 < threshold <= 1):
+            return {
+                "allowed": False,
+                "reason": "갭 리스크 설정 오류: gap_up_entry_block은 (0,1]이어야 함",
+                "gap_risk_blocked": True,
+            }
 
         try:
             from core.data_collector import DataCollector
@@ -637,10 +1107,10 @@ class OrderExecutor:
             return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
 
         gap_pct = (today_open - prev_close) / prev_close
-        if gap_pct >= gap_cfg["gap_up_entry_block"]:
+        if gap_pct >= threshold:
             reason = (
                 f"갭업 +{gap_pct*100:.1f}% "
-                f"(기준 +{gap_cfg['gap_up_entry_block']*100:.0f}%) — 추격매수 차단"
+                f"(기준 +{threshold*100:.0f}%) — 추격매수 차단"
             )
             logger.warning("종목 {} 매수 스킵: {}", symbol, reason)
             return {"allowed": False, "reason": reason, "gap_risk_blocked": True}
@@ -673,6 +1143,33 @@ class OrderExecutor:
         if not math.isfinite(order_price) or order_price <= 0:
             return None
         return order_price
+
+    @staticmethod
+    def _finite_amount(value, *, positive: bool = False) -> float | None:
+        """주문 경계에서 NaN/Inf와 음수 자금 값을 거부한다."""
+        try:
+            amount = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(amount):
+            return None
+        if positive and amount <= 0:
+            return None
+        if not positive and amount < 0:
+            return None
+        return amount
+
+    @staticmethod
+    def _position_invested_value(position) -> float:
+        value = getattr(position, "total_invested", None)
+        if value is None:
+            value = float(getattr(position, "avg_price", 0) or 0) * int(
+                getattr(position, "quantity", 0) or 0
+            )
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("포지션 투자금에 NaN/Inf 또는 음수가 포함됨")
+        return value
 
     def execute_buy(
         self,
@@ -726,6 +1223,14 @@ class OrderExecutor:
         execution_session_id: str = "",
     ) -> dict:
         """매수 주문 실제 로직 (Lock 내부에서 호출)."""
+        halt_check = self._global_trading_halt_check(
+            "BUY",
+            symbol=symbol,
+            strategy=strategy,
+        )
+        if not halt_check["allowed"]:
+            return {"success": False, **halt_check}
+
         live_gate_check = self._live_buy_gate_check("BUY")
         if not live_gate_check["allowed"]:
             return {"success": False, **live_gate_check}
@@ -736,6 +1241,30 @@ class OrderExecutor:
             logger.warning("종목 {} 매수 스킵: {}", symbol, reason_text)
             return {"success": False, "reason": reason_text, "price_invalid": True}
         price = order_price
+
+        cash_was_unspecified = available_cash is None
+        checked_capital = self._finite_amount(capital, positive=True)
+        checked_cash = self._finite_amount(
+            capital if available_cash is None else available_cash,
+            positive=True,
+        )
+        checked_invested = (
+            None
+            if current_invested is None
+            else self._finite_amount(current_invested)
+        )
+        if (
+            checked_capital is None
+            or checked_cash is None
+            or current_invested is not None and checked_invested is None
+        ):
+            return {
+                "success": False,
+                "reason": "자본/가용현금/투자금에 NaN/Inf·0 이하 또는 음수가 포함됨",
+                "capital_invalid": True,
+            }
+        capital = checked_capital
+        available_cash = checked_cash
 
         if self._should_block_new_buy_volatility_window():
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -771,8 +1300,24 @@ class OrderExecutor:
                     "시장 국면 [{}]: 손절×{:.2f}, 익절×{:.2f}",
                     regime_adj["regime"], regime_sl_mult, regime_tp_mult,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            # 비활성 필터의 부가 로직 실패는 기존 동작을 유지하되, 필터가 켜진 상태에서
+            # 국면 판별 자체가 실패하면 unknown으로 간주해 신규 BUY를 fail-closed 한다.
+            if bool(self.config.trading.get("market_regime_filter", False)):
+                reason_text = f"시장 국면 확인 모듈 오류로 신규 매수를 차단합니다: {exc}"
+                logger.exception("종목 {} 매수 스킵: {}", symbol, reason_text)
+                return {
+                    "success": False,
+                    "reason": reason_text,
+                    "market_regime_blocked": True,
+                    "market_regime": "unknown",
+                    "market_regime_details": {
+                        "reason": "market_regime_module_failed",
+                        "error": str(exc),
+                        "fail_closed": True,
+                    },
+                }
+            logger.debug("비활성 시장 국면 필터 부가 로직 생략: {}", exc)
 
         sizing_costs = self.risk_manager.calculate_transaction_costs(
             price,
@@ -803,7 +1348,27 @@ class OrderExecutor:
             return {"success": False, "reason": "계산된 수량이 0"}
 
         # 상관관계 기반 포지션 축소
-        positions = get_all_positions(account_key=self.account_key if self.account_key else None)
+        positions = get_all_positions(
+            account_key=self.account_key if self.account_key else None,
+            mode=self.mode,
+        )
+        try:
+            persisted_invested = sum(
+                self._position_invested_value(position) for position in positions
+            )
+            # 호출자가 전달한 값이 오래됐거나 작더라도 DB에 이미 존재하는 노출을
+            # 무시해 한도를 낮출 수 없게 한다.
+            checked_invested = max(checked_invested or 0.0, persisted_invested)
+            if cash_was_unspecified:
+                # 현금 미전달 시 총자산 전체를 현금으로 간주하지 않는다.
+                checked_cash = max(0.0, capital - persisted_invested)
+                available_cash = checked_cash
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "reason": f"현재 투자금 확인 실패: {exc}",
+                "capital_invalid": True,
+            }
         existing_symbols = [p.symbol for p in positions]
         corr_result = self.risk_manager.check_correlation_risk(symbol, existing_symbols)
         if corr_result.get("blocked"):
@@ -846,10 +1411,21 @@ class OrderExecutor:
             sizing_entry_price * quantity,
             capital,
             available_cash=available_cash,
-            current_invested=current_invested or 0,
+            current_invested=checked_invested,
             symbol=symbol,
             sector_map=sector_map,
             positions=positions,
+            existing_position_value=next(
+                (
+                    float(getattr(p, "total_invested", 0) or 0)
+                    for p in positions
+                    if getattr(p, "symbol", "") == symbol
+                ),
+                0.0,
+            ),
+            is_new_position=not any(
+                getattr(p, "symbol", "") == symbol for p in positions
+            ),
         )
         if not div_check["can_buy"]:
             logger.warning("종목 {} 매수 불가: {}", symbol, div_check["reason"])
@@ -871,7 +1447,6 @@ class OrderExecutor:
         costs = self.risk_manager.calculate_transaction_costs(
             price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
         )
-        available_cash = capital if available_cash is None else available_cash
         estimated_fill_price = float(costs.get("execution_price", price) or price)
 
         # 음수 캐시 방지: 가용 현금이 0 이하이면 즉시 거부
@@ -900,9 +1475,8 @@ class OrderExecutor:
             avg_daily_volume=avg_daily_volume,
         )
         if not pre_check["allowed"]:
-            result = {"success": False, "reason": pre_check["reason"]}
-            if pre_check.get("paper_entry_blocked"):
-                result["paper_entry_blocked"] = True
+            result = {"success": False, **pre_check}
+            result.pop("allowed", None)
             return result
 
         # ── 상태기계 기반 주문 처리 ──
@@ -931,24 +1505,26 @@ class OrderExecutor:
         actual_slippage_pct = None
 
         if self.mode == "live":
-            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            ttl_seconds = self._safe_order_guard_ttl(
+                "pending_order_ttl_seconds",
+                default=600,
+                minimum=60,
+            )
             persistent_block = self._persistent_live_order_block(symbol, order)
             if persistent_block:
                 return persistent_block
-            if OrderGuard.has_pending(symbol):
-                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
-                self._persist_order_record(order)
-                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             live_unfilled_block = self._live_unfilled_order_block(symbol, order)
             if live_unfilled_block:
                 self._persist_order_record(order)
                 return live_unfilled_block
 
-            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            guard_block = self._claim_live_order_guard(symbol, order, ttl_seconds)
+            if guard_block:
+                return guard_block
             order.transition(OrderStatus.SUBMITTED)
             self._persist_order_record(order)
 
-            order_result = self._execute_with_retry(
+            order_result = self._execute_authorized_kis_order(
                 self.kis_api.buy_order, symbol, quantity, int(price),
                 symbol=symbol, action="BUY", price=price, quantity=quantity,
                 strategy=strategy, signal_score=signal_score, reason=reason,
@@ -980,7 +1556,6 @@ class OrderExecutor:
             # FILLED 전이 — 이 시점에서만 position/trade 반영
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
             self._persist_order_record(order)
-            OrderGuard.clear(symbol)
         else:
             # Paper mode: simulated broker event
             order.transition(OrderStatus.SUBMITTED)
@@ -995,49 +1570,63 @@ class OrderExecutor:
         # 4) FILLED 상태에서만 DB 반영 (invariant: fill 전 position 없음)
         assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
 
-        if self.mode == "live":
-            costs = self.risk_manager.calculate_transaction_costs(
-                fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
-            )
-
-        stop_loss = self.risk_manager.calculate_stop_loss(
-            fill_price,
-            atr,
-            regime_multiplier=regime_sl_mult,
-        )
-        tp_info = self.risk_manager.calculate_take_profit(
-            fill_price,
-            regime_multiplier=regime_tp_mult,
-        )
-        trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
-
-        _order_at = datetime.now()
-        _trade = save_trade(
-            symbol=symbol, action="BUY", price=fill_price, quantity=quantity,
-            commission=costs["commission"], tax=0, slippage=costs["slippage"],
-            strategy=strategy, signal_score=signal_score, reason=reason,
-            mode=self.mode, account_key=self.account_key,
-            signal_at=signal_at or _order_at, order_at=_order_at,
-            expected_price=expected_price,
-            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
-            execution_session_id=execution_session_id,
-            order_id=order.order_id,
-        )
-        _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
-                       symbol=symbol, strategy=strategy, mode=self.mode)
-
+        _trade = None
         try:
+            if self.mode == "live":
+                costs = self.risk_manager.calculate_transaction_costs(
+                    fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
+                )
+
+            stop_loss = self.risk_manager.calculate_stop_loss(
+                fill_price,
+                atr,
+                regime_multiplier=regime_sl_mult,
+            )
+            tp_info = self.risk_manager.calculate_take_profit(
+                fill_price,
+                regime_multiplier=regime_tp_mult,
+            )
+            trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
+
+            _order_at = datetime.now()
+            _trade = save_trade(
+                symbol=symbol, action="BUY", price=fill_price, quantity=quantity,
+                commission=costs["commission"], tax=0, slippage=costs["slippage"],
+                strategy=strategy, signal_score=signal_score, reason=reason,
+                mode=self.mode, account_key=self.account_key,
+                signal_at=signal_at or _order_at, order_at=_order_at,
+                expected_price=expected_price,
+                actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
+                execution_session_id=execution_session_id,
+                order_id=order.order_id,
+            )
+            _log_op_event("SIGNAL", f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
+                           symbol=symbol, strategy=strategy, mode=self.mode)
             save_position(
                 symbol=symbol, avg_price=fill_price, quantity=quantity,
                 stop_loss_price=stop_loss, take_profit_price=tp_info["target_final"],
                 trailing_stop_price=trailing_stop, strategy=strategy,
                 account_key=self.account_key,
+                mode=self.mode,
             )
-        except Exception:
+        except Exception as exc:
             # 원장 보상 롤백: 매매만 남으면 현금만 차감된 반쪽 원장 — 유령 낙폭과
             # 가드 오발동의 뿌리(2026-07-07 실측). 되돌리고 실패를 위로 알린다.
-            delete_trade_by_id(_trade.id)
+            if _trade is not None:
+                try:
+                    delete_trade_by_id(_trade.id)
+                except Exception:
+                    logger.exception("체결 후 BUY 매매기록 보상 삭제 실패: {}", symbol)
+            self._halt_after_post_fill_ledger_failure(
+                order=order,
+                action="BUY",
+                error=exc,
+            )
             raise
+
+        if self.mode == "live":
+            # 브로커 체결과 Trade/Position 원장이 모두 영속화된 뒤에만 해제한다.
+            OrderGuard.clear(symbol)
 
         # 매매 로그
         log_trade("BUY", symbol, fill_price, quantity, reason)
@@ -1117,11 +1706,26 @@ class OrderExecutor:
     ) -> dict:
         # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
         # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
+        halt_check = self._global_trading_halt_check(
+            "BUY",
+            symbol=symbol,
+            strategy=strategy,
+        )
+        if not halt_check["allowed"]:
+            return {"success": False, **halt_check}
+
         live_gate_check = self._live_buy_gate_check("BUY")
         if not live_gate_check["allowed"]:
             return {"success": False, **live_gate_check}
 
-        quantity = int(quantity or 0)
+        try:
+            quantity_value = float(quantity)
+            quantity = int(quantity_value)
+        except (TypeError, ValueError, OverflowError):
+            quantity = 0
+            quantity_value = 0
+        if not math.isfinite(quantity_value) or quantity_value != quantity:
+            return {"success": False, "reason": "quantity must be a finite integer"}
         if quantity <= 0:
             return {"success": False, "reason": "quantity must be positive"}
         order_price = self._positive_order_price(price)
@@ -1133,6 +1737,17 @@ class OrderExecutor:
             }
         price = order_price
 
+        checked_capital = self._finite_amount(capital, positive=True)
+        checked_cash = self._finite_amount(available_cash, positive=True)
+        if checked_capital is None or checked_cash is None:
+            return {
+                "success": False,
+                "reason": "자본/가용현금에 NaN/Inf·0 이하가 포함됨",
+                "capital_invalid": True,
+            }
+        capital = checked_capital
+        available_cash = checked_cash
+
         if self._should_block_new_buy_volatility_window():
             return {"success": False, "reason": "장 초반/마감 진입 차단 시간대"}
 
@@ -1142,7 +1757,13 @@ class OrderExecutor:
         expected_price = float(price)
         fill_price = float(costs["execution_price"])
         total_required = fill_price * quantity + float(costs.get("commission", 0) or 0)
-        if total_required > float(available_cash):
+        if not math.isfinite(total_required) or total_required <= 0:
+            return {
+                "success": False,
+                "reason": "예상 주문금액이 유효하지 않습니다",
+                "capital_invalid": True,
+            }
+        if total_required > available_cash:
             return {
                 "success": False,
                 "reason": "사용 가능 현금 부족",
@@ -1150,6 +1771,9 @@ class OrderExecutor:
                 "available_cash": available_cash,
             }
 
+        # 영속 HALT·월간 cap·drawdown·paper governance·유동성은 외부 가격/실적
+        # 조회보다 먼저 확인한다. 이미 차단된 주문이 불필요한 네트워크 호출을 하지
+        # 않게 하고, 운영 차단 사유의 우선순위를 일관되게 유지한다.
         pre_check = self._pre_order_check(
             symbol=symbol,
             action="BUY",
@@ -1159,13 +1783,235 @@ class OrderExecutor:
             avg_daily_volume=avg_daily_volume,
         )
         if not pre_check["allowed"]:
-            result = {"success": False, "reason": pre_check["reason"]}
-            if pre_check.get("paper_entry_blocked"):
-                result["paper_entry_blocked"] = True
+            result = {"success": False, **pre_check}
+            result.pop("allowed", None)
             return result
 
-        stop_loss = self.risk_manager.calculate_stop_loss(price, atr)
-        tp_info = self.risk_manager.calculate_take_profit(price)
+        try:
+            positions = get_all_positions(
+                account_key=self.account_key if self.account_key else None,
+                mode=self.mode,
+            )
+            invested_values = [
+                self._position_invested_value(position) for position in positions
+            ]
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": f"현재 포지션 노출 확인 실패: {exc}",
+                "exposure_check_failed": True,
+            }
+        existing_position_value = sum(
+            value
+            for position, value in zip(positions, invested_values)
+            if str(getattr(position, "symbol", "")) == str(symbol)
+        )
+        div_cfg = (self.config.risk_params or {}).get("diversification", {}) or {}
+        max_sector_ratio = div_cfg.get("max_sector_ratio")
+        try:
+            parsed_sector_ratio = (
+                None if max_sector_ratio is None else float(max_sector_ratio)
+            )
+        except (TypeError, ValueError, OverflowError):
+            parsed_sector_ratio = None
+        need_sector_map = bool(
+            parsed_sector_ratio is not None
+            and math.isfinite(parsed_sector_ratio)
+            and parsed_sector_ratio > 0
+            and (
+                bool(positions)
+                or (fill_price * quantity) / capital > parsed_sector_ratio
+            )
+        )
+        sector_map = self._get_sector_map_cached() if need_sector_map else None
+        exposure_check = self.risk_manager.check_diversification(
+            current_positions=len(positions),
+            position_value=fill_price * quantity,
+            total_value=capital,
+            available_cash=available_cash,
+            current_invested=sum(invested_values),
+            symbol=symbol,
+            sector_map=sector_map,
+            positions=positions if need_sector_map else None,
+            existing_position_value=existing_position_value,
+            is_new_position=not any(
+                str(getattr(position, "symbol", "")) == str(symbol)
+                for position in positions
+            ),
+        )
+        if not exposure_check["can_buy"]:
+            return {
+                "success": False,
+                "reason": exposure_check["reason"],
+                "exposure_limit_blocked": True,
+            }
+
+        # 고정수량 어댑터도 일반 BUY의 전략 리스크 필터를 우회할 수 없다.
+        # 축소 권고가 나온 경우 목표 수량을 조용히 바꾸지 않고 주문을 거부한다.
+        existing_symbols = [str(getattr(p, "symbol", "")) for p in positions]
+        corr_result = self.risk_manager.check_correlation_risk(
+            symbol,
+            existing_symbols,
+        )
+        if corr_result.get("blocked") or float(corr_result.get("scale", 1.0)) < 1.0:
+            return {
+                "success": False,
+                "reason": corr_result.get("reason") or "고상관 포지션 축소 필요",
+                "correlation_risk_blocked": True,
+            }
+
+        gap_check = self._gap_up_entry_check(symbol, price)
+        if not gap_check["allowed"]:
+            return {"success": False, **gap_check}
+
+        try:
+            raw_skip_days = self.config.trading.get("skip_earnings_days", 0)
+            if isinstance(raw_skip_days, bool):
+                raise ValueError("boolean skip_earnings_days")
+            skip_earnings_days = int(raw_skip_days)
+            if skip_earnings_days < 0:
+                raise ValueError("negative skip_earnings_days")
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "success": False,
+                "reason": f"실적 발표일 필터 설정 오류: {exc}",
+                "earnings_filter_blocked": True,
+            }
+        if skip_earnings_days > 0:
+            try:
+                from core.earnings_filter import is_near_earnings
+
+                near_earnings, earnings_reason = is_near_earnings(
+                    symbol,
+                    skip_days=skip_earnings_days,
+                    config=self.config,
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "reason": f"실적 발표일 확인 실패: {exc}",
+                    "earnings_filter_blocked": True,
+                }
+            if near_earnings:
+                return {
+                    "success": False,
+                    "reason": earnings_reason,
+                    "earnings_filter_blocked": True,
+                }
+
+        from database.repositories import get_recent_sell_trades
+
+        try:
+            recent_sells = get_recent_sell_trades(
+                limit=(
+                    self.risk_manager.risk_params.get(
+                        "performance_degradation", {}
+                    ).get("recent_trades", 20)
+                ),
+                mode=self.mode,
+                account_key=self.account_key if self.account_key else None,
+            )
+            perf_check = self.risk_manager.check_recent_performance(recent_sells)
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": f"최근 전략 성과 확인 실패: {exc}",
+                "performance_check_failed": True,
+            }
+        if not perf_check.get("allowed", True):
+            return {
+                "success": False,
+                "reason": perf_check.get("reason", "성과 열화로 매수 중단"),
+                "performance_degradation_blocked": True,
+            }
+
+        regime_sl_mult = 1.0
+        regime_tp_mult = 1.0
+        try:
+            from core.market_regime import get_regime_adjusted_params
+
+            regime_adj = get_regime_adjusted_params(self.config)
+            if not regime_adj.get("allow_buys", True):
+                return {
+                    "success": False,
+                    "reason": (
+                        "시장 국면 확인 실패 또는 bearish 상태로 고정수량 매수를 "
+                        "차단합니다"
+                    ),
+                    "market_regime_blocked": True,
+                    "market_regime": regime_adj.get("regime", "unknown"),
+                }
+            position_scale = float(regime_adj.get("position_scale", 1.0))
+            if not math.isfinite(position_scale) or position_scale <= 0:
+                return {
+                    "success": False,
+                    "reason": "시장 국면 포지션 배수가 유효하지 않습니다",
+                    "market_regime_blocked": True,
+                }
+            if position_scale < 1.0:
+                return {
+                    "success": False,
+                    "reason": (
+                        f"시장 국면이 포지션 {position_scale:.0%} 축소를 요구하므로 "
+                        "정확한 고정수량 주문을 거부합니다"
+                    ),
+                    "market_regime_blocked": True,
+                }
+            regime_sl_mult = float(regime_adj.get("stop_loss_multiplier", 1.0))
+            regime_tp_mult = float(regime_adj.get("take_profit_multiplier", 1.0))
+        except Exception as exc:
+            if bool(self.config.trading.get("market_regime_filter", False)):
+                return {
+                    "success": False,
+                    "reason": f"시장 국면 확인 오류로 고정수량 매수를 차단합니다: {exc}",
+                    "market_regime_blocked": True,
+                }
+
+        # 목표비중 어댑터도 1회 손실 예산을 확대할 권한은 없다. 정확한 목표 수량이
+        # 상한을 넘으면 임의 축소(목표 왜곡) 대신 명시적으로 거부한다.
+        stop_loss = self.risk_manager.calculate_stop_loss(
+            fill_price,
+            atr,
+            regime_multiplier=regime_sl_mult,
+        )
+        max_risk_rate = float(
+            (self.config.risk_params.get("position_sizing") or {}).get(
+                "max_risk_per_trade", 0.01
+            )
+        )
+        projected_loss = (fill_price - stop_loss) * quantity + float(
+            costs.get("commission", 0) or 0
+        )
+        risk_budget = capital * max_risk_rate
+        if (
+            not math.isfinite(max_risk_rate)
+            or not math.isfinite(projected_loss)
+            or not math.isfinite(risk_budget)
+            or max_risk_rate <= 0
+            or max_risk_rate > 0.05
+            or projected_loss <= 0
+            or projected_loss > risk_budget
+        ):
+            return {
+                "success": False,
+                "reason": (
+                    "고정수량 주문의 예상 손실이 1회 손실 예산을 초과하거나 "
+                    "리스크 입력이 유효하지 않습니다"
+                ),
+                "per_trade_risk_blocked": True,
+                "projected_loss": projected_loss,
+                "risk_budget": risk_budget,
+            }
+
+        stop_loss = self.risk_manager.calculate_stop_loss(
+            fill_price,
+            atr,
+            regime_multiplier=regime_sl_mult,
+        )
+        tp_info = self.risk_manager.calculate_take_profit(
+            price,
+            regime_multiplier=regime_tp_mult,
+        )
         trailing_stop = self.risk_manager.calculate_trailing_stop(price, atr)
 
         order = self.order_book.create_order(
@@ -1192,24 +2038,26 @@ class OrderExecutor:
         # 주문 집행: 사이징만 건너뛰고, 집행 안전장치는 일반 매수와 동일하게 적용한다.
         actual_slippage_pct = None
         if self.mode == "live":
-            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            ttl_seconds = self._safe_order_guard_ttl(
+                "pending_order_ttl_seconds",
+                default=600,
+                minimum=60,
+            )
             persistent_block = self._persistent_live_order_block(symbol, order)
             if persistent_block:
                 return persistent_block
-            if OrderGuard.has_pending(symbol):
-                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
-                self._persist_order_record(order)
-                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             live_unfilled_block = self._live_unfilled_order_block(symbol, order)
             if live_unfilled_block:
                 self._persist_order_record(order)
                 return live_unfilled_block
 
-            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            guard_block = self._claim_live_order_guard(symbol, order, ttl_seconds)
+            if guard_block:
+                return guard_block
             order.transition(OrderStatus.SUBMITTED)
             self._persist_order_record(order)
 
-            order_result = self._execute_with_retry(
+            order_result = self._execute_authorized_kis_order(
                 self.kis_api.buy_order, symbol, quantity, int(price),
                 symbol=symbol, action="BUY", price=price, quantity=quantity,
                 strategy=strategy, signal_score=signal_score, reason=reason,
@@ -1238,7 +2086,6 @@ class OrderExecutor:
             self._report_execution_slippage(symbol, "BUY", expected_price, fill_price, actual_slippage_pct)
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
             self._persist_order_record(order)
-            OrderGuard.clear(symbol)
             # 체결가 기준 비용 재계산
             costs = self.risk_manager.calculate_transaction_costs(
                 fill_price, quantity, "BUY", avg_daily_volume=avg_daily_volume, symbol=symbol,
@@ -1249,39 +2096,40 @@ class OrderExecutor:
             order.transition(OrderStatus.FILLED, fill_qty=quantity, fill_price=fill_price)
         assert order.status == OrderStatus.FILLED, f"DB 반영 시점에 FILLED가 아님: {order.status}"
 
-        stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
-        tp_info = self.risk_manager.calculate_take_profit(fill_price)
-        trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
-
-        _order_at = datetime.now()
-        _trade = save_trade(
-            symbol=symbol,
-            action="BUY",
-            price=fill_price,
-            quantity=quantity,
-            commission=costs["commission"],
-            tax=0,
-            slippage=costs["slippage"],
-            strategy=strategy,
-            signal_score=signal_score,
-            reason=reason,
-            mode=self.mode,
-            account_key=self.account_key,
-            signal_at=_order_at,
-            order_at=_order_at,
-            expected_price=expected_price,
-            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
-            execution_session_id=execution_session_id,
-            order_id=order.order_id,
-        )
-        _log_op_event(
-            "SIGNAL",
-            f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
-            symbol=symbol,
-            strategy=strategy,
-            mode=self.mode,
-        )
+        _trade = None
         try:
+            stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
+            tp_info = self.risk_manager.calculate_take_profit(fill_price)
+            trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
+
+            _order_at = datetime.now()
+            _trade = save_trade(
+                symbol=symbol,
+                action="BUY",
+                price=fill_price,
+                quantity=quantity,
+                commission=costs["commission"],
+                tax=0,
+                slippage=costs["slippage"],
+                strategy=strategy,
+                signal_score=signal_score,
+                reason=reason,
+                mode=self.mode,
+                account_key=self.account_key,
+                signal_at=_order_at,
+                order_at=_order_at,
+                expected_price=expected_price,
+                actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
+                execution_session_id=execution_session_id,
+                order_id=order.order_id,
+            )
+            _log_op_event(
+                "SIGNAL",
+                f"BUY {symbol} {quantity}주 @ {price:,.0f}원",
+                symbol=symbol,
+                strategy=strategy,
+                mode=self.mode,
+            )
             save_position(
                 symbol=symbol,
                 avg_price=fill_price,
@@ -1291,12 +2139,25 @@ class OrderExecutor:
                 trailing_stop_price=trailing_stop,
                 strategy=strategy,
                 account_key=self.account_key,
+                mode=self.mode,
             )
-        except Exception:
+        except Exception as exc:
             # 원장 보상 롤백: 매매만 남으면 현금만 차감된 반쪽 원장 — 유령 낙폭과
             # 가드 오발동의 뿌리(2026-07-07 실측). 되돌리고 실패를 위로 알린다.
-            delete_trade_by_id(_trade.id)
+            if _trade is not None:
+                try:
+                    delete_trade_by_id(_trade.id)
+                except Exception:
+                    logger.exception("체결 후 고정수량 BUY 매매기록 보상 삭제 실패: {}", symbol)
+            self._halt_after_post_fill_ledger_failure(
+                order=order,
+                action="BUY",
+                error=exc,
+            )
             raise
+
+        if self.mode == "live":
+            OrderGuard.clear(symbol)
         log_trade("BUY", symbol, fill_price, quantity, reason)
 
         result = {
@@ -1311,13 +2172,14 @@ class OrderExecutor:
             "trailing_stop": trailing_stop,
             "costs": costs,
             "mode": self.mode,
-            "paper_fixed_quantity": True,
+            "fixed_quantity": True,
+            "paper_fixed_quantity": self.mode == "paper",
             "execution_session_id": execution_session_id,
             "order_id": order.order_id,
         }
         logger.info(
-            "✅ 고정수량 paper 매수 완료: {} {}주 @ {:,.0f}원",
-            symbol, quantity, fill_price,
+            "✅ 고정수량 {} 매수 완료: {} {}주 @ {:,.0f}원",
+            self.mode, symbol, quantity, fill_price,
         )
         return result
 
@@ -1362,19 +2224,41 @@ class OrderExecutor:
         execution_session_id: str = "",
     ) -> dict:
         """매도 주문 실제 로직 (Lock 내부에서 호출)."""
-        position = get_position(symbol, account_key=self.account_key)
+        position = get_position(symbol, account_key=self.account_key, mode=self.mode)
         if not position:
             logger.warning("종목 {} 보유 포지션 없음 — 매도 스킵", symbol)
             return {"success": False, "reason": "보유 포지션 없음"}
 
+        # 손실 방어 청산은 지정가가 현재가를 뒤쫓지 못해 미체결되는 위험보다
+        # 체결 확률을 우선한다. 현재가가 끊겨도 실전 시장가 주문은 평균단가를
+        # 손익 추정 기준으로 삼아 계속 진행한다.
+        is_emergency = self._is_emergency_sell_reason(reason)
         order_price = self._positive_order_price(price)
         if order_price is None:
-            reason_text = f"매도 가격 확인 실패: {symbol} 현재가 없음"
-            logger.warning("종목 {} 매도 스킵: {}", symbol, reason_text)
-            return {"success": False, "reason": reason_text, "price_invalid": True}
+            fallback_price = self._positive_order_price(
+                getattr(position, "avg_price", None)
+            )
+            if self.mode == "live" and is_emergency and fallback_price is not None:
+                order_price = fallback_price
+                logger.critical(
+                    "긴급 실전 청산 현재가 없음 — 평균단가를 참조가로 시장가 제출: {}",
+                    symbol,
+                )
+            else:
+                reason_text = f"매도 가격 확인 실패: {symbol} 현재가 없음"
+                logger.warning("종목 {} 매도 스킵: {}", symbol, reason_text)
+                return {"success": False, "reason": reason_text, "price_invalid": True}
         price = order_price
 
-        sell_qty = position.quantity if quantity is None else int(quantity)
+        raw_sell_qty = position.quantity if quantity is None else quantity
+        try:
+            sell_qty_value = float(raw_sell_qty)
+            sell_qty = int(sell_qty_value)
+        except (TypeError, ValueError, OverflowError):
+            sell_qty = 0
+            sell_qty_value = 0
+        if not math.isfinite(sell_qty_value) or sell_qty_value != sell_qty:
+            return {"success": False, "reason": "매도 수량은 유한한 정수여야 합니다"}
         if sell_qty <= 0:
             logger.warning("종목 {} 매도 수량 오류: {}", symbol, sell_qty)
             return {"success": False, "reason": "매도 수량은 1주 이상이어야 합니다"}
@@ -1393,7 +2277,6 @@ class OrderExecutor:
             }
 
         # 최소 보유 기간 검사 (손실 방어용 긴급 청산은 예외)
-        is_emergency = self._is_emergency_sell_reason(reason)
         if not is_emergency:
             min_hold = self._get_min_holding_days()
             if min_hold > 0 and getattr(position, "bought_at", None):
@@ -1422,25 +2305,33 @@ class OrderExecutor:
         )
 
         if self.mode == "live":
-            ttl_seconds = int(self.config.trading.get("pending_order_ttl_seconds", 600))
+            ttl_seconds = self._safe_order_guard_ttl(
+                "pending_order_ttl_seconds",
+                default=600,
+                minimum=60,
+            )
             persistent_block = self._persistent_live_order_block(symbol, order)
             if persistent_block:
                 return persistent_block
-            if OrderGuard.has_pending(symbol):
-                order.transition(OrderStatus.REJECTED, reason="OrderGuard pending")
-                self._persist_order_record(order)
-                return {"success": False, "reason": f"{symbol} 종목에 미체결/최근 주문이 남아 있어 중복 주문을 차단했습니다."}
             live_unfilled_block = self._live_unfilled_order_block(symbol, order)
             if live_unfilled_block:
                 self._persist_order_record(order)
                 return live_unfilled_block
 
-            OrderGuard.mark_pending(symbol, ttl_seconds=ttl_seconds)
+            guard_block = self._claim_live_order_guard(symbol, order, ttl_seconds)
+            if guard_block:
+                return guard_block
             order.transition(OrderStatus.SUBMITTED)
             self._persist_order_record(order)
 
-            order_result = self._execute_with_retry(
-                self.kis_api.sell_order, symbol, sell_qty, int(price),
+            broker_order_price = 0 if is_emergency else int(price)
+            broker_order_type = "01" if is_emergency else "00"
+            order_result = self._execute_authorized_kis_order(
+                self.kis_api.sell_order,
+                symbol,
+                sell_qty,
+                broker_order_price,
+                broker_order_type,
                 symbol=symbol, action="SELL", price=price, quantity=sell_qty,
                 strategy=strategy, signal_score=signal_score, reason=reason,
             )
@@ -1470,7 +2361,6 @@ class OrderExecutor:
             self._report_execution_slippage(symbol, "SELL", expected_price, fill_price, actual_slippage_pct)
             order.transition(OrderStatus.FILLED, fill_qty=sell_qty, fill_price=fill_price)
             self._persist_order_record(order)
-            OrderGuard.clear(symbol)
         else:
             # Paper mode: simulated broker event
             costs = self.risk_manager.calculate_transaction_costs(
@@ -1489,42 +2379,57 @@ class OrderExecutor:
         # FILLED 상태에서만 DB 반영 (invariant)
         assert order.status == OrderStatus.FILLED, f"SELL DB 반영 시점에 FILLED가 아님: {order.status}"
 
-        if self.mode == "live":
-            costs = self.risk_manager.calculate_transaction_costs(
-                fill_price,
-                sell_qty,
-                "SELL",
-                avg_daily_volume=avg_daily_volume,
-                avg_price=float(position.avg_price),
-                symbol=symbol,
-            )
-        total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
-        pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
-        pnl_rate = ((fill_price / position.avg_price) - 1) * 100
-
-        _trade = save_trade(
-            symbol=symbol, action="SELL", price=fill_price, quantity=sell_qty,
-            commission=costs["commission"], tax=total_tax, slippage=costs["slippage"],
-            strategy=strategy, signal_score=signal_score,
-            reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
-            mode=self.mode, account_key=self.account_key,
-            expected_price=expected_price,
-            actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
-            execution_session_id=execution_session_id,
-            order_id=order.order_id,
-        )
-
+        _trade = None
         remaining_pos = None
         try:
+            if self.mode == "live":
+                costs = self.risk_manager.calculate_transaction_costs(
+                    fill_price,
+                    sell_qty,
+                    "SELL",
+                    avg_daily_volume=avg_daily_volume,
+                    avg_price=float(position.avg_price),
+                    symbol=symbol,
+                )
+            total_tax = costs["tax"] + costs.get("capital_gains_tax", 0)
+            pnl = (fill_price - position.avg_price) * sell_qty - costs["commission"] - total_tax
+            pnl_rate = ((fill_price / position.avg_price) - 1) * 100
+
+            _trade = save_trade(
+                symbol=symbol, action="SELL", price=fill_price, quantity=sell_qty,
+                commission=costs["commission"], tax=total_tax, slippage=costs["slippage"],
+                strategy=strategy, signal_score=signal_score,
+                reason=f"{reason} | PnL: {pnl:,.0f}원 ({pnl_rate:.2f}%)",
+                mode=self.mode, account_key=self.account_key,
+                expected_price=expected_price,
+                actual_slippage_pct=actual_slippage_pct if self.mode == "live" else None,
+                execution_session_id=execution_session_id,
+                order_id=order.order_id,
+            )
+
             if sell_qty >= position.quantity:
-                delete_position(symbol, account_key=self.account_key)
+                delete_position(symbol, account_key=self.account_key, mode=self.mode)
             else:
-                remaining_pos = reduce_position(symbol, sell_qty, account_key=self.account_key)
-        except Exception:
+                remaining_pos = reduce_position(
+                    symbol, sell_qty, account_key=self.account_key, mode=self.mode
+                )
+        except Exception as exc:
             # 원장 보상 롤백(매수와 대칭): 매도 기록만 남고 포지션이 그대로면
             # 현금이 이중 계상된 반쪽 원장이 된다. 되돌리고 실패를 위로 알린다.
-            delete_trade_by_id(_trade.id)
+            if _trade is not None:
+                try:
+                    delete_trade_by_id(_trade.id)
+                except Exception:
+                    logger.exception("체결 후 SELL 매매기록 보상 삭제 실패: {}", symbol)
+            self._halt_after_post_fill_ledger_failure(
+                order=order,
+                action="SELL",
+                error=exc,
+            )
             raise
+
+        if self.mode == "live":
+            OrderGuard.clear(symbol)
         # 부분 익절 플래그 갱신은 보상 범위 밖 — 이 시점엔 매도·포지션 반영이 모두
         # 끝나 원장이 정합이고, 플래그 실패에 매매를 되돌리면 오히려 원장이 깨진다.
         if remaining_pos and reason == "TAKE_PROFIT_PARTIAL":
@@ -1534,7 +2439,7 @@ class OrderExecutor:
             # 부분 익절 완료 표시를 영속화해 다음 모니터링 사이클에서 재발동되지 않게 한다.
             update_position_targets(
                 symbol, take_profit_price=round(final_target, 0),
-                account_key=self.account_key, partial_tp_done=True,
+                account_key=self.account_key, partial_tp_done=True, mode=self.mode,
             )
 
         # 매매 로그
@@ -1584,7 +2489,7 @@ class OrderExecutor:
 
     def _check_stop_loss_take_profit_impl(self, symbol: str, current_price: float) -> dict:
         """SL/TP 실제 로직 (Lock 내부에서 호출)."""
-        position = get_position(symbol, account_key=self.account_key)
+        position = get_position(symbol, account_key=self.account_key, mode=self.mode)
         if not position:
             return {"action": None}
 
@@ -1601,7 +2506,13 @@ class OrderExecutor:
         ).get("fixed_rate", 0.03)
 
         from database.repositories import update_trailing_stop
-        update_trailing_stop(symbol, current_price, trailing_rate, account_key=self.account_key)
+        update_trailing_stop(
+            symbol,
+            current_price,
+            trailing_rate,
+            account_key=self.account_key,
+            mode=self.mode,
+        )
 
         # 1. 익절 체크 (최종 목표가 도달 → 전량 매도)
         if position.take_profit_price and current_price >= position.take_profit_price:
@@ -1636,7 +2547,7 @@ class OrderExecutor:
 
         # 3. 트레일링 스탑 체크 (이익 보호)
         # position 재조회 (trailing_stop_price가 업데이트되었을 수 있음)
-        position = get_position(symbol, account_key=self.account_key)
+        position = get_position(symbol, account_key=self.account_key, mode=self.mode)
         if position and position.trailing_stop_price and current_price <= position.trailing_stop_price:
             logger.warning(
                 "📉 트레일링 스탑 발동: {} 현재가={:,.0f} ≤ 스탑가={:,.0f}",
@@ -1931,6 +2842,11 @@ class OrderExecutor:
           다음 KIS↔DB 동기화에서 실제 체결분을 대조하게 한다.
         """
         self._persist_order_record(order)
+        self._halt_for_uncertain_live_execution(
+            order=order,
+            action=action,
+            reason="broker_order_response_unknown",
+        )
         logger.warning(
             "실전 주문 응답 유실 — 접수 여부 불명, 장부 반영 보류·reconcile 대기: {} {} order_id={} status={}",
             action, order.symbol, order.order_id, order.status.value,
@@ -1956,6 +2872,12 @@ class OrderExecutor:
         execution: dict,
     ) -> dict:
         self._persist_order_record(order)
+        self._halt_for_uncertain_live_execution(
+            order=order,
+            action=action,
+            reason=str(execution.get("reason") or "live_fill_unconfirmed"),
+            execution=execution,
+        )
         logger.warning(
             "실전 주문 체결 미확인 — 장부 반영 보류: {} {} order_id={} broker_order_id={} reason={}",
             action,
@@ -2154,6 +3076,16 @@ class OrderExecutor:
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
+        # BUY 진입 초기에 확인했더라도 실제 주문 생성 직전에
+        # 다시 읽어, 그 사이 긴급 청산 HALT가 설정된 경쟁을 차단한다.
+        halt_check = self._global_trading_halt_check(
+            action,
+            symbol=symbol,
+            strategy=strategy,
+        )
+        if not halt_check["allowed"]:
+            return halt_check
+
         monthly_cap = self._monthly_buy_cap_check(symbol, action)
         if not monthly_cap["allowed"]:
             return monthly_cap
@@ -2203,6 +3135,13 @@ class OrderExecutor:
             return liquidity_check
 
         return {"allowed": True, "reason": ""}
+
+    def _execute_authorized_kis_order(self, order_func, *args, **kwargs):
+        """저수준 KIS 실주문 API를 이 executor의 검증 구간에서만 연다."""
+        from api.kis_api import authorized_kis_order_submission
+
+        with authorized_kis_order_submission():
+            return self._execute_with_retry(order_func, *args, **kwargs)
 
     def _execute_with_retry(
         self,

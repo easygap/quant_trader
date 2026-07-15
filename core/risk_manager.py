@@ -91,18 +91,52 @@ class RiskManager:
         Returns:
             매수 가능 수량
         """
-        if entry_price <= 0:
+        if (
+            not isinstance(entry_price, (int, float, np.integer, np.floating))
+            or isinstance(entry_price, (bool, np.bool_))
+            or not np.isfinite(entry_price)
+            or entry_price <= 0
+        ):
             logger.warning("진입가가 0 이하 — 포지션 계산 불가 (entry_price={})", entry_price)
             return 0
 
-        if capital <= 0:
+        if (
+            not isinstance(capital, (int, float, np.integer, np.floating))
+            or isinstance(capital, (bool, np.bool_))
+            or not np.isfinite(capital)
+            or capital <= 0
+        ):
             logger.warning("자본이 0 이하 — 포지션 계산 불가")
             return 0
 
+        if (
+            not isinstance(stop_loss_price, (int, float, np.integer, np.floating))
+            or isinstance(stop_loss_price, (bool, np.bool_))
+            or not np.isfinite(stop_loss_price)
+            or stop_loss_price <= 0
+            or stop_loss_price >= entry_price
+        ):
+            logger.warning(
+                "손절가는 진입가보다 낮은 양수여야 함 — 포지션 계산 불가 "
+                "(entry_price={}, stop_loss_price={})",
+                entry_price,
+                stop_loss_price,
+            )
+            return 0
+
         max_risk = self.risk_params.get("position_sizing", {}).get("max_risk_per_trade", 0.01)
+        if (
+            not isinstance(max_risk, (int, float))
+            or isinstance(max_risk, bool)
+            or not np.isfinite(max_risk)
+            or max_risk <= 0
+            or max_risk > 0.05
+        ):
+            logger.error("max_risk_per_trade 설정 오류 — 신규 포지션 차단: {}", max_risk)
+            return 0
         risk_amount = capital * max_risk
 
-        risk_per_share = abs(entry_price - stop_loss_price)
+        risk_per_share = entry_price - stop_loss_price
         if risk_per_share <= 0:
             logger.warning("손절 폭이 0 이하 — 포지션 계산 불가")
             return 0
@@ -115,13 +149,18 @@ class RiskManager:
             )
             return 0
 
-        quantity = int(risk_amount / risk_per_share)
+        risk_capped_quantity = int(risk_amount / risk_per_share)
+        quantity = risk_capped_quantity
 
         # 신호 강도 기반 스케일링
         scale = self._signal_scale(signal_score)
         if scale != 1.0:
             quantity = int(quantity * scale)
             logger.debug("신호 강도 스케일링: score={} → scale={:.2f}", signal_score, scale)
+
+        # max_risk_per_trade는 이름 그대로 절대 상한이다. 신호 강도는 약한 신호의
+        # 수량을 줄일 수만 있고, 강한 신호가 이 손실 예산을 확대해서는 안 된다.
+        quantity = min(quantity, risk_capped_quantity)
 
         max_ratio = self.risk_params.get("diversification", {}).get("max_position_ratio", 0.20)
         max_invest = capital * max_ratio
@@ -134,7 +173,7 @@ class RiskManager:
             "포지션 계산: 자본={:,.0f} | 진입가={:,.0f} | 손절가={:,.0f} | "
             "1% 룰={}주 | 비중제한={}주 | 신호스케일={:.2f} | 최종={}주",
             capital, entry_price, stop_loss_price,
-            quantity, max_by_ratio, scale, final_qty,
+            risk_capped_quantity, max_by_ratio, min(scale, 1.0), final_qty,
         )
 
         return final_qty
@@ -175,13 +214,9 @@ class RiskManager:
             {"scale": float, "high_corr_symbols": list, "reason": str}
         """
         corr_cfg = self.risk_params.get("diversification", {}).get("correlation_risk", {})
-        if not corr_cfg.get("enabled", False) or not existing_symbols:
+        enabled = corr_cfg.get("enabled", False)
+        if enabled is False or enabled is None or not existing_symbols:
             return {"scale": 1.0, "high_corr_symbols": [], "reason": ""}
-
-        threshold = float(corr_cfg.get("high_corr_threshold", 0.7))
-        scale_factor = float(corr_cfg.get("high_corr_scale", 0.5))
-        strict = bool(corr_cfg.get("strict", True))
-        lb = lookback_days or int(corr_cfg.get("lookback_days", 60))
 
         def _blocked(reason: str, symbols: list[str] | None = None) -> dict:
             payload = {
@@ -193,6 +228,37 @@ class RiskManager:
             if symbols:
                 payload["missing_symbols"] = symbols
             return payload
+
+        if enabled is not True:
+            return _blocked("상관관계 리스크 설정 오류: enabled는 boolean이어야 함")
+        strict_raw = corr_cfg.get("strict", True)
+        if not isinstance(strict_raw, bool):
+            return _blocked("상관관계 리스크 설정 오류: strict는 boolean이어야 함")
+        strict = strict_raw
+        try:
+            threshold = float(corr_cfg.get("high_corr_threshold", 0.7))
+            scale_factor = float(corr_cfg.get("high_corr_scale", 0.5))
+            raw_lookback = (
+                lookback_days
+                if lookback_days is not None
+                else corr_cfg.get("lookback_days", 60)
+            )
+            if isinstance(raw_lookback, bool):
+                raise ValueError("boolean lookback")
+            lb = int(raw_lookback)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return _blocked(f"상관관계 리스크 설정 오류: {exc}")
+        if (
+            not np.isfinite(threshold)
+            or not np.isfinite(scale_factor)
+            or not (0 < threshold <= 1)
+            or not (0 < scale_factor <= 1)
+            or lb < 30
+        ):
+            return _blocked(
+                "상관관계 리스크 설정 오류: threshold/scale은 (0,1], "
+                "lookback_days는 30 이상이어야 함"
+            )
 
         try:
             from core.data_collector import DataCollector
@@ -293,14 +359,40 @@ class RiskManager:
         Returns:
             손절 가격
         """
+        try:
+            entry_price = float(entry_price)
+            regime_multiplier = float(regime_multiplier)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("손절가 계산 입력은 유한한 숫자여야 합니다") from exc
+        if not np.isfinite(entry_price) or entry_price <= 0:
+            raise ValueError(f"entry_price는 유한한 양수여야 합니다: {entry_price!r}")
+        if not np.isfinite(regime_multiplier) or regime_multiplier <= 0:
+            raise ValueError(
+                f"regime_multiplier는 유한한 양수여야 합니다: {regime_multiplier!r}"
+            )
+
         sl_config = self.risk_params.get("stop_loss", {})
         sl_type = sl_config.get("type", "fixed")
 
         if sl_type == "atr" and atr is not None:
-            multiplier = sl_config.get("atr_multiplier", 2.0)
+            try:
+                atr = float(atr)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("ATR은 유한한 양수여야 합니다") from exc
+            if not np.isfinite(atr) or atr <= 0:
+                raise ValueError(f"ATR은 유한한 양수여야 합니다: {atr!r}")
+            multiplier = float(sl_config.get("atr_multiplier", 2.0))
+            if not np.isfinite(multiplier) or multiplier <= 0:
+                raise ValueError(
+                    f"atr_multiplier는 유한한 양수여야 합니다: {multiplier!r}"
+                )
             stop_price = entry_price - (atr * multiplier * regime_multiplier)
         else:
-            fixed_rate = sl_config.get("fixed_rate", 0.03) * regime_multiplier
+            fixed_rate = float(sl_config.get("fixed_rate", 0.03)) * regime_multiplier
+            if not np.isfinite(fixed_rate) or fixed_rate <= 0:
+                raise ValueError(
+                    f"fixed stop-loss rate는 유한한 양수여야 합니다: {fixed_rate!r}"
+                )
             stop_price = entry_price * (1 - fixed_rate)
 
         stop_price = round(stop_price, 0)
@@ -413,6 +505,15 @@ class RiskManager:
                 "peak": 최고점,
             }
         """
+        try:
+            current_value = float(current_value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("MDD 평가금액은 유한한 양수여야 합니다") from exc
+        if not np.isfinite(current_value) or current_value <= 0:
+            raise ValueError(
+                f"MDD 평가금액은 유한한 양수여야 합니다: {current_value!r}"
+            )
+
         # 최고점 갱신
         if current_value > self._peak_value:
             self._peak_value = current_value
@@ -462,7 +563,16 @@ class RiskManager:
         Returns:
             True이면 매매 계속, False이면 중단
         """
-        if capital <= 0:
+        try:
+            daily_pnl = float(daily_pnl)
+            capital = float(capital)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not np.isfinite(daily_pnl)
+            or not np.isfinite(capital)
+            or capital <= 0
+        ):
             return False
         max_daily = self.risk_params.get("drawdown", {}).get("max_daily_loss", 0.03)
 
@@ -485,6 +595,120 @@ class RiskManager:
     # 분산 투자 체크
     # =============================================================
 
+    def check_projected_exposure(
+        self,
+        *,
+        current_positions: int,
+        position_value: float,
+        total_value: float,
+        available_cash: float | None,
+        current_invested: float,
+        existing_position_value: float = 0,
+        is_new_position: bool = True,
+        symbol: str = "",
+    ) -> dict:
+        """모든 BUY 경로가 공유하는 숫자 기반 최종 노출 상한 검사."""
+        div_config = self.risk_params.get("diversification", {})
+        try:
+            raw_max_positions = div_config.get("max_positions", 10)
+            if isinstance(raw_max_positions, bool):
+                raise ValueError("boolean max_positions")
+            max_positions = int(raw_max_positions)
+            max_ratio = float(div_config.get("max_position_ratio", 0.20))
+            max_investment_ratio = float(
+                div_config.get("max_investment_ratio", 0.70)
+            )
+            min_cash = float(div_config.get("min_cash_ratio", 0.20))
+            current_positions = int(current_positions)
+            position_value = self._value_in_krw_for_symbol(
+                symbol, float(position_value)
+            )
+            existing_position_value = self._value_in_krw_for_symbol(
+                symbol, float(existing_position_value)
+            )
+            total_value = float(total_value)
+            current_invested = float(current_invested)
+            available_cash = (
+                None if available_cash is None else float(available_cash)
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "can_buy": False,
+                "reason": f"노출 한도 입력/설정 오류: {exc}",
+                "exposure_check_failed": True,
+            }
+
+        numeric_values = (
+            max_ratio,
+            max_investment_ratio,
+            min_cash,
+            position_value,
+            existing_position_value,
+            total_value,
+            current_invested,
+        )
+        if available_cash is not None:
+            numeric_values += (available_cash,)
+        if (
+            not all(np.isfinite(value) for value in numeric_values)
+            or max_positions <= 0
+            or current_positions < 0
+            or not (0 < max_ratio <= 1)
+            or not (0 < max_investment_ratio <= 1)
+            or not (0 <= min_cash < 1)
+            or position_value <= 0
+            or existing_position_value < 0
+            or total_value <= 0
+            or current_invested < 0
+            or available_cash is not None and available_cash < 0
+        ):
+            return {
+                "can_buy": False,
+                "reason": "노출 한도 입력/설정에 NaN/Inf·음수 또는 잘못된 비율이 포함됨",
+                "exposure_check_failed": True,
+            }
+
+        projected_position_value = existing_position_value + position_value
+        projected_invested = current_invested + position_value
+        if is_new_position and current_positions >= max_positions:
+            return {
+                "can_buy": False,
+                "reason": f"최대 보유 종목({max_positions}개) 초과",
+            }
+        if projected_position_value / total_value > max_ratio:
+            return {
+                "can_buy": False,
+                "reason": f"단일 종목 비중 {max_ratio*100:.0f}% 초과",
+            }
+        if projected_invested / total_value > max_investment_ratio:
+            return {
+                "can_buy": False,
+                "reason": f"전체 투자 비중 {max_investment_ratio*100:.0f}% 초과",
+            }
+
+        # 현금이 명시되지 않아도 총자산-현재투자액으로 보수적으로 추정한다.
+        cash_before_order = (
+            available_cash
+            if available_cash is not None
+            else max(0.0, total_value - current_invested)
+        )
+        remaining_cash_ratio = (cash_before_order - position_value) / total_value
+        if remaining_cash_ratio < min_cash:
+            return {
+                "can_buy": False,
+                "reason": f"최소 현금 비중 {min_cash*100:.0f}% 미만",
+            }
+
+        return {
+            "can_buy": True,
+            "reason": "",
+            "position_value": position_value,
+            "existing_position_value": existing_position_value,
+            "projected_position_value": projected_position_value,
+            "projected_invested": projected_invested,
+            "remaining_cash_ratio": remaining_cash_ratio,
+        }
+
     def check_diversification(
         self,
         current_positions: int,
@@ -495,61 +719,69 @@ class RiskManager:
         symbol: str = "",
         sector_map: dict | None = None,
         positions: list | None = None,
+        existing_position_value: float = 0,
+        is_new_position: bool = True,
     ) -> dict:
         """
         분산 투자 규칙 확인 (종목 수·비중·투자비율·현금 + 업종 비중)
 
         Args:
             current_positions: 현재 보유 종목 수
-            position_value: 해당 종목 투자 금액
+            position_value: 이번 주문으로 추가될 투자 금액
             total_value: 총 포트폴리오 가치
             available_cash: 가용 현금
             current_invested: 현재 총 투자 금액
             symbol: 매수 대상 종목코드 (업종 체크용)
             sector_map: {종목코드: 업종명} 딕셔너리
             positions: 현재 보유 Position 객체 리스트 (업종 비중 계산용)
+            existing_position_value: 동일 종목의 기존 투자 금액
+            is_new_position: 이번 주문이 신규 종목 추가인지 여부
 
         Returns:
             {"can_buy": bool, "reason": str}
         """
         div_config = self.risk_params.get("diversification", {})
-        max_positions = div_config.get("max_positions", 10)
-        max_ratio = div_config.get("max_position_ratio", 0.20)
-        max_investment_ratio = div_config.get("max_investment_ratio", 0.70)
-        min_cash = div_config.get("min_cash_ratio", 0.20)
-        sector_map_strict = bool(div_config.get("sector_map_strict", True))
+        sector_map_strict = div_config.get("sector_map_strict", True)
+        if not isinstance(sector_map_strict, bool):
+            return {
+                "can_buy": False,
+                "reason": "업종 비중 설정 오류: sector_map_strict는 boolean이어야 함",
+            }
 
-        position_value = self._value_in_krw_for_symbol(symbol, float(position_value or 0))
+        position_value = float(position_value or 0)
+        existing_position_value = float(existing_position_value or 0)
         current_invested = float(current_invested or 0)
-
-        if current_positions >= max_positions:
-            return {"can_buy": False, "reason": f"최대 보유 종목({max_positions}개) 초과"}
-
-        if total_value > 0 and (position_value / total_value) > max_ratio:
-            return {"can_buy": False, "reason": f"단일 종목 비중 {max_ratio*100:.0f}% 초과"}
-
-        if total_value > 0:
-            projected_invested_ratio = (current_invested + position_value) / total_value
-            if projected_invested_ratio > max_investment_ratio:
-                return {
-                    "can_buy": False,
-                    "reason": f"전체 투자 비중 {max_investment_ratio*100:.0f}% 초과",
-                }
-
-        if available_cash is not None and total_value > 0:
-            remaining_cash = available_cash - position_value
-            remaining_cash_ratio = remaining_cash / total_value
-            if remaining_cash_ratio < min_cash:
-                return {
-                    "can_buy": False,
-                    "reason": f"최소 현금 비중 {min_cash*100:.0f}% 미만",
-                }
+        exposure = self.check_projected_exposure(
+            current_positions=current_positions,
+            position_value=position_value,
+            total_value=total_value,
+            available_cash=available_cash,
+            current_invested=current_invested,
+            existing_position_value=existing_position_value,
+            is_new_position=is_new_position,
+            symbol=symbol,
+        )
+        if not exposure["can_buy"]:
+            return exposure
+        position_value = float(exposure["position_value"])
 
         # 업종별 최대 비중 체크
         max_sector_ratio = div_config.get("max_sector_ratio")
+        if max_sector_ratio is not None:
+            try:
+                max_sector_ratio = float(max_sector_ratio)
+            except (TypeError, ValueError, OverflowError):
+                return {
+                    "can_buy": False,
+                    "reason": "업종 비중 설정 오류: max_sector_ratio가 숫자가 아님",
+                }
+            if not np.isfinite(max_sector_ratio) or not (0 < max_sector_ratio <= 1):
+                return {
+                    "can_buy": False,
+                    "reason": "업종 비중 설정 오류: max_sector_ratio는 (0,1]이어야 함",
+                }
         if (
             max_sector_ratio is not None
-            and max_sector_ratio > 0
             and total_value > 0
             and symbol
             and positions is not None
@@ -624,11 +856,41 @@ class RiskManager:
             {"allowed": 매수 허용 여부, "win_rate": 승률(0~1), "reason": 사유}
         """
         cfg = self.risk_params.get("performance_degradation", {})
-        if not cfg.get("enabled", False):
+        enabled = cfg.get("enabled", False)
+        if enabled is False or enabled is None:
             return {"allowed": True, "win_rate": None, "reason": ""}
-
-        min_win_rate = float(cfg.get("min_win_rate", 0.35))
-        min_sample = max(5, int(cfg.get("recent_trades", 20)) // 2)
+        if enabled is not True:
+            return {
+                "allowed": False,
+                "win_rate": None,
+                "reason": "성과 열화 설정 오류: enabled는 boolean이어야 함",
+                "performance_config_invalid": True,
+            }
+        try:
+            min_win_rate = float(cfg.get("min_win_rate", 0.35))
+            raw_recent_trades = cfg.get("recent_trades", 20)
+            if isinstance(raw_recent_trades, bool):
+                raise ValueError("boolean recent_trades")
+            recent_trades = int(raw_recent_trades)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {
+                "allowed": False,
+                "win_rate": None,
+                "reason": f"성과 열화 설정 오류: {exc}",
+                "performance_config_invalid": True,
+            }
+        if (
+            not np.isfinite(min_win_rate)
+            or not (0 < min_win_rate <= 1)
+            or recent_trades < 5
+        ):
+            return {
+                "allowed": False,
+                "win_rate": None,
+                "reason": "성과 열화 설정 오류: min_win_rate 또는 recent_trades 범위 오류",
+                "performance_config_invalid": True,
+            }
+        min_sample = max(5, recent_trades // 2)
 
         if not recent_sell_trades or len(recent_sell_trades) < min_sample:
             return {"allowed": True, "win_rate": None, "reason": ""}
@@ -670,7 +932,7 @@ class RiskManager:
         symbol: str = None,
     ) -> dict:
         """
-        거래 비용 계산 (수수료 + 증권거래세 + 슬리피지 + 양도소득세(선택))
+        거래 비용 계산 (수수료 + 매도 관련 세금 + 슬리피지 + 양도소득세(선택))
 
         Args:
             price: 체결 가격
@@ -679,14 +941,50 @@ class RiskManager:
             avg_daily_volume: 일평균 거래량 (동적 슬리피지용)
             avg_price: 매도 시 평균 매입 단가 (양도소득세 계산용; 대주주 해당 시)
             symbol: 종목코드 (선택). transaction_costs.tax_exempt_symbols에 있으면
-                매도세를 면제한다 — 국내 상장 ETF는 증권거래세 비과세인데 개별 주식
-                세율을 일괄 적용하면 ETF 바스켓의 비용이 과대계상된다(승격 게이트의
-                비용 상한 판정까지 왜곡). 미전달 시 기존 동작(일괄 과세) 유지.
+                증권거래세를 면제한다. 다만 holding_period_income_tax.symbols에 등록된
+                기타 ETF는 양(+)의 매매차익에 보유기간 과세를 별도로 반영한다.
+                미전달 시 기존 동작(일괄 거래세 과세) 유지.
 
         Returns:
-            commission(수수료), tax(증권거래세+농특세 매도 시 0.20%), capital_gains_tax(양도소득세, 설정 시),
-            slippage, total_cost, effective_price 등.
+            commission(수수료), transaction_tax(증권거래세+농특세),
+            holding_period_income_tax(기타 ETF 보유기간 과세), tax(두 세금 합계),
+            capital_gains_tax(양도소득세, 설정 시), slippage, total_cost,
+            effective_price 등.
         """
+        if (
+            not isinstance(price, (int, float, np.integer, np.floating))
+            or isinstance(price, (bool, np.bool_))
+            or not np.isfinite(price)
+            or price <= 0
+        ):
+            raise ValueError(f"price는 유한한 양수여야 합니다: {price!r}")
+        if (
+            not isinstance(quantity, (int, float, np.integer, np.floating))
+            or isinstance(quantity, (bool, np.bool_))
+            or not np.isfinite(quantity)
+            or quantity <= 0
+        ):
+            raise ValueError(f"quantity는 유한한 양수여야 합니다: {quantity!r}")
+        action = str(action).upper()
+        if action not in {"BUY", "SELL"}:
+            raise ValueError(f"action은 BUY 또는 SELL이어야 합니다: {action!r}")
+        if avg_daily_volume is not None and (
+            not isinstance(avg_daily_volume, (int, float, np.integer, np.floating))
+            or isinstance(avg_daily_volume, (bool, np.bool_))
+            or not np.isfinite(avg_daily_volume)
+            or avg_daily_volume < 0
+        ):
+            raise ValueError(
+                f"avg_daily_volume은 0 이상의 유한한 수여야 합니다: {avg_daily_volume!r}"
+            )
+        if avg_price is not None and (
+            not isinstance(avg_price, (int, float, np.integer, np.floating))
+            or isinstance(avg_price, (bool, np.bool_))
+            or not np.isfinite(avg_price)
+            or avg_price <= 0
+        ):
+            raise ValueError(f"avg_price는 유한한 양수여야 합니다: {avg_price!r}")
+
         costs = self.risk_params.get("transaction_costs", {})
         amount = price * quantity
 
@@ -724,13 +1022,36 @@ class RiskManager:
         slippage_rate_effective = slippage_per_share / price if price > 0 else 0
 
         # 증권거래세+농특세: 매도 금액의 0.20% (2026년~ 코스피·코스닥 동일; ETF는 면제)
-        tax = 0
-        if action.upper() == "SELL":
-            tax = amount * sell_tax_rate
+        transaction_tax = 0.0
+        if action == "SELL":
+            transaction_tax = amount * sell_tax_rate
+
+        # 국내주식형이 아닌 ETF의 보유기간 과세. 법정 과세표준은
+        # min(양의 매매차익, 양의 과표기준가격 증분)이지만 일별 과표기준가를 현재
+        # 데이터 파이프라인이 제공하지 않는다. 등록 종목은 양의 매매차익 전액을
+        # 과세표준으로 잡아 세후 성과를 낙관하지 않는 보수적 상한을 사용한다.
+        holding_period_income_tax = 0.0
+        holding_tax_cfg = costs.get("holding_period_income_tax", {}) or {}
+        holding_tax_symbols = {
+            str(s) for s in (holding_tax_cfg.get("symbols") or [])
+        }
+        if (
+            action == "SELL"
+            and holding_tax_cfg.get("enabled", False)
+            and symbol is not None
+            and str(symbol) in holding_tax_symbols
+            and avg_price is not None
+        ):
+            taxable_gain = max(0.0, (price - avg_price) * quantity)
+            holding_period_income_tax = taxable_gain * float(
+                holding_tax_cfg.get("rate", 0.154)
+            )
+
+        tax = transaction_tax + holding_period_income_tax
 
         # 양도소득세 (대주주 해당 시만; enabled 시 실현 이익에 대해 부과)
         capital_gains_tax = 0
-        if action.upper() == "SELL" and avg_price is not None and quantity > 0:
+        if action == "SELL" and avg_price is not None and quantity > 0:
             cgt_cfg = costs.get("capital_gains_tax", {}) or {}
             if cgt_cfg.get("enabled", False):
                 gain = (price - avg_price) * quantity
@@ -740,18 +1061,22 @@ class RiskManager:
         total_cost = commission + tax + slippage + capital_gains_tax
 
         # 실효 가격 (매수 시 높게, 매도 시 낮게; 증권거래세·슬리피지 반영, 양도소득세는 별도)
-        if action.upper() == "BUY":
+        if action == "BUY":
             effective_price = price * (1 + costs.get("commission_rate", 0) + slippage_rate_effective)
             execution_price = price + slippage_per_share
         else:
-            effective_price = price * (
-                1 - costs.get("commission_rate", 0) - slippage_rate_effective - sell_tax_rate
+            effective_price = (
+                (amount - commission - slippage - tax - capital_gains_tax) / quantity
+                if quantity > 0
+                else 0
             )
             execution_price = max(0, price - slippage_per_share)
 
         return {
             "commission": round(commission, 0),
             "tax": round(tax, 0),
+            "transaction_tax": round(transaction_tax, 0),
+            "holding_period_income_tax": round(holding_period_income_tax, 0),
             "capital_gains_tax": round(capital_gains_tax, 0),
             "slippage": round(slippage, 0),
             "total_cost": round(total_cost, 0),

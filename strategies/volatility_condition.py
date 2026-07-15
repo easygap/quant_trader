@@ -48,7 +48,11 @@ class VolatilityConditionStrategy(BaseStrategy):
         close = result["close"].astype(float)
         ret = close.pct_change().dropna()
         # 롤링 표준편차 * sqrt(252) = 연율화 변동성 (% 단위로 하려면 *100)
-        vol = ret.rolling(lookback, min_periods=min(10, lookback)).std() * np.sqrt(252) * 100
+        vol = (
+            ret.rolling(lookback, min_periods=min(10, lookback)).std()
+            * np.sqrt(252)
+            * 100
+        ).reindex(result.index)
         result["realized_vol_pct"] = vol
 
         # 스코어: 낮은 변동성 = 양수, 높은 변동성 = 음수 (정규화 -1~1 수준)
@@ -56,8 +60,15 @@ class VolatilityConditionStrategy(BaseStrategy):
         result["strategy_score"] = np.clip((mid - vol) / max(mid, 1), -2, 2)
 
         result["signal"] = self.HOLD
-        result.loc[vol <= low_max, "signal"] = self.BUY
-        result.loc[vol >= high_min, "signal"] = self.SELL
+        # pct_change().dropna() removes the first row, so rolling volatility has
+        # a shorter index unless it is explicitly aligned. Pandas 3 treats an
+        # unaligned boolean Series passed to .loc as labels and can raise
+        # ``TypeError: unhashable type: 'Series'``. Keep masks on result.index
+        # on every supported pandas version.
+        low_vol_mask = vol.le(low_max).reindex(result.index, fill_value=False)
+        high_vol_mask = vol.ge(high_min).reindex(result.index, fill_value=False)
+        result.loc[low_vol_mask, "signal"] = self.BUY
+        result.loc[high_vol_mask, "signal"] = self.SELL
         return result
 
     def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:

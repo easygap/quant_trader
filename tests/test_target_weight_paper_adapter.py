@@ -1043,6 +1043,7 @@ class SimpleCostRiskManager:
         self.commission_rate = commission_rate
         self.slippage_per_share = slippage_per_share
         self.tax_rate = tax_rate
+        self.calls = []
         self.risk_params = {
             "diversification": {
                 "max_position_ratio": max_position_ratio,
@@ -1059,7 +1060,13 @@ class SimpleCostRiskManager:
         action="BUY",
         avg_daily_volume=None,
         avg_price=None,
+        symbol=None,
     ):
+        self.calls.append({
+            "action": action,
+            "symbol": symbol,
+            "quantity": quantity,
+        })
         commission = round(price * quantity * self.commission_rate, 0)
         tax = round(price * quantity * self.tax_rate, 0) if action.upper() == "SELL" else 0
         slippage = round(self.slippage_per_share * quantity, 0)
@@ -10506,12 +10513,13 @@ def test_assess_plan_pre_trade_risk_passes_when_cash_covers_costed_orders():
     from tools.target_weight_rotation_pilot import assess_plan_pre_trade_risk
 
     plan = _adapter_plan()
+    risk_manager = SimpleCostRiskManager(
+        commission_rate=0.001,
+        slippage_per_share=1.0,
+    )
     risk = assess_plan_pre_trade_risk(
         plan,
-        risk_manager=SimpleCostRiskManager(
-            commission_rate=0.001,
-            slippage_per_share=1.0,
-        ),
+        risk_manager=risk_manager,
     )
 
     assert risk["complete"] is True
@@ -10520,6 +10528,9 @@ def test_assess_plan_pre_trade_risk_passes_when_cash_covers_costed_orders():
     assert risk["cost_summary"]["commission"] > 0
     assert risk["cost_summary"]["slippage"] > 0
     assert risk["order_costs"][0]["avg_daily_volume"] == 1_000_000.0
+    assert [call["symbol"] for call in risk_manager.calls] == [
+        order.symbol for order in plan.orders
+    ]
 
 
 def test_assess_plan_pre_trade_risk_blocks_cash_shortfall_after_costs():
@@ -13768,6 +13779,7 @@ def test_target_weight_execution_evidence_flows_to_promotion_and_live_gate(monke
         promotion_dir=promotion_dir,
         evidence_dir=evidence_dir,
         current_git_hash="abc123",
+        current_git_worktree_state=(True, ""),
         now=datetime(2026, 4, 10, 12, 0, 0),
     )
 

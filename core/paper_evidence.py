@@ -404,6 +404,7 @@ def _probe_portfolio_metrics(account_key: str, date: datetime) -> dict:
         snap = (
             session.query(PortfolioSnapshot)
             .filter(
+                PortfolioSnapshot.mode == "paper",
                 PortfolioSnapshot.account_key == ak,
                 PortfolioSnapshot.date >= day_start,
                 PortfolioSnapshot.date < day_end,
@@ -437,6 +438,7 @@ def _probe_portfolio_metrics(account_key: str, date: datetime) -> dict:
         prev_snap = (
             session.query(PortfolioSnapshot)
             .filter(
+                PortfolioSnapshot.mode == "paper",
                 PortfolioSnapshot.account_key == ak,
                 PortfolioSnapshot.date < day_start,
             )
@@ -646,7 +648,10 @@ def _collect_execution_ops_metrics(
         # --- phantom position ---
         positions = (
             session.query(Position)
-            .filter(Position.account_key == (account_key or ""))
+            .filter(
+                Position.mode == "paper",
+                Position.account_key == (account_key or ""),
+            )
             .all()
         )
         lookback = date - timedelta(days=90)
@@ -913,6 +918,7 @@ def _cross_validate(portfolio: dict, trades: dict, account_key: str, date: datet
         snap = (
             session.query(PortfolioSnapshot)
             .filter(
+                PortfolioSnapshot.mode == "paper",
                 PortfolioSnapshot.account_key == (account_key or ""),
                 PortfolioSnapshot.date >= day_start,
                 PortfolioSnapshot.date < day_end,

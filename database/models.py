@@ -113,6 +113,9 @@ class Position(Base):
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(
+        String(20), default="paper", server_default="paper", nullable=False, index=True
+    )  # paper / live (legacy migration rows may be quarantined as legacy)
     account_key = Column(String(64), default="", nullable=False, index=True)  # 전략/계좌 구분
     symbol = Column(String(20), nullable=False)                # 종목 코드
     avg_price = Column(Float, nullable=False)                   # 평균 매수가
@@ -127,10 +130,17 @@ class Position(Base):
     bought_at = Column(DateTime, default=datetime.now)          # 최초 매수 시점
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-    __table_args__ = (UniqueConstraint("account_key", "symbol", name="uq_positions_account_symbol"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "mode", "account_key", "symbol", name="uq_positions_mode_account_symbol"
+        ),
+    )
 
     def __repr__(self):
-        return f"<Position(account={self.account_key!r}, {self.symbol}, {self.quantity}주, 평균가={self.avg_price:,.0f})>"
+        return (
+            f"<Position(mode={self.mode!r}, account={self.account_key!r}, "
+            f"{self.symbol}, {self.quantity}주, 평균가={self.avg_price:,.0f})>"
+        )
 
     @property
     def current_value(self):
@@ -147,6 +157,9 @@ class PortfolioSnapshot(Base):
     __tablename__ = "portfolio_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(
+        String(20), default="paper", server_default="paper", nullable=False, index=True
+    )  # paper / live (legacy migration rows may be quarantined as legacy)
     account_key = Column(String(64), default="", nullable=False, index=True)
     date = Column(DateTime, nullable=False)                     # 기록 날짜
     total_value = Column(Float, nullable=False)                 # 총 평가 금액
@@ -159,10 +172,17 @@ class PortfolioSnapshot(Base):
     position_count = Column(Integer, default=0)                 # 보유 종목 수
     created_at = Column(DateTime, default=datetime.now)
 
-    __table_args__ = (UniqueConstraint("account_key", "date", name="uq_snapshots_account_date"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "mode", "account_key", "date", name="uq_snapshots_mode_account_date"
+        ),
+    )
 
     def __repr__(self):
-        return f"<Snapshot(account={self.account_key!r}, {self.date}, 총={self.total_value:,.0f})>"
+        return (
+            f"<Snapshot(mode={self.mode!r}, account={self.account_key!r}, "
+            f"{self.date}, 총={self.total_value:,.0f})>"
+        )
 
 
 class DailyReport(Base):
@@ -590,136 +610,441 @@ def _migrate_positions_partial_tp_done(engine):
                 raise
 
 
-def _migrate_snapshot_unique_constraint(engine):
-    """portfolio_snapshots의 구버전 UNIQUE(date) 단독 제약을 (account_key, date)로 재구축.
+def _sqlite_table_columns(conn, table_name):
+    """SQLite 테이블 컬럼 메타데이터를 name 키로 반환한다."""
+    from sqlalchemy import text
 
-    account_key 도입 전 스키마의 유산: date 단독 유니크라 두 번째 계정(예: kr_pocket)이
-    같은 날 스냅샷을 저장하는 순간 IntegrityError로 조용히 유실된다(2026-07-06 실측).
-    SQLite는 인라인 UNIQUE 삭제가 불가하므로 표준 재구축(rename → 신 스키마 생성 →
-    복사 → 검증 → 구 테이블 삭제)을 쓴다. 멱등이며, 중간 중단 시 다음 초기화에서
-    legacy 테이블을 감지해 복사부터 재개한다(INSERT OR IGNORE + PK로 중복 안전).
+    rows = conn.execute(text(f'PRAGMA table_info("{table_name}")')).fetchall()
+    return {str(row[1]): row for row in rows}
+
+
+def _sqlite_has_unique_columns(conn, table_name, expected_columns):
+    """SQLite UNIQUE 인덱스의 컬럼 순서를 이름에 의존하지 않고 검증한다."""
+    from sqlalchemy import text
+
+    for index_row in conn.execute(text(f'PRAGMA index_list("{table_name}")')).fetchall():
+        if not bool(index_row[2]):
+            continue
+        index_name = str(index_row[1]).replace('"', '""')
+        columns = tuple(
+            str(row[2])
+            for row in conn.execute(text(f'PRAGMA index_info("{index_name}")')).fetchall()
+        )
+        if columns == tuple(expected_columns):
+            return True
+    return False
+
+
+def _sqlite_mode_column_ready(conn, table_name):
+    """mode가 NOT NULL이고 DB 기본값이 paper인지 확인한다."""
+    row = _sqlite_table_columns(conn, table_name).get("mode")
+    if row is None or not bool(row[3]):
+        return False
+    default = str(row[4] or "").strip().strip("()").strip().strip("'\"").lower()
+    return default == "paper"
+
+
+def _sqlite_drop_rebuild_indexes(conn, legacy_name):
+    """rename된 테이블의 명시적 인덱스 이름을 신 테이블에 반납한다.
+
+    SQLite의 ALTER TABLE RENAME은 `ix_positions_account_key` 같은 인덱스
+    이름을 그대로 유지한다. 이를 남겨 두면 create_all이 신 테이블의
+    동명 인덱스를 만들지 못한다. UNIQUE 제약의 auto-index(origin=u)는
+    테이블과 함께 보존해야 하므로 일반 인덱스(origin=c)만 제거한다.
     """
     from sqlalchemy import text
 
-    if engine.url.get_dialect().name != "sqlite":
-        return
-    cols = (
-        "id, date, total_value, cash, invested, daily_return, cumulative_return, "
-        "mdd, position_count, created_at, account_key, peak_value"
+    for row in conn.execute(text(f'PRAGMA index_list("{legacy_name}")')).fetchall():
+        origin = str(row[3]) if len(row) > 3 else "c"
+        name = str(row[1])
+        if origin == "c" and not name.startswith("sqlite_autoindex_"):
+            quoted = name.replace('"', '""')
+            conn.execute(text(f'DROP INDEX IF EXISTS "{quoted}"'))
+
+
+def _sqlite_inferred_mode_expression(conn, ledger, source_alias="legacy"):
+    """기존 장부 행의 모드를 거래 이력에서 보수적으로 역산한다.
+
+    Position은 account_key+symbol, Snapshot은 account_key의 거래 mode 집합이
+    정확히 하나일 때만 그 mode로 귀속한다. 무이력·혼합 이력은
+    paper/live 어느 쪽에도 잘못 영향을 주지 않도록 legacy로 격리한다.
+    """
+    columns = _sqlite_table_columns(conn, "trade_history")
+    required = {"account_key", "mode"}
+    if ledger == "position":
+        required.add("symbol")
+    if not required.issubset(columns):
+        return "'legacy'"
+
+    join = f"th.account_key = {source_alias}.account_key"
+    if ledger == "position":
+        join += f" AND th.symbol = {source_alias}.symbol"
+    valid = "NULLIF(TRIM(th.mode), '') IS NOT NULL"
+    return (
+        "CASE WHEN ("
+        "SELECT COUNT(DISTINCT LOWER(TRIM(th.mode))) FROM trade_history AS th "
+        f"WHERE {join} AND {valid}"
+        ") = 1 THEN ("
+        "SELECT MIN(LOWER(TRIM(th.mode))) FROM trade_history AS th "
+        f"WHERE {join} AND {valid}"
+        ") ELSE 'legacy' END"
     )
-    legacy_name = "portfolio_snapshots_legacy_uq"
 
+
+def _sqlite_rebuild_mode_ledger(
+    engine,
+    *,
+    table_name,
+    legacy_name,
+    target_columns,
+    missing_defaults,
+    ledger,
+    expected_unique,
+    verify_keys,
+):
+    """rename 후 복사 단계를 멱등·중단 복구 가능하게 수행한다."""
+    from sqlalchemy import text
+
+    # 중단이 rename 직후였더라도 인덱스 충돌 제거부터 재개한다.
     with engine.connect() as conn:
-        legacy_exists = conn.execute(text(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:n"
-        ), {"n": legacy_name}).scalar()
+        _sqlite_drop_rebuild_indexes(conn, legacy_name)
+        conn.commit()
 
-        if not legacy_exists:
-            ddl = conn.execute(text(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='portfolio_snapshots'"
-            )).scalar()
-            if not ddl:
-                return
-            normalized = " ".join(str(ddl).split()).lower()
-            is_legacy = (
-                "unique (date)" in normalized
-                and "uq_snapshots_account_date" not in normalized
-            )
-            if not is_legacy:
-                return
-            logger.warning(
-                "portfolio_snapshots 구버전 UNIQUE(date) 감지 — (account_key, date) 복합 제약으로 재구축"
-            )
-            conn.execute(text(
-                f"ALTER TABLE portfolio_snapshots RENAME TO {legacy_name}"
-            ))
-            conn.commit()
-
-    # 신 스키마 재생성 (rename으로 본 테이블이 사라졌으므로 create_all이 새로 만든다)
     Base.metadata.create_all(engine)
 
     with engine.connect() as conn:
-        before = conn.execute(text(f"SELECT COUNT(*) FROM {legacy_name}")).scalar()
+        if not _sqlite_has_unique_columns(conn, table_name, expected_unique):
+            raise RuntimeError(
+                f"{table_name} 신규 복합 UNIQUE 생성 실패 — legacy 테이블 보존"
+            )
+        if not _sqlite_mode_column_ready(conn, table_name):
+            raise RuntimeError(
+                f"{table_name}.mode NOT NULL/DEFAULT paper 생성 실패 — legacy 테이블 보존"
+            )
+
+        source_columns = _sqlite_table_columns(conn, legacy_name)
+        inferred_mode = _sqlite_inferred_mode_expression(conn, ledger)
+        select_expressions = []
+        for column in target_columns:
+            if column == "mode":
+                if column in source_columns:
+                    select_expressions.append(
+                        "COALESCE(NULLIF(LOWER(TRIM(legacy.mode)), ''), "
+                        f"{inferred_mode})"
+                    )
+                else:
+                    select_expressions.append(inferred_mode)
+            elif column in source_columns:
+                select_expressions.append(f'legacy."{column}"')
+            else:
+                select_expressions.append(missing_defaults.get(column, "NULL"))
+
+        quoted_columns = ", ".join(f'"{column}"' for column in target_columns)
+        select_sql = ", ".join(select_expressions)
+        before = int(conn.execute(text(f'SELECT COUNT(*) FROM "{legacy_name}"')).scalar() or 0)
         conn.execute(text(
-            f"INSERT OR IGNORE INTO portfolio_snapshots ({cols}) SELECT {cols} FROM {legacy_name}"
+            f'INSERT OR IGNORE INTO "{table_name}" ({quoted_columns}) '
+            f'SELECT {select_sql} FROM "{legacy_name}" AS legacy'
         ))
-        after = conn.execute(text("SELECT COUNT(*) FROM portfolio_snapshots")).scalar()
-        if after < before:
+
+        key_match = " AND ".join(
+            f'(target."{column}" = legacy."{column}" OR '
+            f'(target."{column}" IS NULL AND legacy."{column}" IS NULL))'
+            for column in verify_keys
+        )
+        copied = int(conn.execute(text(
+            f'SELECT COUNT(*) FROM "{legacy_name}" AS legacy '
+            f'JOIN "{table_name}" AS target ON target.id = legacy.id AND {key_match}'
+        )).scalar() or 0)
+        if copied != before:
             conn.rollback()
             raise RuntimeError(
-                f"스냅샷 재구축 검증 실패: 복사 후 {after} < 원본 {before} — legacy 테이블 보존"
+                f"{table_name} 재구축 검증 실패: {copied}/{before}행 복사 확인 — "
+                "legacy 테이블 보존"
             )
-        conn.execute(text(f"DROP TABLE {legacy_name}"))
+
+        conn.execute(text(f'DROP TABLE "{legacy_name}"'))
         conn.commit()
-        logger.info("portfolio_snapshots 재구축 완료: {}행, 복합 유니크(account_key, date)", after)
+        logger.info(
+            "{} 재구축 완료: {}행, mode 격리 UNIQUE{}",
+            table_name,
+            before,
+            expected_unique,
+        )
+
+
+def _postgres_unique_constraints(conn, table_name):
+    """현재 search_path의 PostgreSQL UNIQUE 제약 {name: normalized definition}."""
+    from sqlalchemy import text
+
+    rows = conn.execute(text(
+        "SELECT c.conname, pg_get_constraintdef(c.oid) "
+        "FROM pg_constraint AS c "
+        "WHERE c.conrelid = to_regclass(:table_name) AND c.contype = 'u'"
+    ), {"table_name": table_name}).fetchall()
+    return {
+        str(row[0]): "".join(str(row[1]).lower().replace('"', '').split())
+        for row in rows
+    }
+
+
+def _postgres_trade_history_supports(conn, required_columns):
+    from sqlalchemy import text
+
+    count = conn.execute(text(
+        "SELECT COUNT(DISTINCT column_name) FROM information_schema.columns "
+        "WHERE table_schema = ANY(current_schemas(false)) "
+        "AND table_name = 'trade_history' AND column_name = ANY(:columns)"
+    ), {"columns": list(required_columns)}).scalar()
+    return int(count or 0) == len(required_columns)
+
+
+def _postgres_migrate_mode_ledger(
+    engine,
+    *,
+    table_name,
+    constraint_name,
+    expected_unique,
+    obsolete_unique,
+    inference_sql,
+    required_trade_columns,
+):
+    """PostgreSQL 장부 모드/제약을 하나의 DDL 트랜잭션으로 전환한다."""
+    from sqlalchemy import text
+
+    table_ident = engine.dialect.identifier_preparer.quote(table_name)
+    constraint_ident = engine.dialect.identifier_preparer.quote(constraint_name)
+    desired_definition = "unique(" + ",".join(expected_unique) + ")"
+    obsolete_definitions = {
+        "unique(" + ",".join(columns) + ")" for columns in obsolete_unique
+    }
+
+    # PostgreSQL DDL은 transactional이므로 중간 중단 시 전체가 rollback된다.
+    with engine.begin() as conn:
+        if conn.execute(text("SELECT to_regclass(:table_name)"), {
+            "table_name": table_name,
+        }).scalar() is None:
+            return
+
+        constraints = _postgres_unique_constraints(conn, table_name)
+        already_scoped = desired_definition in constraints.values()
+
+        conn.execute(text(
+            f"ALTER TABLE {table_ident} ADD COLUMN IF NOT EXISTS mode VARCHAR(20)"
+        ))
+        conn.execute(text(
+            f"UPDATE {table_ident} SET mode = LOWER(BTRIM(mode)) WHERE mode IS NOT NULL"
+        ))
+
+        # 완료 제약이 이미 있으면 과거 legacy 행을 새 거래 이력으로
+        # 재분류하지 않는다. 제약 전환 중인 최초 1회에만 역산한다.
+        if not already_scoped and _postgres_trade_history_supports(
+            conn, required_trade_columns
+        ):
+            conn.execute(text(inference_sql))
+        conn.execute(text(
+            f"UPDATE {table_ident} SET mode = 'legacy' "
+            "WHERE mode IS NULL OR BTRIM(mode) = ''"
+        ))
+        conn.execute(text(
+            f"ALTER TABLE {table_ident} ALTER COLUMN mode SET DEFAULT 'paper'"
+        ))
+        conn.execute(text(
+            f"ALTER TABLE {table_ident} ALTER COLUMN mode SET NOT NULL"
+        ))
+
+        constraints = _postgres_unique_constraints(conn, table_name)
+        for name, definition in constraints.items():
+            if definition in obsolete_definitions:
+                quoted_name = engine.dialect.identifier_preparer.quote(name)
+                conn.execute(text(
+                    f"ALTER TABLE {table_ident} DROP CONSTRAINT {quoted_name}"
+                ))
+        if desired_definition not in constraints.values():
+            columns = ", ".join(
+                engine.dialect.identifier_preparer.quote(column)
+                for column in expected_unique
+            )
+            conn.execute(text(
+                f"ALTER TABLE {table_ident} ADD CONSTRAINT {constraint_ident} "
+                f"UNIQUE ({columns})"
+            ))
+
+
+def _migrate_snapshot_unique_constraint(engine):
+    """Snapshot을 (mode, account_key, date)로 격리하고 기존 행을 보수적 이전.
+
+    SQLite는 rename/create/copy/verify/drop을 중단 후 재개 가능하게 수행한다.
+    PostgreSQL은 transactional DDL로 전체 전환을 원자적으로 수행한다.
+    기존 mode가 없으면 account_key의 거래 mode가 하나일 때만 귀속하고,
+    혼합·무이력은 legacy로 격리한다.
+    """
+    from sqlalchemy import text
+
+    dialect = engine.url.get_dialect().name
+    expected_unique = ("mode", "account_key", "date")
+    if dialect == "postgresql":
+        _postgres_migrate_mode_ledger(
+            engine,
+            table_name="portfolio_snapshots",
+            constraint_name="uq_snapshots_mode_account_date",
+            expected_unique=expected_unique,
+            obsolete_unique=(("date",), ("account_key", "date")),
+            required_trade_columns=("account_key", "mode"),
+            inference_sql="""
+                WITH inferred AS (
+                    SELECT s.id,
+                           CASE WHEN COUNT(DISTINCT LOWER(BTRIM(t.mode))) FILTER (
+                                    WHERE NULLIF(BTRIM(t.mode), '') IS NOT NULL
+                                ) = 1
+                                THEN MIN(LOWER(BTRIM(t.mode))) FILTER (
+                                    WHERE NULLIF(BTRIM(t.mode), '') IS NOT NULL
+                                )
+                                ELSE 'legacy'
+                           END AS inferred_mode
+                    FROM portfolio_snapshots AS s
+                    LEFT JOIN trade_history AS t ON t.account_key = s.account_key
+                    GROUP BY s.id
+                )
+                UPDATE portfolio_snapshots AS s
+                SET mode = inferred.inferred_mode
+                FROM inferred
+                WHERE s.id = inferred.id
+                  AND (s.mode IS NULL OR BTRIM(s.mode) = '' OR s.mode = 'legacy')
+            """,
+        )
+        return
+    if dialect != "sqlite":
+        return
+
+    table_name = "portfolio_snapshots"
+    legacy_name = "portfolio_snapshots_legacy_uq"
+    with engine.connect() as conn:
+        legacy_exists = bool(conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
+        ), {"name": legacy_name}).scalar())
+        if not legacy_exists:
+            table_exists = bool(conn.execute(text(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
+            ), {"name": table_name}).scalar())
+            if not table_exists:
+                return
+            if (
+                _sqlite_has_unique_columns(conn, table_name, expected_unique)
+                and _sqlite_mode_column_ready(conn, table_name)
+            ):
+                return
+            logger.warning(
+                "portfolio_snapshots 장부를 UNIQUE(mode, account_key, date)로 재구축"
+            )
+            conn.execute(text(
+                f'ALTER TABLE "{table_name}" RENAME TO "{legacy_name}"'
+            ))
+            _sqlite_drop_rebuild_indexes(conn, legacy_name)
+            conn.commit()
+
+    _sqlite_rebuild_mode_ledger(
+        engine,
+        table_name=table_name,
+        legacy_name=legacy_name,
+        target_columns=(
+            "id", "mode", "date", "total_value", "cash", "invested",
+            "daily_return", "cumulative_return", "mdd", "position_count",
+            "created_at", "account_key", "peak_value",
+        ),
+        missing_defaults={"account_key": "''", "position_count": "0"},
+        ledger="snapshot",
+        expected_unique=expected_unique,
+        verify_keys=("account_key", "date"),
+    )
 
 
 def _migrate_position_unique_constraint(engine):
-    """positions의 구버전 UNIQUE(symbol) 단독 제약을 (account_key, symbol)로 재구축.
+    """Position을 (mode, account_key, symbol)로 격리하고 기존 행을 보수적 이전.
 
-    account_key 도입 전 스키마의 유산(스냅샷 UNIQUE(date)와 같은 계열): symbol 단독
-    유니크라 서로 다른 계좌가 같은 종목을 드는 순간 IntegrityError — 매매 기록은
-    남는데 포지션만 유실돼 평가액이 현금만 남는다(2026-07-07 실측: 트랙 재시작으로
-    아카이브 키에 069500이 남은 상태에서 본 키가 069500 재매수 → 스냅샷 -41%).
-    아카이브/본 키 조합만이 아니라 바스켓·전략 트랙이 같은 종목을 겹쳐 들 수 없는
-    구조적 지뢰다. 모델은 이미 복합 제약인데 물리 테이블만 낡았다(create_all은
-    기존 테이블을 못 바꾼다). 표준 재구축(rename → 생성 → 복사 → 검증 → 삭제),
-    멱등·중단 재개 가능 — 스냅샷 마이그레이션과 동일 절차.
+    기존 mode가 없으면 동일 account_key+symbol의 거래 mode가 하나일 때만
+    귀속하고, 혼합·무이력은 legacy로 격리해 신규 paper/live 조회에서
+    제외한다. SQLite 재구축은 멱등·중단 재개 가능하고 PostgreSQL DDL은
+    단일 트랜잭션으로 원자적으로 수행한다.
     """
     from sqlalchemy import text
 
-    if engine.url.get_dialect().name != "sqlite":
+    dialect = engine.url.get_dialect().name
+    expected_unique = ("mode", "account_key", "symbol")
+    if dialect == "postgresql":
+        _postgres_migrate_mode_ledger(
+            engine,
+            table_name="positions",
+            constraint_name="uq_positions_mode_account_symbol",
+            expected_unique=expected_unique,
+            obsolete_unique=(("symbol",), ("account_key", "symbol")),
+            required_trade_columns=("account_key", "symbol", "mode"),
+            inference_sql="""
+                WITH inferred AS (
+                    SELECT p.id,
+                           CASE WHEN COUNT(DISTINCT LOWER(BTRIM(t.mode))) FILTER (
+                                    WHERE NULLIF(BTRIM(t.mode), '') IS NOT NULL
+                                ) = 1
+                                THEN MIN(LOWER(BTRIM(t.mode))) FILTER (
+                                    WHERE NULLIF(BTRIM(t.mode), '') IS NOT NULL
+                                )
+                                ELSE 'legacy'
+                           END AS inferred_mode
+                    FROM positions AS p
+                    LEFT JOIN trade_history AS t
+                      ON t.account_key = p.account_key AND t.symbol = p.symbol
+                    GROUP BY p.id
+                )
+                UPDATE positions AS p
+                SET mode = inferred.inferred_mode
+                FROM inferred
+                WHERE p.id = inferred.id
+                  AND (p.mode IS NULL OR BTRIM(p.mode) = '' OR p.mode = 'legacy')
+            """,
+        )
         return
-    cols = (
-        "id, symbol, avg_price, quantity, total_invested, stop_loss_price, "
-        "take_profit_price, trailing_stop_price, highest_price, strategy, "
-        "bought_at, updated_at, account_key, partial_tp_done"
-    )
+    if dialect != "sqlite":
+        return
+
+    table_name = "positions"
     legacy_name = "positions_legacy_uq"
-
     with engine.connect() as conn:
-        legacy_exists = conn.execute(text(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:n"
-        ), {"n": legacy_name}).scalar()
-
+        legacy_exists = bool(conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
+        ), {"name": legacy_name}).scalar())
         if not legacy_exists:
-            ddl = conn.execute(text(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
-            )).scalar()
-            if not ddl:
+            table_exists = bool(conn.execute(text(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"
+            ), {"name": table_name}).scalar())
+            if not table_exists:
                 return
-            normalized = " ".join(str(ddl).split()).lower()
-            is_legacy = (
-                "unique (symbol)" in normalized
-                and "uq_positions_account_symbol" not in normalized
-            )
-            if not is_legacy:
+            if (
+                _sqlite_has_unique_columns(conn, table_name, expected_unique)
+                and _sqlite_mode_column_ready(conn, table_name)
+            ):
                 return
-            logger.warning(
-                "positions 구버전 UNIQUE(symbol) 감지 — (account_key, symbol) 복합 제약으로 재구축"
-            )
+            logger.warning("positions 장부를 UNIQUE(mode, account_key, symbol)로 재구축")
             conn.execute(text(
-                f"ALTER TABLE positions RENAME TO {legacy_name}"
+                f'ALTER TABLE "{table_name}" RENAME TO "{legacy_name}"'
             ))
+            _sqlite_drop_rebuild_indexes(conn, legacy_name)
             conn.commit()
 
-    # 신 스키마 재생성 (rename으로 본 테이블이 사라졌으므로 create_all이 새로 만든다)
-    Base.metadata.create_all(engine)
-
-    with engine.connect() as conn:
-        before = conn.execute(text(f"SELECT COUNT(*) FROM {legacy_name}")).scalar()
-        conn.execute(text(
-            f"INSERT OR IGNORE INTO positions ({cols}) SELECT {cols} FROM {legacy_name}"
-        ))
-        after = conn.execute(text("SELECT COUNT(*) FROM positions")).scalar()
-        if after < before:
-            conn.rollback()
-            raise RuntimeError(
-                f"포지션 재구축 검증 실패: 복사 후 {after} < 원본 {before} — legacy 테이블 보존"
-            )
-        conn.execute(text(f"DROP TABLE {legacy_name}"))
-        conn.commit()
-        logger.info("positions 재구축 완료: {}행, 복합 유니크(account_key, symbol)", after)
+    _sqlite_rebuild_mode_ledger(
+        engine,
+        table_name=table_name,
+        legacy_name=legacy_name,
+        target_columns=(
+            "id", "mode", "symbol", "avg_price", "quantity", "total_invested",
+            "stop_loss_price", "take_profit_price", "trailing_stop_price",
+            "highest_price", "strategy", "bought_at", "updated_at", "account_key",
+            "partial_tp_done",
+        ),
+        missing_defaults={"account_key": "''", "partial_tp_done": "0"},
+        ledger="position",
+        expected_unique=expected_unique,
+        verify_keys=("account_key", "symbol"),
+    )
 
 
 def init_database():
@@ -735,8 +1060,8 @@ def init_database():
         _migrate_add_account_key(engine)
     except Exception:
         pass
-    # 구버전 UNIQUE(date) 재구축 — 실패 시 조용히 넘기지 않는다(두 번째 계정의
-    # 스냅샷이 계속 유실되는 상태를 숨기면 안 됨). 단, legacy가 아니면 no-op.
+    # 스냅샷 mode 격리 재구축 — 실패를 숨기면 paper/live 장부가
+    # 계속 충돌할 수 있으므로 예외를 전파한다. 신 스키마에서는 no-op.
     _migrate_snapshot_unique_constraint(engine)
     try:
         _migrate_trade_history_slippage_columns(engine)
@@ -754,9 +1079,8 @@ def init_database():
         _migrate_positions_partial_tp_done(engine)
     except Exception:
         pass
-    # 구버전 UNIQUE(symbol) 재구축 — 스냅샷 UNIQUE(date)와 같은 이유로 조용히 넘기지
-    # 않는다(계좌 간 동일 종목 보유가 막혀 매수 포지션이 유실되는 상태). legacy가
-    # 아니면 no-op. partial_tp_done 컬럼 추가 이후에 실행해야 복사 컬럼이 갖춰진다.
+    # 포지션 mode 격리 재구축. partial_tp_done 컬럼 추가 이후에 실행해
+    # 구버전 테이블을 완전히 복사한다. 신 스키마에서는 no-op.
     _migrate_position_unique_constraint(engine)
 
     if "sqlite" in engine.url.drivername:

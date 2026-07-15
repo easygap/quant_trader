@@ -58,20 +58,24 @@ def record_basket_deposit(basket_name: str, amount: float, note: str = "") -> di
         return {"ok": False, "error": f"바스켓 '{basket_name}' 설정 없음"}
     account_key = rebalance_live_strategy_id(basket_name)
     basket_capital = (baskets.get(basket_name) or {}).get("initial_capital")
+    mode = (
+        "live"
+        if str(config.trading.get("mode", "paper")).lower() == "live"
+        else "paper"
+    )
 
     now = datetime.now()
-    prev = get_latest_snapshot_summary(account_key=account_key)
+    prev = get_latest_snapshot_summary(account_key=account_key, mode=mode)
     if prev is not None:
         boundary = prev.get("created_at") or prev.get("date")
         if boundary is not None and now <= boundary:
             return {"ok": False, "error": "마지막 스냅샷 이전 시각 — 과거 소급 기록 불가"}
 
-    mode = str(config.trading.get("mode", "paper")).lower()
     flow_id = record_cash_flow(
         amount=amount, account_key=account_key, occurred_at=now,
         note=note or "", mode=mode,
     )
-    deposits = get_cash_flow_total(account_key=account_key)
+    deposits = get_cash_flow_total(account_key=account_key, mode=mode)
     out = {
         "ok": True, "account_key": account_key, "flow_id": int(flow_id),
         "amount": amount, "deposits_total": float(deposits),
@@ -128,11 +132,16 @@ def main() -> int:
     init_database()
     config = Config.get()
     account_key = args.account_key
+    mode = (
+        "live"
+        if str(config.trading.get("mode", "paper")).lower() == "live"
+        else "paper"
+    )
 
     now = datetime.now()
     # 과거 소급 금지: 마지막 스냅샷 이전 시각의 입금은 TWR 체인이 중화하지 못해
     # (그 구간 수익률이 이미 확정됨) 수익률이 왜곡된다 — fail-closed.
-    prev = get_latest_snapshot_summary(account_key=account_key)
+    prev = get_latest_snapshot_summary(account_key=account_key, mode=mode)
     if prev is not None:
         boundary = prev.get("created_at") or prev.get("date")
         if boundary is not None and now <= boundary:
@@ -142,12 +151,11 @@ def main() -> int:
             )
             return 1
 
-    mode = str(config.trading.get("mode", "paper")).lower()
     flow_id = record_cash_flow(
         amount=float(args.amount), account_key=account_key,
         occurred_at=now, note=args.note, mode=mode,
     )
-    deposits = get_cash_flow_total(account_key=account_key)
+    deposits = get_cash_flow_total(account_key=account_key, mode=mode)
     logger.info(
         "입금 기록 완료 (id={}): {} +{:,.0f}원 — 누적 입금 {:,.0f}원",
         flow_id, account_key, args.amount, deposits,

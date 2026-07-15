@@ -158,6 +158,7 @@ def run_backtest(args):
         strategy_name=args.strategy,
         strict_lookahead=args.strict_lookahead,
         notify_overtrading=True,
+        symbol=args.symbol,
     )
 
     if not result:
@@ -653,6 +654,27 @@ def run_deploy_check(args) -> int:
 
 
 def run_rebalance(args):
+    """Run a rebalance, serializing every order-capable live invocation."""
+    config = Config.get()
+    mode = str(config.trading.get("mode", "paper")).lower()
+    dry_run = bool(getattr(args, "dry_run", False))
+    if mode != "live" or dry_run:
+        return _run_rebalance_impl(args)
+
+    from core.runtime_lock import live_runtime_lock
+
+    project_root = Path(__file__).resolve().parent
+    with live_runtime_lock(project_root) as acquired:
+        if not acquired:
+            logger.error(
+                "실전 리밸런싱 중단: 다른 live 스케줄러/리밸런서가 "
+                "실행 중이거나 프로세스 락을 확인할 수 없습니다."
+            )
+            raise SystemExit(1)
+        return _run_rebalance_impl(args)
+
+
+def _run_rebalance_impl(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -670,6 +692,7 @@ def run_rebalance(args):
     dry_run = getattr(args, "dry_run", False)
     force_rebalance = getattr(args, "force_rebalance", False)
     mode = str(config.trading.get("mode", "paper")).lower()
+    ledger_mode = "live" if mode == "live" else "paper"
     live_rebalance_confirmed = False
 
     if basket_name:
@@ -895,6 +918,7 @@ def run_rebalance(args):
                         from core.portfolio_manager import twr_period_return
                         snaps = get_portfolio_snapshots(
                             days=7, account_key=live_strategy_name,
+                            mode=ledger_mode,
                         )
                         if snaps is not None and len(snaps) >= 2:
                             sdf = snaps.sort_values("date")
@@ -912,6 +936,7 @@ def run_rebalance(args):
                                 try:
                                     flow = get_cash_flow_total_between(
                                         live_strategy_name, prev_boundary, datetime.now(),
+                                        mode=ledger_mode,
                                     )
                                 except Exception:
                                     pass
@@ -1035,7 +1060,10 @@ def run_paper_trading(args):
     max_holding_days = (config.risk_params.get("position_limits", {}) or {}).get("max_holding_days", 0)
     if max_holding_days > 0:
         today = datetime.now().date()
-        for pos in get_all_positions(account_key=account_key if account_key else None):
+        for pos in get_all_positions(
+            account_key=account_key if account_key else None,
+            mode="paper",
+        ):
             bought_at = getattr(pos, "bought_at", None)
             if not bought_at:
                 continue
@@ -1089,7 +1117,11 @@ def run_paper_trading(args):
                 except Exception:
                     pass
 
-            if signal_info["signal"] == "BUY" and not get_position(symbol, account_key=account_key):
+            if signal_info["signal"] == "BUY" and not get_position(
+                symbol,
+                account_key=account_key,
+                mode="paper",
+            ):
                 from core.market_regime import check_market_regime
                 regime_result = check_market_regime(config, collector)
                 if not regime_result["allow_buys"]:
@@ -1117,7 +1149,11 @@ def run_paper_trading(args):
                 )
                 if order_result.get("success"):
                     discord.send_trade_alert(order_result)
-            elif signal_info["signal"] == "SELL" and get_position(symbol, account_key=account_key):
+            elif signal_info["signal"] == "SELL" and get_position(
+                symbol,
+                account_key=account_key,
+                mode="paper",
+            ):
                 avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1]) if "volume" in df.columns and not df["volume"].empty else None
                 order_result = executor.execute_sell(
                     symbol=symbol,
@@ -1168,6 +1204,21 @@ def _check_live_readiness_gate(config, strategy_name: str) -> list[str]:
 
 
 def run_live_trading(args):
+    """Run the canonical live workflow under the global live runtime lock."""
+    from core.runtime_lock import live_runtime_lock
+
+    project_root = Path(__file__).resolve().parent
+    with live_runtime_lock(project_root) as acquired:
+        if not acquired:
+            logger.error(
+                "실전 모드 진입 중단: 다른 live 스케줄러/리밸런서가 "
+                "실행 중이거나 프로세스 락을 확인할 수 없습니다."
+            )
+            raise SystemExit(1)
+        return _run_live_trading_impl(args)
+
+
+def _run_live_trading_impl(args):
     """
     실전 매매 모드 실행.
     4중 확인: 전략 코드 등록 → 환경변수 → --confirm-live → canonical live gate.
@@ -1219,9 +1270,23 @@ def run_live_trading(args):
     config.enforce_live_auto_entry_policy()
 
     try:
+        # live에서는 승인 단위(전략)와 실계좌 라우팅이 1:1로
+        # 명시되어야 한다. 기본 계좌 폴백은 장부별 노출 한도를 깨므로
+        # 모드 플립 직후, 인증/잔고 조회 전에 친절한 오류로 종료한다.
+        try:
+            live_account_no = config.get_account_no(strategy_name)
+        except ValueError as exc:
+            logger.error("🚫 실전 계좌 라우팅 검증 실패: {}", exc)
+            logger.error(
+                "config/settings.yaml의 kis_api.accounts에 '{}'의 실계좌를 "
+                "명시한 뒤 다시 시도하세요.",
+                strategy_name,
+            )
+            sys.exit(1)
+
         # 토큰 사전 발급 (필수 환경변수 미설정 시 명확히 종료)
         from api.kis_api import KISApi
-        kis = KISApi()
+        kis = KISApi(account_no=live_account_no)
         if not kis.authenticate():
             logger.error(
                 "KIS API 인증 실패. 실전 모드를 사용하려면 "
@@ -1423,25 +1488,67 @@ def run_compare_paper_backtest(args):
 
 
 def run_emergency_liquidate(args):
-    """긴급 전 종목 매도 (CLI: --mode liquidate). 블랙스완 감지 외에도 수동 개입이 필요할 때 즉시 전 종목 매도."""
-    logger.info("=" * 50)
-    logger.info("🚨 긴급 전 종목 매도 모드")
-    logger.info("=" * 50)
+    """긴급 청산 대상을 명시적으로 paper/live로 고정해 실행한다.
 
+    canonical live 실행은 YAML을 paper로 유지한 채 해당 프로세스 안에서만
+    mode를 live로 전환한다. 따라서 별도 청산 프로세스가 설정값만 보면 실제
+    계좌가 아니라 paper 장부를 지울 수 있다. CLI에서는 ``--liquidate-live``를
+    명시한 경우에만 live를 선택한다. 속성이 없는 기존 내부 호출은 하위
+    호환을 위해 설정 mode를 따르되, argparse 경로에는 항상 속성이 존재한다.
+    """
     config = Config.get()
-    mode = str(config.trading.get("mode", "paper")).lower()
+    configured_mode = str(config.trading.get("mode", "paper")).lower()
+    explicit_live = getattr(args, "liquidate_live", None)
+    mode = configured_mode if explicit_live is None else ("live" if explicit_live else "paper")
+
     if mode == "live":
         _require_live_operator_confirmation(
             args,
             action_label="실전 긴급 청산",
-            example="python main.py --mode liquidate --confirm-live",
+            example=(
+                "python main.py --mode liquidate --liquidate-live --confirm-live"
+            ),
+        )
+
+    old_mode = configured_mode
+    config.trading["mode"] = mode
+    try:
+        return _run_emergency_liquidate_impl(args, config=config, mode=mode)
+    finally:
+        config.trading["mode"] = old_mode
+
+
+def _run_emergency_liquidate_impl(args, *, config, mode: str):
+    """선택된 장부와 브로커에서 전 종목을 청산한다."""
+    logger.info("=" * 50)
+    logger.info("🚨 긴급 전 종목 매도 모드 ({})", mode)
+    logger.info("=" * 50)
+
+    if mode == "live":
+        # 운영자 확인 직후, broker sync나 포지션 조회보다 먼저 전역
+        # 영속 HALT를 남긴다. 청산 중/후 다른 프로세스가 신규 BUY를
+        # 시도해도 OrderExecutor가 동일 DB 상태를 읽고 fail-closed한다.
+        from database.repositories import set_trading_halt
+
+        halt_state = set_trading_halt(
+            "운영자 확인된 live 긴급 전량 청산 시작",
+            source="main.run_emergency_liquidate",
+            mode="live",
+            detail={
+                "action": "emergency_liquidate",
+                "confirm_live": bool(getattr(args, "confirm_live", False)),
+            },
+        )
+        logger.critical(
+            "전역 거래 HALT 영속화 완료 (event_id={}) — 명시적 운영자 해제 전까지 BUY 차단",
+            halt_state.get("event_id"),
         )
         _sync_live_positions_before_liquidation(config)
 
     from database.repositories import get_all_positions
     from core.order_executor import OrderExecutor
 
-    positions = get_all_positions()  # 긴급 청산은 모든 계좌 포지션 대상
+    positions = get_all_positions(mode=mode)  # 선택한 장부의 모든 계좌 포지션 대상
     summary = {
         "attempted": len(positions),
         "succeeded": 0,
@@ -1467,26 +1574,26 @@ def run_emergency_liquidate(args):
                 from api.kis_api import KISApi
                 account_no = config.get_account_no(ak)
                 kis = KISApi(account_no=account_no)
-                price_info = kis.get_current_price(pos.symbol)
                 try:
-                    price = float((price_info or {}).get("price") or 0)
-                except (TypeError, ValueError):
-                    price = 0.0
-                if price <= 0:
-                    reason = "실전 긴급 청산 현재가 조회 실패"
-                    summary["failed"] += 1
-                    summary["details"].append({
-                        "symbol": pos.symbol,
-                        "account_key": ak,
-                        "status": "failed",
-                        "reason": reason,
-                    })
-                    logger.error(
-                        "{}: {} — 평균단가 fallback 매도를 실행하지 않습니다.",
-                        reason,
+                    price_info = kis.get_current_price(pos.symbol)
+                    current_price = float((price_info or {}).get("price") or 0)
+                    if current_price > 0:
+                        price = current_price
+                    else:
+                        logger.critical(
+                            "실전 긴급 청산 현재가 누락: {} — 평균단가 {:,.0f}원은 "
+                            "체결 참조가로만 쓰고 broker 시장가 매도를 시도합니다.",
+                            pos.symbol,
+                            price,
+                        )
+                except Exception as exc:
+                    logger.critical(
+                        "실전 긴급 청산 현재가 조회 예외: {} ({}) — 평균단가 "
+                        "{:,.0f}원을 체결 참조가로 broker 시장가 매도를 시도합니다.",
                         pos.symbol,
+                        exc,
+                        price,
                     )
-                    continue
             result = executor.execute_sell(
                 pos.symbol,
                 price,
@@ -1732,12 +1839,15 @@ def run_health_check() -> int:
                 key = rebalance_live_strategy_id(name)
                 snap = (
                     session.query(PortfolioSnapshot)
-                    .filter(PortfolioSnapshot.account_key == key)
+                    .filter(
+                        PortfolioSnapshot.mode == "paper",
+                        PortfolioSnapshot.account_key == key,
+                    )
                     .order_by(PortfolioSnapshot.date.desc())
                     .first()
                 )
                 last_dates.append(snap.date if snap else None)
-                positions_b = get_all_positions(account_key=key) or []
+                positions_b = get_all_positions(account_key=key, mode="paper") or []
                 position_count += len(positions_b)
                 # 배치율은 부가 신호 — 계산 실패(예: baskets.yaml에 float 불가한
                 # target_stock_weight 오타)가 핵심 신호인 결측/staleness 감지를
@@ -1858,7 +1968,10 @@ def run_weekly_report() -> int:
             try:
                 snaps = (
                     session.query(PortfolioSnapshot)
-                    .filter(PortfolioSnapshot.account_key == key)
+                    .filter(
+                        PortfolioSnapshot.mode == "paper",
+                        PortfolioSnapshot.account_key == key,
+                    )
                     .order_by(PortfolioSnapshot.date.asc())
                     .all()
                 )
@@ -1897,7 +2010,12 @@ def run_weekly_report() -> int:
                         try:
                             ref_boundary = ref.created_at or ref.date
                             last_boundary = snaps[-1].created_at or now_kst
-                            flow = get_cash_flow_total_between(key, ref_boundary, last_boundary)
+                            flow = get_cash_flow_total_between(
+                                key,
+                                ref_boundary,
+                                last_boundary,
+                                mode="paper",
+                            )
                         except Exception:
                             pass
                         week_change = twr_period_return(ref_val, last_val, flow) * 100
@@ -2099,6 +2217,14 @@ def main():
     parser.add_argument(
         "--confirm-live", action="store_true",
         help="실전 모드 진입 시 필수. 미지정 시 live 모드 진입 거부.",
+    )
+    parser.add_argument(
+        "--liquidate-live",
+        action="store_true",
+        help=(
+            "[liquidate 모드] 실계좌 청산 대상을 명시. "
+            "ENABLE_LIVE_TRADING=true 및 --confirm-live도 함께 필요"
+        ),
     )
     # --force-live 제거됨 (감사 C-1 대응): hard gate는 우회 불가
     parser.add_argument(

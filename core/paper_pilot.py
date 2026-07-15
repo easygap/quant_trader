@@ -739,14 +739,14 @@ def _count_orders_today(strategy: str, as_of_date: str | datetime | None = None)
 def _count_positions(strategy: str) -> int:
     from database.repositories import get_all_positions
 
-    positions = get_all_positions(account_key=strategy)
+    positions = get_all_positions(account_key=strategy, mode="paper")
     return len(positions) if positions else 0
 
 
 def _get_gross_exposure(strategy: str) -> float:
     from database.repositories import get_all_positions
 
-    positions = get_all_positions(account_key=strategy)
+    positions = get_all_positions(account_key=strategy, mode="paper")
     if not positions:
         return 0
     return sum((p.avg_price or 0) * (p.quantity or 0) for p in positions)

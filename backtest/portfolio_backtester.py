@@ -20,6 +20,21 @@ from config.config_loader import Config
 from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
+EXECUTION_MODEL_NEXT_OPEN = "next_open"
+EXECUTION_MODEL_LEGACY_SAME_CLOSE = "legacy_same_close"
+_SUPPORTED_EXECUTION_MODELS = frozenset(
+    (EXECUTION_MODEL_NEXT_OPEN, EXECUTION_MODEL_LEGACY_SAME_CLOSE)
+)
+
+
+def _validate_execution_model(execution_model: str) -> str:
+    if execution_model not in _SUPPORTED_EXECUTION_MODELS:
+        supported = ", ".join(sorted(_SUPPORTED_EXECUTION_MODELS))
+        raise ValueError(
+            f"지원하지 않는 execution_model={execution_model!r}. 지원값: {supported}"
+        )
+    return execution_model
+
 
 class PortfolioBacktester:
     """
@@ -46,6 +61,7 @@ class PortfolioBacktester:
         trade_start_date: str = None,
         param_overrides: dict = None,
         apply_liquidity_filter: bool = True,
+        execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
     ) -> dict:
         """
         멀티종목 포트폴리오 백테스트 실행.
@@ -60,6 +76,9 @@ class PortfolioBacktester:
             param_overrides: 전략 파라미터 덮어쓰기. 예:
                 {"relative_strength_rotation": {"short_lookback": 40}}
             apply_liquidity_filter: true면 run 진입 시점에 20일 평균 거래대금 기준으로 universe 사전 제외
+            execution_model: 전략 신호 체결 모델. 기본 ``next_open``은 T일 종가로
+                확정된 BUY/SELL을 다음 거래일 시가에 체결한다. 과거 결과 재현용
+                ``legacy_same_close``도 명시적으로 선택할 수 있다.
 
         Returns:
             포트폴리오 수준 백테스트 결과
@@ -71,6 +90,8 @@ class PortfolioBacktester:
             initial_capital = self.risk_params.get(
                 "position_sizing", {}
             ).get("initial_capital", 10000000)
+
+        execution_model = _validate_execution_model(execution_model)
 
         original_symbols = list(symbols)
         if apply_liquidity_filter:
@@ -175,6 +196,7 @@ class PortfolioBacktester:
             min_hold_days=min_hold_days,
             disable_trailing_stop=disable_trailing_stop,
             tp_rate_override=float(tp_override) if tp_override is not None else None,
+            execution_model=execution_model,
         )
 
         metrics = self._calculate_portfolio_metrics(result, initial_capital)
@@ -194,6 +216,7 @@ class PortfolioBacktester:
             "input_symbols": original_symbols,
             "liquidity_filter": liquidity_filter,
             "initial_capital": initial_capital,
+            "execution_model": execution_model,
             "per_symbol_stats": result.get("per_symbol_stats", {}),
             # 진단 계측 전달
             "exit_reason_counts": result.get("exit_reason_counts", {}),
@@ -349,7 +372,9 @@ class PortfolioBacktester:
         min_hold_days: int = 0,
         disable_trailing_stop: bool = False,
         tp_rate_override: float = None,
+        execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
     ) -> dict:
+        execution_model = _validate_execution_model(execution_model)
         cash = initial_capital
         positions = {}  # symbol -> {qty, avg_price, buy_date, high_water_mark}
         trades = []
@@ -482,6 +507,20 @@ class PortfolioBacktester:
                 return None
             return pos
 
+        def _strategy_signal_context(
+            sym: str, date
+        ) -> tuple[pd.Series | None, object | None]:
+            """체결일 기준으로 사용할 전략 신호 행과 실제 신호일을 반환한다."""
+            sig_df = signals.get(sym)
+            pos = _index_position(sig_df, date)
+            if pos is None:
+                return None, None
+            if execution_model == EXECUTION_MODEL_NEXT_OPEN:
+                pos -= 1
+                if pos < 0:
+                    return None, None
+            return sig_df.iloc[pos], sig_df.index[pos]
+
         def _previous_close(sym: str, date) -> float | None:
             sig_df = signals.get(sym)
             if sig_df is None or "close" not in sig_df.columns:
@@ -595,6 +634,7 @@ class PortfolioBacktester:
 
                 sell_reason = None
                 sell_price_ref = close
+                sell_signal_date = None
                 avg_daily_volume = _avg_daily_volume(sig_df, date, row)
                 row_atr = _get_atr(sig_df, date)
                 hd = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
@@ -648,18 +688,40 @@ class PortfolioBacktester:
                             sell_reason = None  # 냉각기: TRAILING_STOP 억제
                         else:
                             sell_reason = "TRAILING_STOP"
-                if not sell_reason and row.get("signal") == "SELL":
+                strategy_row, strategy_signal_date = _strategy_signal_context(sym, date)
+                if (
+                    not sell_reason
+                    and strategy_row is not None
+                    and strategy_row.get("signal") == "SELL"
+                ):
                     if in_cooling:
                         sell_reason = None  # 냉각기: 전략 SELL 억제
                     else:
                         sell_reason = "SELL"
+                        sell_signal_date = strategy_signal_date
+                        sell_price_ref = (
+                            open_price
+                            if execution_model == EXECUTION_MODEL_NEXT_OPEN
+                            else close
+                        )
+                        avg_daily_volume = _avg_daily_volume(
+                            sig_df, strategy_signal_date, strategy_row
+                        )
 
                 if sell_reason:
-                    to_sell.append((sym, sell_price_ref, sell_reason, avg_daily_volume))
+                    to_sell.append(
+                        (
+                            sym,
+                            sell_price_ref,
+                            sell_reason,
+                            avg_daily_volume,
+                            sell_signal_date,
+                        )
+                    )
                     exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
 
             executed_sell_count += len(to_sell)
-            for sym, close, reason, avg_daily_volume in to_sell:
+            for sym, close, reason, avg_daily_volume, signal_date in to_sell:
                 pos = positions.pop(sym)
                 costs = self.risk_manager.calculate_transaction_costs(
                     close,
@@ -667,6 +729,7 @@ class PortfolioBacktester:
                     "SELL",
                     avg_daily_volume=avg_daily_volume,
                     avg_price=pos["avg_price"],
+                    symbol=sym,
                 )
                 sell_price = costs["execution_price"]
                 tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
@@ -674,7 +737,7 @@ class PortfolioBacktester:
                 cash += sell_price * pos["qty"] - costs["commission"] - tax_amt
                 per_symbol_pnl[sym] = per_symbol_pnl.get(sym, 0) + pnl
                 holding_days = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
-                trades.append({
+                trade = {
                     "date": date, "symbol": sym, "action": reason,
                     "price": sell_price, "quantity": pos["qty"],
                     "pnl": pnl, "pnl_rate": ((sell_price / pos["avg_price"]) - 1) * 100,
@@ -688,7 +751,10 @@ class PortfolioBacktester:
                     "score_bollinger": pos.get("score_bollinger", 0),
                     "score_volume": pos.get("score_volume", 0),
                     "holding_days": holding_days,
-                })
+                }
+                if signal_date is not None:
+                    trade["signal_date"] = signal_date
+                trades.append(trade)
 
             # 시장국면 판별 (TICKET-05): T-1일 지수 기준, look-ahead bias 없음
             regime_at_t = "bullish"
@@ -716,59 +782,84 @@ class PortfolioBacktester:
                     sig_df = signals.get(sym)
                     if sig_df is None or date not in sig_df.index:
                         continue
-                    row = sig_df.loc[date]
-                    if row.get("signal") == "BUY":
-                        close = float(row.get("close", 0))
+                    current_pos = _index_position(sig_df, date)
+                    if current_pos is None:
+                        continue
+                    execution_row = sig_df.iloc[current_pos]
+                    strategy_row, signal_date = _strategy_signal_context(sym, date)
+                    if strategy_row is not None and strategy_row.get("signal") == "BUY":
+                        close = float(execution_row.get("close", 0))
                         prev_close = _previous_close(sym, date)
-                        open_price = _row_price(row, "open", close)
+                        open_price = _row_price(execution_row, "open", close)
+                        execution_price_ref = (
+                            open_price
+                            if execution_model == EXECUTION_MODEL_NEXT_OPEN
+                            else close
+                        )
 
                         if gap_enabled and gap_up_entry_block > 0 and prev_close is not None and prev_close > 0:
                             gap_pct = (open_price - prev_close) / prev_close
                             if gap_pct >= gap_up_entry_block:
                                 gap_up_buy_blocks += 1
                                 skipped_reasons["gap_up_entry_block"] = skipped_reasons.get("gap_up_entry_block", 0) + 1
-                                _record_blocked_buy(sym, row, "gap_up_entry_block")
+                                _record_blocked_buy(sym, strategy_row, "gap_up_entry_block")
                                 continue
 
-                        if skip_earnings_days > 0 and _is_near_backtest_earnings(row, date):
+                        if skip_earnings_days > 0 and _is_near_backtest_earnings(execution_row, date):
                             earnings_buy_blocks += 1
                             skipped_reasons["earnings_window"] = skipped_reasons.get("earnings_window", 0) + 1
-                            _record_blocked_buy(sym, row, "earnings_window")
+                            _record_blocked_buy(sym, strategy_row, "earnings_window")
                             continue
 
                         if bs_enabled and date_idx <= bs_cooldown_until_idx:
                             blackswan_buy_blocks += 1
                             skipped_reasons["blackswan_cooldown"] = skipped_reasons.get("blackswan_cooldown", 0) + 1
-                            _record_blocked_buy(sym, row, "blackswan_cooldown")
+                            _record_blocked_buy(sym, strategy_row, "blackswan_cooldown")
                             continue
 
-                        score = float(row.get("total_score", row.get("strategy_score", 0)))
-                        buy_candidates.append((sym, close, score))
+                        score = float(
+                            strategy_row.get(
+                                "total_score", strategy_row.get("strategy_score", 0)
+                            )
+                        )
+                        buy_candidates.append(
+                            (
+                                sym,
+                                execution_price_ref,
+                                score,
+                                strategy_row,
+                                signal_date,
+                            )
+                        )
             else:
-                # bearish: 모든 BUY 신호 차단. 차단 수 집계 (종목 무관하게 날짜 1회)
-                n_blocked = sum(
-                    1 for sym in symbols
-                    if sym not in positions
-                    and signals.get(sym) is not None
-                    and date in signals[sym].index
-                    and signals[sym].loc[date].get("signal") == "BUY"
-                )
+                # bearish: 오늘 체결될 예약 BUY 신호를 모두 차단한다.
+                blocked_pending = []
+                for sym in symbols:
+                    if sym in positions:
+                        continue
+                    strategy_row, signal_date = _strategy_signal_context(sym, date)
+                    if strategy_row is not None and strategy_row.get("signal") == "BUY":
+                        blocked_pending.append((sym, strategy_row, signal_date))
+                n_blocked = len(blocked_pending)
                 regime_buy_blocks += n_blocked
                 skipped_reasons["regime_bearish"] = skipped_reasons.get("regime_bearish", 0) + n_blocked
                 if n_blocked > 0 and len(blocked_buy_examples) < 10:
-                    for sym in symbols:
-                        if sym not in positions and signals.get(sym) is not None and date in signals[sym].index:
-                            r = signals[sym].loc[date]
-                            if r.get("signal") == "BUY":
-                                blocked_buy_examples.append({
-                                    "date": str(date)[:10], "symbol": sym,
-                                    "score": float(r.get("total_score", r.get("strategy_score", 0))),
-                                    "reason": "bearish",
-                                })
+                    for sym, strategy_row, _signal_date in blocked_pending:
+                        if len(blocked_buy_examples) >= 10:
+                            break
+                        blocked_buy_examples.append({
+                            "date": str(date)[:10], "symbol": sym,
+                            "score": float(
+                                strategy_row.get(
+                                    "total_score", strategy_row.get("strategy_score", 0)
+                                )
+                            ),
+                            "reason": "bearish",
+                        })
 
             buy_candidates.sort(key=lambda x: -x[2])
 
-            for sym, close, score in buy_candidates:
+            for sym, execution_price_ref, score, sig_row, signal_date in buy_candidates:
                 if len(positions) >= max_positions:
                     skipped_reasons["max_positions"] = skipped_reasons.get("max_positions", 0) + 1
                     continue
@@ -792,13 +883,18 @@ class PortfolioBacktester:
                     continue
 
                 max_invest = total_equity_now * max_position_ratio
-                buy_atr = _get_atr(signals.get(sym), date)
-                stop_at_buy = _stop_loss_price(close, buy_atr)
-                risk_per_share = max(close - stop_at_buy, close * 0.001)
+                buy_atr = _get_atr(signals.get(sym), signal_date)
+                stop_at_buy = _stop_loss_price(execution_price_ref, buy_atr)
+                risk_per_share = max(
+                    execution_price_ref - stop_at_buy,
+                    execution_price_ref * 0.001,
+                )
                 risk_amount = total_equity_now * self.risk_params.get("position_sizing", {}).get("max_risk_per_trade", 0.01)
                 qty = min(
                     int(risk_amount / risk_per_share),
-                    int(max_invest / close) if close > 0 else 0,
+                    int(max_invest / execution_price_ref)
+                    if execution_price_ref > 0
+                    else 0,
                 )
 
                 scale = self.risk_manager._signal_scale(score)
@@ -832,24 +928,26 @@ class PortfolioBacktester:
                     blackswan_recovery_buys += 1
 
                 if qty > 0 and notional_bucket == "caution":
-                    caution_buy_notionals.append(close * qty)
+                    caution_buy_notionals.append(execution_price_ref * qty)
                 elif qty > 0 and notional_bucket == "bullish":
-                    bullish_buy_notionals.append(close * qty)
+                    bullish_buy_notionals.append(execution_price_ref * qty)
 
                 if qty <= 0:
                     skipped_reasons["qty_zero"] = skipped_reasons.get("qty_zero", 0) + 1
                     continue
-                if close * qty > cash * 0.95:
+                if execution_price_ref * qty > cash * 0.95:
                     skipped_reasons["no_cash"] = skipped_reasons.get("no_cash", 0) + 1
                     continue
 
-                sig_row = signals[sym].loc[date]
-                avg_daily_volume = _avg_daily_volume(signals.get(sym), date, sig_row)
+                avg_daily_volume = _avg_daily_volume(
+                    signals.get(sym), signal_date, sig_row
+                )
                 costs = self.risk_manager.calculate_transaction_costs(
-                    close,
+                    execution_price_ref,
                     qty,
                     "BUY",
                     avg_daily_volume=avg_daily_volume,
+                    symbol=sym,
                 )
                 buy_price = costs["execution_price"]
                 total_cost = buy_price * qty + costs["commission"]
@@ -875,6 +973,7 @@ class PortfolioBacktester:
                 }
                 trades.append({
                     "date": date, "symbol": sym, "action": "BUY",
+                    "signal_date": signal_date,
                     "price": buy_price, "quantity": qty, "pnl": 0, "pnl_rate": 0,
                     "commission": costs["commission"],
                     "tax": 0.0,
@@ -909,6 +1008,7 @@ class PortfolioBacktester:
         return {
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve),
+            "execution_model": execution_model,
             "per_symbol_stats": per_symbol_stats,
             "regime_buy_blocks": regime_buy_blocks,
             "regime_caution_buys": regime_caution_buys,
@@ -944,12 +1044,23 @@ class PortfolioBacktester:
         trades = result["trades"]
 
         if equity.empty:
-            return {"total_return": 0, "sharpe_ratio": 0, "max_drawdown": 0}
+            return {
+                "execution_model": result.get(
+                    "execution_model", EXECUTION_MODEL_NEXT_OPEN
+                ),
+                "total_return": 0,
+                "sharpe_ratio": 0,
+                "max_drawdown": 0,
+            }
 
         final_value = equity["value"].iloc[-1]
         total_return = ((final_value / initial_capital) - 1) * 100
 
         equity["daily_return"] = equity["value"].pct_change()
+        if initial_capital > 0:
+            equity.loc[equity.index[0], "daily_return"] = (
+                float(equity["value"].iloc[0]) / initial_capital
+            ) - 1.0
         daily_returns = equity["daily_return"].dropna()
 
         if len(daily_returns) > 0 and daily_returns.std() > 0:
@@ -966,6 +1077,8 @@ class PortfolioBacktester:
             sortino = sharpe
 
         equity["peak"] = equity["value"].cummax()
+        if initial_capital > 0:
+            equity["peak"] = equity["peak"].clip(lower=initial_capital)
         equity["drawdown"] = (equity["value"] - equity["peak"]) / equity["peak"]
         max_drawdown = equity["drawdown"].min() * 100
 
@@ -997,6 +1110,9 @@ class PortfolioBacktester:
         total_transaction_cost = round(total_commission + total_tax + total_slippage_cost, 0)
 
         metrics = {
+            "execution_model": result.get(
+                "execution_model", EXECUTION_MODEL_NEXT_OPEN
+            ),
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
             "sharpe_ratio": round(sharpe, 2),

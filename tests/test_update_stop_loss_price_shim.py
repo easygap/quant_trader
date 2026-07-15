@@ -25,13 +25,14 @@ def test_update_stop_loss_price_delegates_to_update_position_targets(monkeypatch
 
     def fake_update_position_targets(
         symbol, stop_loss_price=None, take_profit_price=None,
-        trailing_stop_price=None, account_key="",
+        trailing_stop_price=None, account_key="", mode="paper",
     ):
         captured["symbol"] = symbol
         captured["stop_loss_price"] = stop_loss_price
         captured["take_profit_price"] = take_profit_price
         captured["trailing_stop_price"] = trailing_stop_price
         captured["account_key"] = account_key
+        captured["mode"] = mode
 
     monkeypatch.setattr(repo, "update_position_targets", fake_update_position_targets)
 
@@ -43,6 +44,7 @@ def test_update_stop_loss_price_delegates_to_update_position_targets(monkeypatch
         "take_profit_price": None,
         "trailing_stop_price": None,
         "account_key": "scoring",
+        "mode": "paper",
     }
 
 

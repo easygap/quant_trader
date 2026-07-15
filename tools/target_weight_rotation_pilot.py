@@ -550,7 +550,10 @@ def _load_symbols(config: Any, raw_symbols: str | None) -> list[str]:
 def _load_positions(account_key: str) -> dict[str, Any]:
     from database.repositories import get_all_positions
 
-    return {pos.symbol: pos for pos in get_all_positions(account_key=account_key)}
+    return {
+        pos.symbol: pos
+        for pos in get_all_positions(account_key=account_key, mode="paper")
+    }
 
 
 def _portfolio_cash(config: Any, account_key: str, cash_override: float | None) -> float:
@@ -2972,7 +2975,10 @@ def _target_weight_snapshot_database_state(
         day_end = day_start + timedelta(days=1)
         snapshots = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == ak)
+            .filter(
+                PortfolioSnapshot.mode == "paper",
+                PortfolioSnapshot.account_key == ak,
+            )
             .order_by(PortfolioSnapshot.date.desc())
             .all()
         )
@@ -3001,7 +3007,10 @@ def _target_weight_snapshot_database_state(
         )
         positions_total = (
             session.query(Position)
-            .filter(Position.account_key == ak)
+            .filter(
+                Position.mode == "paper",
+                Position.account_key == ak,
+            )
             .count()
         )
         return {
@@ -6996,7 +7005,10 @@ def backup_target_weight_db_restore_state(
             )
             positions = (
                 session.query(Position)
-                .filter(Position.account_key == candidate_id)
+                .filter(
+                    Position.mode == "paper",
+                    Position.account_key == candidate_id,
+                )
                 .order_by(Position.symbol.asc())
                 .all()
             )
@@ -7427,7 +7439,10 @@ def apply_target_weight_db_restore_plan(
             )
             existing_positions = (
                 session.query(Position)
-                .filter(Position.account_key == candidate_id)
+                .filter(
+                    Position.mode == "paper",
+                    Position.account_key == candidate_id,
+                )
                 .count()
             )
             db_precondition = {
@@ -7472,6 +7487,7 @@ def apply_target_weight_db_restore_plan(
                 for row in position_rows:
                     avg_price = float(row.get("avg_price"))
                     position = Position(
+                        mode="paper",
                         account_key=candidate_id,
                         symbol=normalize_symbol(str(row.get("symbol") or "")),
                         avg_price=avg_price,
@@ -9717,6 +9733,7 @@ def assess_plan_pre_trade_risk(
             action,
             avg_daily_volume=avg_daily_volume,
             avg_price=avg_price,
+            symbol=order.symbol,
         )
         commission = float(costs.get("commission", 0) or 0)
         tax = float(costs.get("tax", 0) or 0)

@@ -403,6 +403,7 @@ class TestExecutorUsesStateMachine:
             trailing_stop_price=68_000,
             strategy="scoring",
             account_key="test_sm",
+            mode="live",
         )
         kis_api = UnfilledLookupFailedKIS()
         executor = self._prepare_live_executor(self._make_executor(), kis_api)
@@ -418,7 +419,7 @@ class TestExecutorUsesStateMachine:
         assert "미체결 조회" in result["reason"]
         assert result["live_unfilled_check"]["checked"] is False
         assert kis_api.sell_called is False
-        position = get_position("000660", account_key="test_sm")
+        position = get_position("000660", account_key="test_sm", mode="live")
         assert position is not None
         assert position.quantity == 5
         assert not OrderGuard.has_pending("000660")
@@ -707,7 +708,7 @@ class TestExecutorUsesStateMachine:
             def has_unfilled_orders(self, symbol):
                 return False
 
-            def sell_order(self, symbol, quantity, price):
+            def sell_order(self, symbol, quantity, price, order_type="00"):
                 return {"odno": "S123"}
 
             def get_filled_avg_price_after_order(self, symbol, order_output):
@@ -723,6 +724,7 @@ class TestExecutorUsesStateMachine:
             trailing_stop_price=68_000,
             strategy="scoring",
             account_key="test_sm",
+            mode="live",
         )
         executor = self._prepare_live_executor(self._make_executor(), AckNoFillKIS())
 
@@ -737,7 +739,7 @@ class TestExecutorUsesStateMachine:
         assert result["order_pending"] is True
         assert result["requires_reconcile"] is True
         assert result["order_status"] == OrderStatus.ACKED.value
-        position = get_position("000660", account_key="test_sm")
+        position = get_position("000660", account_key="test_sm", mode="live")
         assert position is not None
         assert position.quantity == 5
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "000660"]
@@ -1005,7 +1007,7 @@ class TestExecutorUsesStateMachine:
         assert result["success"] is True, result.get("reason")
         assert result["quantity"] == 4
         assert kis.last_qty == 4  # 사이저가 덮어쓰지 않고 고정수량 그대로 주문
-        pos = get_position("005933", account_key="test_sm")
+        pos = get_position("005933", account_key="test_sm", mode="live")
         assert pos is not None and pos.quantity == 4
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "005933"]
         assert orders[-1].status == OrderStatus.FILLED

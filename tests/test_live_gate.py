@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from core.live_gate import (
     LIVE_GATE_ARTIFACT_TYPE,
     LIVE_GATE_SCHEMA_VERSION,
+    get_current_git_worktree_state,
     validate_canonical_metadata_integrity,
     validate_live_readiness,
 )
@@ -12,6 +13,48 @@ from core.live_gate import (
 class DummyConfig:
     yaml_hash = "yaml-ok"
     resolved_hash = "resolved-ok"
+
+
+def test_git_worktree_state_checks_tracked_and_untracked_changes(monkeypatch):
+    calls = []
+
+    def fake_check_output(command, **kwargs):
+        calls.append((command, kwargs))
+        return " M core/live_gate.py\n?? untracked.txt\n"
+
+    monkeypatch.setattr("core.live_gate.subprocess.check_output", fake_check_output)
+
+    clean, detail = get_current_git_worktree_state()
+
+    assert clean is False
+    assert detail.splitlines() == [" M core/live_gate.py", "?? untracked.txt"]
+    assert calls[0][0] == [
+        "git",
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+    ]
+
+
+def test_git_worktree_state_is_fail_closed_on_git_error(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("git unavailable")
+
+    monkeypatch.setattr("core.live_gate.subprocess.check_output", fail)
+
+    clean, detail = get_current_git_worktree_state()
+
+    assert clean is None
+    assert "git unavailable" in detail
+
+
+def test_git_worktree_state_reports_clean(monkeypatch):
+    monkeypatch.setattr(
+        "core.live_gate.subprocess.check_output",
+        lambda *args, **kwargs: "",
+    )
+
+    assert get_current_git_worktree_state() == (True, "")
 
 
 def _write_json(path, payload):
@@ -772,10 +815,50 @@ def test_valid_canonical_bundle_and_paper_evidence_pass(tmp_path):
         promotion_dir=promotion_dir,
         evidence_dir=evidence_dir,
         current_git_hash="abc123",
+        current_git_worktree_state=(True, ""),
         now=datetime(2026, 4, 29, 12, 0, 0),
     )
 
     assert issues == []
+
+
+def test_dirty_worktree_blocks_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        current_git_worktree_state=(False, " M tracked.py\n?? untracked.txt"),
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("worktree가 clean 상태가 아님" in issue for issue in issues)
+    assert any("tracked/untracked 변경 2건" in issue for issue in issues)
+
+
+def test_worktree_inspection_error_blocks_live_gate(tmp_path):
+    promotion_dir = tmp_path / "reports" / "promotion"
+    evidence_dir = tmp_path / "reports" / "paper_evidence"
+    _write_bundle(promotion_dir)
+    _write_evidence(evidence_dir)
+
+    issues = validate_live_readiness(
+        DummyConfig(),
+        "scoring",
+        promotion_dir=promotion_dir,
+        evidence_dir=evidence_dir,
+        current_git_hash="abc123",
+        current_git_worktree_state=(None, "git unavailable"),
+        now=datetime(2026, 4, 29, 12, 0, 0),
+    )
+
+    assert any("git worktree 상태 확인 실패" in issue for issue in issues)
 
 
 def test_current_blockers_no_go_blocks_live_gate(tmp_path):
@@ -1066,6 +1149,7 @@ def test_target_weight_live_gate_accepts_verified_pilot_evidence(tmp_path):
         promotion_dir=promotion_dir,
         evidence_dir=evidence_dir,
         current_git_hash="abc123",
+        current_git_worktree_state=(True, ""),
         now=datetime(2026, 4, 29, 12, 0, 0),
     )
 
