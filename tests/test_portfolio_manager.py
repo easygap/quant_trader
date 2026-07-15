@@ -68,7 +68,7 @@ def fresh_db():
 def test_portfolio_summary_uses_trade_cash_flow(monkeypatch):
     monkeypatch.setattr(
         "core.portfolio_manager.get_all_positions",
-        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
+        lambda account_key=None, mode="paper": [_MockPosition("005930", 50000, 10)],
     )
     monkeypatch.setattr(
         "core.portfolio_manager.get_trade_cash_summary",
@@ -93,6 +93,73 @@ def test_portfolio_summary_uses_trade_cash_flow(monkeypatch):
     assert summary["unrealized_pnl"] == 50000
 
 
+def test_daily_snapshot_requires_complete_finite_market_prices(monkeypatch):
+    """보유 종목을 평균단가로 평가한 가짜 NAV는 증거 장부에 저장하지 않는다."""
+    saved = []
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_all_positions",
+        lambda account_key=None, mode="paper": [
+            _MockPosition("005930", 50000, 10)
+        ],
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_trade_cash_summary",
+        lambda mode=None, account_key=None: {"cash_delta": -500000},
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_cash_flow_total",
+        lambda account_key="", mode="paper": 0,
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.has_cash_flows",
+        lambda account_key="", mode="paper": False,
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_latest_peak_value",
+        lambda account_key="", mode="paper": None,
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.save_portfolio_snapshot",
+        lambda **kwargs: saved.append(kwargs) or True,
+    )
+
+    pm = PortfolioManager(_MockConfig(), account_key="scoring")
+
+    assert pm.save_daily_snapshot() is False
+    assert pm.save_daily_snapshot({"005930": float("nan")}) is False
+    assert pm.save_daily_snapshot({"005930": 55000}) is True
+    assert len(saved) == 1
+    assert saved[0]["total_value"] == 1050000
+    assert saved[0]["mode"] == "paper"
+
+
+@pytest.mark.parametrize(
+    "avg_price,quantity",
+    [
+        (float("nan"), 1),
+        (50000, float("inf")),
+        (50000, 1.5),
+    ],
+)
+def test_portfolio_summary_rejects_corrupt_position_numbers(
+    monkeypatch, avg_price, quantity
+):
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_all_positions",
+        lambda account_key=None, mode="paper": [
+            _MockPosition("005930", avg_price, quantity)
+        ],
+    )
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_latest_peak_value",
+        lambda account_key="", mode="paper": None,
+    )
+
+    pm = PortfolioManager(_MockConfig())
+    with pytest.raises(ValueError):
+        pm.get_portfolio_summary({"005930": 55000})
+
+
 def test_live_portfolio_summary_marks_broker_balance_fallback(monkeypatch):
     """live 잔고 조회 실패 시 DB fallback을 표시하고 주문 sizing용 자본 조회는 차단한다."""
     from core.portfolio_manager import LiveBrokerBalanceUnavailable
@@ -102,7 +169,10 @@ def test_live_portfolio_summary_marks_broker_balance_fallback(monkeypatch):
         "get_balance",
         lambda self: (_ for _ in ()).throw(RuntimeError("kis down")),
     )
-    monkeypatch.setattr("core.portfolio_manager.get_all_positions", lambda account_key=None: [])
+    monkeypatch.setattr(
+        "core.portfolio_manager.get_all_positions",
+        lambda account_key=None, mode="paper": [],
+    )
     monkeypatch.setattr(
         "core.portfolio_manager.get_trade_cash_summary",
         lambda mode=None, account_key=None: {
@@ -148,7 +218,7 @@ def test_sync_with_broker_uses_core_notifier(monkeypatch):
     )
     monkeypatch.setattr(
         "core.portfolio_manager.get_all_positions",
-        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
+        lambda account_key=None, mode="paper": [_MockPosition("005930", 50000, 10)],
     )
     monkeypatch.setattr(core.notifier, "Notifier", _FakeNotifier)
 
@@ -185,7 +255,7 @@ def test_sync_with_broker_skips_auto_correct_when_kis_positions_empty(monkeypatc
     )
     monkeypatch.setattr(
         "core.portfolio_manager.get_all_positions",
-        lambda account_key=None: [_MockPosition("005930", 50000, 10)],
+        lambda account_key=None, mode="paper": [_MockPosition("005930", 50000, 10)],
     )
     monkeypatch.setattr(core.notifier, "Notifier", _FakeNotifier)
     monkeypatch.setattr(PortfolioManager, "_auto_correct_positions", _record_auto_correct)

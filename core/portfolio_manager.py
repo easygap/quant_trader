@@ -4,6 +4,8 @@
 - KIS 잔고와 DB 포지션 동기화 (sync_with_broker)
 """
 
+import math
+
 from loguru import logger
 
 from config.config_loader import Config
@@ -28,10 +30,27 @@ def twr_period_return(v_prev: float, v_now: float, flow: float = 0.0) -> float:
     r = v_now / (v_prev + flow) - 1  — 입금은 수익이 아니므로 분모에 더해 중화한다.
     분모가 0 이하이면 판정 불가로 0을 반환한다(신규 계정 초기 상태 등).
     """
-    base = float(v_prev) + float(flow)
+    values = (float(v_prev), float(v_now), float(flow))
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("TWR 입력값은 유한한 숫자여야 합니다")
+    base = values[0] + values[2]
     if base <= 0:
         return 0.0
-    return float(v_now) / base - 1.0
+    return values[1] / base - 1.0
+
+
+def _finite_number(value, *, name: str, positive: bool = False) -> float:
+    """장부 계산에 NaN/Inf/불리언이 섞이지 않도록 공통 검증한다."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name}은 유한한 숫자여야 합니다")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name}은 유한한 숫자여야 합니다") from exc
+    if not math.isfinite(number) or (positive and number <= 0):
+        requirement = "유한한 양수" if positive else "유한한 숫자"
+        raise ValueError(f"{name}은 {requirement}여야 합니다")
+    return number
 
 
 class LiveBrokerBalanceUnavailable(RuntimeError):
@@ -79,10 +98,27 @@ class PortfolioManager:
                     "position_sizing", {}
                 ).get("initial_capital", 10000000)
             )
-        self._is_live = self.config.trading.get("mode", "paper") == "live"
+        self.initial_capital = _finite_number(
+            self.initial_capital,
+            name="initial_capital",
+            positive=True,
+        )
+        self._is_live = str(self.config.trading.get("mode", "paper")).lower() == "live"
+        # DB 장부는 실제 체결인 live와 그 외(paper/schedule)를 두 개로만
+        # 격리한다. schedule을 별도 mode로 넘기면 paper 포지션이 안 보인다.
+        self._ledger_mode = "live" if self._is_live else "paper"
 
         # Peak value 복구: DB 스냅샷에서 이전 세션의 peak을 가져와 MDD 연속성 유지
-        restored_peak = get_latest_peak_value(account_key=self.account_key)
+        restored_peak = get_latest_peak_value(
+            account_key=self.account_key,
+            mode=self._ledger_mode,
+        )
+        if restored_peak is not None:
+            restored_peak = _finite_number(
+                restored_peak,
+                name="restored_peak",
+                positive=True,
+            )
         if restored_peak is not None and restored_peak > self.initial_capital:
             self._peak_value = restored_peak
             logger.info("Peak value DB에서 복구: {:,.0f}원", restored_peak)
@@ -97,9 +133,19 @@ class PortfolioManager:
             self.account_key or "default",
         )
 
-    def _build_position_state(self, current_prices: dict = None) -> dict:
+    def _build_position_state(
+        self,
+        current_prices: dict = None,
+        *,
+        require_market_prices: bool = False,
+    ) -> dict:
         """보유 포지션과 평가손익 상태 계산."""
-        positions = get_all_positions(account_key=self.account_key if self.account_key else None)
+        positions = get_all_positions(
+            account_key=self.account_key if self.account_key else None,
+            mode=self._ledger_mode,
+        )
+        if current_prices is not None and not isinstance(current_prices, dict):
+            raise ValueError("current_prices는 종목별 가격 딕셔너리여야 합니다")
         current_prices = current_prices or {}
 
         invested = 0.0
@@ -107,19 +153,44 @@ class PortfolioManager:
         position_details = []
 
         for pos in positions:
-            price = current_prices.get(pos.symbol, pos.avg_price)
-            pos_value = price * pos.quantity
-            pos_invested = pos.avg_price * pos.quantity
+            symbol = str(getattr(pos, "symbol", "") or "").strip()
+            if not symbol:
+                raise ValueError("빈 종목코드가 장부에 포함되어 있습니다")
+            avg_price = _finite_number(
+                getattr(pos, "avg_price", None),
+                name=f"{symbol} 평균단가",
+                positive=True,
+            )
+            quantity_number = _finite_number(
+                getattr(pos, "quantity", None),
+                name=f"{symbol} 수량",
+                positive=True,
+            )
+            if not quantity_number.is_integer():
+                raise ValueError(f"{symbol} 수량은 정수여야 합니다")
+            quantity = int(quantity_number)
+
+            if require_market_prices and symbol not in current_prices:
+                raise ValueError(f"{symbol} 시장가격이 없어 스냅샷을 저장할 수 없습니다")
+            raw_price = current_prices.get(symbol, avg_price)
+            price = _finite_number(
+                raw_price,
+                name=f"{symbol} 현재가",
+                positive=True,
+            )
+
+            pos_value = price * quantity
+            pos_invested = avg_price * quantity
             pnl = pos_value - pos_invested
-            pnl_rate = ((price / pos.avg_price) - 1) * 100 if pos.avg_price > 0 else 0
+            pnl_rate = ((price / avg_price) - 1) * 100
 
             invested += pos_invested
             current_value += pos_value
 
             position_details.append({
-                "symbol": pos.symbol,
-                "quantity": pos.quantity,
-                "avg_price": pos.avg_price,
+                "symbol": symbol,
+                "quantity": quantity,
+                "avg_price": avg_price,
                 "current_price": price,
                 "invested": pos_invested,
                 "current_value": pos_value,
@@ -137,14 +208,23 @@ class PortfolioManager:
 
     def _get_db_financials(self, invested: float, current_value: float, mode: str) -> dict:
         """trade_history 기준 현금/실현손익/총 평가금 계산."""
+        invested = _finite_number(invested, name="투자원금")
+        current_value = _finite_number(current_value, name="포지션 평가금")
         cash_summary = get_trade_cash_summary(
             mode=mode,
             account_key=self.account_key if self.account_key else None,
         )
         # 외부 현금 흐름(입금/출금)은 현금에 더하되 손익에서는 제외한다 —
         # 입금은 수익이 아니다(적립식 지원, docs/POCKET_TRACK_PLAN.md §4).
-        deposits = get_cash_flow_total(account_key=self.account_key)
-        cash = self.initial_capital + deposits + cash_summary["cash_delta"]
+        deposits = _finite_number(get_cash_flow_total(
+            account_key=self.account_key,
+            mode=self._ledger_mode,
+        ), name="누적 현금흐름")
+        cash_delta = _finite_number(
+            cash_summary.get("cash_delta"),
+            name="거래 현금변동",
+        )
+        cash = self.initial_capital + deposits + cash_delta
         total_value = cash + current_value
         realized_pnl = cash + invested - self.initial_capital - deposits
         unrealized_pnl = current_value - invested
@@ -155,7 +235,12 @@ class PortfolioManager:
             "unrealized_pnl": unrealized_pnl,
         }
 
-    def get_portfolio_summary(self, current_prices: dict = None) -> dict:
+    def get_portfolio_summary(
+        self,
+        current_prices: dict = None,
+        *,
+        require_market_prices: bool = False,
+    ) -> dict:
         """
         포트폴리오 현황 요약
 
@@ -165,7 +250,10 @@ class PortfolioManager:
         Returns:
             포트폴리오 요약 딕셔너리
         """
-        state = self._build_position_state(current_prices)
+        state = self._build_position_state(
+            current_prices,
+            require_market_prices=require_market_prices,
+        )
         invested = state["invested"]
         current_value = state["current_value"]
         position_details = state["position_details"]
@@ -185,8 +273,21 @@ class PortfolioManager:
                 account_no = self.config.get_account_no(self.account_key)
                 balance = KISApi(account_no=account_no).get_balance()
                 if balance and "total_value" in balance:
-                    total_value = float(balance["total_value"])
-                    cash = float(balance.get("cash", total_value - current_value))
+                    candidate_total = float(balance["total_value"])
+                    candidate_cash = float(
+                        balance.get("cash", candidate_total - current_value)
+                    )
+                    if (
+                        not math.isfinite(candidate_total)
+                        or not math.isfinite(candidate_cash)
+                        or candidate_total < 0
+                        or candidate_cash < 0
+                    ):
+                        raise ValueError(
+                            "KIS 잔고에 NaN/Inf 또는 음수 평가금액이 포함됨"
+                        )
+                    total_value = candidate_total
+                    cash = candidate_cash
                     broker_balance_ok = True
                     broker_balance_source = "kis"
                 else:
@@ -196,7 +297,10 @@ class PortfolioManager:
                 broker_balance_error = str(e)
                 logger.warning("KIS 잔고 조회 실패 — DB 기준으로 대체: {}", e)
 
-        deposits_total = get_cash_flow_total(account_key=self.account_key)
+        deposits_total = _finite_number(get_cash_flow_total(
+            account_key=self.account_key,
+            mode=self._ledger_mode,
+        ), name="누적 현금흐름")
 
         if cash is None or total_value is None:
             financials = self._get_db_financials(
@@ -214,7 +318,10 @@ class PortfolioManager:
 
         # 분기는 순합이 아니라 '흐름 존재 여부'로 — 순합 0(+100/-100)이어도 구간
         # 수익률은 이미 흐름의 영향을 받았으므로 TWR 경로를 유지해야 한다.
-        account_has_flows = deposits_total != 0 or has_cash_flows(self.account_key)
+        account_has_flows = deposits_total != 0 or has_cash_flows(
+            self.account_key,
+            mode=self._ledger_mode,
+        )
 
         if not account_has_flows:
             # 무입금 계정: 기존 산식 그대로 (하위 호환 — 결과 불변)
@@ -228,7 +335,10 @@ class PortfolioManager:
             # 직전 스냅샷과 이번 측정 사이 유입(flow)을 분모에 더해 중화하고,
             # 누적은 직전 스냅샷의 누적수익률에 구간 수익률을 연결한다.
             from datetime import datetime as _dt
-            prev = get_latest_snapshot_summary(account_key=self.account_key)
+            prev = get_latest_snapshot_summary(
+                account_key=self.account_key,
+                mode=self._ledger_mode,
+            )
             if prev is None:
                 # 첫 측정: 초기자본이 첫 유입, 그간의 입금 전액이 구간 유입
                 r = twr_period_return(self.initial_capital, total_value, deposits_total)
@@ -237,20 +347,51 @@ class PortfolioManager:
                 # 경계는 실제 측정 시각(created_at) — date(자정 귀속)를 쓰면 스냅샷
                 # 이전의 같은 날 입금이 이중 산입된다.
                 boundary = prev.get("created_at") or prev.get("date")
-                flow_since = get_cash_flow_total_between(
+                flow_since = _finite_number(get_cash_flow_total_between(
                     self.account_key, boundary, _dt.now(),
+                    mode=self._ledger_mode,
+                ), name="구간 현금흐름")
+                prev_total = _finite_number(
+                    prev.get("total_value"), name="직전 스냅샷 총평가금"
                 )
-                r = twr_period_return(prev["total_value"], total_value, flow_since)
-                total_return = ((1 + prev["cumulative_return"] / 100) * (1 + r) - 1) * 100
+                prev_return = _finite_number(
+                    prev.get("cumulative_return"), name="직전 누적수익률"
+                )
+                r = twr_period_return(prev_total, total_value, flow_since)
+                total_return = ((1 + prev_return / 100) * (1 + r) - 1) * 100
 
             # MDD도 TWR 지수 기준 — 원화 피크로 재면 입금이 낙폭을 가짜 회복시킨다.
             index_now = 1 + total_return / 100
-            hist_max = get_max_cumulative_return(account_key=self.account_key)
-            peak_index = max(1.0, index_now, 1 + (hist_max or 0.0) / 100)
+            hist_max = get_max_cumulative_return(
+                account_key=self.account_key,
+                mode=self._ledger_mode,
+            )
+            hist_max = (
+                0.0
+                if hist_max is None
+                else _finite_number(hist_max, name="과거 최대 누적수익률")
+            )
+            peak_index = max(1.0, index_now, 1 + hist_max / 100)
             mdd = ((peak_index - index_now) / peak_index) * 100 if peak_index > 0 else 0
             # 원화 피크(peak_value 컬럼)는 스냅샷 연속성 위해 기존대로 계속 기록
             if total_value > self._peak_value:
                 self._peak_value = total_value
+
+        calculated = {
+            "total_value": total_value,
+            "cash": cash,
+            "invested": invested,
+            "current_value": current_value,
+            "total_return": total_return,
+            "mdd": mdd,
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": unrealized_pnl,
+            "deposits_total": deposits_total,
+            "principal": self.initial_capital + deposits_total,
+            "peak_value": self._peak_value,
+        }
+        for name, value in calculated.items():
+            _finite_number(value, name=name)
 
         return {
             "total_value": round(total_value, 0),
@@ -276,7 +417,20 @@ class PortfolioManager:
         snapshot_date: 귀속 날짜 지정(미지정 시 오늘). 비거래일 보충 실행에서
         NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
         """
-        summary = self.get_portfolio_summary(current_prices)
+        try:
+            # 보유 종목이 있다면 모든 종목의 실제 시장가격이 있어야 한다. 평균단가
+            # 폴백으로 손실을 숨긴 NAV를 증거 장부에 남기는 것은 허용하지 않는다.
+            summary = self.get_portfolio_summary(
+                current_prices,
+                require_market_prices=True,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.error(
+                "포트폴리오 스냅샷 저장 차단 (계좌: {}): {}",
+                self.account_key or "default",
+                exc,
+            )
+            return False
 
         ok = save_portfolio_snapshot(
             total_value=summary["total_value"],
@@ -288,6 +442,7 @@ class PortfolioManager:
             account_key=self.account_key,
             peak_value=self._peak_value,
             snapshot_date=snapshot_date,
+            mode=self._ledger_mode,
         )
 
         if ok:
@@ -416,7 +571,13 @@ class PortfolioManager:
             return {"ok": False, "mismatches": [], "corrected": [], "message": "잔고 응답 없음"}
 
         kis_positions = {p["symbol"]: p for p in balance["positions"] if p.get("symbol")}
-        db_positions = {p.symbol: p for p in get_all_positions(account_key=self.account_key if self.account_key else None)}
+        db_positions = {
+            p.symbol: p
+            for p in get_all_positions(
+                account_key=self.account_key if self.account_key else None,
+                mode=self._ledger_mode,
+            )
+        }
         empty_broker_auto_correct_skipped = False
 
         mismatches = []
@@ -548,6 +709,7 @@ class PortfolioManager:
                         quantity=int(m["kis_qty"]),
                         strategy="broker_sync_recovered",
                         account_key=ak,
+                        mode=self._ledger_mode,
                         **targets,
                     )
                     corrected.append({
@@ -559,14 +721,14 @@ class PortfolioManager:
                     logger.info("자동 보정: {} DB에 추가 ({}주)", symbol, m["kis_qty"])
 
                 elif m["type"] == "db_only":
-                    delete_position(symbol, account_key=ak)
+                    delete_position(symbol, account_key=ak, mode=self._ledger_mode)
                     corrected.append({"symbol": symbol, "action": "deleted", "qty": m["db_qty"]})
                     logger.info("자동 보정: {} DB에서 삭제 (KIS에 없음)", symbol)
 
                 elif m["type"] == "qty_mismatch":
                     kis_qty = int(m["kis_qty"])
                     if kis_qty == 0:
-                        delete_position(symbol, account_key=ak)
+                        delete_position(symbol, account_key=ak, mode=self._ledger_mode)
                         corrected.append({"symbol": symbol, "action": "deleted", "qty": 0})
                     else:
                         reference_price = self._broker_reference_price(m)
@@ -579,6 +741,7 @@ class PortfolioManager:
                             quantity=kis_qty,
                             strategy="broker_sync_recovered",
                             account_key=ak,
+                            mode=self._ledger_mode,
                             **targets,
                         )
                         corrected.append({

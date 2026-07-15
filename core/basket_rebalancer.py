@@ -153,6 +153,10 @@ class BasketRebalancer:
         """실전(live) 모드 여부."""
         return str(self.config.trading.get("mode", "paper")).lower() == "live"
 
+    def _ledger_mode(self) -> str:
+        """schedule 등 비실전 런타임은 paper 장부로 정규화한다."""
+        return "live" if self._is_live() else "paper"
+
     def save_daily_nav_snapshot(self) -> bool:
         """바스켓 계정의 일일 NAV 스냅샷 저장. 트랙레코드 시계열의 1행.
 
@@ -168,7 +172,10 @@ class BasketRebalancer:
         try:
             snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
             prices = {s: v["price"] for s, v in snapshot.items()}
-            positions = get_all_positions(account_key=self.account_key)
+            positions = get_all_positions(
+                account_key=self.account_key,
+                mode=self._ledger_mode(),
+            )
             missing = [p.symbol for p in positions if p.symbol not in prices]
             if missing:
                 logger.warning(
@@ -264,6 +271,7 @@ class BasketRebalancer:
 
         positions = get_all_positions(
             account_key=self.account_key if self.account_key else None,
+            mode=self._ledger_mode(),
         )
         pos_map = {p.symbol: p for p in positions}
 
@@ -422,6 +430,7 @@ class BasketRebalancer:
 
         positions = get_all_positions(
             account_key=self.account_key if self.account_key else None,
+            mode=self._ledger_mode(),
         )
         pos_map = {p.symbol: p for p in positions}
 

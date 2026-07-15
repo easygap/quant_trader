@@ -81,22 +81,40 @@ def _pm(monkeypatch, account, initial=300_000, cash_delta=0.0, deposits=0.0,
     """요약 산식 검증용 PortfolioManager — 저장소 의존을 모두 결정론으로 고정."""
     import core.portfolio_manager as pm_mod
 
-    monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+    monkeypatch.setattr(
+        pm_mod,
+        "get_latest_peak_value",
+        lambda account_key="", mode="paper": None,
+    )
     pm = PortfolioManager(account_key=account, initial_capital=initial)
-    monkeypatch.setattr(pm_mod, "get_all_positions", lambda account_key=None: [])
+    monkeypatch.setattr(
+        pm_mod,
+        "get_all_positions",
+        lambda account_key=None, mode="paper": [],
+    )
     monkeypatch.setattr(
         pm_mod, "get_trade_cash_summary",
         lambda mode=None, account_key=None: {"cash_delta": cash_delta},
     )
-    monkeypatch.setattr(pm_mod, "get_cash_flow_total", lambda account_key="": deposits)
     monkeypatch.setattr(
-        pm_mod, "get_latest_snapshot_summary", lambda account_key="": prev_snapshot,
+        pm_mod,
+        "get_cash_flow_total",
+        lambda account_key="", mode="paper": deposits,
     )
     monkeypatch.setattr(
-        pm_mod, "get_cash_flow_total_between", lambda ak, a, u: flow_since,
+        pm_mod,
+        "get_latest_snapshot_summary",
+        lambda account_key="", mode="paper": prev_snapshot,
     )
     monkeypatch.setattr(
-        pm_mod, "get_max_cumulative_return", lambda account_key="": hist_max_cum,
+        pm_mod,
+        "get_cash_flow_total_between",
+        lambda ak, a, u, mode="paper": flow_since,
+    )
+    monkeypatch.setattr(
+        pm_mod,
+        "get_max_cumulative_return",
+        lambda account_key="", mode="paper": hist_max_cum,
     )
     return pm
 
@@ -111,7 +129,11 @@ class TestBasketCapitalResolution:
     def test_basket_key_resolves_basket_capital(self, monkeypatch):
         import core.portfolio_manager as pm_mod
 
-        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        monkeypatch.setattr(
+            pm_mod,
+            "get_latest_peak_value",
+            lambda account_key="", mode="paper": None,
+        )
         from unittest.mock import patch
         with patch(
             "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
@@ -123,7 +145,11 @@ class TestBasketCapitalResolution:
     def test_unknown_basket_falls_back_to_global(self, monkeypatch):
         import core.portfolio_manager as pm_mod
 
-        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        monkeypatch.setattr(
+            pm_mod,
+            "get_latest_peak_value",
+            lambda account_key="", mode="paper": None,
+        )
         from unittest.mock import patch
         with patch(
             "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
@@ -135,14 +161,22 @@ class TestBasketCapitalResolution:
     def test_non_basket_key_unchanged(self, monkeypatch):
         import core.portfolio_manager as pm_mod
 
-        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        monkeypatch.setattr(
+            pm_mod,
+            "get_latest_peak_value",
+            lambda account_key="", mode="paper": None,
+        )
         pm = PortfolioManager(account_key="scoring")
         assert pm.initial_capital >= 1_000_000  # 기존 동작 그대로
 
     def test_explicit_capital_still_wins(self, monkeypatch):
         import core.portfolio_manager as pm_mod
 
-        monkeypatch.setattr(pm_mod, "get_latest_peak_value", lambda account_key="": None)
+        monkeypatch.setattr(
+            pm_mod,
+            "get_latest_peak_value",
+            lambda account_key="", mode="paper": None,
+        )
         pm = PortfolioManager(
             account_key="basket_rebalance:kr_pocket", initial_capital=777,
         )
@@ -250,7 +284,11 @@ class TestHasCashFlowsBranch:
             prev_snapshot=prev, flow_since=-100_000, hist_max_cum=25.0,
         )
         import core.portfolio_manager as pm_mod
-        monkeypatch.setattr(pm_mod, "has_cash_flows", lambda account_key="": True)
+        monkeypatch.setattr(
+            pm_mod,
+            "has_cash_flows",
+            lambda account_key="", mode="paper": True,
+        )
         out = pm.get_portfolio_summary()
         # V=300k, 유입 -100k → r = 300/(400-100)-1 = 0 → 누적 25% 유지 (legacy면 0%로 붕괴)
         assert out["total_return"] == pytest.approx(25.0)

@@ -55,6 +55,12 @@ def test_position_size_risk_per_share_zero(risk_manager):
     assert risk_manager.calculate_position_size(10_000_000, 50_000, 50_000) == 0
 
 
+@pytest.mark.parametrize("stop_price", [0, -1, 50_001, float("nan"), float("inf"), "49000", None, True])
+def test_position_size_rejects_invalid_stop_price(risk_manager, stop_price):
+    """손절가가 양수가 아니거나 진입가 이상/비유한 값이면 fail-closed."""
+    assert risk_manager.calculate_position_size(10_000_000, 50_000, stop_price) == 0
+
+
 def test_position_size_capital_zero(risk_manager):
     """자본 0이면 0 반환"""
     assert risk_manager.calculate_position_size(0, 50_000, 49_000) == 0
@@ -65,6 +71,28 @@ def test_position_size_normal(risk_manager):
     qty = risk_manager.calculate_position_size(10_000_000, 50_000, 49_000)
     assert qty > 0
     assert isinstance(qty, int)
+
+
+def test_signal_scaling_cannot_exceed_max_risk_per_trade(risk_manager):
+    """강한 신호도 설정된 1회 손실 예산을 확대하지 못한다."""
+    risk_manager.risk_params["position_sizing"]["signal_scaling"] = {
+        "enabled": True,
+        "min_scale": 0.5,
+        "max_scale": 1.5,
+        "score_range": [2, 5],
+    }
+    capital = 10_000_000
+    entry = 50_000
+    stop = 49_000
+    qty = risk_manager.calculate_position_size(capital, entry, stop, signal_score=5)
+
+    assert qty * (entry - stop) <= capital * 0.01
+
+
+@pytest.mark.parametrize("bad_risk", [0, -0.01, 0.051, 1.0, float("nan"), float("inf"), "0.01", True])
+def test_invalid_max_risk_setting_blocks_new_position(risk_manager, bad_risk):
+    risk_manager.risk_params["position_sizing"]["max_risk_per_trade"] = bad_risk
+    assert risk_manager.calculate_position_size(10_000_000, 50_000, 49_000) == 0
 
 
 def test_tick_size():
@@ -206,6 +234,40 @@ def test_dynamic_slippage_increases_when_order_participation_is_high(risk_manage
     assert high["slippage_multiplier"] >= 2.0
 
 
+@pytest.mark.parametrize("bad_price", [0, -1, float("nan"), float("inf"), "50000", True])
+def test_transaction_costs_reject_invalid_price(risk_manager, bad_price):
+    with pytest.raises(ValueError, match="price"):
+        risk_manager.calculate_transaction_costs(bad_price, 1, "BUY")
+
+
+@pytest.mark.parametrize("bad_quantity", [0, -1, float("nan"), float("inf"), "1", True])
+def test_transaction_costs_reject_invalid_quantity(risk_manager, bad_quantity):
+    with pytest.raises(ValueError, match="quantity"):
+        risk_manager.calculate_transaction_costs(50_000, bad_quantity, "BUY")
+
+
+def test_transaction_costs_allow_positive_fractional_quantity_for_research(risk_manager):
+    result = risk_manager.calculate_transaction_costs(50_000, 1.5, "BUY")
+    assert result["total_cost"] > 0
+
+
+@pytest.mark.parametrize("bad_action", ["", "HOLD", "PURCHASE", None])
+def test_transaction_costs_reject_unknown_action(risk_manager, bad_action):
+    with pytest.raises(ValueError, match="action"):
+        risk_manager.calculate_transaction_costs(50_000, 1, bad_action)
+
+
+@pytest.mark.parametrize("bad_avg_price", [0, -1, float("nan"), float("inf"), "50000"])
+def test_transaction_costs_reject_invalid_average_price(risk_manager, bad_avg_price):
+    with pytest.raises(ValueError, match="avg_price"):
+        risk_manager.calculate_transaction_costs(
+            50_000,
+            1,
+            "SELL",
+            avg_price=bad_avg_price,
+        )
+
+
 def test_correlation_risk_blocks_when_target_price_data_lookup_fails(risk_manager, monkeypatch):
     """상관관계 리스크가 켜져 있으면 대상 종목 가격 조회 실패 시 fail-closed."""
 
@@ -251,6 +313,76 @@ def test_correlation_risk_blocks_when_existing_position_data_is_insufficient(ris
     assert result["missing_symbols"] == ["000660"]
 
 
+@pytest.mark.parametrize(
+    ("key", "bad_value"),
+    [
+        ("high_corr_threshold", float("nan")),
+        ("high_corr_scale", 0),
+        ("lookback_days", 29),
+        ("strict", "true"),
+    ],
+)
+def test_correlation_risk_invalid_runtime_config_blocks_without_data_lookup(
+    risk_manager, monkeypatch, key, bad_value
+):
+    risk_manager.risk_params["diversification"]["correlation_risk"][key] = bad_value
+    monkeypatch.setattr(
+        "core.data_collector.DataCollector",
+        lambda: pytest.fail("invalid config must block before data lookup"),
+    )
+
+    result = risk_manager.check_correlation_risk("005930", ["000660"])
+
+    assert result["blocked"] is True
+    assert result["scale"] == 0.0
+    assert "설정 오류" in result["reason"]
+
+
+def test_performance_degradation_nan_threshold_blocks(risk_manager):
+    risk_manager.risk_params["performance_degradation"] = {
+        "enabled": True,
+        "recent_trades": 20,
+        "min_win_rate": float("nan"),
+    }
+
+    result = risk_manager.check_recent_performance([])
+
+    assert result["allowed"] is False
+    assert result["performance_config_invalid"] is True
+
+
+def test_projected_exposure_rejects_boolean_max_positions(risk_manager):
+    risk_manager.risk_params["diversification"]["max_positions"] = True
+
+    result = risk_manager.check_projected_exposure(
+        current_positions=0,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=1_000_000,
+        current_invested=0,
+    )
+
+    assert result["can_buy"] is False
+    assert result["exposure_check_failed"] is True
+
+
+def test_diversification_nan_sector_cap_blocks(risk_manager):
+    risk_manager.risk_params["diversification"]["max_sector_ratio"] = float("nan")
+
+    result = risk_manager.check_diversification(
+        current_positions=0,
+        position_value=100_000,
+        total_value=1_000_000,
+        available_cash=1_000_000,
+        symbol="005930",
+        sector_map={"005930": "반도체"},
+        positions=[],
+    )
+
+    assert result["can_buy"] is False
+    assert "설정 오류" in result["reason"]
+
+
 class TestEtfSellTaxExemption:
     """국내 상장 ETF 매도세 면제 — tax_exempt_symbols 등록 종목은 매도세 0.
 
@@ -267,6 +399,11 @@ class TestEtfSellTaxExemption:
                     "tax_rate": 0.0020,
                     # yaml에서 숫자로 적혀도(따옴표 누락) 문자열 비교로 매칭돼야 한다
                     "tax_exempt_symbols": ["069500", 357870],
+                    "holding_period_income_tax": {
+                        "enabled": True,
+                        "rate": 0.154,
+                        "symbols": [357870],
+                    },
                     "slippage": 0.0005,
                     "slippage_ticks": 1,
                     "dynamic_slippage": {"enabled": False},
@@ -280,6 +417,42 @@ class TestEtfSellTaxExemption:
 
     def test_int_coded_yaml_entry_still_matches(self, rm):
         out = rm.calculate_transaction_costs(57715, 2, "SELL", symbol="357870")
+        assert out["tax"] == 0
+
+    def test_other_etf_positive_gain_applies_holding_period_income_tax(self, rm):
+        out = rm.calculate_transaction_costs(
+            60_000,
+            2,
+            "SELL",
+            avg_price=50_000,
+            symbol="357870",
+        )
+        expected = round((60_000 - 50_000) * 2 * 0.154, 0)
+        assert out["transaction_tax"] == 0
+        assert out["holding_period_income_tax"] == expected
+        assert out["tax"] == expected
+
+    def test_other_etf_loss_has_no_holding_period_income_tax(self, rm):
+        out = rm.calculate_transaction_costs(
+            50_000,
+            2,
+            "SELL",
+            avg_price=60_000,
+            symbol="357870",
+        )
+        assert out["holding_period_income_tax"] == 0
+        assert out["tax"] == 0
+
+    def test_domestic_equity_etf_gain_remains_trade_gain_tax_free(self, rm):
+        out = rm.calculate_transaction_costs(
+            60_000,
+            2,
+            "SELL",
+            avg_price=50_000,
+            symbol="069500",
+        )
+        assert out["transaction_tax"] == 0
+        assert out["holding_period_income_tax"] == 0
         assert out["tax"] == 0
 
     def test_non_exempt_symbol_keeps_tax(self, rm):

@@ -65,7 +65,10 @@ def main() -> int:
         if args.undo:
             existing = (
                 session.query(TradeHistory)
-                .filter(TradeHistory.account_key == dst_key)
+                .filter(
+                    TradeHistory.mode == "paper",
+                    TradeHistory.account_key == dst_key,
+                )
                 .count()
             )
             if existing:
@@ -85,7 +88,10 @@ def main() -> int:
         ]:
             rows = (
                 session.query(model)
-                .filter(model.account_key == src_key)
+                .filter(
+                    model.mode == "paper",
+                    model.account_key == src_key,
+                )
                 .all()
             )
             moves.append((model.__tablename__, rows, has_strategy))

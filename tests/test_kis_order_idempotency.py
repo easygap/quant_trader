@@ -1,8 +1,9 @@
 """KIS _request 비멱등(주문) 재시도 안전성 회귀 테스트.
 
-핵심: 주문 제출(POST)은 응답을 못 받은 네트워크 오류에서 재전송하면 이중 체결이
-난다. idempotent=False면 한 번만 보내고, 체결 여부 불명 예외(KISOrderResponseUnknown)를
-던져 상위 재시도 래퍼가 재전송 대신 reconcile 경로로 분기하게 한다.
+핵심: 주문 제출(POST)은 네트워크 응답 유실뿐 아니라 HTTP 429/5xx에서도
+브로커가 요청을 처리했는지 단정할 수 없다. idempotent=False면 한 번만 보내고,
+체결 여부 불명 예외(KISOrderResponseUnknown)를 던져 상위 재시도 래퍼가
+재전송 대신 reconcile 경로로 분기하게 한다.
 """
 import time
 from unittest.mock import patch
@@ -78,6 +79,37 @@ def test_order_post_not_resubmitted_on_connection_error():
     with patch("api.kis_api.requests.post", side_effect=fake_post):
         with pytest.raises(KISOrderResponseUnknown):
             api._request("POST", "/order", "TR", body={"x": 1}, idempotent=False)
+
+    assert calls["post"] == 1
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 502, 503, 504])
+def test_order_post_not_resubmitted_on_ambiguous_http_status(status_code):
+    """비멱등 주문은 429/5xx 응답을 UNKNOWN으로 올리고 단 1회만 POST한다."""
+    api = _make_api()
+    calls = {"post": 0}
+
+    class FakeResp:
+        headers = {"Retry-After": "1"}
+
+        def __init__(self, code):
+            self.status_code = code
+
+    def fake_post(*a, **kw):
+        calls["post"] += 1
+        return FakeResp(status_code)
+
+    with patch("api.kis_api.requests.post", side_effect=fake_post), \
+         patch("api.kis_api.time.sleep", side_effect=AssertionError("order must not retry")):
+        with pytest.raises(KISOrderResponseUnknown, match=f"HTTP {status_code}"):
+            api._request(
+                "POST",
+                "/order",
+                "TR",
+                body={"x": 1},
+                max_retries=3,
+                idempotent=False,
+            )
 
     assert calls["post"] == 1
 

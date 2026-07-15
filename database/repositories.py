@@ -5,19 +5,32 @@
 - 모든 함수에 @with_retry 적용 — WAL 체크포인트 중 일시적 locked에도 안전
 """
 
+import json
 import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import and_
+from sqlalchemy import and_, text
+from sqlalchemy.exc import IntegrityError
 from loguru import logger
 
 from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
     Position, PortfolioSnapshot, DailyReport, FailedOrder,
     PendingOrderGuard, OrderRecord as DbOrderRecord, CashFlow,
+    OperationEvent,
 )
+
+
+TRADING_HALT_SET = "TRADING_HALT_SET"
+TRADING_HALT_CLEARED = "TRADING_HALT_CLEARED"
+TRADING_HALT_STRATEGY = "global_trading_halt"
+_TRADING_HALT_ADVISORY_LOCK_KEY = 0x51484C54  # "QHLT"
+
+
+class TradingHaltStateConflict(RuntimeError):
+    """HALT 해제 기준 이벤트가 이미 최신 상태가 아닐 때 발생한다."""
 
 
 # =============================================================
@@ -430,6 +443,11 @@ def get_daily_trade_summary(
 # 포지션 관련
 # =============================================================
 
+def _ledger_mode(mode: str = "paper") -> str:
+    """장부 mode를 소문자로 정규화한다. 빈 값은 하위 호환상 paper."""
+    return str(mode or "paper").strip().lower() or "paper"
+
+
 @with_retry
 def save_position(
     symbol: str,
@@ -440,13 +458,17 @@ def save_position(
     trailing_stop_price: float = None,
     strategy: str = "",
     account_key: str = "",
+    mode: str = "paper",
 ) -> Position:
-    """포지션 저장 (신규 또는 업데이트). account_key: 전략별 계좌 구분."""
+    """포지션 저장 (신규 또는 업데이트). mode+account_key 장부별 격리."""
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         position = session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
 
         if position:
@@ -468,6 +490,7 @@ def save_position(
         else:
             # 신규 포지션
             position = Position(
+                mode=md,
                 account_key=ak,
                 symbol=symbol,
                 avg_price=avg_price,
@@ -502,6 +525,7 @@ def replace_position_from_broker(
     trailing_stop_price: float = None,
     strategy: str = "",
     account_key: str = "",
+    mode: str = "paper",
 ) -> Position:
     """
     브로커 잔고 기준으로 포지션을 절대값 보정한다.
@@ -512,12 +536,15 @@ def replace_position_from_broker(
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         qty = int(quantity)
         if qty <= 0:
             raise ValueError("브로커 보정 수량은 1주 이상이어야 합니다")
 
         position = session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
         if position:
             position.avg_price = float(avg_price)
@@ -528,6 +555,7 @@ def replace_position_from_broker(
                 position.strategy = strategy
         else:
             position = Position(
+                mode=md,
                 account_key=ak,
                 symbol=symbol,
                 avg_price=float(avg_price),
@@ -557,24 +585,31 @@ def replace_position_from_broker(
 
 
 @with_retry
-def get_position(symbol: str, account_key: str = "") -> Optional[Position]:
-    """특정 종목의 포지션 조회 (account_key 지정 시 해당 계좌만)."""
+def get_position(
+    symbol: str, account_key: str = "", mode: str = "paper"
+) -> Optional[Position]:
+    """특정 mode+계좌+종목의 포지션 조회."""
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         return session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
     finally:
         session.close()
 
 
 @with_retry
-def get_all_positions(account_key: Optional[str] = None) -> List[Position]:
-    """모든 포지션 조회 (account_key 지정 시 해당 계좌만)."""
+def get_all_positions(
+    account_key: Optional[str] = None, mode: str = "paper"
+) -> List[Position]:
+    """지정 mode의 모든 포지션 조회 (account_key는 선택 필터)."""
     session = get_session()
     try:
-        query = session.query(Position)
+        query = session.query(Position).filter(Position.mode == _ledger_mode(mode))
         if account_key is not None:
             query = query.filter(Position.account_key == (account_key or ""))
         return query.all()
@@ -583,13 +618,16 @@ def get_all_positions(account_key: Optional[str] = None) -> List[Position]:
 
 
 @with_retry
-def delete_position(symbol: str, account_key: str = ""):
+def delete_position(symbol: str, account_key: str = "", mode: str = "paper"):
     """포지션 삭제 (전량 매도 시)."""
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).delete()
         session.commit()
         logger.info("포지션 삭제: {}", symbol)
@@ -602,18 +640,23 @@ def delete_position(symbol: str, account_key: str = ""):
 
 
 @with_retry
-def reduce_position(symbol: str, sell_qty: int, account_key: str = "") -> Optional[Position]:
+def reduce_position(
+    symbol: str, sell_qty: int, account_key: str = "", mode: str = "paper"
+) -> Optional[Position]:
     """
     부분 매도: 수량만 감소, 평균 단가 유지.
     남은 수량이 0이면 delete_position 후 None 반환.
     """
     if sell_qty <= 0:
-        return get_position(symbol, account_key=account_key)
+        return get_position(symbol, account_key=account_key, mode=mode)
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         position = session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
         if not position:
             return None
@@ -637,7 +680,13 @@ def reduce_position(symbol: str, sell_qty: int, account_key: str = "") -> Option
 
 
 @with_retry
-def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float, account_key: str = ""):
+def update_trailing_stop(
+    symbol: str,
+    current_price: float,
+    trailing_rate: float,
+    account_key: str = "",
+    mode: str = "paper",
+):
     """
     트레일링 스탑 가격 업데이트
     - 현재가가 최고가를 경신하면 스탑가도 갱신
@@ -645,8 +694,11 @@ def update_trailing_stop(symbol: str, current_price: float, trailing_rate: float
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         position = session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
         if position and current_price > (position.highest_price or 0):
             position.highest_price = current_price
@@ -667,6 +719,7 @@ def update_position_targets(
     trailing_stop_price: float = None,
     account_key: str = "",
     partial_tp_done: bool = None,
+    mode: str = "paper",
 ):
     """
     포지션의 손절/익절/트레일링 가격을 업데이트 (부분 매도 후 재조정 등).
@@ -675,8 +728,11 @@ def update_position_targets(
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         position = session.query(Position).filter(
-            Position.account_key == ak, Position.symbol == symbol
+            Position.mode == md,
+            Position.account_key == ak,
+            Position.symbol == symbol,
         ).first()
         if not position:
             return
@@ -696,10 +752,18 @@ def update_position_targets(
         session.close()
 
 
-def update_stop_loss_price(symbol: str, stop_loss_price: float, account_key: str = ""):
+def update_stop_loss_price(
+    symbol: str,
+    stop_loss_price: float,
+    account_key: str = "",
+    mode: str = "paper",
+):
     # 래칟 손절 갱신: Position.stop_loss_price 한 필드만 update_position_targets로 위임.
     update_position_targets(
-        symbol, stop_loss_price=stop_loss_price, account_key=account_key
+        symbol,
+        stop_loss_price=stop_loss_price,
+        account_key=account_key,
+        mode=mode,
     )
 
 
@@ -719,8 +783,9 @@ def save_portfolio_snapshot(
     account_key: str = "",
     peak_value: float = None,
     snapshot_date: datetime = None,
+    mode: str = "paper",
 ):
-    """일일 포트폴리오 스냅샷 저장 (account_key: 전략별 계좌 구분).
+    """일일 포트폴리오 스냅샷 저장 (mode+account_key 장부별 격리).
 
     snapshot_date: 스냅샷 귀속 날짜(자정으로 정규화). 미지정 시 오늘.
     비거래일 보충 실행에서 NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
@@ -732,7 +797,9 @@ def save_portfolio_snapshot(
             base = datetime(base.year, base.month, base.day)
         today = base.replace(hour=0, minute=0, second=0, microsecond=0)
         ak = account_key or ""
+        md = _ledger_mode(mode)
         snapshot = PortfolioSnapshot(
+            mode=md,
             account_key=ak,
             date=today,
             total_value=total_value,
@@ -744,9 +811,11 @@ def save_portfolio_snapshot(
             peak_value=peak_value,
             position_count=position_count,
         )
-        # merge by (account_key, date)
+        # merge by (mode, account_key, date)
         existing = session.query(PortfolioSnapshot).filter(
-            PortfolioSnapshot.account_key == ak, PortfolioSnapshot.date == today
+            PortfolioSnapshot.mode == md,
+            PortfolioSnapshot.account_key == ak,
+            PortfolioSnapshot.date == today,
         ).first()
         if existing:
             existing.total_value = total_value
@@ -774,14 +843,18 @@ def save_portfolio_snapshot(
 
 
 @with_retry
-def get_latest_peak_value(account_key: str = "") -> float | None:
+def get_latest_peak_value(
+    account_key: str = "", mode: str = "paper"
+) -> float | None:
     """DB에서 가장 최근 스냅샷의 peak_value를 복구. 없으면 None."""
     session = get_session()
     try:
         ak = account_key or ""
+        md = _ledger_mode(mode)
         row = (
             session.query(PortfolioSnapshot.peak_value)
             .filter(
+                PortfolioSnapshot.mode == md,
                 PortfolioSnapshot.account_key == ak,
                 PortfolioSnapshot.peak_value.isnot(None),
             )
@@ -825,7 +898,7 @@ def record_cash_flow(
             amount=float(amount),
             occurred_at=occurred_at or datetime.now(),
             note=note or "",
-            mode=mode,
+            mode=_ledger_mode(mode),
         )
         session.add(row)
         session.commit()
@@ -835,7 +908,7 @@ def record_cash_flow(
 
 
 @with_retry
-def has_cash_flows(account_key: str = "") -> bool:
+def has_cash_flows(account_key: str = "", mode: str = "paper") -> bool:
     """계정에 외부 현금 흐름 기록이 하나라도 있는가 — TWR 분기 판정용.
 
     순합(net)이 아니라 존재 여부로 판정한다: +100 뒤 -100처럼 순합 0이어도 구간
@@ -845,7 +918,10 @@ def has_cash_flows(account_key: str = "") -> bool:
     try:
         return (
             session.query(CashFlow.id)
-            .filter(CashFlow.account_key == (account_key or ""))
+            .filter(
+                CashFlow.mode == _ledger_mode(mode),
+                CashFlow.account_key == (account_key or ""),
+            )
             .first()
         ) is not None
     finally:
@@ -853,13 +929,16 @@ def has_cash_flows(account_key: str = "") -> bool:
 
 
 @with_retry
-def get_cash_flows(account_key: str = "") -> list:
+def get_cash_flows(account_key: str = "", mode: str = "paper") -> list:
     """계정의 외부 현금 흐름 목록 [(occurred_at, amount)...] — 시간가중 자본 계산용."""
     session = get_session()
     try:
         rows = (
             session.query(CashFlow)
-            .filter(CashFlow.account_key == (account_key or ""))
+            .filter(
+                CashFlow.mode == _ledger_mode(mode),
+                CashFlow.account_key == (account_key or ""),
+            )
             .order_by(CashFlow.occurred_at.asc())
             .all()
         )
@@ -869,13 +948,18 @@ def get_cash_flows(account_key: str = "") -> list:
 
 
 @with_retry
-def get_recent_cash_flows(account_key: str = "", limit: int = 12) -> list:
+def get_recent_cash_flows(
+    account_key: str = "", limit: int = 12, mode: str = "paper"
+) -> list:
     """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용."""
     session = get_session()
     try:
         rows = (
             session.query(CashFlow)
-            .filter(CashFlow.account_key == (account_key or ""))
+            .filter(
+                CashFlow.mode == _ledger_mode(mode),
+                CashFlow.account_key == (account_key or ""),
+            )
             .order_by(CashFlow.occurred_at.desc())
             .limit(int(limit))
             .all()
@@ -896,11 +980,15 @@ def get_recent_cash_flows(account_key: str = "", limit: int = 12) -> list:
 def get_cash_flow_total(
     account_key: str = "",
     until: Optional[datetime] = None,
+    mode: str = "paper",
 ) -> float:
     """계정의 외부 현금 흐름 순합(입금-출금). until 지정 시 그 시각 이하만."""
     session = get_session()
     try:
-        query = session.query(CashFlow).filter(CashFlow.account_key == (account_key or ""))
+        query = session.query(CashFlow).filter(
+            CashFlow.mode == _ledger_mode(mode),
+            CashFlow.account_key == (account_key or ""),
+        )
         if until is not None:
             query = query.filter(CashFlow.occurred_at <= until)
         return float(sum(r.amount or 0 for r in query.all()))
@@ -913,6 +1001,7 @@ def get_cash_flow_total_between(
     account_key: str,
     after: datetime,
     until: datetime,
+    mode: str = "paper",
 ) -> float:
     """(after, until] 구간의 외부 현금 흐름 순합 — TWR 구간 수익률 보정용.
 
@@ -923,7 +1012,10 @@ def get_cash_flow_total_between(
     try:
         rows = (
             session.query(CashFlow)
-            .filter(CashFlow.account_key == (account_key or ""))
+            .filter(
+                CashFlow.mode == _ledger_mode(mode),
+                CashFlow.account_key == (account_key or ""),
+            )
             .filter(CashFlow.occurred_at > after)
             .filter(CashFlow.occurred_at <= until)
             .all()
@@ -934,7 +1026,9 @@ def get_cash_flow_total_between(
 
 
 @with_retry
-def get_latest_snapshot_summary(account_key: str = "") -> Optional[dict]:
+def get_latest_snapshot_summary(
+    account_key: str = "", mode: str = "paper"
+) -> Optional[dict]:
     """가장 최근 스냅샷의 (date, created_at, total_value, cumulative_return) 요약.
 
     TWR 체인 계산용 — created_at은 실제 측정 시각이라 '직전 측정 이후 유입' 경계로
@@ -944,7 +1038,10 @@ def get_latest_snapshot_summary(account_key: str = "") -> Optional[dict]:
     try:
         row = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == (account_key or ""))
+            .filter(
+                PortfolioSnapshot.mode == _ledger_mode(mode),
+                PortfolioSnapshot.account_key == (account_key or ""),
+            )
             .order_by(PortfolioSnapshot.date.desc())
             .first()
         )
@@ -961,13 +1058,16 @@ def get_latest_snapshot_summary(account_key: str = "") -> Optional[dict]:
 
 
 @with_retry
-def get_max_cumulative_return(account_key: str = "") -> Optional[float]:
+def get_max_cumulative_return(
+    account_key: str = "", mode: str = "paper"
+) -> Optional[float]:
     """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용."""
     session = get_session()
     try:
         row = (
             session.query(PortfolioSnapshot.cumulative_return)
             .filter(
+                PortfolioSnapshot.mode == _ledger_mode(mode),
                 PortfolioSnapshot.account_key == (account_key or ""),
                 PortfolioSnapshot.cumulative_return.isnot(None),
             )
@@ -980,12 +1080,19 @@ def get_max_cumulative_return(account_key: str = "") -> Optional[float]:
 
 
 @with_retry
-def get_portfolio_snapshots(days: int = 30, account_key: Optional[str] = None) -> pd.DataFrame:
-    """최근 N일간 포트폴리오 스냅샷 조회 (account_key 지정 시 해당 계좌만)."""
+def get_portfolio_snapshots(
+    days: int = 30,
+    account_key: Optional[str] = None,
+    mode: str = "paper",
+) -> pd.DataFrame:
+    """최근 N일간 지정 mode의 포트폴리오 스냅샷 조회."""
     session = get_session()
     try:
         since = datetime.now() - timedelta(days=days)
-        query = session.query(PortfolioSnapshot).filter(PortfolioSnapshot.date >= since)
+        query = session.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.mode == _ledger_mode(mode),
+            PortfolioSnapshot.date >= since,
+        )
         if account_key is not None:
             query = query.filter(PortfolioSnapshot.account_key == (account_key or ""))
         results = query.order_by(PortfolioSnapshot.date).all()
@@ -1015,6 +1122,7 @@ def get_portfolio_snapshots_between(
     start_date: datetime,
     end_date: datetime,
     account_key: Optional[str] = None,
+    mode: str = "paper",
 ) -> List[dict]:
     """지정 기간 내 포트폴리오 스냅샷 목록 조회 (일별, 시간 무시). account_key 지정 시 해당 계좌만."""
     session = get_session()
@@ -1022,6 +1130,7 @@ def get_portfolio_snapshots_between(
         start_naive = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_naive = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
         query = session.query(PortfolioSnapshot).filter(
+            PortfolioSnapshot.mode == _ledger_mode(mode),
             PortfolioSnapshot.date >= start_naive,
             PortfolioSnapshot.date <= end_naive,
         )
@@ -1056,7 +1165,9 @@ def get_paper_performance_metrics(
     없으면 해당 구간 매도 거래의 실현손익 합계로 대체 수익률 추정.
     account_key 지정 시 해당 계좌만 집계.
     """
-    snapshots = get_portfolio_snapshots_between(start_date, end_date, account_key=account_key)
+    snapshots = get_portfolio_snapshots_between(
+        start_date, end_date, account_key=account_key, mode=mode
+    )
     trades = get_trade_history(mode=mode, start_date=start_date, end_date=end_date, account_key=account_key)
     sell_actions = ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP")
     sell_trades = [t for t in trades if (t.action or "").upper() in sell_actions]
@@ -1182,6 +1293,211 @@ def get_daily_reports(days: int = 30, account_key: Optional[str] = None) -> pd.D
         } for r in results])
     finally:
         session.close()
+
+
+# =============================================================
+# 전역 거래 HALT 킬스위치 (OperationEvent append-only 상태 로그)
+# =============================================================
+
+def _required_halt_text(value: str, field: str, max_length: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field}는 빈 값일 수 없습니다")
+    return text[:max_length]
+
+
+def _trading_halt_state_from_event(event: OperationEvent | None) -> dict:
+    if event is None:
+        return {
+            "halted": False,
+            "event_id": None,
+            "event_type": None,
+            "reason": "",
+            "source": "",
+            "mode": None,
+            "created_at": None,
+            "detail": {},
+        }
+
+    detail = {}
+    if event.detail:
+        try:
+            decoded = json.loads(event.detail)
+            if isinstance(decoded, dict):
+                detail = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # 이벤트 종류가 상태의 최종 근거이므로 detail 파싱 실패가
+            # 상태 판정을 느슨하게 만들어서는 안 된다.
+            detail = {}
+
+    return {
+        "halted": event.event_type == TRADING_HALT_SET,
+        "event_id": int(event.id),
+        "event_type": event.event_type,
+        "reason": str(detail.get("reason") or event.message or ""),
+        "source": str(detail.get("source") or ""),
+        "mode": event.mode,
+        "created_at": event.created_at,
+        "detail": detail,
+    }
+
+
+@with_retry
+def get_trading_halt_state() -> dict:
+    """최신 전역 HALT 전환 이벤트를 읽는다.
+
+    조회 예외는 호출자가 반드시 받도록 전파한다. 주문 경로는 이를
+    fail-closed BUY 차단으로 변환하며, SELL은 이 함수를 호출하지 않는다.
+    """
+    session = get_session()
+    try:
+        event = (
+            session.query(OperationEvent)
+            .filter(OperationEvent.strategy == TRADING_HALT_STRATEGY)
+            .filter(OperationEvent.event_type.in_((TRADING_HALT_SET, TRADING_HALT_CLEARED)))
+            .order_by(OperationEvent.id.desc())
+            .first()
+        )
+        return _trading_halt_state_from_event(event)
+    finally:
+        session.close()
+
+
+def _record_trading_halt_transition(
+    event_type: str,
+    reason: str,
+    *,
+    source: str,
+    mode: str,
+    detail: Optional[dict] = None,
+    expected_active_event_id: Optional[int] = None,
+) -> dict:
+    reason_text = _required_halt_text(reason, "reason", 2000)
+    source_text = _required_halt_text(source, "source", 200)
+    mode_text = str(mode or "live").strip().lower()[:20] or "live"
+    payload = dict(detail or {})
+    payload.update({
+        "reason": reason_text,
+        "source": source_text,
+        "global": True,
+    })
+
+    session = get_session()
+    try:
+        # SET/CLEAR 전환을 같은 직렬화 지점에 묶는다. CLEAR가 상태를 읽은 뒤
+        # 새 SET을 덮어쓰는 lost-update를 막으려면 CLEAR만 잠가서는 부족하다.
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            session.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _TRADING_HALT_ADVISORY_LOCK_KEY},
+            )
+        else:  # 지원 여부를 증명할 수 없는 DB에서는 안전하게 전환을 거부한다.
+            raise RuntimeError(f"HALT 전환 락 미지원 DB dialect: {dialect}")
+
+        if event_type == TRADING_HALT_CLEARED:
+            latest = (
+                session.query(OperationEvent)
+                .filter(OperationEvent.strategy == TRADING_HALT_STRATEGY)
+                .filter(
+                    OperationEvent.event_type.in_(
+                        (TRADING_HALT_SET, TRADING_HALT_CLEARED)
+                    )
+                )
+                .order_by(OperationEvent.id.desc())
+                .first()
+            )
+            latest_state = _trading_halt_state_from_event(latest)
+            if not latest_state["halted"]:
+                raise TradingHaltStateConflict(
+                    "활성 HALT가 없거나 이미 해제되어 CLEAR를 거부합니다"
+                )
+            if int(latest_state["event_id"]) != int(expected_active_event_id):
+                raise TradingHaltStateConflict(
+                    "HALT 상태가 해제 확인 이후 변경되었습니다: "
+                    f"expected_event_id={expected_active_event_id}, "
+                    f"current_event_id={latest_state['event_id']}"
+                )
+
+        event = OperationEvent(
+            event_type=event_type,
+            severity="critical" if event_type == TRADING_HALT_SET else "warning",
+            symbol=None,
+            strategy=TRADING_HALT_STRATEGY,
+            message=reason_text,
+            detail=json.dumps(payload, ensure_ascii=False, default=str),
+            mode=mode_text,
+        )
+        session.add(event)
+        session.commit()
+        session.refresh(event)
+        state = _trading_halt_state_from_event(event)
+        logger.log(
+            "CRITICAL" if state["halted"] else "WARNING",
+            "전역 거래 HALT 상태 전환: halted={} event_id={} source={} reason={}",
+            state["halted"],
+            state["event_id"],
+            source_text,
+            reason_text,
+        )
+        return state
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@with_retry
+def set_trading_halt(
+    reason: str,
+    *,
+    source: str = "operator",
+    mode: str = "live",
+    detail: Optional[dict] = None,
+) -> dict:
+    """전 계좌·전 전략 BUY를 막는 영속 HALT를 설정하고 감사 이벤트를 남긴다."""
+    return _record_trading_halt_transition(
+        TRADING_HALT_SET,
+        reason,
+        source=source,
+        mode=mode,
+        detail=detail,
+    )
+
+
+@with_retry
+def clear_trading_halt(
+    reason: str,
+    *,
+    source: str = "operator",
+    mode: str = "live",
+    confirmed: bool = False,
+    expected_active_event_id: Optional[int] = None,
+    detail: Optional[dict] = None,
+) -> dict:
+    """명시적 운영자 확인 후 HALT를 해제하고 append-only 감사 이벤트를 남긴다."""
+    if confirmed is not True:
+        raise ValueError("HALT 해제에는 confirmed=True 운영자 확인이 필요합니다")
+    try:
+        expected_id = int(expected_active_event_id)
+    except (TypeError, ValueError):
+        raise ValueError("HALT 해제에는 expected_active_event_id가 필요합니다") from None
+    if expected_id <= 0:
+        raise ValueError("expected_active_event_id는 양수여야 합니다")
+    payload = dict(detail or {})
+    payload["confirmed"] = True
+    payload["expected_active_event_id"] = expected_id
+    return _record_trading_halt_transition(
+        TRADING_HALT_CLEARED,
+        reason,
+        source=source,
+        mode=mode,
+        detail=payload,
+        expected_active_event_id=expected_id,
+    )
 
 
 # =============================================================
@@ -1426,6 +1742,39 @@ def has_open_order_record(symbol: str, account_key: str = "", mode: str | None =
 # =============================================================
 # 중복 주문 방지 (DB 영속 가드)
 # =============================================================
+
+@with_retry
+def claim_order_guard(symbol: str, expires_at: datetime) -> bool:
+    """동일 종목 주문권을 DB UNIQUE 제약으로 원자적으로 획득한다.
+
+    ``has_pending`` 뒤 ``mark_pending`` 하는 check-then-set은 두 프로세스가
+    동시에 통과할 수 있다. 만료 행 삭제와 신규 INSERT를 한 트랜잭션에서
+    수행하고, UNIQUE 충돌은 정상적인 claim 실패로 처리한다. 그 밖의 DB
+    오류는 호출자에게 전파해 주문 경로가 fail-closed 하게 한다.
+    """
+    symbol_text = str(symbol or "").strip()
+    if not symbol_text:
+        raise ValueError("order guard symbol은 빈 값일 수 없습니다")
+
+    session = get_session()
+    try:
+        now = datetime.now()
+        session.query(PendingOrderGuard).filter(
+            PendingOrderGuard.symbol == symbol_text,
+            PendingOrderGuard.expires_at <= now,
+        ).delete(synchronize_session=False)
+        session.add(PendingOrderGuard(symbol=symbol_text, expires_at=expires_at))
+        session.commit()
+        return True
+    except IntegrityError:
+        session.rollback()
+        return False
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 
 @with_retry
 def save_order_guard(symbol: str, expires_at: datetime):

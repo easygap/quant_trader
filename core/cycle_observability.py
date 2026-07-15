@@ -87,12 +87,21 @@ def detect_snapshot_gaps_for_account(
 
     today_d = _as_date(today)
     th = TradingHours(config)
+    ledger_mode = (
+        "live"
+        if str(getattr(config, "trading", {}).get("mode", "paper")).lower()
+        == "live"
+        else "paper"
+    )
 
     session = get_session()
     try:
         snaps = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == account_key)
+            .filter(
+                PortfolioSnapshot.mode == ledger_mode,
+                PortfolioSnapshot.account_key == account_key,
+            )
             .all()
         )
         snap_dates = [_as_date(s.date) for s in snaps]

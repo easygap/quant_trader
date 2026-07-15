@@ -439,3 +439,51 @@ def test_cash_flows_endpoint_lists_recent():
         assert data["flows"][0]["note"] == "7월 적립"
 
     asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_cash_flows_endpoint_uses_active_ledger_mode():
+    """실전 대시보드에서 동일 바스켓의 paper 입금 내역을 노출하지 않는다."""
+    import asyncio
+    from types import SimpleNamespace
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+    from database.repositories import record_cash_flow
+    from core.basket_rebalancer import rebalance_live_strategy_id
+
+    name = "kr_pocket_flows_mode_isolation"
+    account_key = rebalance_live_strategy_id(name)
+    init_database()
+    record_cash_flow(
+        100_000,
+        account_key=account_key,
+        occurred_at=datetime(2026, 7, 6, 9, 0),
+        note="paper-only",
+        mode="paper",
+    )
+    record_cash_flow(
+        200_000,
+        account_key=account_key,
+        occurred_at=datetime(2026, 7, 6, 10, 0),
+        note="live-only",
+        mode="live",
+    )
+
+    async def run():
+        app = wd.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            with patch.object(
+                wd.Config,
+                "get",
+                return_value=SimpleNamespace(trading={"mode": "live"}),
+            ):
+                res = await client.get("/api/cash_flows?basket=" + name)
+                assert res.status == 200
+                data = await res.json()
+        finally:
+            await client.close()
+        assert [flow["note"] for flow in data["flows"]] == ["live-only"]
+
+    asyncio.run(run())

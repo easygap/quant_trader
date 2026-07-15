@@ -17,7 +17,10 @@ class FakeCollector:
 
 
 class NoCostRiskManager:
-    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+    def calculate_transaction_costs(
+        self, price, quantity, action="BUY", avg_daily_volume=None,
+        avg_price=None, symbol=None,
+    ):
         return {
             "commission": 0.0,
             "tax": 0.0,
@@ -28,7 +31,10 @@ class NoCostRiskManager:
 
 
 class CostRiskManager:
-    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+    def calculate_transaction_costs(
+        self, price, quantity, action="BUY", avg_daily_volume=None,
+        avg_price=None, symbol=None,
+    ):
         if action == "BUY":
             return {
                 "commission": 1.0,
@@ -50,13 +56,17 @@ class RecordingSlippageRiskManager:
     def __init__(self):
         self.calls = []
 
-    def calculate_transaction_costs(self, price, quantity, action="BUY", avg_daily_volume=None, avg_price=None):
+    def calculate_transaction_costs(
+        self, price, quantity, action="BUY", avg_daily_volume=None,
+        avg_price=None, symbol=None,
+    ):
         self.calls.append(
             {
                 "action": action,
                 "avg_daily_volume": avg_daily_volume,
                 "quantity": quantity,
                 "avg_price": avg_price,
+                "symbol": symbol,
             }
         )
         multiplier = 2.0 if avg_daily_volume else 1.0
@@ -987,6 +997,7 @@ def test_target_weight_rotation_passes_avg_daily_volume_to_transaction_costs():
     assert recorder.calls
     assert any(call["action"] == "SELL" for call in recorder.calls)
     assert all(call["avg_daily_volume"] == pytest.approx(1_000_000.0) for call in recorder.calls)
+    assert all(call["symbol"] in {"AAA", "BBB", "CCC"} for call in recorder.calls)
 
     trades = result["trades"]
     metrics = result["target_weight_metrics"]

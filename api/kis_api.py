@@ -8,8 +8,11 @@
 
 import time
 import json
+import math
 import random
 import ssl
+import contextvars
+from contextlib import contextmanager
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -20,6 +23,59 @@ from loguru import logger
 
 from config.config_loader import Config
 from api.circuit_breaker import get_breaker
+
+
+_RATE_STATE_REGISTRY_LOCK = threading.Lock()
+_RATE_STATE_REGISTRY: dict[tuple[str, str], dict[str, Any]] = {}
+_ORDER_SUBMISSION_AUTHORIZED = contextvars.ContextVar(
+    "kis_order_submission_authorized",
+    default=False,
+)
+
+
+@contextmanager
+def authorized_kis_order_submission():
+    """OrderExecutor가 모든 가드를 통과한 짧은 구간에만 실주문을 허용한다."""
+    token = _ORDER_SUBMISSION_AUTHORIZED.set(True)
+    try:
+        yield
+    finally:
+        _ORDER_SUBMISSION_AUTHORIZED.reset(token)
+
+
+def _shared_rate_state(
+    base_url: str,
+    app_key: str,
+    max_calls_per_sec: float,
+    max_calls_per_min: int,
+) -> dict[str, Any]:
+    """같은 KIS app/domain 인스턴스들이 하나의 호출 예산을 공유한다."""
+    key = (str(base_url), str(app_key))
+    with _RATE_STATE_REGISTRY_LOCK:
+        state = _RATE_STATE_REGISTRY.get(key)
+        if state is None:
+            state = {
+                "max_calls_per_sec": max_calls_per_sec,
+                "max_calls_per_min": max_calls_per_min,
+                "tokens": max_calls_per_sec,
+                "last_refill": time.monotonic(),
+                "minute_window": deque(),
+                "token_lock": threading.Lock(),
+                "minute_lock": threading.Lock(),
+            }
+            _RATE_STATE_REGISTRY[key] = state
+        else:
+            # 인스턴스별 설정이 다르면 더 보수적인 한도를 프로세스 전체에 적용한다.
+            state["max_calls_per_sec"] = min(
+                float(state["max_calls_per_sec"]), max_calls_per_sec
+            )
+            state["max_calls_per_min"] = min(
+                int(state["max_calls_per_min"]), max_calls_per_min
+            )
+            state["tokens"] = min(
+                float(state["tokens"]), float(state["max_calls_per_sec"])
+            )
+        return state
 
 
 class KISTokenExpiredError(Exception):
@@ -63,6 +119,12 @@ class KISApi:
             self.base_url = kis.get("mock_url", "https://openapivts.koreainvestment.com:29443")
         else:
             self.base_url = kis.get("base_url", "https://openapi.koreainvestment.com:9443")
+        if self.use_mock is True and not self._is_confirmed_mock_endpoint():
+            logger.critical(
+                "KIS use_mock=true이지만 실효 URL이 공식 VTS가 아님 — "
+                "실돈 가능 endpoint로 보호합니다: {}",
+                self.base_url,
+            )
 
         # 인증 토큰
         self._access_token = None
@@ -78,14 +140,20 @@ class KISApi:
         # 2) Sliding Window: 분당 한도 (지속적 버스트 방지)
         self.max_calls_per_sec = float(kis.get("max_calls_per_sec", 10.0))
         self.max_calls_per_min = int(kis.get("max_calls_per_min", 300))
-        self._tokens = self.max_calls_per_sec
-        self._last_refill = time.monotonic()
-        self._token_lock = threading.Lock()
+        self._rate_state = _shared_rate_state(
+            self.base_url,
+            self.app_key,
+            self.max_calls_per_sec,
+            self.max_calls_per_min,
+        )
+        self._tokens = self._rate_state["tokens"]
+        self._last_refill = self._rate_state["last_refill"]
+        self._token_lock = self._rate_state["token_lock"]
         self._auth_lock = threading.Lock()
 
         # 분당 슬라이딩 윈도우: 최근 60초 내 요청 타임스탬프
-        self._minute_window: deque[float] = deque()
-        self._minute_lock = threading.Lock()
+        self._minute_window = self._rate_state["minute_window"]
+        self._minute_lock = self._rate_state["minute_lock"]
 
         # 모니터링 카운터 (사용량 추적)
         self._total_requests = 0
@@ -96,10 +164,19 @@ class KISApi:
         # 토큰 에러 쿨다운: 발급 실패 시 60초간 재시도 억제
         self._token_error_until: float = 0.0
 
+        masked_account = "미설정"
+        if self.account_no:
+            digits = self.cano
+            masked_account = (
+                f"{'*' * max(0, len(digits) - 2)}{digits[-2:]}-**"
+                if digits
+                else "****-**"
+            )
+
         logger.info(
             "KIS API 초기화 완료 (모드: {}, 계좌: {}, RateLimit: {}/sec, {}/min)",
-            "모의투자" if self.use_mock else "실전",
-            self.account_no,
+            "모의투자(VTS)" if self._is_confirmed_mock_endpoint() else "실전/미확인",
+            masked_account,
             self.max_calls_per_sec,
             self.max_calls_per_min,
         )
@@ -129,6 +206,18 @@ class KISApi:
             and self.app_secret != "YOUR_APP_SECRET_HERE"
             and len(self.app_key) > 0
         )
+
+    def _is_confirmed_mock_endpoint(self) -> bool:
+        """플래그와 실효 URL이 모두 KIS VTS일 때만 모의 주문으로 신뢰한다."""
+        return (
+            getattr(self, "use_mock", None) is True
+            and "openapivts.koreainvestment.com"
+            in str(getattr(self, "base_url", "")).strip().lower()
+        )
+
+    def _requires_order_capability(self) -> bool:
+        """실전 또는 정체를 확신할 수 없는 endpoint는 실주문처럼 보호한다."""
+        return not self._is_confirmed_mock_endpoint()
 
     @staticmethod
     def _mask_key(key: str, head: int = 4, tail: int = 4) -> str:
@@ -232,54 +321,63 @@ class KISApi:
         self._wait_for_minute_window()
 
         # 2) 초당 Token Bucket
-        with self._token_lock:
+        state = self._rate_state
+        with state["token_lock"]:
             while True:
                 now = time.monotonic()
-                elapsed = now - self._last_refill
+                elapsed = now - float(state["last_refill"])
+                max_per_sec = float(state["max_calls_per_sec"])
 
-                self._tokens = self._tokens + (elapsed * self.max_calls_per_sec)
-                if self._tokens > self.max_calls_per_sec:
-                    self._tokens = self.max_calls_per_sec
-                self._last_refill = now
+                state["tokens"] = float(state["tokens"]) + (elapsed * max_per_sec)
+                if state["tokens"] > max_per_sec:
+                    state["tokens"] = max_per_sec
+                state["last_refill"] = now
 
-                if self._tokens >= 1.0:
-                    self._tokens = self._tokens - 1.0
+                if state["tokens"] >= 1.0:
+                    state["tokens"] = state["tokens"] - 1.0
                     break
                 else:
-                    sleep_time = (1.0 - self._tokens) / self.max_calls_per_sec
+                    sleep_time = (1.0 - state["tokens"]) / max_per_sec
                     time.sleep(max(0.01, sleep_time))
+            self._tokens = state["tokens"]
+            self._last_refill = state["last_refill"]
 
         # 분당 윈도우에 현재 요청 기록
-        with self._minute_lock:
-            self._minute_window.append(time.monotonic())
+        with state["minute_lock"]:
+            state["minute_window"].append(time.monotonic())
         self._total_requests += 1
 
     def _wait_for_minute_window(self):
         """분당 한도 초과 시 가장 오래된 요청이 윈도우를 벗어날 때까지 대기."""
         while True:
-            with self._minute_lock:
+            state = self._rate_state
+            with state["minute_lock"]:
                 now = time.monotonic()
                 cutoff = now - 60.0
-                while self._minute_window and self._minute_window[0] < cutoff:
-                    self._minute_window.popleft()
-                if len(self._minute_window) < self.max_calls_per_min:
+                window = state["minute_window"]
+                max_per_min = int(state["max_calls_per_min"])
+                while window and window[0] < cutoff:
+                    window.popleft()
+                if len(window) < max_per_min:
                     return
-                oldest = self._minute_window[0]
+                oldest = window[0]
                 wait = oldest - cutoff + 0.1
             logger.debug(
                 "분당 한도 도달 ({}/{}), {:.1f}초 대기",
-                len(self._minute_window), self.max_calls_per_min, wait,
+                len(window), max_per_min, wait,
             )
             time.sleep(wait)
 
     def get_rate_limit_stats(self) -> dict:
         """현재 Rate Limiter 사용량 통계 반환."""
-        with self._minute_lock:
+        state = self._rate_state
+        with state["minute_lock"]:
             now = time.monotonic()
             cutoff = now - 60.0
-            while self._minute_window and self._minute_window[0] < cutoff:
-                self._minute_window.popleft()
-            recent_minute = len(self._minute_window)
+            window = state["minute_window"]
+            while window and window[0] < cutoff:
+                window.popleft()
+            recent_minute = len(window)
 
         elapsed_sec = max(1, time.monotonic() - self._session_start)
         return {
@@ -287,10 +385,12 @@ class KISApi:
             "total_429s": self._total_429s,
             "total_conn_errors": self._total_conn_errors,
             "requests_last_60s": recent_minute,
-            "max_per_sec": self.max_calls_per_sec,
-            "max_per_min": self.max_calls_per_min,
+            "max_per_sec": state["max_calls_per_sec"],
+            "max_per_min": state["max_calls_per_min"],
             "avg_per_sec": round(self._total_requests / elapsed_sec, 2),
-            "minute_utilization_pct": round(recent_minute / self.max_calls_per_min * 100, 1),
+            "minute_utilization_pct": round(
+                recent_minute / int(state["max_calls_per_min"]) * 100, 1
+            ),
             "token_cooldown_active": time.monotonic() < self._token_error_until,
         }
 
@@ -358,6 +458,16 @@ class KISApi:
 
                 if response.status_code == 429:
                     self._total_429s += 1
+                    if not idempotent:
+                        # 주문 POST는 브로커가 요청을 처리했는지 클라이언트가
+                        # 단정할 수 없는 응답을 받으면 절대 재전송하지 않는다.
+                        # 상위 OrderExecutor가 주문을 UNKNOWN으로 유지하고
+                        # 미체결/체결 조회를 통해 reconcile하도록 맡긴다.
+                        logger.error(
+                            "비멱등 요청 HTTP 429 — 재전송하지 않고 체결 여부 불명 처리: {}",
+                            path,
+                        )
+                        raise KISOrderResponseUnknown(f"{path}: HTTP 429")
                     try:
                         retry_after = int(response.headers.get("Retry-After", 5))
                     except (TypeError, ValueError):
@@ -373,6 +483,18 @@ class KISApi:
 
                 if response.status_code in (500, 502, 503, 504):
                     breaker.on_failure()
+                    if not idempotent:
+                        # 5xx는 브로커가 주문을 접수한 뒤 응답 생성에 실패한
+                        # 경우를 배제할 수 없다. 같은 주문을 다시 POST하면
+                        # 이중 체결될 수 있으므로 UNKNOWN/reconcile로 전환한다.
+                        logger.error(
+                            "비멱등 요청 HTTP {} — 재전송하지 않고 체결 여부 불명 처리: {}",
+                            response.status_code,
+                            path,
+                        )
+                        raise KISOrderResponseUnknown(
+                            f"{path}: HTTP {response.status_code}"
+                        )
                     wait = self._backoff_with_jitter(attempt)
                     logger.warning(
                         "[{}] 서버 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {}",
@@ -654,6 +776,14 @@ class KISApi:
         Returns:
             주문 결과 딕셔너리
         """
+        if self._requires_order_capability() and not _ORDER_SUBMISSION_AUTHORIZED.get():
+            logger.critical(
+                "OrderExecutor capability 없는 직접 실계좌 BUY 호출 차단: {}",
+                symbol,
+            )
+            raise PermissionError(
+                "실계좌 주문은 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
+            )
         # 모의투자 vs 실전 거래 ID
         tr_id = "VTTC0802U" if self.use_mock else "TTTC0802U"
 
@@ -701,6 +831,14 @@ class KISApi:
         Returns:
             주문 결과 딕셔너리
         """
+        if self._requires_order_capability() and not _ORDER_SUBMISSION_AUTHORIZED.get():
+            logger.critical(
+                "OrderExecutor capability 없는 직접 실계좌 SELL 호출 차단: {}",
+                symbol,
+            )
+            raise PermissionError(
+                "실계좌 주문은 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
+            )
         tr_id = "VTTC0801U" if self.use_mock else "TTTC0801U"
 
         body = {
@@ -1242,25 +1380,51 @@ class KISApi:
         output1 = data.get("output1", [])   # 종목별 보유 현황
         output2 = data.get("output2", [{}]) # 계좌 요약
 
-        positions = []
-        for item in output1:
-            positions.append({
-                "symbol": item.get("pdno", ""),
-                "name": item.get("prdt_name", ""),
-                "quantity": int(item.get("hldg_qty", 0)),
-                "avg_price": float(item.get("pchs_avg_pric", 0)),
-                "current_price": float(item.get("prpr", 0)),
-                "pnl_rate": float(item.get("evlu_pfls_rt", 0)),
-                "pnl_amount": float(item.get("evlu_pfls_amt", 0)),
-            })
+        def _finite_number(value, *, minimum: float | None = None) -> float:
+            number = float(value or 0)
+            if not math.isfinite(number) or (minimum is not None and number < minimum):
+                raise ValueError(f"invalid numeric balance value: {value!r}")
+            return number
 
-        summary = output2[0] if output2 else {}
-        return {
-            "cash": float(summary.get("dnca_tot_amt", 0)),        # 예수금 총액
-            "total_value": float(summary.get("tot_evlu_amt", 0)),  # 총 평가금액
-            "total_pnl": float(summary.get("evlu_pfls_smtl_amt", 0)),  # 총 평가손익
-            "positions": positions,
-        }
+        try:
+            positions = []
+            for item in output1:
+                quantity_value = _finite_number(item.get("hldg_qty", 0), minimum=0)
+                quantity = int(quantity_value)
+                if quantity_value != quantity:
+                    raise ValueError(
+                        f"fractional domestic holding quantity: {quantity_value!r}"
+                    )
+                positions.append({
+                    "symbol": item.get("pdno", ""),
+                    "name": item.get("prdt_name", ""),
+                    "quantity": quantity,
+                    "avg_price": _finite_number(
+                        item.get("pchs_avg_pric", 0), minimum=0
+                    ),
+                    "current_price": _finite_number(item.get("prpr", 0), minimum=0),
+                    "pnl_rate": _finite_number(item.get("evlu_pfls_rt", 0)),
+                    "pnl_amount": _finite_number(item.get("evlu_pfls_amt", 0)),
+                })
+
+            summary = output2[0] if output2 else {}
+            parsed = {
+                "cash": _finite_number(summary.get("dnca_tot_amt", 0), minimum=0),
+                "total_value": _finite_number(
+                    summary.get("tot_evlu_amt", 0), minimum=0
+                ),
+                "total_pnl": _finite_number(
+                    summary.get("evlu_pfls_smtl_amt", 0)
+                ),
+                "positions": positions,
+            }
+        except (TypeError, ValueError, OverflowError) as exc:
+            # NaN/Inf는 비교 연산에서 손실 한도를 우회할 수 있다. 잔고 전체를
+            # 사용할 수 없는 것으로 처리해 상위 live BUY 경계가 fail-closed한다.
+            logger.error("KIS 잔고 숫자 검증 실패 — 응답 사용 거부: {}", exc)
+            return None
+
+        return parsed
 
     def get_approval_key(self) -> str:
         """
@@ -1419,6 +1583,14 @@ class KISApi:
             price: 지정가 (USD). 시장가 대체 시 0 → API 스펙상 \"0\" 문자열 전달
             market: NAS / NYS / AMS
         """
+        if self._requires_order_capability() and not _ORDER_SUBMISSION_AUTHORIZED.get():
+            logger.critical(
+                "OrderExecutor capability 없는 직접 해외 실계좌 주문 차단: {}",
+                symbol,
+            )
+            raise PermissionError(
+                "실계좌 주문은 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
+            )
         _, ovrs = self.map_us_market_to_kis_codes(market)
         symb = str(symbol).strip().upper()
         sd = str(side).strip().lower()

@@ -112,6 +112,22 @@ class Scheduler:
 
     MAX_CONSECUTIVE_SKIPS = 3  # 연속 스킵 허용 한도 (초과 시 알림)
 
+    def _resolved_ledger_mode(self) -> str:
+        """스케줄러 실행 모드를 paper/live 장부 모드로 정규화한다.
+
+        정상 인스턴스는 ``__init__``에서 값을 고정한다. 복구 도구나 최소 테스트
+        더블처럼 생성자가 생략된 객체도 설정 모드에서 안전하게 재해석한다.
+        live 이외의 값(schedule 포함)은 언제나 paper 장부다.
+        """
+        mode = getattr(self, "_ledger_mode", None)
+        if mode in ("paper", "live"):
+            return mode
+        mode = getattr(self, "_mode", None)
+        if mode is None:
+            trading = getattr(getattr(self, "config", None), "trading", {}) or {}
+            mode = trading.get("mode", "paper")
+        return "live" if str(mode).lower() == "live" else "paper"
+
     def __init__(
         self,
         strategy_name: str = "scoring",
@@ -122,6 +138,7 @@ class Scheduler:
         self.config = config or Config.get()
         self.strategy_name = strategy_name
         self._mode = str(self.config.trading.get("mode", "paper")).lower()
+        self._ledger_mode = "live" if self._mode == "live" else "paper"
         self._live_gate_validated = bool(live_gate_validated)
         self.trading_hours = TradingHours(self.config)
         self.blackswan = BlackSwanDetector(self.config)
@@ -188,6 +205,10 @@ class Scheduler:
                 account_key=self.strategy_name,
                 live_gate_validated=self._live_gate_validated,
             )
+        # Scheduler와 OrderExecutor가 같은 cooldown/recovery 상태를 보도록
+        # 단일 감지기를 공유한다. 별도 인스턴스면 Scheduler가
+        # 급락을 감지해도 주문 직전 가드는 cooldown을 모른다.
+        self._order_executor.blackswan = self.blackswan
         return self._order_executor
 
     def _is_paper_like_mode(self) -> bool:
@@ -458,7 +479,11 @@ class Scheduler:
                         self.auto_entry
                         and allow_buys
                         and signal_info["signal"] == "BUY"
-                        and not get_position(symbol)
+                        and not get_position(
+                            symbol,
+                            account_key=self.strategy_name,
+                            mode=self._resolved_ledger_mode(),
+                        )
                     ):
                         avg_vol = None
                         if "volume" in df.columns and not df["volume"].empty:
@@ -598,6 +623,12 @@ class Scheduler:
             if self.config.trading.get("mode") == "live":
                 live_entry_allowed = self._maybe_sync_with_broker()
 
+            # 기존 노출의 손절/블랙스완을 신규 진입보다 먼저 점검한다.
+            # 급락 첫 사이클에서 선매수 후 손절하는 순서 역전을 막고,
+            # 여기서 활성화된 cooldown이 아래 진입 가드에 즉시 반영된다.
+            with PositionLock():
+                self._check_exit_signals(kis=kis)
+
             # 쿨다운 해제 직후 → 즉시 신호 재평가 (반등 구간 포착)
             if self.blackswan.consume_cooldown_ended_flag():
                 logger.info("블랙스완 쿨다운 해제 — 즉시 신호 재평가 트리거")
@@ -612,8 +643,8 @@ class Scheduler:
 
             if self.auto_entry and self._entry_candidates and not self.blackswan.is_on_cooldown():
                 if live_entry_allowed:
-                    # 신규 진입 실행 중 예기치 못한 예외가 나도 아래 손절/익절 점검은
-                    # 반드시 돌아야 하므로 진입 블록을 별도 try로 감싼다(안전 우선).
+                    # 진입 블록 예외가 이후 동적 손절가 갱신/재스캔까지
+                    # 전파되지 않도록 별도 try로 감싼다.
                     try:
                         with PositionLock():
                             self._execute_entry_candidates()
@@ -629,9 +660,6 @@ class Scheduler:
                         "live 신규 진입 후보 실행 보류 — KIS 잔고 크로스체크 미통과: {}",
                         self._last_broker_sync_message or "unknown",
                     )
-
-            with PositionLock():
-                self._check_exit_signals(kis=kis)
 
             # 장중 보유 종목 동적 손절가 업데이트 (ATR 변화 반영)
             self._update_dynamic_stop_losses()
@@ -772,7 +800,11 @@ class Scheduler:
                     if df.empty or len(df) < 30:
                         continue
                     signal_info = strategy.generate_signal(df, symbol=symbol)
-                    if signal_info.get("signal") == "BUY" and not get_position(symbol, account_key=self.strategy_name):
+                    if signal_info.get("signal") == "BUY" and not get_position(
+                        symbol,
+                        account_key=self.strategy_name,
+                        mode=self._resolved_ledger_mode(),
+                    ):
                         avg_vol = None
                         if "volume" in df.columns and not df["volume"].empty:
                             avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
@@ -948,7 +980,11 @@ class Scheduler:
         candidates = list(self._entry_candidates)
         for idx, candidate in enumerate(candidates):
             symbol = candidate["symbol"]
-            if get_position(symbol, account_key=self.strategy_name):
+            if get_position(
+                symbol,
+                account_key=self.strategy_name,
+                mode=self._resolved_ledger_mode(),
+            ):
                 continue
 
             # 오래된 후보 폐기
@@ -1064,14 +1100,17 @@ class Scheduler:
         self._entry_candidates = remaining
 
     def _check_exit_signals(self, kis=None):
-        """포지션 순회: 갭다운 즉시 청산, 최대 보유 기간 초과 시 강제 정리, 블랙스완, 손절/익절/트레일링 스탑."""
+        """포지션 순회: 블랙스완, 갭다운, 최대 보유 기간, 손절/익절/트레일링 스탑."""
         from api.kis_api import KISApi
 
         executor = self._get_or_create_executor()
         account_no = self.config.get_account_no(self.strategy_name)
         if kis is None:
             kis = KISApi(account_no=account_no)
-        positions = get_all_positions(account_key=self.strategy_name)
+        positions = get_all_positions(
+            account_key=self.strategy_name,
+            mode=self._resolved_ledger_mode(),
+        )
         today = datetime.now().date()
         max_holding_days = (
             self.config.risk_params.get("position_limits", {}) or {}
@@ -1118,13 +1157,54 @@ class Scheduler:
                 except (TypeError, ValueError):
                     prev_close = 0.0
 
-                # 갭다운 즉시 청산: 전일 종가 대비 시가가 크게 갭다운이면 손절 회피 불가
-                if gap_enabled and prev_close > 0:
-                    gap_pct = (current_price - prev_close) / prev_close
+                # 심각한 급락은 gap 청산보다 먼저 판정해 cooldown을 반드시
+                # 활성화한다. gap 분기가 continue하면 -5% 이하에서 BlackSwan
+                # 검사가 영원히 도달불가였던 순서 결함을 막는다.
+                bs_result = self.blackswan.check_stock(
+                    pos.symbol,
+                    current_price,
+                    prev_close,
+                )
+                if bs_result["triggered"]:
+                    self.discord.send_message(
+                        f"🚨 블랙스완 발동!\n{bs_result['reason']}",
+                        critical=True,
+                    )
+                    _log_op(
+                        "BLACKSWAN",
+                        bs_result["reason"],
+                        severity="critical",
+                        symbol=pos.symbol,
+                        strategy=self.strategy_name,
+                        mode=self._mode,
+                    )
+                    executor.execute_sell(
+                        pos.symbol,
+                        current_price,
+                        reason="블랙스완 긴급 매도",
+                        strategy=self.strategy_name,
+                    )
+                    continue
+
+                # 갭다운은 '시가 vs 전일 종가'로만 판정한다. 현재가를 쓰면
+                # 장중 -3% 하락도 갭다운으로 오인해 불필요한 긴급 청산을 낸다.
+                try:
+                    open_price = float(price_info.get("open", 0) or 0)
+                except (TypeError, ValueError):
+                    open_price = 0.0
+                if (
+                    gap_enabled
+                    and prev_close > 0
+                    and math.isfinite(open_price)
+                    and open_price > 0
+                ):
+                    gap_pct = (open_price - prev_close) / prev_close
                     if gap_pct <= gap_down_threshold:
                         logger.warning(
-                            "갭다운 청산 발동: {} 갭 {:.1f}% (기준 {:.0f}%)",
-                            pos.symbol, gap_pct * 100, gap_down_threshold * 100,
+                            "갭다운 청산 발동: {} 시가 갭 {:.1f}% (기준 {:.0f}%)",
+                            pos.symbol,
+                            gap_pct * 100,
+                            gap_down_threshold * 100,
                         )
                         result = executor.execute_sell(
                             pos.symbol, current_price,
@@ -1153,19 +1233,6 @@ class Scheduler:
                             self.discord.send_trade_alert(result)
                         continue
 
-                bs_result = self.blackswan.check_stock(pos.symbol, current_price, prev_close)
-
-                if bs_result["triggered"]:
-                    self.discord.send_message(f"🚨 블랙스완 발동!\n{bs_result['reason']}", critical=True)
-                    _log_op("BLACKSWAN", bs_result["reason"], severity="critical",
-                            symbol=pos.symbol, strategy=self.strategy_name, mode=self._mode)
-                    executor.execute_sell(
-                        pos.symbol, current_price,
-                        reason="블랙스완 긴급 매도",
-                        strategy=self.strategy_name,
-                    )
-                    continue
-
                 check = executor.check_stop_loss_take_profit(pos.symbol, current_price)
                 if check["action"]:
                     _log_op("SL_TP", f"{check['action']} {pos.symbol} @ {current_price:,.0f}",
@@ -1183,6 +1250,40 @@ class Scheduler:
             except Exception as e:
                 logger.error("종목 {} 모니터링 실패: {}", pos.symbol, e)
 
+    def _collect_snapshot_prices(self) -> dict[str, float]:
+        """보유 종목 전부의 현재가를 수집한다.
+
+        한 종목이라도 가격을 확인하지 못하면 불완전한 NAV 스냅샷을 만들지
+        않도록 예외를 발생시킨다.
+        """
+        positions = get_all_positions(
+            account_key=self.strategy_name,
+            mode=self._resolved_ledger_mode(),
+        )
+        if not positions:
+            return {}
+
+        from api.kis_api import KISApi
+
+        account_no = self.config.get_account_no(self.strategy_name)
+        kis = KISApi(account_no=account_no)
+        prices: dict[str, float] = {}
+        for position in positions:
+            symbol = str(getattr(position, "symbol", "") or "").strip()
+            if not symbol:
+                raise RuntimeError("빈 종목코드가 포지션 장부에 포함되어 있습니다")
+            price_info = kis.get_current_price(symbol)
+            try:
+                price = float((price_info or {}).get("price"))
+            except (AttributeError, TypeError, ValueError):
+                price = 0.0
+            if not math.isfinite(price) or price <= 0:
+                raise RuntimeError(
+                    f"{symbol} 현재가를 확인하지 못해 장마감 스냅샷을 중단합니다"
+                )
+            prices[symbol] = price
+        return prices
+
     def _run_post_market(self):
         """장마감: 일일 리포트 저장 및 발송."""
         logger.info("=" * 50)
@@ -1190,8 +1291,10 @@ class Scheduler:
         logger.info("=" * 50)
 
         try:
-            self.portfolio.save_daily_snapshot()
-            summary = self.portfolio.get_portfolio_summary()
+            snapshot_prices = self._collect_snapshot_prices()
+            if not self.portfolio.save_daily_snapshot(snapshot_prices):
+                raise RuntimeError("검증된 시장가격으로 포트폴리오 스냅샷을 저장하지 못했습니다")
+            summary = self.portfolio.get_portfolio_summary(snapshot_prices)
             trade_summary = get_daily_trade_summary(
                 mode=self.config.trading.get("mode", "paper"),
                 account_key=self.strategy_name,
@@ -1646,7 +1749,10 @@ class Scheduler:
         from core.risk_manager import RiskManager
         from database.repositories import update_stop_loss_price
 
-        positions = get_all_positions(account_key=self.strategy_name)
+        positions = get_all_positions(
+            account_key=self.strategy_name,
+            mode=self._resolved_ledger_mode(),
+        )
         if not positions:
             return
 
@@ -1683,6 +1789,7 @@ class Scheduler:
                     if new_sl > old_sl:
                         update_stop_loss_price(
                             pos.symbol, new_sl, account_key=self.strategy_name,
+                            mode=self._resolved_ledger_mode(),
                         )
                         logger.debug(
                             "동적 손절가 갱신: {} {:,.0f} → {:,.0f} (ATR={:.0f})",
@@ -1752,7 +1859,11 @@ class Scheduler:
             watchlist = WatchlistManager(self.config).resolve()
 
             for symbol in watchlist:
-                if get_position(symbol, account_key=self.strategy_name):
+                if get_position(
+                    symbol,
+                    account_key=self.strategy_name,
+                    mode=self._resolved_ledger_mode(),
+                ):
                     continue
                 if any(c["symbol"] == symbol for c in self._entry_candidates):
                     continue

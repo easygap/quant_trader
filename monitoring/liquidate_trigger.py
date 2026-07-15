@@ -111,7 +111,11 @@ def _run_liquidate() -> tuple[bool, str]:
 
     from main import run_emergency_liquidate
 
-    args = Namespace(confirm_live=_env_truthy("LIQUIDATE_TRIGGER_CONFIRM_LIVE"))
+    confirmed_live = _env_truthy("LIQUIDATE_TRIGGER_CONFIRM_LIVE")
+    args = Namespace(
+        confirm_live=confirmed_live,
+        liquidate_live=confirmed_live,
+    )
     try:
         result = run_emergency_liquidate(args)
     except SystemExit as exc:
