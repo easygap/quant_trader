@@ -48,9 +48,15 @@ def _cfg(basket_name):
         basket_name: {
             "name": "소액 적립 (KODEX200 50/50)",
             "enabled": True,
+            "primary": True,
+            "purpose": "월 적립 중심",
+            "contribution_plan": {
+                "enabled": True, "cadence": "monthly", "amount": 100_000,
+            },
             "initial_capital": 300_000,
             "target_stock_weight": 0.5,
             "holdings": {"069500": 1.0},
+            "holding_names": {"069500": "KODEX 200"},
         }
     }
 
@@ -86,9 +92,15 @@ class TestGetBasketsJson:
         assert b["design_fraction"] == pytest.approx(0.5)
         # 보유
         assert b["positions"] == [{
-            "symbol": "069500", "quantity": 1,
+            "symbol": "069500", "name": "KODEX 200", "quantity": 1,
             "avg_price": 128_135.0, "invested": 128_135.0,
         }]
+        assert data["mode"] in {"paper", "live"}
+        assert b["is_primary"] is True
+        assert b["purpose"] == "월 적립 중심"
+        assert b["contribution_plan"] == {
+            "enabled": True, "cadence": "monthly", "amount": 100_000.0,
+        }
 
     def test_no_snapshot_yet_is_null_not_crash(self):
         name = "kr_pocket_empty"  # 시드 없음 — 운영 전 상태
@@ -196,6 +208,31 @@ class TestSnapshotsSerialization:
         asyncio.run(run())
 
     @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+    def test_snapshots_endpoint_clamps_excessive_range(self):
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+
+        async def run():
+            with patch.object(
+                wd,
+                "get_snapshots_json",
+                return_value={"snapshots": [], "days": 3650, "mode": "paper"},
+            ) as mocked:
+                app = wd.create_app()
+                client = TestClient(TestServer(app))
+                await client.start_server()
+                try:
+                    response = await client.get("/api/snapshots?days=999999")
+                    assert response.status == 200
+                    await response.json()
+                finally:
+                    await client.close()
+                mocked.assert_called_once_with(days=3650, account_key=None)
+
+        asyncio.run(run())
+
+    @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
     def test_empty_account_key_filters_default_account_only(self):
         # account_key=(빈 값)은 기본 계정('')만 — 무필터(전 계정 혼합)로 강등되면
         # 10M/30만 스케일 시계열이 한 차트에 섞인다.
@@ -236,11 +273,141 @@ def test_html_page_contains_basket_tracks_section():
     from monitoring.web_dashboard import _html_page
 
     html = _html_page()
-    assert "basketTracks" in html          # 섹션
-    assert "/api/baskets" in html          # 폴링 대상
-    assert "chartAccount" in html          # 차트 계정 선택기
-    assert "/api/deposit" in html          # 웹 입금 폼
-    assert "depositOverlay" in html        # 입금 모달
+    assert "basketTracks" in html              # 주력 포트폴리오 섹션
+    assert "chartAccount" in html              # 장기 차트 계정 선택기
+    assert 'id="decisionTitle"' in html        # 오늘의 단일 판단
+    assert '<dialog class="deposit-dialog"' in html
+    assert 'role="status" aria-live="polite"' in html
+    assert 'class="skip-link"' in html
+    assert '/static/nungum-symbol.svg' in html  # BI 심볼
+    assert '/static/dashboard.js' in html       # 동작은 외부 자산으로 분리
+    assert "cdn.jsdelivr.net" not in html       # 금융 데이터 페이지에 외부 JS 없음
+
+    js = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "monitoring" / "static" / "dashboard.js"
+    ).read_text(encoding="utf-8")
+    assert "/api/baskets" in js
+    assert "/api/deposit" in js
+
+
+def test_runtime_payload_includes_serializable_trading_halt():
+    import json
+    from monitoring import web_dashboard as wd
+
+    halt = {
+        "halted": True,
+        "event_id": 7,
+        "event_type": "TRADING_HALT_SET",
+        "reason": "장부 불일치 점검",
+        "source": "test",
+        "mode": "paper",
+        "created_at": datetime(2026, 7, 16, 15, 30),
+        "detail": {},
+    }
+    with patch(
+        "database.repositories.get_trading_halt_state", return_value=halt,
+    ), patch(
+        "core.data_collector.DataCollector", return_value=object(),
+    ), patch(
+        "core.market_regime.check_market_regime",
+        return_value={"regime": "bullish", "position_scale": 1.0, "allow_buys": True},
+    ), patch(
+        "monitoring.dashboard_runtime_state.read_state", return_value={},
+    ):
+        payload = wd.get_runtime_json()
+
+    json.dumps(payload)
+    assert payload["trading_halt"]["halted"] is True
+    assert payload["trading_halt"]["created_at"] == "2026-07-16T15:30:00"
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_dashboard_static_assets_are_served():
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+
+    async def run():
+        app = wd.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            for path in (
+                "/static/dashboard.css",
+                "/static/dashboard.js",
+                "/static/nungum-symbol.svg",
+            ):
+                response = await client.get(path)
+                assert response.status == 200, path
+                assert await response.read(), path
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_dashboard_responses_include_security_headers():
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+
+    async def run():
+        client = TestClient(TestServer(wd.create_app()))
+        await client.start_server()
+        try:
+            response = await client.get("/")
+            assert response.status == 200
+            html = await response.text()
+            assert 'id="openDepositButton" type="button" disabled' in html
+            assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["X-Frame-Options"] == "DENY"
+            assert response.headers["X-Content-Type-Options"] == "nosniff"
+            assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_runtime_cache_never_caches_trading_halt():
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+
+    base = {
+        "timestamp": "2026-07-16T16:00:00",
+        "market_regime": None,
+        "trading_halt": None,
+        "signals_today": [],
+    }
+    halts = [
+        {"halted": False, "reason": ""},
+        {"halted": True, "reason": "체결 점검"},
+    ]
+
+    async def run():
+        wd._RUNTIME_CACHE.update({"at": 0.0, "data": None})
+        try:
+            with patch.object(wd, "get_runtime_json", return_value=base) as slow, patch.object(
+                wd, "_get_trading_halt_json", side_effect=halts,
+            ):
+                client = TestClient(TestServer(wd.create_app()))
+                await client.start_server()
+                try:
+                    first = await (await client.get("/api/runtime")).json()
+                    second = await (await client.get("/api/runtime")).json()
+                finally:
+                    await client.close()
+            assert slow.call_count == 1
+            assert first["trading_halt"]["halted"] is False
+            assert second["trading_halt"]["halted"] is True
+        finally:
+            wd._RUNTIME_CACHE.update({"at": 0.0, "data": None})
+
+    asyncio.run(run())
 
 
 @pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
@@ -269,18 +436,31 @@ class TestDepositEndpoint:
                 client = TestClient(TestServer(app))
                 await client.start_server()
                 try:
+                    headers = {
+                        "X-Requested-With": "quant-dashboard",
+                        "Idempotency-Key": "test-deposit-record-0001",
+                    }
                     res = await client.post(
                         "/api/deposit",
                         json={"basket": name, "amount": 100000, "note": "웹 테스트"},
-                        headers={"X-Requested-With": "quant-dashboard"},
+                        headers=headers,
                     )
                     assert res.status == 200
                     data = await res.json()
+                    replay = await client.post(
+                        "/api/deposit",
+                        json={"basket": name, "amount": 100000, "note": "웹 테스트"},
+                        headers=headers,
+                    )
+                    assert replay.status == 200
+                    replay_data = await replay.json()
                 finally:
                     await client.close()
                 assert data["ok"] is True
                 assert data["deposits_total"] == 100000
                 assert data["principal"] == 400000  # 초기 30만 + 입금 10만
+                assert replay_data["flow_id"] == data["flow_id"]
+                assert replay_data["deposits_total"] == 100000
 
         asyncio.run(run())
         from core.basket_rebalancer import rebalance_live_strategy_id
@@ -304,7 +484,10 @@ class TestDepositEndpoint:
                 client = TestClient(TestServer(app))
                 await client.start_server()
                 try:
-                    h = {"X-Requested-With": "quant-dashboard"}
+                    h = {
+                        "X-Requested-With": "quant-dashboard",
+                        "Idempotency-Key": "test-bad-deposit-0001",
+                    }
                     r1 = await client.post("/api/deposit", json={"basket": "kr_pocket_dep2", "amount": 0}, headers=h)
                     r2 = await client.post("/api/deposit", json={"basket": "no_such", "amount": 1000}, headers=h)
                     r3 = await client.post("/api/deposit", data=b"not-json", headers=h)
@@ -349,6 +532,27 @@ class TestDepositEndpoint:
             account_key=rebalance_live_strategy_id(name)
         ) == 0.0
 
+    def test_deposit_without_idempotency_key_is_400(self):
+        import asyncio
+        from aiohttp.test_utils import TestClient, TestServer
+        from monitoring import web_dashboard as wd
+
+        async def run():
+            client = TestClient(TestServer(wd.create_app()))
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/api/deposit",
+                    json={"basket": "kr_pocket", "amount": 100000},
+                    headers={"X-Requested-With": "quant-dashboard"},
+                )
+                assert response.status == 400
+                assert "요청 키" in (await response.json())["error"]
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+
     def test_deposit_rejects_nonfinite_json_literals(self):
         # python json.loads는 Infinity/NaN 리터럴을 기본 허용 — float('inf')>0 은 True,
         # nan<=0 은 False라 기존 양수 검사를 둘 다 통과해 무한대/NaN 입금이 기록되던
@@ -381,6 +585,7 @@ class TestDepositEndpoint:
                             headers={
                                 "Content-Type": "application/json",
                                 "X-Requested-With": "quant-dashboard",
+                                "Idempotency-Key": "test-nonfinite-deposit-0001",
                             },
                         )
                         assert res.status == 400, f"payload {payload!r} → {res.status}"

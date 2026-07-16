@@ -831,8 +831,8 @@ class TestForceLiveRemoved:
         assert host == "127.0.0.1"
         assert port == 8080
 
-    def test_web_dashboard_uses_configured_or_explicit_host(self, monkeypatch):
-        """외부 바인드는 설정 또는 CLI에서 명시한 경우에만 사용한다."""
+    def test_web_dashboard_rejects_external_host(self, monkeypatch):
+        """인증 없는 금융 대시보드는 명시해도 외부 주소에 바인드하지 않는다."""
         from monitoring import web_dashboard as wd
 
         monkeypatch.setattr(
@@ -841,7 +841,8 @@ class TestForceLiveRemoved:
             lambda: SimpleNamespace(settings={"dashboard": {"host": "0.0.0.0", "port": 9090}}),
         )
 
-        assert wd.resolve_dashboard_bind() == ("0.0.0.0", 9090)
+        with pytest.raises(ValueError, match="loopback"):
+            wd.resolve_dashboard_bind()
         assert wd.resolve_dashboard_bind(host="127.0.0.1", port=7070) == ("127.0.0.1", 7070)
 
     def test_main_dashboard_passes_host_and_port(self, monkeypatch):

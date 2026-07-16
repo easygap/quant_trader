@@ -880,6 +880,7 @@ def record_cash_flow(
     occurred_at: Optional[datetime] = None,
     note: str = "",
     mode: str = "paper",
+    request_id: Optional[str] = None,
 ) -> int:
     """외부 현금 흐름(+입금/-출금)을 기록하고 id를 반환한다.
 
@@ -891,17 +892,62 @@ def record_cash_flow(
 
     if not amount or not math.isfinite(float(amount)):
         raise ValueError("amount는 0이 아닌 유한한 숫자여야 합니다 (+입금 / -출금)")
+    ledger_mode = _ledger_mode(mode)
+    normalized_account = account_key or ""
+    normalized_note = str(note or "")[:200]
+    normalized_request_id = str(request_id or "").strip() or None
+    if normalized_request_id and len(normalized_request_id) > 64:
+        raise ValueError("request_id는 64자 이하여야 합니다")
+
     session = get_session()
     try:
+        def _existing_idempotent_row():
+            if not normalized_request_id:
+                return None
+            return (
+                session.query(CashFlow)
+                .filter(
+                    CashFlow.mode == ledger_mode,
+                    CashFlow.account_key == normalized_account,
+                    CashFlow.request_id == normalized_request_id,
+                )
+                .first()
+            )
+
+        def _validated_existing_id(row):
+            if row is None:
+                return None
+            if (
+                float(row.amount) != float(amount)
+                or str(row.note or "") != normalized_note
+            ):
+                raise ValueError(
+                    "같은 request_id가 다른 입금 내용에 사용되었습니다"
+                )
+            return int(row.id)
+
+        existing_id = _validated_existing_id(_existing_idempotent_row())
+        if existing_id is not None:
+            return existing_id
+
         row = CashFlow(
-            account_key=account_key or "",
+            account_key=normalized_account,
             amount=float(amount),
             occurred_at=occurred_at or datetime.now(),
-            note=note or "",
-            mode=_ledger_mode(mode),
+            note=normalized_note,
+            mode=ledger_mode,
+            request_id=normalized_request_id,
         )
         session.add(row)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            # 동시 재시도가 고유 인덱스에서 경합한 경우 이미 기록된 동일 행을 반환한다.
+            existing_id = _validated_existing_id(_existing_idempotent_row())
+            if existing_id is not None:
+                return existing_id
+            raise
         return int(row.id)
     finally:
         session.close()

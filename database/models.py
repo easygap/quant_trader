@@ -253,6 +253,15 @@ class CashFlow(Base):
     TWR이 맞는다(증권사 잔고는 현금만 알지, 언제 얼마가 외부에서 왔는지는 모른다).
     """
     __tablename__ = "cash_flows"
+    __table_args__ = (
+        Index(
+            "uq_cash_flows_idempotency",
+            "mode",
+            "account_key",
+            "request_id",
+            unique=True,
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_key = Column(String(64), default="", nullable=False, index=True)
@@ -260,6 +269,9 @@ class CashFlow(Base):
     occurred_at = Column(DateTime, nullable=False, index=True)   # 발생 시각(귀속 기준)
     note = Column(String(200), default="")                       # 메모 (예: 7월 적립)
     mode = Column(String(20), default="paper")
+    # 웹 요청 재시도 시 같은 입금이 두 번 기록되지 않도록 보존하는 고유 키.
+    # CLI 등 키가 없는 기존 호출은 NULL이라 서로 충돌하지 않는다.
+    request_id = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
     def __repr__(self):
@@ -608,6 +620,36 @@ def _migrate_positions_partial_tp_done(engine):
             else:
                 conn.rollback()
                 raise
+
+
+def _migrate_cash_flow_request_id(engine):
+    """기존 cash_flows에 웹 입금 멱등성 키와 고유 인덱스를 추가한다."""
+    from sqlalchemy import text
+
+    dialect = engine.url.get_dialect().name
+    with engine.begin() as conn:
+        if dialect == "sqlite":
+            table = conn.execute(text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='cash_flows'"
+            )).fetchone()
+            if not table:
+                return
+            columns = conn.execute(text("PRAGMA table_info(cash_flows)")).fetchall()
+            if not any(row[1] == "request_id" for row in columns):
+                conn.execute(text(
+                    "ALTER TABLE cash_flows ADD COLUMN request_id VARCHAR(64)"
+                ))
+        else:
+            conn.execute(text(
+                "ALTER TABLE cash_flows "
+                "ADD COLUMN IF NOT EXISTS request_id VARCHAR(64)"
+            ))
+
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_cash_flows_idempotency "
+            "ON cash_flows (mode, account_key, request_id)"
+        ))
 
 
 def _sqlite_table_columns(conn, table_name):
@@ -1079,6 +1121,8 @@ def init_database():
         _migrate_positions_partial_tp_done(engine)
     except Exception:
         pass
+    # 입금 재시도 중복은 원금과 TWR을 오염시키므로 마이그레이션 실패를 숨기지 않는다.
+    _migrate_cash_flow_request_id(engine)
     # 포지션 mode 격리 재구축. partial_tp_done 컬럼 추가 이후에 실행해
     # 구버전 테이블을 완전히 복사한다. 신 스키마에서는 no-op.
     _migrate_position_unique_constraint(engine)

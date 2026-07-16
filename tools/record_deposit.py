@@ -19,7 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from loguru import logger  # noqa: E402
 
 
-def record_basket_deposit(basket_name: str, amount: float, note: str = "") -> dict:
+def record_basket_deposit(
+    basket_name: str,
+    amount: float,
+    note: str = "",
+    *,
+    request_id: str | None = None,
+) -> dict:
     """바스켓 적립 입금 기록 — CLI와 웹 대시보드가 공유하는 단일 검증·기록 경로.
 
     검증: 금액 양수, 바스켓 존재, 과거 소급 금지(마지막 스냅샷 이후만 — TWR 체인 보호).
@@ -73,7 +79,7 @@ def record_basket_deposit(basket_name: str, amount: float, note: str = "") -> di
 
     flow_id = record_cash_flow(
         amount=amount, account_key=account_key, occurred_at=now,
-        note=note or "", mode=mode,
+        note=note or "", mode=mode, request_id=request_id,
     )
     deposits = get_cash_flow_total(account_key=account_key, mode=mode)
     out = {
