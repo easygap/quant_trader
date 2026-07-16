@@ -102,7 +102,7 @@ email:
 
 # 웹 대시보드 (python main.py --mode dashboard)
 dashboard:
-  host: "127.0.0.1"  # 기본은 로컬 전용. 외부 공개는 reverse proxy/인증 구성 후 명시적으로 0.0.0.0 사용
+  host: "127.0.0.1"  # 인증 없는 화면이므로 loopback 전용. reverse proxy도 이 주소로 연결
   port: 8080
 
 # 관심 종목(watchlist): 수작업 없이 시가총액·코스피200·모멘텀·저변동성 기준으로 자동 선정 가능

@@ -40,6 +40,8 @@ baskets:
   kr_diversified_hold:
     name: "분산 대형주 buy&hold (저회전)"
     enabled: true
+    primary: false
+    purpose: "장기 관찰용"
     # 관찰용 강등(docs/POCKET_TRACK_PLAN.md §6): 소액 전환으로 자본 증액 결정이 종결돼
     # 배치율 미달(-21%p, 하이닉스 슬롯+절사)은 조치 대상이 아니다 — 상시 ATTENTION은
     # 경보 피로만 남기고 다른 바스켓의 배치율 이탈을 가린다. 감시 사실상 해제(1.0).
@@ -62,6 +64,17 @@ baskets:
       "012330": 0.10    # 현대모비스 (자동차부품)
       "105560": 0.10    # KB금융 (금융)
       # 합계 = 1.00
+    holding_names:
+      "005930": "삼성전자"
+      "000660": "SK하이닉스"
+      "035420": "NAVER"
+      "005380": "현대차"
+      "051910": "LG화학"
+      "005490": "POSCO홀딩스"
+      "055550": "신한지주"
+      "035720": "카카오"
+      "012330": "현대모비스"
+      "105560": "KB금융"
 
   # --- 균형 배분(주식 50% + 현금 50%) — 안정성 우선 ---
   # docs/STATIC_ALLOCATION.md 결론을 실행 기능으로 구현. target_stock_weight로 주식 비중을
@@ -109,6 +122,12 @@ baskets:
   kr_pocket:
     name: "소액 적립 (지수+CD금리 파킹)"
     enabled: true
+    primary: true
+    purpose: "월 적립 중심"
+    contribution_plan:
+      enabled: true
+      cadence: "monthly"
+      amount: 100000
     initial_capital: 300000        # 시작 자본 30만원 (paper — live 전환 시 실자본과 일치)
     target_stock_weight: 0.95      # 투자 95% (지수 47.5 + 파킹 47.5) / 현금 5%
     min_cash_ratio: 0.05           # 바스켓별 현금 하한 오버라이드 (전역 0.20 대체)
@@ -126,6 +145,9 @@ baskets:
     holdings:
       "069500": 0.5    # KODEX 200 — 위험자산 슬리브(총자산의 47.5%)
       "357870": 0.5    # TIGER CD금리투자KIS(합성) — 파킹 슬리브(총자산의 47.5%)
+    holding_names:
+      "069500": "KODEX 200"
+      "357870": "TIGER CD금리투자KIS(합성)"
 
   # --- 예시 2: 신호 가중 리밸런싱 바스켓 ---
   # signal_weighted: true 시, 스코어링 전략 점수에 따라 목표 비중을 동적 조정

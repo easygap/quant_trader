@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">눈금</title>
+  <desc id="desc">서로 마주 보는 니은과 기역으로 기준과 기록의 분리를 나타낸 심볼</desc>
+  <path fill="#B84A2A" d="M8 24h8v24h24v8H8Z"/>
+  <path fill="#18201F" d="M24 8h32v32h-8V16H24Z"/>
+</svg>
