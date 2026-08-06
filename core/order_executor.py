@@ -53,6 +53,8 @@ class OrderExecutor:
     """
 
     MAX_RETRIES = 3  # 주문 재시도 최대 횟수
+    EMERGENCY_CANCEL_VERIFY_ATTEMPTS = 3
+    EMERGENCY_CANCEL_VERIFY_DELAY_SECONDS = 0.2
     # risk_params.slippage 기본 0.05% 대비 3배 초과 시 warning, 1% 초과 시 디스코드
     SLIPPAGE_WARN_PCT = 0.15
     SLIPPAGE_DISCORD_PCT = 1.0
@@ -517,6 +519,287 @@ class OrderExecutor:
             Notifier(self.config).send_message(f"🚨 {halt_reason}", critical=True)
         except Exception as exc:
             logger.error("불명확 체결 알림 전송 실패: {}", exc)
+
+    def _emergency_cancel_block(
+        self,
+        *,
+        order,
+        reason: str,
+        cancel_status: dict | None = None,
+        cancellation_attempts: list[dict] | None = None,
+    ) -> dict:
+        """긴급 매도 전 충돌 BUY 취소가 불명확하면 매도를 중단하고 HALT한다."""
+        persist_error = ""
+        try:
+            order.transition(OrderStatus.REJECTED, reason=reason)
+            self._persist_order_record(order)
+        except Exception as exc:
+            persist_error = str(exc)
+            logger.exception(
+                "긴급 취소 실패 SELL 주문 상태 저장 실패 — HALT는 계속 진행: {}",
+                exc,
+            )
+        detail = {
+            "reason": reason,
+            "cancel_status": cancel_status or {},
+            "cancellation_attempts": cancellation_attempts or [],
+        }
+        if persist_error:
+            detail["sell_order_persist_error"] = persist_error
+        self._halt_for_uncertain_live_execution(
+            order=order,
+            action="CANCEL_BEFORE_EMERGENCY_SELL",
+            reason="emergency_buy_cancel_unconfirmed",
+            execution=detail,
+        )
+        return {
+            "success": False,
+            "reason": reason,
+            "symbol": order.symbol,
+            "mode": self.mode,
+            "emergency_cancel_blocked": True,
+            "requires_reconcile": True,
+            "cancel_status": cancel_status or {},
+            "cancellation_attempts": cancellation_attempts or [],
+        }
+
+    def _mark_cancelled_live_buy_records(
+        self,
+        symbol: str,
+        cancelled_orders: list[dict],
+    ) -> list[dict]:
+        """브로커에서 취소 확인된 BUY를 인메모리·DB open 상태에서 닫는다."""
+        cancelled_by_id = {
+            self._normalize_broker_order_id(item.get("order_no")): item
+            for item in cancelled_orders
+            if self._normalize_broker_order_id(item.get("order_no"))
+        }
+        if not cancelled_by_id:
+            return []
+
+        for local_order in self.order_book.get_open_orders(symbol):
+            if str(local_order.action).upper() != "BUY":
+                continue
+            broker_id = self._normalize_broker_order_id(local_order.broker_order_id)
+            if broker_id not in cancelled_by_id:
+                continue
+            local_order.transition(
+                OrderStatus.CANCELLED,
+                reason="긴급 매도 전 KIS 미체결 BUY 취소 확인",
+            )
+            self._persist_order_record(local_order)
+
+        updated: list[dict] = []
+        records = get_open_order_records(
+            symbol=symbol,
+            account_key=self.account_key,
+            mode=self.mode,
+        )
+
+        for record in records:
+            if str(record.get("action") or "").upper() != "BUY":
+                continue
+            broker_id = self._normalize_broker_order_id(record.get("broker_order_id"))
+            cancelled = cancelled_by_id.get(broker_id)
+            if cancelled is None:
+                continue
+            try:
+                filled_qty = int(cancelled.get("filled_qty") or 0)
+            except (TypeError, ValueError, OverflowError):
+                filled_qty = int(record.get("filled_qty") or 0)
+            reconciled = reconcile_order_record(
+                record["order_id"],
+                status=OrderStatus.CANCELLED.value,
+                filled_qty=max(filled_qty, int(record.get("filled_qty") or 0)),
+                remaining_qty=0,
+                reason="emergency_sell_conflicting_buy_cancelled",
+            )
+            if reconciled:
+                updated.append(reconciled)
+        return updated
+
+    def _cancel_conflicting_live_buys_before_emergency_sell(
+        self,
+        *,
+        symbol: str,
+        order,
+        strategy: str,
+    ) -> dict | None:
+        """긴급 SELL 전에 같은 종목의 취소 가능 BUY를 제거한다.
+
+        미체결 BUY를 둔 채 보유분만 매도하면 이후 BUY가 체결되어 포지션이
+        되살아날 수 있다. KIS가 취소 가능 수량을 확인해 준 주문만 취소하고,
+        재조회에서 BUY가 사라진 것이 확인된 경우에만 SELL 경로를 계속한다.
+        부분 체결분이 있거나 조회·취소 상태가 불명확하면 수량을 추측하지 않고
+        영속 HALT 후 브로커 대조를 요구한다.
+        """
+        if self.mode != "live":
+            return None
+
+        status_getter = getattr(self.kis_api, "get_cancelable_order_status", None)
+        if not callable(status_getter):
+            # 오래된/테스트용 KIS 어댑터도 기존 미체결 조회에서 "없음"을
+            # 확정할 수 있으면 취소할 대상 자체가 없으므로 계속 진행할 수 있다.
+            # 조회 실패 또는 미체결 존재는 기존 fail-closed 결과를 그대로 쓴다.
+            return self._live_unfilled_order_block(symbol, order)
+
+        try:
+            initial_status = status_getter(symbol, "BUY")
+        except Exception as exc:
+            initial_status = {
+                "checked": False,
+                "reason": "cancelable_query_exception",
+                "error": str(exc),
+                "orders": [],
+            }
+        if not initial_status.get("checked"):
+            return self._emergency_cancel_block(
+                order=order,
+                reason=(
+                    "긴급 매도 전 취소 가능한 BUY 주문 조회가 실패해 "
+                    "주문을 보류했습니다."
+                ),
+                cancel_status=initial_status,
+            )
+
+        pending_buys = list(initial_status.get("orders") or [])
+        if not pending_buys:
+            return None
+
+        cancel_func = getattr(self.kis_api, "cancel_order", None)
+        if not callable(cancel_func):
+            return self._emergency_cancel_block(
+                order=order,
+                reason=(
+                    "긴급 매도 전 KIS 미체결 BUY 취소 기능을 사용할 수 없어 "
+                    "주문을 보류했습니다."
+                ),
+                cancel_status={
+                    **initial_status,
+                    "reason": "cancel_api_missing",
+                },
+            )
+
+        logger.critical(
+            "긴급 매도 전 미체결 BUY {}건 발견 — 선취소 후 SELL 검증: {}",
+            len(pending_buys),
+            symbol,
+        )
+        cancellation_attempts: list[dict] = []
+        for pending in pending_buys:
+            attempt = {
+                "order_no": pending.get("order_no"),
+                "cancelable_qty": pending.get("cancelable_qty"),
+                "filled_qty": pending.get("filled_qty"),
+                "response_unknown": False,
+                "accepted": False,
+            }
+            try:
+                result = self._execute_authorized_kis_order(
+                    cancel_func,
+                    pending.get("order_no"),
+                    pending.get("order_branch"),
+                    pending.get("cancelable_qty"),
+                    pending.get("order_type"),
+                    pending.get("exchange_id"),
+                    symbol=symbol,
+                    action="CANCEL",
+                    quantity=int(pending.get("cancelable_qty") or 0),
+                    strategy=strategy,
+                    reason="emergency_sell_conflicting_buy",
+                )
+                if result is ORDER_RESPONSE_UNKNOWN:
+                    attempt["response_unknown"] = True
+                elif result is not None:
+                    attempt["accepted"] = True
+            except Exception as exc:
+                attempt["error"] = str(exc)
+            cancellation_attempts.append(attempt)
+
+        verified_status: dict | None = None
+        for verification_attempt in range(self.EMERGENCY_CANCEL_VERIFY_ATTEMPTS):
+            try:
+                current_status = status_getter(symbol, "BUY")
+            except Exception as exc:
+                current_status = {
+                    "checked": False,
+                    "reason": "cancel_verification_exception",
+                    "error": str(exc),
+                    "orders": [],
+                }
+            verified_status = current_status
+            if current_status.get("checked") and not current_status.get("orders"):
+                break
+            if not current_status.get("checked"):
+                break
+            if verification_attempt + 1 < self.EMERGENCY_CANCEL_VERIFY_ATTEMPTS:
+                time_mod.sleep(self.EMERGENCY_CANCEL_VERIFY_DELAY_SECONDS)
+
+        if not verified_status or not verified_status.get("checked") or verified_status.get("orders"):
+            return self._emergency_cancel_block(
+                order=order,
+                reason=(
+                    "미체결 BUY 취소가 브로커 재조회에서 확인되지 않아 "
+                    "긴급 매도를 보류했습니다."
+                ),
+                cancel_status=verified_status or {},
+                cancellation_attempts=cancellation_attempts,
+            )
+
+        try:
+            cancelled_records = self._mark_cancelled_live_buy_records(
+                symbol, pending_buys
+            )
+        except Exception as exc:
+            logger.exception(
+                "취소 확인 후 로컬 주문 상태 정리 실패 — 긴급 SELL 보류: {} — {}",
+                symbol,
+                exc,
+            )
+            return self._emergency_cancel_block(
+                order=order,
+                reason=(
+                    "미체결 BUY 취소는 확인됐지만 로컬 주문 상태를 안전하게 "
+                    "정리하지 못해 긴급 매도를 보류했습니다."
+                ),
+                cancel_status={
+                    **verified_status,
+                    "local_reconcile_error": str(exc),
+                },
+                cancellation_attempts=cancellation_attempts,
+            )
+        partial_fills = [
+            item for item in pending_buys if int(item.get("filled_qty") or 0) > 0
+        ]
+        if partial_fills:
+            return self._emergency_cancel_block(
+                order=order,
+                reason=(
+                    "기존 BUY의 부분 체결분이 확인되어 실제 보유 수량을 "
+                    "KIS 잔고와 대조하기 전까지 긴급 매도를 보류했습니다."
+                ),
+                cancel_status={
+                    **verified_status,
+                    "partial_fills": partial_fills,
+                    "cancelled_records": cancelled_records,
+                },
+                cancellation_attempts=cancellation_attempts,
+            )
+
+        OrderGuard.clear(symbol)
+        _log_op_event(
+            "EMERGENCY_BUY_CANCEL_CONFIRMED",
+            f"긴급 매도 전 미체결 BUY {len(pending_buys)}건 취소 확인: {symbol}",
+            severity="critical",
+            symbol=symbol,
+            strategy=strategy or None,
+            detail={
+                "cancelled_orders": pending_buys,
+                "cancelled_records": cancelled_records,
+            },
+            mode=self.mode,
+        )
+        return None
 
     def _get_sector_map_cached(self) -> dict:
         """업종 매핑을 한 번만 조회하고 캐시한다. 실패 시 빈 dict."""
@@ -2310,6 +2593,14 @@ class OrderExecutor:
                 default=600,
                 minimum=60,
             )
+            if is_emergency:
+                cancel_block = self._cancel_conflicting_live_buys_before_emergency_sell(
+                    symbol=symbol,
+                    order=order,
+                    strategy=strategy,
+                )
+                if cancel_block:
+                    return cancel_block
             persistent_block = self._persistent_live_order_block(symbol, order)
             if persistent_block:
                 return persistent_block

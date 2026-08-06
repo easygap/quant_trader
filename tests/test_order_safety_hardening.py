@@ -469,6 +469,17 @@ class _RecordingSellBroker:
     def __init__(self):
         self.calls = []
 
+    def get_cancelable_order_status(self, symbol, side="BUY"):
+        return {
+            "checked": True,
+            "reason": "ok",
+            "has_cancelable": False,
+            "orders": [],
+        }
+
+    def cancel_order(self, *args, **kwargs):
+        raise AssertionError("취소할 BUY가 없는데 cancel_order가 호출됨")
+
     def sell_order(self, symbol, quantity, price, order_type="00"):
         self.calls.append(
             {
@@ -542,6 +553,195 @@ def test_live_sell_uses_market_only_for_emergency_exit(
             "order_type": expected_order_type,
         }
     ]
+
+
+def _pending_buy(order_no="0000001234", *, filled_qty=0):
+    return {
+        "symbol": "000660",
+        "side": "BUY",
+        "order_no": order_no,
+        "order_branch": "06010",
+        "cancelable_qty": 2,
+        "filled_qty": filled_qty,
+        "ordered_qty": 2 + filled_qty,
+        "order_price": "70000",
+        "order_type": "00",
+        "exchange_id": "KRX",
+        "order_time": "101500",
+    }
+
+
+class _EmergencyCancelBroker:
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.events = []
+        self._last_status = statuses[-1]
+
+    def get_cancelable_order_status(self, symbol, side="BUY"):
+        self.events.append(("QUERY_CANCELABLE", symbol, side))
+        if self.statuses:
+            self._last_status = self.statuses.pop(0)
+        return self._last_status
+
+    def cancel_order(self, order_no, order_branch, quantity, order_type, exchange_id):
+        self.events.append(
+            (
+                "CANCEL",
+                order_no,
+                order_branch,
+                quantity,
+                order_type,
+                exchange_id,
+            )
+        )
+        return {"odno": f"C-{order_no}"}
+
+    def sell_order(self, symbol, quantity, price, order_type="00"):
+        self.events.append(("SELL", symbol, quantity, price, order_type))
+        return {"odno": "SELL-AFTER-CANCEL"}
+
+
+def _prepare_emergency_sell_executor(monkeypatch, broker):
+    config = _minimal_risk_config(use_mock=False)
+    executor = _executor_without_external_initialization(config=config, mode="live")
+    executor.kis_api = broker
+    executor._get_min_holding_days = lambda: 0
+    executor._pre_order_check = lambda **kwargs: {"allowed": True, "reason": ""}
+    executor._persistent_live_order_block = lambda *args, **kwargs: None
+    executor._live_unfilled_order_block = lambda *args, **kwargs: None
+    executor._claim_live_order_guard = lambda *args, **kwargs: None
+    executor._persist_order_record = lambda *args, **kwargs: None
+    executor._mark_cancelled_live_buy_records = lambda *args, **kwargs: []
+    executor._resolve_live_execution = lambda *args, **kwargs: {
+        "confirmed": False,
+        "reason": "live_fill_unconfirmed",
+        "filled_qty": 0,
+        "remaining_qty": 5,
+    }
+    executor._pending_live_execution_result = lambda **kwargs: {
+        "success": False,
+        "order_pending": True,
+    }
+    position = SimpleNamespace(
+        symbol="000660",
+        quantity=5,
+        avg_price=70_000,
+        bought_at=datetime.now() - timedelta(days=30),
+    )
+    monkeypatch.setattr(
+        "core.order_executor.get_position", lambda *args, **kwargs: position
+    )
+    return executor
+
+
+def test_emergency_sell_cancels_conflicting_buy_before_market_sell(monkeypatch):
+    pending = _pending_buy()
+    broker = _EmergencyCancelBroker(
+        [
+            {"checked": True, "reason": "ok", "orders": [pending]},
+            {"checked": True, "reason": "ok", "orders": []},
+        ]
+    )
+    executor = _prepare_emergency_sell_executor(monkeypatch, broker)
+
+    result = executor.execute_sell(
+        symbol="000660",
+        price=68_000,
+        reason="STOP_LOSS",
+        strategy="safety_test",
+    )
+
+    assert result["order_pending"] is True
+    assert broker.events == [
+        ("QUERY_CANCELABLE", "000660", "BUY"),
+        ("CANCEL", "0000001234", "06010", 2, "00", "KRX"),
+        ("QUERY_CANCELABLE", "000660", "BUY"),
+        ("SELL", "000660", 5, 0, "01"),
+    ]
+
+
+def test_emergency_sell_halts_when_cancel_is_not_confirmed(monkeypatch):
+    pending = _pending_buy()
+    broker = _EmergencyCancelBroker(
+        [{"checked": True, "reason": "ok", "orders": [pending]}]
+    )
+    executor = _prepare_emergency_sell_executor(monkeypatch, broker)
+    halts = []
+    executor._halt_for_uncertain_live_execution = lambda **kwargs: halts.append(kwargs)
+    monkeypatch.setattr("core.order_executor.time_mod.sleep", lambda *_: None)
+
+    result = executor.execute_sell(
+        symbol="000660",
+        price=68_000,
+        reason="STOP_LOSS",
+        strategy="safety_test",
+    )
+
+    assert result["success"] is False
+    assert result["emergency_cancel_blocked"] is True
+    assert result["requires_reconcile"] is True
+    assert not any(event[0] == "SELL" for event in broker.events)
+    assert len(halts) == 1
+    assert halts[0]["action"] == "CANCEL_BEFORE_EMERGENCY_SELL"
+
+
+def test_emergency_sell_halts_after_cancelling_partially_filled_buy(monkeypatch):
+    pending = _pending_buy(filled_qty=1)
+    broker = _EmergencyCancelBroker(
+        [
+            {"checked": True, "reason": "ok", "orders": [pending]},
+            {"checked": True, "reason": "ok", "orders": []},
+        ]
+    )
+    executor = _prepare_emergency_sell_executor(monkeypatch, broker)
+    halts = []
+    executor._halt_for_uncertain_live_execution = lambda **kwargs: halts.append(kwargs)
+
+    result = executor.execute_sell(
+        symbol="000660",
+        price=68_000,
+        reason="STOP_LOSS",
+        strategy="safety_test",
+    )
+
+    assert result["success"] is False
+    assert result["emergency_cancel_blocked"] is True
+    assert "부분 체결" in result["reason"]
+    assert ("CANCEL", "0000001234", "06010", 2, "00", "KRX") in broker.events
+    assert not any(event[0] == "SELL" for event in broker.events)
+    assert len(halts) == 1
+
+
+def test_emergency_sell_halts_when_cancelled_order_cannot_be_reconciled_locally(
+    monkeypatch,
+):
+    pending = _pending_buy()
+    broker = _EmergencyCancelBroker(
+        [
+            {"checked": True, "reason": "ok", "orders": [pending]},
+            {"checked": True, "reason": "ok", "orders": []},
+        ]
+    )
+    executor = _prepare_emergency_sell_executor(monkeypatch, broker)
+    executor._mark_cancelled_live_buy_records = lambda *args, **kwargs: (
+        (_ for _ in ()).throw(RuntimeError("order DB unavailable"))
+    )
+    halts = []
+    executor._halt_for_uncertain_live_execution = lambda **kwargs: halts.append(kwargs)
+
+    result = executor.execute_sell(
+        symbol="000660",
+        price=68_000,
+        reason="STOP_LOSS",
+        strategy="safety_test",
+    )
+
+    assert result["success"] is False
+    assert result["emergency_cancel_blocked"] is True
+    assert "로컬 주문 상태" in result["reason"]
+    assert result["cancel_status"]["local_reconcile_error"] == "order DB unavailable"
+    assert not any(event[0] == "SELL" for event in broker.events)
+    assert len(halts) == 1
 
 
 @pytest.mark.parametrize(

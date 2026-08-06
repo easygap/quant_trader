@@ -6,7 +6,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -27,8 +27,11 @@ def _seed_pocket(basket_name):
     init_database()
     session = get_session()
     try:
+        snapshot_at = (datetime.now() - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         session.add(PortfolioSnapshot(
-            account_key=acct, date=datetime(2026, 7, 6),
+            account_key=acct, date=snapshot_at,
             total_value=400_126, cash=171_846, invested=228_280,
             cumulative_return=0.04, mdd=0.0, peak_value=400_126,
         ))
@@ -39,7 +42,11 @@ def _seed_pocket(basket_name):
         session.commit()
     finally:
         session.close()
-    record_cash_flow(100_000, account_key=acct, occurred_at=datetime(2026, 7, 6, 9, 0))
+    record_cash_flow(
+        100_000,
+        account_key=acct,
+        occurred_at=snapshot_at.replace(hour=9),
+    )
     return acct
 
 
@@ -246,7 +253,7 @@ class TestSnapshotsSerialization:
         session = get_session()
         try:
             session.add(PortfolioSnapshot(
-                account_key="", date=_dt(2026, 7, 7),
+                account_key="", date=_dt.now() - timedelta(days=1),
                 total_value=10_000_000, cash=10_000_000, invested=0,
             ))
             session.commit()

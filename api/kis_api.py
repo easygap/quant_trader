@@ -866,6 +866,88 @@ class KISApi:
             logger.error("매도 주문 실패: {} - {}", symbol, msg)
             return None
 
+    def cancel_order(
+        self,
+        order_no: str,
+        order_branch: str,
+        quantity: int,
+        order_type: str,
+        exchange_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """국내주식 미체결 주문의 지정 수량을 취소한다.
+
+        KIS 공식 ``주식주문(정정취소)`` 규격을 따른다. 호출자는 먼저
+        :meth:`get_cancelable_order_status`로 ``psbl_qty``를 확인해야 한다.
+        취소 역시 비멱등 요청이므로 응답 유실 시 재전송하지 않고
+        :class:`KISOrderResponseUnknown`을 전파한다.
+        """
+        if self._requires_order_capability() and not _ORDER_SUBMISSION_AUTHORIZED.get():
+            logger.critical(
+                "OrderExecutor capability 없는 직접 실계좌 CANCEL 호출 차단: {}",
+                order_no,
+            )
+            raise PermissionError(
+                "실계좌 주문 취소는 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
+            )
+
+        normalized_order_no = str(order_no or "").strip()
+        normalized_branch = str(order_branch or "").strip()
+        normalized_order_type = str(order_type or "").strip()
+        normalized_exchange = str(exchange_id or "").strip().upper()
+        try:
+            raw_quantity = float(quantity)
+            normalized_quantity = int(raw_quantity)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("취소 수량은 1 이상의 정수여야 합니다.") from exc
+        if not normalized_order_no:
+            raise ValueError("원주문번호가 필요합니다.")
+        if not normalized_branch:
+            raise ValueError("주문채번지점번호가 필요합니다.")
+        if (
+            not math.isfinite(raw_quantity)
+            or raw_quantity != normalized_quantity
+            or normalized_quantity <= 0
+        ):
+            raise ValueError("취소 수량은 1 이상이어야 합니다.")
+        if not normalized_order_type:
+            raise ValueError("원주문 주문구분코드가 필요합니다.")
+        if normalized_exchange not in {"KRX", "NXT", "SOR"}:
+            raise ValueError("거래소ID구분코드는 KRX, NXT, SOR 중 하나여야 합니다.")
+
+        tr_id = "VTTC0013U" if self.use_mock else "TTTC0013U"
+        body = {
+            "CANO": self.cano,
+            "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "KRX_FWDG_ORD_ORGNO": normalized_branch,
+            "ORGN_ODNO": normalized_order_no,
+            "ORD_DVSN": normalized_order_type,
+            "RVSE_CNCL_DVSN_CD": "02",  # 취소
+            # 조회 직후에도 일부 체결될 수 있으므로, 조회된 가능수량만 명시적으로 취소한다.
+            "ORD_QTY": str(normalized_quantity),
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "N",
+            "EXCG_ID_DVSN_CD": normalized_exchange,
+        }
+        data = self._request(
+            "POST",
+            "/uapi/domestic-stock/v1/trading/order-rvsecncl",
+            tr_id,
+            body=body,
+            idempotent=False,
+        )
+        if data and data.get("rt_cd") == "0":
+            logger.warning(
+                "미체결 주문 취소 접수: order_no={} qty={} exchange={}",
+                normalized_order_no,
+                normalized_quantity,
+                normalized_exchange,
+            )
+            return data.get("output", {})
+
+        msg = data.get("msg1", "알 수 없는 오류") if data else "API 응답 없음"
+        logger.error("미체결 주문 취소 실패: {} - {}", normalized_order_no, msg)
+        return None
+
     @staticmethod
     def _odno_from_order_output(order_output: Optional[Dict[str, Any]]) -> str:
         if not order_output or not isinstance(order_output, dict):
@@ -1134,6 +1216,216 @@ class KISApi:
             if qty > 0:
                 return qty
         return 0
+
+    @staticmethod
+    def _nonnegative_int_from_order_row(
+        row: Dict[str, Any],
+        *keys: str,
+    ) -> Optional[int]:
+        """주문 응답의 정수 필드를 보수적으로 읽는다.
+
+        필드가 없거나 숫자가 아니면 ``None``을 반환해 호출자가 상태 불명으로
+        처리하게 한다. 음수는 유효한 수량이 아니므로 역시 ``None``이다.
+        """
+        for key in keys:
+            value = row.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                number = float(value)
+                parsed = int(number)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(number) or number != parsed or parsed < 0:
+                continue
+            return parsed
+        return None
+
+    def get_cancelable_order_status(
+        self,
+        symbol: str,
+        side: str = "BUY",
+    ) -> Dict[str, Any]:
+        """정정·취소 가능한 국내주식 주문을 조회한다.
+
+        KIS 공식 규격은 취소 전 ``psbl_qty`` 확인을 요구한다. 이 메서드는
+        종목과 매매 방향을 다시 필터링하고, 취소에 필요한 주문번호·지점번호·
+        주문구분·거래소를 보존한다. 응답이 잘렸을 가능성이 있거나 필수 수량을
+        해석하지 못하면 ``checked=False``로 반환해 주문 경로를 fail-closed한다.
+        """
+        target_symbol = str(symbol or "").strip()
+        normalized_side = str(side or "").strip().upper()
+        side_code = {"SELL": "1", "BUY": "2"}.get(normalized_side)
+        broker_side_code = {"SELL": "01", "BUY": "02"}.get(normalized_side)
+        if not target_symbol:
+            return {
+                "checked": False,
+                "reason": "cancelable_symbol_missing",
+                "orders": [],
+            }
+        if not side_code or not broker_side_code:
+            return {
+                "checked": False,
+                "reason": "cancelable_side_invalid",
+                "orders": [],
+            }
+        if not self._is_configured() or not self.cano:
+            return {
+                "checked": False,
+                "reason": "kis_not_configured",
+                "orders": [],
+            }
+
+        try:
+            params = {
+                "CANO": self.cano,
+                "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "INQR_DVSN_1": "1",  # 종목 기준
+                "INQR_DVSN_2": side_code,
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+            }
+            # 공식 최신 샘플은 실전/모의 모두 이 조회 TR을 사용한다.
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-psbl-rvsecncl",
+                "TTTC0084R",
+                params=params,
+            )
+            if not data or data.get("rt_cd") != "0":
+                return {
+                    "checked": False,
+                    "reason": "kis_cancelable_query_failed",
+                    "message": (
+                        data.get("msg1") if isinstance(data, dict) else "API 응답 없음"
+                    ),
+                    "orders": [],
+                }
+
+            output = data.get("output") or data.get("output1") or []
+            if isinstance(output, dict):
+                output = [output] if output else []
+            if not isinstance(output, list):
+                return {
+                    "checked": False,
+                    "reason": "kis_cancelable_output_invalid",
+                    "orders": [],
+                }
+
+            # 한 번에 최대 50건인 API다. 헤더의 연속조회 상태를 공통 래퍼가
+            # 노출하지 않으므로 50건 경계에서는 목록이 완전하다고 추측하지 않는다.
+            if len(output) >= 50:
+                return {
+                    "checked": False,
+                    "reason": "kis_cancelable_pagination_required",
+                    "orders": [],
+                    "returned_count": len(output),
+                }
+
+            orders: list[dict[str, Any]] = []
+            malformed: list[dict[str, Any]] = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                row_symbol = self._symbol_from_order_row(item)
+                if row_symbol != target_symbol:
+                    continue
+                row_side = str(
+                    item.get("sll_buy_dvsn_cd")
+                    or item.get("SLL_BUY_DVSN_CD")
+                    or broker_side_code
+                ).strip()
+                if row_side != broker_side_code:
+                    continue
+
+                cancelable_qty = self._nonnegative_int_from_order_row(
+                    item, "psbl_qty", "PSBL_QTY"
+                )
+                filled_qty = self._nonnegative_int_from_order_row(
+                    item, "tot_ccld_qty", "TOT_CCLD_QTY"
+                )
+                ordered_qty = self._nonnegative_int_from_order_row(
+                    item, "ord_qty", "ORD_QTY"
+                )
+                if cancelable_qty is None:
+                    malformed.append({"symbol": row_symbol, "reason": "psbl_qty_invalid"})
+                    continue
+                if cancelable_qty <= 0:
+                    continue
+                if filled_qty is None:
+                    malformed.append({
+                        "symbol": row_symbol,
+                        "reason": "tot_ccld_qty_invalid",
+                    })
+                    continue
+
+                order = {
+                    "symbol": row_symbol,
+                    "side": normalized_side,
+                    "order_no": str(
+                        item.get("odno") or item.get("ODNO") or ""
+                    ).strip(),
+                    "order_branch": str(
+                        item.get("ord_gno_brno")
+                        or item.get("ORD_GNO_BRNO")
+                        or ""
+                    ).strip(),
+                    "cancelable_qty": cancelable_qty,
+                    "filled_qty": filled_qty,
+                    "ordered_qty": ordered_qty,
+                    "order_price": item.get("ord_unpr") or item.get("ORD_UNPR") or "",
+                    "order_type": str(
+                        item.get("ord_dvsn_cd")
+                        or item.get("ORD_DVSN_CD")
+                        or ""
+                    ).strip(),
+                    "exchange_id": str(
+                        item.get("excg_id_dvsn_cd")
+                        or item.get("EXCG_ID_DVSN_CD")
+                        or ""
+                    ).strip().upper(),
+                    "order_time": item.get("ord_tmd") or item.get("ORD_TMD") or "",
+                }
+                missing = [
+                    key
+                    for key in ("order_no", "order_branch", "order_type", "exchange_id")
+                    if not order[key]
+                ]
+                if missing:
+                    malformed.append({
+                        "symbol": row_symbol,
+                        "order_no": order["order_no"],
+                        "reason": "cancel_fields_missing",
+                        "missing": missing,
+                    })
+                    continue
+                orders.append(order)
+
+            if malformed:
+                return {
+                    "checked": False,
+                    "reason": "kis_cancelable_order_malformed",
+                    "orders": orders,
+                    "malformed": malformed,
+                }
+            return {
+                "checked": True,
+                "reason": "ok",
+                "has_cancelable": bool(orders),
+                "orders": orders,
+            }
+        except Exception as exc:
+            logger.warning(
+                "정정취소 가능 주문 조회 실패 — 긴급 매도 전 자동 취소 불가: {} — {}",
+                target_symbol,
+                exc,
+            )
+            return {
+                "checked": False,
+                "reason": "kis_cancelable_query_exception",
+                "error": str(exc),
+                "orders": [],
+            }
 
     def get_unfilled_order_status(self, symbol: str) -> Dict[str, Any]:
         """
