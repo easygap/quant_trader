@@ -327,9 +327,17 @@ class TestShippedBasketsConfig:
         baskets = self._load()
         assert "kr_diversified_hold" in baskets, "분산 보유 바스켓 누락"
         b = baskets["kr_diversified_hold"]
-        # 10종목 균등(각 10%)
-        assert len(b["holdings"]) == 10
-        assert all(abs(float(w) - 0.10) < 1e-9 for w in b["holdings"].values())
+        # 섹터 분산 균등 배분. 종목 수는 자본 규모에 따라 조정되므로(1주 가격이 슬롯
+        # 금액을 넘는 종목은 편입 불가 — 2026-08-07에 000660 제외) 개수를 못 박지 않고
+        # '균등 배분'이라는 설계 불변식만 검사한다.
+        holdings = b["holdings"]
+        assert len(holdings) >= 8, "섹터 분산이 무너질 만큼 종목이 줄었다"
+        equal_weight = 1.0 / len(holdings)
+        assert all(
+            abs(float(w) - equal_weight) < 0.001 for w in holdings.values()
+        ), f"균등 배분이 아님: {holdings}"
+        # 주식 노출은 명시적 정책이어야 한다(2026-08-07: 현금 완충 40%를 설계로 고정)
+        assert b["target_stock_weight"] == 0.60
         # 저회전: 넓은 드리프트 임계 + 낮은 회전 상한
         rb = b["rebalance"]
         assert rb["drift_threshold"] >= 0.08
@@ -726,6 +734,7 @@ class TestUnfillableSlotWarning:
             "rebalance": {"trigger": "drift", "drift_threshold": 0.08,
                           "min_trade_amount": 200000, "max_turnover_ratio": 1.0},
         }
+        rb.basket = rb.basket_cfg          # 리스크 정책 조회원(재진입 차단 등)
         rb.rebalance_cfg = rb.basket_cfg["rebalance"]
         rb.account_key = "t"
         rb.execution_strategy = "t"
@@ -733,6 +742,7 @@ class TestUnfillableSlotWarning:
             get_portfolio_summary=lambda current_prices=None: {"total_value": 1_000_000},
         )
         rb._is_live = lambda: False
+        rb._ledger_mode = lambda: "paper"
         rb._stock_fraction = lambda: 1.0
         rb.get_target_weights = lambda: {"000660": 0.5, "005930": 0.5}
         rb.get_current_weights = lambda prices=None: {}

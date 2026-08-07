@@ -20,6 +20,12 @@ from loguru import logger
 _KST = ZoneInfo("Asia/Seoul")
 
 from config.config_loader import Config
+from core.basket_risk import (
+    RISK_EXIT_TAG,
+    basket_risk_levels,
+    evaluate_basket_stops,
+    symbols_in_reentry_cooldown,
+)
 from core.portfolio_manager import PortfolioManager
 from core.data_collector import DataCollector
 from database.repositories import get_all_positions
@@ -398,6 +404,39 @@ class BasketRebalancer:
         return False, f"알 수 없는 트리거: {trigger}"
 
     # ------------------------------------------------------------------
+    # 리스크 청산 (손절/익절/트레일링)
+    # ------------------------------------------------------------------
+
+    def plan_risk_exits(self, prices: dict[str, float] = None) -> list[RebalanceOrder]:
+        """바스켓 리스크 정책(baskets.yaml `risk:`)에 걸린 포지션의 청산 주문.
+
+        리밸런싱보다 먼저 실행돼야 한다 — 청산 대상을 그대로 둔 채 비중을 맞추면
+        손실 종목을 오히려 더 사게 된다.
+
+        정책이 없는 바스켓은 빈 리스트를 반환한다(순수 buy&hold — 기존 동작).
+        """
+        prices = prices or self._fetch_current_prices()
+        positions = get_all_positions(
+            account_key=self.account_key,
+            mode=self._ledger_mode(),
+        )
+        hits = evaluate_basket_stops(self.basket, positions, prices)
+        orders: list[RebalanceOrder] = []
+        for hit in hits:
+            logger.warning(
+                "바스켓 '{}' 리스크 청산 대상 — {} {}: {}",
+                self.basket_name, hit["action"], hit["symbol"], hit["reason"],
+            )
+            orders.append(RebalanceOrder(
+                symbol=hit["symbol"], action="SELL", quantity=hit["quantity"],
+                price=hit["price"],
+                # 사유에 RISK_EXIT/액션 표지를 남긴다 — 재진입 차단이 매매 이력에서
+                # '리스크 청산으로 나간 종목'을 이 표지로 되찾는다.
+                reason=f"{RISK_EXIT_TAG} {hit['action']}: {hit['reason']}",
+            ))
+        return orders
+
+    # ------------------------------------------------------------------
     # 리밸런싱 주문 계획
     # ------------------------------------------------------------------
 
@@ -434,12 +473,25 @@ class BasketRebalancer:
         )
         pos_map = {p.symbol: p for p in positions}
 
+        # 손절/트레일링으로 방금 나간 종목은 매수 후보에서 뺀다. 이게 없으면 청산으로
+        # 비워진 슬롯을 같은 사이클의 비중 교정이 곧바로 되사서 손실만 확정하는
+        # 왕복매매가 된다(2026-08-07 10:07 실측: 현대차 -25% 손절 4초 뒤 재매수).
+        cooldown = symbols_in_reentry_cooldown(
+            self.basket, self.account_key, self._ledger_mode(),
+        )
+
         # 1) 후보 거래를 먼저 모두 계산(회전율 예산 적용 전). 거래액은 실제 주문 명목금액 기준.
         candidates: list[tuple[RebalanceOrder, float]] = []
         for symbol in targets:
             target_w = targets[symbol]
             actual_w = actuals.get(symbol, 0.0)
             drift = target_w - actual_w
+            if drift > 0 and symbol in cooldown:
+                logger.info(
+                    "종목 {} 매수 보류 — {} (비중 부족 {:.1%}는 차단 해제 후 교정)",
+                    symbol, cooldown[symbol], drift,
+                )
+                continue
             trade_value = abs(investable * target_w - investable * actual_w)
             if trade_value < min_trade:
                 if drift > 0 and actual_w <= 0:
@@ -611,6 +663,12 @@ class BasketRebalancer:
                         reason=f"리밸런싱: {order.reason}",
                         strategy=self.execution_strategy,
                         avg_daily_volume=snapshot.get(order.symbol, {}).get("avg_volume"),
+                        # 종목 구성과 종목별 상한은 baskets.yaml의 목표 비중표가 이미
+                        # 정한 분산 정책이다 — 그 위에 쌍별 상관 거부권을 또 얹으면
+                        # 하락장(대형주 상관 → 1)에 설계대로 채우는 주문이 전부 막힌다.
+                        weight_policy_managed=True,
+                        # 진입 레벨도 트랙 정책으로 기록한다(전역 단타 -3% 손절 금지).
+                        risk_levels=basket_risk_levels(self.basket, order.price),
                     )
                 else:
                     res = executor.execute_sell(

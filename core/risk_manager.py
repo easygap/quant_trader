@@ -215,6 +215,13 @@ class RiskManager:
         """
         corr_cfg = self.risk_params.get("diversification", {}).get("correlation_risk", {})
         enabled = corr_cfg.get("enabled", False)
+        # 자기 자신은 비교 대상에서 뺀다. 보유 중인 종목을 추가 매수하면 호출부가 넘기는
+        # existing_symbols에 대상 종목이 그대로 들어 있어 corr(x, x)=1.0이 잡히고, 이는
+        # 항상 임계값을 넘는다 — '분산' 판단으로는 무의미한데 결과는 매번 고상관 판정이다.
+        # 실측 피해: 바스켓이 만드는 주문은 대부분 보유분 추가매수라, 1일차 체결 이후
+        # 모든 추가매수가 영구 거부돼 트랙이 57거래일간 통째로 얼어붙었다(2026-06-10~08-06).
+        # 동일 종목의 추가 노출은 max_position_ratio(단일 종목 상한)가 이미 관리한다.
+        existing_symbols = [s for s in (existing_symbols or []) if str(s) != str(symbol)]
         if enabled is False or enabled is None or not existing_symbols:
             return {"scale": 1.0, "high_corr_symbols": [], "reason": ""}
 

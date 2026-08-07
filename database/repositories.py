@@ -1104,6 +1104,40 @@ def get_latest_snapshot_summary(
 
 
 @with_retry
+def get_snapshot_before(
+    before_date: datetime, account_key: str = "", mode: str = "paper"
+) -> Optional[dict]:
+    """before_date보다 이전 날짜의 가장 최근 스냅샷 요약.
+
+    daily_return(전일 대비) 계산용. get_latest_snapshot_summary를 그대로 쓰면 같은 날
+    재실행(upsert) 때 '오늘 스냅샷'이 직전으로 잡혀 전일 대비가 항상 0이 된다.
+    """
+    session = get_session()
+    try:
+        base = before_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        row = (
+            session.query(PortfolioSnapshot)
+            .filter(
+                PortfolioSnapshot.mode == _ledger_mode(mode),
+                PortfolioSnapshot.account_key == (account_key or ""),
+                PortfolioSnapshot.date < base,
+            )
+            .order_by(PortfolioSnapshot.date.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "date": row.date,
+            "created_at": row.created_at,
+            "total_value": float(row.total_value),
+            "cumulative_return": float(row.cumulative_return or 0.0),
+        }
+    finally:
+        session.close()
+
+
+@with_retry
 def get_max_cumulative_return(
     account_key: str = "", mode: str = "paper"
 ) -> Optional[float]:

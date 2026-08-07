@@ -20,6 +20,7 @@ from database.repositories import (
     get_cash_flow_total_between,
     get_max_cumulative_return,
     get_latest_snapshot_summary,
+    get_snapshot_before,
     has_cash_flows,
 )
 
@@ -432,10 +433,19 @@ class PortfolioManager:
             )
             return False
 
+        # 전일 대비 수익률: 종전에는 이 인자를 아예 안 넘겨 기본값 0이 그대로 저장됐다
+        # (운영 스냅샷 61행이 전부 daily_return=0.0). 변동성·샤프·일일 손실 한도가 모두
+        # 이 열을 보므로, 값이 0이면 그 계산들이 조용히 무력화된다.
+        # 입금은 수익이 아니므로 구간 유입을 중화한 TWR 구간 수익률로 계산한다.
+        daily_return = self._compute_daily_return(
+            summary["total_value"], snapshot_date,
+        )
+
         ok = save_portfolio_snapshot(
             total_value=summary["total_value"],
             cash=summary["cash"],
             invested=summary["invested"],
+            daily_return=daily_return,
             cumulative_return=summary["total_return"],
             mdd=summary["mdd"],
             position_count=summary["position_count"],
@@ -456,6 +466,40 @@ class PortfolioManager:
                 self.account_key or "default",
             )
         return bool(ok)
+
+    def _compute_daily_return(self, total_value: float, snapshot_date=None) -> float:
+        """직전 스냅샷 대비 구간 수익률(%). 직전 기록이 없으면 0.
+
+        구간 사이의 외부 현금흐름(입금·출금)은 수익이 아니므로 분모에서 중화한다
+        (누적수익률과 같은 twr_period_return 산식). 계산 실패는 스냅샷 저장을 막지
+        않는다 — 값은 0으로 두고 경고만 남긴다(관측 지표가 원장을 인질로 잡지 않게).
+        """
+        from datetime import datetime as _dt
+
+        try:
+            base = snapshot_date or _dt.now()
+            prev = get_snapshot_before(
+                base, account_key=self.account_key, mode=self._ledger_mode,
+            )
+            if prev is None:
+                return 0.0
+            boundary = prev.get("created_at") or prev.get("date")
+            flow_since = _finite_number(
+                get_cash_flow_total_between(
+                    self.account_key, boundary, _dt.now(), mode=self._ledger_mode,
+                ),
+                name="구간 현금흐름",
+            )
+            prev_total = _finite_number(
+                prev.get("total_value"), name="직전 스냅샷 총평가금",
+            )
+            return twr_period_return(prev_total, total_value, flow_since) * 100
+        except Exception as exc:
+            logger.warning(
+                "전일 대비 수익률 계산 실패 (계좌: {}): {} — 0으로 기록",
+                self.account_key or "default", exc,
+            )
+            return 0.0
 
     def get_paper_performance_report(self, days: int = 30) -> dict:
         """

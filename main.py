@@ -800,6 +800,42 @@ def _run_rebalance_impl(args):
                 except Exception as guard_exc:
                     logger.debug("바스켓 '{}' 당일 체결 판정 실패(가드 생략): {}", name, guard_exc)
 
+            # 리스크 청산(손절/익절/트레일링)을 리밸런싱보다 먼저 평가한다.
+            # 그동안 이 사이클은 비중 교정만 했고 손절/익절은 장중 스케줄러
+            # (core/scheduler.py)에만 있어서, 일 1회 리밸런싱으로만 굴러가는 바스켓
+            # 트랙은 손절선을 뚫어도 아무 일도 일어나지 않았다(2026-08-07 점검에서
+            # 9개 중 6개 포지션이 손절선 이탈 상태로 방치된 것을 확인).
+            #
+            # '1일 1매매 패스' 가드는 적용하지 않는다 — 그 가드는 회전율 상한 우회를
+            # 막으려는 것이고, 리스크 청산은 회전 예산이 아니라 손실 제한이다.
+            # 청산이 이미 끝났으면 포지션이 없어 재평가가 비어 자연히 멱등이다.
+            try:
+                # list로 좁힌다 — 평가 결과가 주문 목록이 아니면 청산을 시도하지 않는다
+                # (빈 목록과 '목록이 아닌 무언가'를 구분하지 않으면 유령 청산이 난다).
+                planned = rebalancer.plan_risk_exits()
+                exit_orders = list(planned) if isinstance(planned, (list, tuple)) else []
+            except Exception as exit_exc:
+                exit_orders = []
+                logger.error("바스켓 '{}' 리스크 청산 평가 실패: {}", name, exit_exc)
+            if exit_orders:
+                exit_result = rebalancer.execute(
+                    exit_orders,
+                    dry_run=dry_run,
+                    live_confirmed=live_rebalance_confirmed,
+                )
+                exit_summary = (
+                    f"🛡️ 바스켓 '{name}' 리스크 청산 {'(DRY RUN) ' if dry_run else ''}"
+                    f"{exit_result['executed']}건 실행 / {exit_result['failed']}건 실패: "
+                    + "; ".join(o.reason for o in exit_orders[:3])
+                )
+                logger.warning(exit_summary)
+                if not dry_run:
+                    record_cycle_event(
+                        "RISK_EXIT", exit_summary, severity="warning",
+                        strategy=live_strategy_name, mode=mode,
+                    )
+                    notifier.send_message(exit_summary, critical=True)
+
             executed = False
             if already_traded_today:
                 logger.info(

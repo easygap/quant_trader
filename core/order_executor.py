@@ -1950,6 +1950,8 @@ class OrderExecutor:
         avg_daily_volume: float = None,
         atr: float = None,
         execution_session_id: str = "",
+        weight_policy_managed: bool = False,
+        risk_levels: dict = None,
     ) -> dict:
         """Execute a fixed-quantity buy (paper or live).
 
@@ -1957,6 +1959,14 @@ class OrderExecutor:
         목표 비중으로 수량을 이미 정하므로, 일반 1%-룰 사이저가 이를 덮어쓰면 안 된다.
         live에서도 주문 집행(OrderGuard·미체결조회·체결확인·reconcile)은 일반 매수와
         동일한 안전 장치를 거친다. 사이징만 건너뛰고 집행은 동일하다.
+
+        weight_policy_managed: 호출부가 사전 승인된 목표 비중표(baskets.yaml 등)로
+            종목 구성과 상한을 이미 결정했음을 뜻한다. 이 경우 쌍별 상관 거부권만
+            건너뛴다 — 나머지 게이트(노출 상한·업종·유동성·갭·실적·현금·거래중단)는
+            그대로 적용된다. 자세한 근거는 _execute_buy_quantity_impl의 상관 체크 참조.
+        risk_levels: {"stop_loss_price", "take_profit_price", "trailing_stop_price"}로
+            진입 시 리스크 레벨을 명시 지정한다(None인 키는 미설정). 미전달 시 전역
+            risk_params 기준으로 계산한다.
         """
         with PositionLock():
             return self._execute_buy_quantity_impl(
@@ -1971,6 +1981,8 @@ class OrderExecutor:
                 avg_daily_volume=avg_daily_volume,
                 atr=atr,
                 execution_session_id=execution_session_id,
+                weight_policy_managed=weight_policy_managed,
+                risk_levels=risk_levels,
             )
 
     def _execute_buy_quantity_impl(
@@ -1986,6 +1998,8 @@ class OrderExecutor:
         avg_daily_volume: float = None,
         atr: float = None,
         execution_session_id: str = "",
+        weight_policy_managed: bool = False,
+        risk_levels: dict = None,
     ) -> dict:
         # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
         # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
@@ -2131,17 +2145,32 @@ class OrderExecutor:
 
         # 고정수량 어댑터도 일반 BUY의 전략 리스크 필터를 우회할 수 없다.
         # 축소 권고가 나온 경우 목표 수량을 조용히 바꾸지 않고 주문을 거부한다.
-        existing_symbols = [str(getattr(p, "symbol", "")) for p in positions]
-        corr_result = self.risk_manager.check_correlation_risk(
-            symbol,
-            existing_symbols,
-        )
-        if corr_result.get("blocked") or float(corr_result.get("scale", 1.0)) < 1.0:
-            return {
-                "success": False,
-                "reason": corr_result.get("reason") or "고상관 포지션 축소 필요",
-                "correlation_risk_blocked": True,
-            }
+        #
+        # 예외: weight_policy_managed(사전 승인된 목표 비중표로 집행)면 쌍별 상관
+        # 거부권을 적용하지 않는다. 상관 게이트의 목적은 '독립적인 신호들이 우연히
+        # 겹쳐 한 방향에 몰리는 것'을 막는 것인데, 목표 비중표는 종목 구성과 종목별
+        # 상한을 운영자가 이미 명시로 정해 둔 분산 정책 그 자체다. 그 위에 쌍별
+        # 상관 거부권을 또 얹으면 분산을 이중으로 계산하는 셈이고, 하락장에서는
+        # 대형주 상관이 일제히 1에 수렴하므로 '설계대로 채우는 주문'이 전부 거부돼
+        # 구조적 교착이 된다. 집중도는 max_position_ratio·max_sector_ratio·
+        # max_investment_ratio가 아래에서 그대로 강제한다.
+        if weight_policy_managed:
+            logger.debug(
+                "종목 {} 쌍별 상관 거부권 미적용 — 사전 승인된 목표 비중표로 집행 "
+                "(집중도는 비중/업종/노출 상한이 강제)", symbol,
+            )
+        else:
+            existing_symbols = [str(getattr(p, "symbol", "")) for p in positions]
+            corr_result = self.risk_manager.check_correlation_risk(
+                symbol,
+                existing_symbols,
+            )
+            if corr_result.get("blocked") or float(corr_result.get("scale", 1.0)) < 1.0:
+                return {
+                    "success": False,
+                    "reason": corr_result.get("reason") or "고상관 포지션 축소 필요",
+                    "correlation_risk_blocked": True,
+                }
 
         gap_check = self._gap_up_entry_check(symbol, price)
         if not gap_check["allowed"]:
@@ -2381,9 +2410,20 @@ class OrderExecutor:
 
         _trade = None
         try:
-            stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
-            tp_info = self.risk_manager.calculate_take_profit(fill_price)
-            trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
+            # 호출부가 트랙 정책으로 레벨을 명시했으면 그것을 쓴다. 전역 risk_params는
+            # 단타 기준(진입가 -3% 손절 / +8% 익절 / 고점 -5% 트레일링)이라, 저회전
+            # buy&hold 바스켓에 그대로 적히면 '있지도 않은 안전망'이 장부에 남는다.
+            # 명시 지정 시 None인 항목은 '해당 트랙에 그 장치 없음'을 뜻한다.
+            if risk_levels is not None:
+                stop_loss = risk_levels.get("stop_loss_price")
+                take_profit_price = risk_levels.get("take_profit_price")
+                trailing_stop = risk_levels.get("trailing_stop_price")
+            else:
+                stop_loss = self.risk_manager.calculate_stop_loss(fill_price, atr)
+                take_profit_price = self.risk_manager.calculate_take_profit(
+                    fill_price,
+                )["target_final"]
+                trailing_stop = self.risk_manager.calculate_trailing_stop(fill_price, atr)
 
             _order_at = datetime.now()
             _trade = save_trade(
@@ -2418,7 +2458,7 @@ class OrderExecutor:
                 avg_price=fill_price,
                 quantity=quantity,
                 stop_loss_price=stop_loss,
-                take_profit_price=tp_info["target_final"],
+                take_profit_price=take_profit_price,
                 trailing_stop_price=trailing_stop,
                 strategy=strategy,
                 account_key=self.account_key,
@@ -2451,7 +2491,7 @@ class OrderExecutor:
             "quantity": quantity,
             "total_amount": fill_price * quantity,
             "stop_loss": stop_loss,
-            "take_profit": tp_info["target_final"],
+            "take_profit": take_profit_price,
             "trailing_stop": trailing_stop,
             "costs": costs,
             "mode": self.mode,
