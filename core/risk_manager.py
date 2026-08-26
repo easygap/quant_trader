@@ -10,6 +10,7 @@ import numpy as np
 from loguru import logger
 
 from config.config_loader import Config
+from core.instrument_classes import is_non_company_symbol
 
 
 def _get_tick_size(price: float) -> int:
@@ -613,19 +614,39 @@ class RiskManager:
         existing_position_value: float = 0,
         is_new_position: bool = True,
         symbol: str = "",
+        exposure_limits: dict | None = None,
     ) -> dict:
-        """모든 BUY 경로가 공유하는 숫자 기반 최종 노출 상한 검사."""
+        """모든 BUY 경로가 공유하는 숫자 기반 최종 노출 상한 검사.
+
+        exposure_limits: 사전 승인된 목표 비중표가 있는 주문에 한해 전역 상한 대신
+            쓸 {max_position_ratio, max_investment_ratio}. 전역값은 재량 매매용
+            안전판이라, 비중을 명시로 선언한 바스켓에는 설계 자체를 불가능하게 만든다
+            (kr_pocket 설계 47.5%/95% vs 전역 20%/70% — 2026-08-26에 적립금이 매수로
+            전환되지 못하는 형태로 드러났다). 상한을 없애는 게 아니라 그 바스켓이
+            선언한 비중 + 허용 드리프트로 바꿔 다는 것이다.
+        """
         div_config = self.risk_params.get("diversification", {})
+        limits = exposure_limits or {}
         try:
             raw_max_positions = div_config.get("max_positions", 10)
             if isinstance(raw_max_positions, bool):
                 raise ValueError("boolean max_positions")
             max_positions = int(raw_max_positions)
-            max_ratio = float(div_config.get("max_position_ratio", 0.20))
-            max_investment_ratio = float(
-                div_config.get("max_investment_ratio", 0.70)
+            max_ratio = float(
+                limits.get("max_position_ratio")
+                if limits.get("max_position_ratio") is not None
+                else div_config.get("max_position_ratio", 0.20)
             )
-            min_cash = float(div_config.get("min_cash_ratio", 0.20))
+            max_investment_ratio = float(
+                limits.get("max_investment_ratio")
+                if limits.get("max_investment_ratio") is not None
+                else div_config.get("max_investment_ratio", 0.70)
+            )
+            min_cash = float(
+                limits.get("min_cash_ratio")
+                if limits.get("min_cash_ratio") is not None
+                else div_config.get("min_cash_ratio", 0.20)
+            )
             current_positions = int(current_positions)
             position_value = self._value_in_krw_for_symbol(
                 symbol, float(position_value)
@@ -728,6 +749,7 @@ class RiskManager:
         positions: list | None = None,
         existing_position_value: float = 0,
         is_new_position: bool = True,
+        exposure_limits: dict | None = None,
     ) -> dict:
         """
         분산 투자 규칙 확인 (종목 수·비중·투자비율·현금 + 업종 비중)
@@ -767,6 +789,7 @@ class RiskManager:
             existing_position_value=existing_position_value,
             is_new_position=is_new_position,
             symbol=symbol,
+            exposure_limits=exposure_limits,
         )
         if not exposure["can_buy"]:
             return exposure
@@ -787,6 +810,14 @@ class RiskManager:
                     "can_buy": False,
                     "reason": "업종 비중 설정 오류: max_sector_ratio는 (0,1]이어야 함",
                 }
+        # 업종 분산은 '개별 기업'에 대한 개념이다. 지수 ETF는 그 자체가 여러 업종에
+        # 걸친 묶음이고, 금리 파킹 ETF는 주식이 아니다 — KRX 업종 코드가 아예 없다.
+        # 그런 종목을 sector_map_strict의 fail-closed에 걸면 '업종 매핑 없음'으로
+        # 영원히 매수 불가가 된다(2026-08-26: kr_pocket에 적립금 10만원이 들어와도
+        # 069500/357870 매수가 전부 이 사유로 거부됐다). 면제 목록으로 명시한다.
+        if symbol and is_non_company_symbol(symbol, self.risk_params):
+            max_sector_ratio = None
+
         if (
             max_sector_ratio is not None
             and total_value > 0

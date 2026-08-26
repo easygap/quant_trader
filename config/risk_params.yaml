@@ -65,6 +65,7 @@ diversification:
   max_investment_ratio: 0.70  # 전체 주식 투자 비중 상한 (총 자산의 70% 초과 불가)
   max_sector_ratio: 0.40      # 단일 업종(KRX Sector) 최대 비중 (총자산 대비 40%). FDR 업종 매핑 사용.
   sector_map_strict: true     # 업종 맵 조회 실패/누락 시 신규 BUY 차단 (fail-closed)
+  # 업종 면제는 instrument_classes.non_company_symbols(파일 하단)를 참조한다.
   max_positions: 10           # 최대 동시 보유 종목 수 (이 개수 초과 시 신규 매수 불가)
   min_cash_ratio: 0.20        # 최소 현금 비중 (20%)
   # 상관관계 기반 리스크 관리: 기존 보유 종목과 높은 상관관계를 보이는 종목의 비중 축소
@@ -185,3 +186,16 @@ transaction_costs:
     warn_slippage_multiplier: 2.0
     critical_at_volume_ratio: 0.03   # 3% 이상 주문 시 고슬리피지 배수 (소형주 대량 주문 가정)
     critical_slippage_multiplier: 4.0
+
+# --- 종목 성격 분류 ---
+# 개별 기업이 아닌 종목(ETF·펀드). 기업 단위로만 의미가 있는 필터는 여기 등록된
+# 종목을 건너뛴다 — 업종 비중(KRX Sector 코드 없음), 실적 발표일(실적일·DART 기업코드
+# 없음)이 그 대상이다. 두 필터 다 fail-closed라, 등록하지 않으면 '매핑 없음 / 조회 불가'
+# 사유로 영원히 매수가 거부된다. 실제로 kr_pocket(ETF 2종)이 이 상태여서 적립금이
+# 들어와도 매수로 전환되지 못했다(2026-08-26 확인).
+#
+# 면제되는 것은 위 두 가지뿐이다. 노출 상한·유동성·갭·현금·거래중단은 그대로 적용된다.
+instrument_classes:
+  non_company_symbols:
+    - "069500"                # KODEX 200 — 200종목 지수 ETF
+    - "357870"                # TIGER CD금리투자KIS(합성) — 금리 파킹, 주식 아님

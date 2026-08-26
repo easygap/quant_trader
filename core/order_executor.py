@@ -16,6 +16,7 @@ from loguru import logger
 
 from config.config_loader import Config
 from api.kis_api import KISApi, KISOrderResponseUnknown
+from core.instrument_classes import is_non_company_symbol
 from core.risk_manager import RiskManager
 from database.repositories import (
     save_trade, save_position, delete_position, reduce_position, delete_trade_by_id,
@@ -1952,6 +1953,7 @@ class OrderExecutor:
         execution_session_id: str = "",
         weight_policy_managed: bool = False,
         risk_levels: dict = None,
+        exposure_limits: dict = None,
     ) -> dict:
         """Execute a fixed-quantity buy (paper or live).
 
@@ -1983,6 +1985,7 @@ class OrderExecutor:
                 execution_session_id=execution_session_id,
                 weight_policy_managed=weight_policy_managed,
                 risk_levels=risk_levels,
+                exposure_limits=exposure_limits,
             )
 
     def _execute_buy_quantity_impl(
@@ -2000,6 +2003,7 @@ class OrderExecutor:
         execution_session_id: str = "",
         weight_policy_managed: bool = False,
         risk_levels: dict = None,
+        exposure_limits: dict = None,
     ) -> dict:
         # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
         # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
@@ -2135,6 +2139,13 @@ class OrderExecutor:
                 str(getattr(position, "symbol", "")) == str(symbol)
                 for position in positions
             ),
+            # 전역 상한은 재량 매매용 안전판이다. 목표 비중을 명시로 선언한 바스켓에는
+            # 그 설계 자체를 불가능하게 만든다 — kr_pocket 설계는 종목당 47.5% / 투자
+            # 95%인데 전역은 20% / 70%라, 적립금이 들어와도 매수가 전부 거부됐다.
+            # 상한을 없애는 게 아니라 '그 바스켓이 선언한 비중 + 허용 드리프트'로
+            # 바꿔 단다(계산은 호출부인 리밸런서가 한다). 승인된 비중표가 없는 주문은
+            # 그대로 전역 상한을 쓴다.
+            exposure_limits=exposure_limits if weight_policy_managed else None,
         )
         if not exposure_check["can_buy"]:
             return {
@@ -2189,6 +2200,13 @@ class OrderExecutor:
                 "reason": f"실적 발표일 필터 설정 오류: {exc}",
                 "earnings_filter_blocked": True,
             }
+        # ETF·펀드는 실적 발표일도 DART 기업코드도 없다. 이 필터는 fail-closed라
+        # 그대로 두면 '실적일 조회 불가'로 영원히 매수가 막힌다(kr_pocket 실측).
+        if skip_earnings_days > 0 and is_non_company_symbol(
+            symbol, self.config.risk_params
+        ):
+            logger.debug("종목 {} 실적 필터 면제 — 개별 기업이 아님(ETF/펀드)", symbol)
+            skip_earnings_days = 0
         if skip_earnings_days > 0:
             try:
                 from core.earnings_filter import is_near_earnings
