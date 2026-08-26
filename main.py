@@ -2016,6 +2016,28 @@ def run_health_check() -> int:
     return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
 
 
+def _fetch_benchmark_closes(start, end) -> dict:
+    """벤치마크(KS11) 종가를 {date: close}로. 실패하면 빈 dict.
+
+    일간 수익률이 아니라 **종가 레벨**을 준다 — 스냅샷이 빠진 날이 있으면 NAV 수익률은
+    여러 날 구간이 되므로, 벤치마크도 같은 구간으로 다시 계산해야 비교가 성립한다
+    (core.performance_lens.aligned_returns 참고).
+    """
+    from datetime import timedelta
+
+    try:
+        import FinanceDataReader as fdr
+
+        s = (start.date() if hasattr(start, "date") else start) - timedelta(days=7)
+        e = end.date() if hasattr(end, "date") else end
+        df = fdr.DataReader("KS11", s.isoformat(), e.isoformat())
+        if df is None or df.empty or "Close" not in df.columns:
+            return {}
+        return {idx.date(): float(v) for idx, v in df["Close"].items()}
+    except Exception:
+        return {}
+
+
 def run_weekly_report() -> int:
     """주간 요약 리포트 — 판단 주기(주 1회) 다이제스트를 Discord로 발송.
 
@@ -2116,10 +2138,40 @@ def run_weekly_report() -> int:
             except Exception:
                 missing_days = 0
 
+            # 국면 분해 + 리스크 지표 — 수익률 한 숫자로는 '방어의 대가'가 안 보인다
+            # (docs/OPERATING_PRINCIPLES.md 원칙 9). 스냅샷의 daily_return과 같은 날의
+            # 벤치마크 일간 수익률을 짝지어 상승/하락 국면을 나눠 잰다.
+            regime = risk = None
+            try:
+                from core.performance_lens import (
+                    aligned_returns, daily_returns_from_nav, risk_metrics,
+                    split_by_regime,
+                )
+
+                # 스냅샷의 daily_return 열이 아니라 NAV 시계열에서 직접 뽑는다 —
+                # 그 열은 2026-08-10 이전 전 구간이 0.0이라(값을 안 넘기던 버그)
+                # 그대로 쓰면 변동성이 0으로 깔려 없는 안정성을 주장하게 된다.
+                nav_points = [(s.date, s.total_value) for s in snaps]
+                daily = daily_returns_from_nav(nav_points)
+                risk = risk_metrics([r for _, r in daily])
+                if len(nav_points) >= 2:
+                    closes = _fetch_benchmark_closes(
+                        nav_points[0][0], nav_points[-1][0],
+                    )
+                    if closes:
+                        pairs = [
+                            (m, b) for _d, m, b in aligned_returns(nav_points, closes)
+                        ]
+                        if pairs:
+                            regime = split_by_regime(pairs)
+            except Exception as lens_exc:
+                logger.debug("국면/리스크 지표 생략: {}", lens_exc)
+
             summary = build_weekly_summary(
                 basket_name=basket_name, eval_result=eval_result,
                 week_nav_change_pct=week_change,
                 missing_days=missing_days, cycle_errors=cycle_errors,
+                regime=regime, risk=risk,
             )
             logger.info("\n{}", summary["text"])
             try:
