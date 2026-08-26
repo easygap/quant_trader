@@ -1,4 +1,4 @@
-"""positions 구버전 UNIQUE(symbol) → (account_key, symbol) 재구축 마이그레이션 테스트.
+"""positions 구버전 UNIQUE → (mode, account_key, symbol) 재구축 테스트.
 
 배경(2026-07-07 실측): account_key 도입 전 스키마의 symbol 단독 유니크가 물리
 테이블에 남아 있어(모델은 이미 복합 제약 — create_all은 기존 테이블을 못 바꾼다),
@@ -39,6 +39,10 @@ def _legacy_engine(tmp_path, symbols=("005930", "069500")):
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with engine.connect() as conn:
         conn.execute(text(LEGACY_DDL))
+        # ALTER TABLE RENAME 후에도 이름이 남는 실제 ORM 인덱스를 재현한다.
+        conn.execute(text(
+            "CREATE INDEX ix_positions_account_key ON positions (account_key)"
+        ))
         for i, sym in enumerate(symbols):
             conn.execute(text(
                 "INSERT INTO positions "
@@ -49,8 +53,31 @@ def _legacy_engine(tmp_path, symbols=("005930", "069500")):
     return engine
 
 
+def _add_trade_modes(engine, rows):
+    """mode 역산에 필요한 최소 구버전 trade_history 스키마."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY,
+                account_key VARCHAR(64) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                mode VARCHAR(20)
+            )
+        """))
+        for account_key, symbol, mode in rows:
+            conn.execute(text(
+                "INSERT INTO trade_history (account_key, symbol, mode) "
+                "VALUES (:account_key, :symbol, :mode)"
+            ), {
+                "account_key": account_key,
+                "symbol": symbol,
+                "mode": mode,
+            })
+        conn.commit()
+
+
 class TestPositionUniqueMigration:
-    def test_rebuild_preserves_rows_and_allows_same_symbol_two_accounts(self, tmp_path):
+    def test_rebuild_preserves_rows_and_allows_same_key_in_paper(self, tmp_path):
         engine = _legacy_engine(tmp_path)
         _migrate_position_unique_constraint(engine)
 
@@ -61,18 +88,22 @@ class TestPositionUniqueMigration:
                 "SELECT avg_price FROM positions WHERE symbol = '069500'"
             )).scalar()
             assert avg == pytest.approx(100001.0)
-            # 핵심: 같은 종목을 다른 계좌(아카이브 키·전략 트랙)가 이제 들 수 있어야 한다
+            # 무이력 기존 행은 legacy로 격리된다.
+            assert conn.execute(text(
+                "SELECT mode FROM positions WHERE symbol = '069500'"
+            )).scalar() == "legacy"
+            # 같은 계좌+종목이어도 신규 paper 장부는 독립 보유 가능해야 한다.
             conn.execute(text(
                 "INSERT INTO positions (symbol, avg_price, quantity, total_invested, account_key, partial_tp_done) "
-                "VALUES ('069500', 123810, 1, 123810, 'basket_rebalance:kr_pocket', 0)"
+                "VALUES ('069500', 123810, 1, 123810, 'basket_rebalance:kr_x', 0)"
             ))
             conn.commit()
             assert conn.execute(text("SELECT COUNT(1) FROM positions")).scalar() == 3
-            # 같은 계좌·같은 종목은 여전히 차단(복합 유니크)
+            # 같은 mode+계좌+종목은 여전히 차단한다.
             with pytest.raises(Exception):
                 conn.execute(text(
                     "INSERT INTO positions (symbol, avg_price, quantity, total_invested, account_key, partial_tp_done) "
-                    "VALUES ('069500', 1, 1, 1, 'basket_rebalance:kr_pocket', 0)"
+                    "VALUES ('069500', 1, 1, 1, 'basket_rebalance:kr_x', 0)"
                 ))
 
     def test_idempotent_on_new_schema(self, tmp_path):
@@ -84,7 +115,8 @@ class TestPositionUniqueMigration:
             ddl = conn.execute(text(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='positions'"
             )).scalar()
-        assert "uq_positions_account_symbol" in ddl
+        assert "uq_positions_mode_account_symbol" in ddl
+        assert "mode VARCHAR(20) DEFAULT 'paper' NOT NULL" in ddl
 
     def test_resume_after_interrupted_rename(self, tmp_path):
         # rename 직후 중단된 상태(legacy 테이블 존재 + 본 테이블 부재)에서 재개
@@ -99,6 +131,41 @@ class TestPositionUniqueMigration:
                 "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='positions_legacy_uq'"
             )).scalar()
             assert legacy == 0
+            # rename으로 따라간 기존 인덱스 이름도 신 테이블에 정상 재생성.
+            indexed_table = conn.execute(text(
+                "SELECT tbl_name FROM sqlite_master WHERE type='index' "
+                "AND name='ix_positions_account_key'"
+            )).scalar()
+            assert indexed_table == "positions"
+
+    def test_single_trade_mode_is_inferred(self, tmp_path):
+        engine = _legacy_engine(tmp_path, symbols=("069500",))
+        _add_trade_modes(engine, [
+            ("basket_rebalance:kr_x", "069500", "LIVE"),
+            ("basket_rebalance:kr_x", "069500", "live"),
+        ])
+
+        _migrate_position_unique_constraint(engine)
+
+        with engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT mode FROM positions WHERE symbol='069500'"
+            )).scalar() == "live"
+
+    def test_mixed_or_missing_trade_mode_is_quarantined(self, tmp_path):
+        engine = _legacy_engine(tmp_path, symbols=("005930", "069500"))
+        _add_trade_modes(engine, [
+            ("basket_rebalance:kr_x", "005930", "paper"),
+            ("basket_rebalance:kr_x", "005930", "live"),
+        ])
+
+        _migrate_position_unique_constraint(engine)
+
+        with engine.connect() as conn:
+            modes = dict(conn.execute(text(
+                "SELECT symbol, mode FROM positions ORDER BY symbol"
+            )).fetchall())
+            assert modes == {"005930": "legacy", "069500": "legacy"}
 
     def test_operational_incident_sequence(self, tmp_path):
         """7/7 실측 시나리오 재연: 아카이브 키가 같은 종목을 든 상태에서 본 키 매수.

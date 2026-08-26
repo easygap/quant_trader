@@ -199,6 +199,65 @@ def summarize_deployment(
     }
 
 
+def summarize_contribution_plan(
+    basket_name: str,
+    plan_cfg: dict[str, Any] | None,
+    last_flow_date: Any,
+    track_start_date: Any,
+    today: Any,
+    grace_days: int = 7,
+) -> dict[str, Any]:
+    """적립 계획(contribution_plan)이 실제로 이행되고 있는지 판정한다. 순수 함수.
+
+    적립식 트랙의 수익 엔진은 '매월 넣는 돈' 그 자체다 — 적립이 멈추면 잔고가 1주
+    단위를 못 넘겨 배치율이 영영 수렴하지 않고, 트랙은 표면상 정상(스냅샷 저장됨,
+    주문 실패 0건)으로 보이면서 설계대로 굴러가지 않는다. 실측(2026-08-26 점검):
+    kr_pocket의 cash_flows가 8월 내내 비어 있었는데 헬스는 26일간 ✅ OK만 반환했다.
+
+    반환: {"verdict": "OK"|"ATTENTION", "note": str, "days_since": int|None}
+    """
+    def _d(v: Any):
+        return v.date() if hasattr(v, "date") and callable(getattr(v, "date")) else v
+
+    cfg = plan_cfg or {}
+    if cfg.get("enabled") is not True:
+        return {"verdict": "OK", "note": "", "days_since": None}
+
+    today_d = _d(today)
+    cadence = str(cfg.get("cadence", "monthly")).lower()
+    period_days = {"weekly": 7, "monthly": 31, "quarterly": 92}.get(cadence, 31)
+    amount = cfg.get("amount")
+    amount_txt = f"{float(amount):,.0f}원 " if amount is not None else ""
+
+    if last_flow_date is None:
+        start = _d(track_start_date) if track_start_date is not None else None
+        if start is None:
+            return {"verdict": "OK", "note": "", "days_since": None}
+        elapsed = (today_d - start).days
+        if elapsed <= period_days + grace_days:
+            return {"verdict": "OK", "note": "", "days_since": elapsed}
+        return {
+            "verdict": "ATTENTION",
+            "note": (
+                f"'{basket_name}' {cadence} 적립 {amount_txt}미실행 — 트랙 개시 {elapsed}일 "
+                f"동안 입금 기록 0건. 적립이 이 트랙의 수익 엔진이므로 배치율이 수렴하지 않는다"
+            ),
+            "days_since": elapsed,
+        }
+
+    days_since = (today_d - _d(last_flow_date)).days
+    if days_since <= period_days + grace_days:
+        return {"verdict": "OK", "note": "", "days_since": days_since}
+    return {
+        "verdict": "ATTENTION",
+        "note": (
+            f"'{basket_name}' {cadence} 적립 {amount_txt}지연 {days_since}일 "
+            f"(마지막 입금 {_d(last_flow_date)})"
+        ),
+        "days_since": days_since,
+    }
+
+
 def summarize_basket_operation(
     enabled_baskets: list[str],
     last_snapshot_date: Any,
@@ -208,6 +267,7 @@ def summarize_basket_operation(
     deployment_ratio: float | None = None,
     design_fraction: float | None = None,
     deployment_tolerance: float = 0.05,
+    contribution_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """바스켓 paper 운영(트랙레코드 축적) 상태를 verdict + 요약으로 환원한다.
 
@@ -262,6 +322,11 @@ def summarize_basket_operation(
         verdict = "ATTENTION"
         if dep["note"]:
             notes.append(dep["note"])
+
+    # 적립 미실행 — 적립식 트랙에서는 '주문 실패 0건'과 무관하게 설계가 안 돌아가는 상태다.
+    for note in contribution_notes or []:
+        verdict = "ATTENTION"
+        notes.append(note)
 
     return {
         "verdict": verdict,

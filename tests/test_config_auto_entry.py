@@ -345,9 +345,8 @@ class TestAccountRoutingVisibility:
             _override_with_env({"kis_api": {"accounts": {}}})
         assert any("KIS_ACCOUNT_NO_GHOST_STRATEGY" in r.message for r in caplog.records)
 
-    def test_live_default_fallback_warns_once(self, caplog):
-        """live에서 미선언 전략이 기본 계좌로 폴백하면 1회 경고(공유 가시화)."""
-        import logging
+    def test_live_default_fallback_is_blocked(self):
+        """live에서 미선언 전략은 기본 실계좌로 침묵 폴백할 수 없다."""
         from config.config_loader import Config
 
         cfg = Config.__new__(Config)
@@ -355,12 +354,8 @@ class TestAccountRoutingVisibility:
             "trading": {"mode": "live"},
             "kis_api": {"account_no": "1111-01", "accounts": {}},
         }
-        Config._default_account_warned = set()
-        with caplog.at_level(logging.WARNING, logger="config_loader"):
-            assert cfg.get_account_no("scoring") == "1111-01"
-            assert cfg.get_account_no("scoring") == "1111-01"  # 2회째는 경고 없음
-        warns = [r for r in caplog.records if "기본 계좌로 폴백" in r.message]
-        assert len(warns) == 1
+        with pytest.raises(ValueError, match="기본 계좌 폴백은 허용되지 않습니다"):
+            cfg.get_account_no("scoring")
 
     def test_paper_default_fallback_silent(self, caplog):
         """paper에서는 기본 계좌 폴백이 정상 동작 — 경고 없음."""
@@ -372,7 +367,6 @@ class TestAccountRoutingVisibility:
             "trading": {"mode": "paper"},
             "kis_api": {"account_no": "1111-01", "accounts": {}},
         }
-        Config._default_account_warned = set()
         with caplog.at_level(logging.WARNING, logger="config_loader"):
             assert cfg.get_account_no("scoring") == "1111-01"
         assert not [r for r in caplog.records if "기본 계좌" in r.message]

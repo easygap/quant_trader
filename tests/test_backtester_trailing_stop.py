@@ -54,7 +54,9 @@ def test_backtester_trailing_stop_triggers():
         index=dates,
     )
 
-    result = bt._simulate(df, initial_capital=1_000_000)
+    result = bt._simulate(
+        df, initial_capital=1_000_000, execution_model="legacy_same_close"
+    )
     actions = [t["action"] for t in result["trades"]]
 
     assert "TRAILING_STOP" in actions

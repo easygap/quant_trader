@@ -123,6 +123,24 @@ def get_current_git_hash() -> str:
         return "unknown"
 
 
+def get_current_git_worktree_state() -> tuple[bool | None, str]:
+    """Return ``(is_clean, detail)`` for tracked and untracked changes.
+
+    ``is_clean`` is ``None`` when git cannot provide a trustworthy answer.  A
+    caller must treat that state as unsafe rather than assuming the worktree is
+    clean.
+    """
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).rstrip("\r\n")
+    except Exception as exc:
+        return None, str(exc)
+    return not bool(output), output
+
+
 def _read_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -934,6 +952,7 @@ def validate_live_readiness(
     current_blockers_path: str | Path | None = None,
     now: datetime | None = None,
     current_git_hash: str | None = None,
+    current_git_worktree_state: tuple[bool | None, str] | None = None,
     max_artifact_age_days: int = LIVE_GATE_MAX_ARTIFACT_AGE_DAYS,
 ) -> list[str]:
     """Validate the canonical evidence chain required before live trading."""
@@ -947,6 +966,11 @@ def validate_live_readiness(
     )
     now = now or datetime.now()
     current_git_hash = current_git_hash or get_current_git_hash()
+    current_git_worktree_state = (
+        current_git_worktree_state
+        if current_git_worktree_state is not None
+        else get_current_git_worktree_state()
+    )
 
     missing = [name for name in REQUIRED_PROMOTION_ARTIFACTS if not (promotion_base / name).exists()]
     if missing:
@@ -1012,6 +1036,20 @@ def validate_live_readiness(
         issues.append(
             f"promotion artifact commit_hash 불일치: artifact={artifact_commit}, current={current_git_hash}. "
             "현재 코드로 canonical 평가를 다시 실행하세요."
+        )
+
+    worktree_clean, worktree_detail = current_git_worktree_state
+    if worktree_clean is None:
+        issues.append(
+            "현재 git worktree 상태 확인 실패. tracked/untracked 변경 여부를 검증할 수 없어 "
+            "live 전환 불가."
+        )
+    elif not worktree_clean:
+        changed_entries = len(worktree_detail.splitlines()) if worktree_detail else 1
+        issues.append(
+            "현재 git worktree가 clean 상태가 아님 "
+            f"(tracked/untracked 변경 {changed_entries}건). 변경을 검토하고 clean commit에서 "
+            "canonical 평가를 다시 실행하세요."
         )
 
     yaml_hash = _config_hash(config, "yaml_hash")

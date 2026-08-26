@@ -23,6 +23,11 @@ class Dashboard:
 
     def __init__(self, config: Config = None):
         self.config = config or Config.get()
+        self.ledger_mode = (
+            "live"
+            if str(self.config.trading.get("mode", "paper")).lower() == "live"
+            else "paper"
+        )
         self.initial_capital = self.config.risk_params.get(
             "position_sizing", {}
         ).get("initial_capital", 10000000)
@@ -77,7 +82,7 @@ class Dashboard:
         Args:
             days: 조회 기간 (일)
         """
-        snapshots = get_portfolio_snapshots(days)
+        snapshots = get_portfolio_snapshots(days, mode=self.ledger_mode)
 
         if snapshots.empty:
             print("  스냅샷 데이터 없음")

@@ -334,8 +334,16 @@ class TestForceLiveRemoved:
             lambda cfg: SimpleNamespace(resolve=lambda: ["005930"]),
         )
         monkeypatch.setattr(main_mod, "_get_strategy", lambda strategy: FakeStrategy())
-        monkeypatch.setattr(repositories, "get_all_positions", lambda account_key=None: [])
-        monkeypatch.setattr(repositories, "get_position", lambda symbol, account_key="": None)
+        monkeypatch.setattr(
+            repositories,
+            "get_all_positions",
+            lambda account_key=None, mode="paper": [],
+        )
+        monkeypatch.setattr(
+            repositories,
+            "get_position",
+            lambda symbol, account_key="", mode="paper": None,
+        )
 
         main_mod.run_paper_trading(SimpleNamespace(strategy="scoring"))
 
@@ -359,6 +367,12 @@ class TestForceLiveRemoved:
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)
         monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
 
+        def fake_set_trading_halt(reason, *, source, mode, detail=None):
+            calls.append(("halt", source, mode))
+            return {"halted": True, "event_id": 101, "reason": reason}
+
+        monkeypatch.setattr(repositories, "set_trading_halt", fake_set_trading_halt)
+
         class FakePortfolio:
             def __init__(self, cfg, account_key=""):
                 self.account_key = account_key
@@ -371,9 +385,13 @@ class TestForceLiveRemoved:
                     "message": "KIS-only 포지션 DB 반영",
                 }
 
-        def fake_get_all_positions():
+        def fake_get_all_positions(mode="paper"):
+            assert mode == "live"
             calls.append(("positions",))
-            assert calls[0] == ("sync", "", True)
+            assert calls[:2] == [
+                ("halt", "main.run_emergency_liquidate", "live"),
+                ("sync", "", True),
+            ]
             return [
                 SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
             ]
@@ -408,7 +426,11 @@ class TestForceLiveRemoved:
 
         summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
 
-        assert calls[:2] == [("sync", "", True), ("positions",)]
+        assert calls[:3] == [
+            ("halt", "main.run_emergency_liquidate", "live"),
+            ("sync", "", True),
+            ("positions",),
+        ]
         assert sells == [{
             "account_key": "",
             "symbol": "005930",
@@ -421,8 +443,8 @@ class TestForceLiveRemoved:
         assert summary["succeeded"] == 1
         assert summary["failed"] == 0
 
-    def test_live_liquidate_does_not_fallback_to_avg_price_when_current_price_missing(self, monkeypatch):
-        """live 긴급 청산은 현재가 조회 실패 시 평균단가 지정가 매도를 내지 않는다."""
+    def test_live_liquidate_uses_avg_price_reference_for_market_exit_when_current_price_missing(self, monkeypatch):
+        """live 긴급 청산은 현재가가 없어도 평균단가를 참조가로 시장가 청산을 시도한다."""
         import main as main_mod
         import database.repositories as repositories
 
@@ -437,11 +459,16 @@ class TestForceLiveRemoved:
 
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)
         monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+        monkeypatch.setattr(
+            repositories,
+            "set_trading_halt",
+            lambda *args, **kwargs: {"halted": True, "event_id": 102},
+        )
         monkeypatch.setattr(main_mod, "_sync_live_positions_before_liquidation", lambda cfg: [])
         monkeypatch.setattr(
             repositories,
             "get_all_positions",
-            lambda: [
+            lambda mode="paper": [
                 SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
             ],
         )
@@ -466,7 +493,7 @@ class TestForceLiveRemoved:
                     "reason": reason,
                     "strategy": strategy,
                 })
-                raise AssertionError("현재가 실패 시 live 매도 주문을 호출하면 안 됨")
+                return {"success": True}
 
         class FakeNotifier:
             def __init__(self, cfg):
@@ -482,17 +509,23 @@ class TestForceLiveRemoved:
         summary = main_mod.run_emergency_liquidate(SimpleNamespace(confirm_live=True))
 
         assert calls == [("price", "005930", "12345678-01")]
-        assert sells == []
+        assert sells == [{
+            "symbol": "005930",
+            "price": 60_000,
+            "quantity": None,
+            "reason": "긴급 전량 청산 (--mode liquidate)",
+            "strategy": "emergency_liquidate",
+        }]
         assert summary["attempted"] == 1
-        assert summary["succeeded"] == 0
-        assert summary["failed"] == 1
+        assert summary["succeeded"] == 1
+        assert summary["failed"] == 0
         assert summary["details"] == [{
             "symbol": "005930",
             "account_key": "",
-            "status": "failed",
-            "reason": "실전 긴급 청산 현재가 조회 실패",
+            "status": "success",
+            "price": 60_000,
         }]
-        assert notifications and "실패 상세" in notifications[0]["text"]
+        assert notifications and notifications[0]["critical"] is True
 
     def test_live_liquidate_aborts_when_broker_sync_fails_before_position_load(self, monkeypatch):
         """live 긴급 청산 전 KIS↔DB 동기화 실패가 남으면 stale DB 포지션만으로 진행하지 않는다."""
@@ -510,6 +543,11 @@ class TestForceLiveRemoved:
 
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)
         monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+        monkeypatch.setattr(
+            repositories,
+            "set_trading_halt",
+            lambda *args, **kwargs: {"halted": True, "event_id": 103},
+        )
 
         class FakePortfolio:
             def __init__(self, cfg, account_key=""):
@@ -543,6 +581,11 @@ class TestForceLiveRemoved:
 
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)
         monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")
+        monkeypatch.setattr(
+            repositories,
+            "set_trading_halt",
+            lambda *args, **kwargs: {"halted": True, "event_id": 104},
+        )
 
         class FakePortfolio:
             def __init__(self, cfg, account_key=""):
@@ -626,7 +669,7 @@ class TestForceLiveRemoved:
         monkeypatch.setattr(
             repositories,
             "get_all_positions",
-            lambda: [
+            lambda mode="paper": [
                 SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
             ],
         )
@@ -663,7 +706,7 @@ class TestForceLiveRemoved:
         monkeypatch.setattr(
             repositories,
             "get_all_positions",
-            lambda: [
+            lambda mode="paper": [
                 SimpleNamespace(symbol="005930", avg_price=60_000, quantity=3, account_key=""),
             ],
         )
@@ -788,8 +831,8 @@ class TestForceLiveRemoved:
         assert host == "127.0.0.1"
         assert port == 8080
 
-    def test_web_dashboard_uses_configured_or_explicit_host(self, monkeypatch):
-        """외부 바인드는 설정 또는 CLI에서 명시한 경우에만 사용한다."""
+    def test_web_dashboard_rejects_external_host(self, monkeypatch):
+        """인증 없는 금융 대시보드는 명시해도 외부 주소에 바인드하지 않는다."""
         from monitoring import web_dashboard as wd
 
         monkeypatch.setattr(
@@ -798,7 +841,8 @@ class TestForceLiveRemoved:
             lambda: SimpleNamespace(settings={"dashboard": {"host": "0.0.0.0", "port": 9090}}),
         )
 
-        assert wd.resolve_dashboard_bind() == ("0.0.0.0", 9090)
+        with pytest.raises(ValueError, match="loopback"):
+            wd.resolve_dashboard_bind()
         assert wd.resolve_dashboard_bind(host="127.0.0.1", port=7070) == ("127.0.0.1", 7070)
 
     def test_main_dashboard_passes_host_and_port(self, monkeypatch):

@@ -3396,6 +3396,7 @@ def _execute_target_weight_rebalance(
             "SELL",
             avg_daily_volume=avg_daily_volume,
             avg_price=avg_price,
+            symbol=sym,
         )
         execution_price = float(costs["execution_price"])
         tax = float(costs.get("tax", 0) or 0) + float(costs.get("capital_gains_tax", 0) or 0)
@@ -3447,6 +3448,7 @@ def _execute_target_weight_rebalance(
             qty_to_buy,
             "BUY",
             avg_daily_volume=avg_daily_volume,
+            symbol=sym,
         )
         outlay = float(costs["execution_price"]) * qty_to_buy + float(costs.get("commission", 0) or 0)
         buy_plans.append((sym, qty_to_buy, costs, outlay, avg_daily_volume))
@@ -3465,6 +3467,7 @@ def _execute_target_weight_rebalance(
             qty,
             "BUY",
             avg_daily_volume=avg_daily_volume,
+            symbol=sym,
         )
         execution_price = float(costs["execution_price"])
         commission = float(costs.get("commission", 0) or 0)

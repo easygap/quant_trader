@@ -69,3 +69,46 @@ def _isolate_sector_map_cache(tmp_path, monkeypatch):
         monkeypatch.setattr(_dc, "SECTOR_MAP_CACHE_PATH", tmp_path / "sector_map_cache.json")
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 전역 거래 HALT 격리 (DB·캐시 격리와 같은 원리)
+#
+# HALT는 OperationEvent에 append-only로 쌓이고 '최신 이벤트가 이긴다'. 테스트 세션은
+# 임시 DB 하나를 공유하므로, 한 테스트가 켠 HALT는 정리하지 않으면 그 뒤 모든 테스트의
+# 신규 BUY를 막는다. 실제로 CI에서 live SELL 체결 미확인 테스트가 켠 HALT가 뒤따르는
+# 매수 테스트들로 번져 무더기 실패를 만들었다(2026-08-26).
+#
+# 개별 테스트의 규율(각자 clear 호출)에 맡기면 새 테스트가 추가될 때마다 다시 샌다 —
+# 공용 인프라에서 강제한다(standing lesson: 격리는 공용 인프라에 둔다).
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _isolate_global_trading_halt():
+    yield
+    try:
+        from database.models import OperationEvent, get_session
+        from database.repositories import TRADING_HALT_CLEARED, TRADING_HALT_SET
+
+        session = get_session()
+        try:
+            leaked = (
+                session.query(OperationEvent)
+                .filter(
+                    OperationEvent.event_type.in_(
+                        (TRADING_HALT_SET, TRADING_HALT_CLEARED)
+                    )
+                )
+                .count()
+            )
+            if leaked:
+                session.query(OperationEvent).filter(
+                    OperationEvent.event_type.in_(
+                        (TRADING_HALT_SET, TRADING_HALT_CLEARED)
+                    )
+                ).delete(synchronize_session=False)
+                session.commit()
+        finally:
+            session.close()
+    except Exception:
+        # 스키마 미생성 등으로 정리에 실패해도 테스트 결과를 바꾸지 않는다.
+        pass

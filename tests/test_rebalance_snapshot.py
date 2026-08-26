@@ -31,6 +31,9 @@ def patched_rebalance(monkeypatch):
     fake_rb.get_status_report.return_value = "status"
     # 거래가 발생하지 않는 날에도 스냅샷은 저장돼야 한다.
     fake_rb.should_rebalance.return_value = (False, "드리프트 미달")
+    # 손절/익절에 걸린 포지션이 없는 평범한 날 — MagicMock 기본 반환(truthy)을 그대로
+    # 두면 매 사이클 리스크 청산이 발동한 것처럼 보인다.
+    fake_rb.plan_risk_exits.return_value = []
     monkeypatch.setattr(
         "core.basket_rebalancer.BasketRebalancer", MagicMock(return_value=fake_rb)
     )

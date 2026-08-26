@@ -52,13 +52,19 @@ def main() -> int:
         )
         positions = (
             session.query(Position)
-            .filter(Position.account_key == "")
-            .filter(Position.strategy == "basket_rebalance")
+            .filter(
+                Position.mode == "paper",
+                Position.account_key == "",
+                Position.strategy == "basket_rebalance",
+            )
             .all()
         )
         snaps = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == "")
+            .filter(
+                PortfolioSnapshot.mode == "paper",
+                PortfolioSnapshot.account_key == "",
+            )
             .all()
         )
         orders = (

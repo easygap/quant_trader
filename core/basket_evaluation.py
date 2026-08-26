@@ -394,7 +394,10 @@ def collect_basket_paper_evaluation(
         )
         snaps = (
             session.query(PortfolioSnapshot)
-            .filter(PortfolioSnapshot.account_key == basket_key)
+            .filter(
+                PortfolioSnapshot.mode == "paper",
+                PortfolioSnapshot.account_key == basket_key,
+            )
             .order_by(PortfolioSnapshot.date.asc())
             .all()
         )
@@ -448,10 +451,13 @@ def collect_basket_paper_evaluation(
     # 바꾼다 — 말기 입금이 전 기간 비용의 분모를 부풀려 게이트를 느슨하게 만들지 않게.
     # 흐름 0건이면 아래 두 값은 기존과 완전히 동일하다(하위 호환).
     from database.repositories import get_cash_flows, has_cash_flows
-    account_has_flows = has_cash_flows(account_key=basket_key)
+    account_has_flows = has_cash_flows(account_key=basket_key, mode="paper")
     if account_has_flows:
         initial_capital = time_weighted_capital(
-            initial_capital, get_cash_flows(account_key=basket_key), operation_start, today,
+            initial_capital,
+            get_cash_flows(account_key=basket_key, mode="paper"),
+            operation_start,
+            today,
         )
 
     nav_return_pct = None

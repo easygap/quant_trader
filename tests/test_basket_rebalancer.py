@@ -161,6 +161,9 @@ class TestTrigger:
         rebalancer.get_current_weights = MagicMock(return_value={
             "005930": 0.39, "000660": 0.35, "035420": 0.25,
         })
+        # 종목별 드리프트가 임계값 아래여도 집계 배치율이 밴드를 벗어나면 트리거된다
+        # (현금 래칫 방지). 이 테스트는 종목별 트리거만 보므로 집계 격차는 0으로 둔다.
+        rebalancer._deployment_gap = MagicMock(return_value=0.0)
         should, reason = rebalancer.should_rebalance()
         assert should is False
 
@@ -327,9 +330,17 @@ class TestShippedBasketsConfig:
         baskets = self._load()
         assert "kr_diversified_hold" in baskets, "분산 보유 바스켓 누락"
         b = baskets["kr_diversified_hold"]
-        # 10종목 균등(각 10%)
-        assert len(b["holdings"]) == 10
-        assert all(abs(float(w) - 0.10) < 1e-9 for w in b["holdings"].values())
+        # 섹터 분산 균등 배분. 종목 수는 자본 규모에 따라 조정되므로(1주 가격이 슬롯
+        # 금액을 넘는 종목은 편입 불가 — 2026-08-07에 000660 제외) 개수를 못 박지 않고
+        # '균등 배분'이라는 설계 불변식만 검사한다.
+        holdings = b["holdings"]
+        assert len(holdings) >= 8, "섹터 분산이 무너질 만큼 종목이 줄었다"
+        equal_weight = 1.0 / len(holdings)
+        assert all(
+            abs(float(w) - equal_weight) < 0.001 for w in holdings.values()
+        ), f"균등 배분이 아님: {holdings}"
+        # 주식 노출은 명시적 정책이어야 한다(2026-08-07: 현금 완충 40%를 설계로 고정)
+        assert b["target_stock_weight"] == 0.60
         # 저회전: 넓은 드리프트 임계 + 낮은 회전 상한
         rb = b["rebalance"]
         assert rb["drift_threshold"] >= 0.08
@@ -377,12 +388,16 @@ class TestShippedBasketsConfig:
         )}
         assert {"069500", "357870"} <= exempt
 
-    def test_observation_track_deployment_alarm_disabled(self):
-        """관찰용 강등(kr_diversified_hold): 종결된 자본 결정의 잔상인 배치율 미달이
-        상시 ATTENTION으로 남아 다른 바스켓 감시를 가리지 않도록 허용 오차 해제."""
-        baskets = self._load()
-        b = baskets["kr_diversified_hold"]
-        assert float(b["monitoring"]["deployment_tolerance"]) >= 1.0
+    def test_observation_track_deployment_alarm_is_enabled(self):
+        """배치율 감시는 켜져 있어야 한다(2026-08-26에 결정을 뒤집었다).
+
+        종전에는 tolerance 1.0으로 사실상 감시를 껐다 — '하이닉스 슬롯을 못 채워 생기는
+        미달은 조치 불가'였기 때문이다. 그 슬롯을 제거하고 목표 배치율을 60%로 명시한
+        지금은 미달이 곧 조치 대상(현금 누수)이고, 실제로 감시가 꺼져 있는 동안
+        배치율이 61.0% → 54.9%로 새는 것을 헬스가 3주간 전혀 잡지 못했다.
+        """
+        b = self._load()["kr_diversified_hold"]
+        assert float(b["monitoring"]["deployment_tolerance"]) < 1.0
 
     def test_all_basket_symbols_are_6digit_kr_codes(self):
         baskets = self._load()
@@ -726,6 +741,7 @@ class TestUnfillableSlotWarning:
             "rebalance": {"trigger": "drift", "drift_threshold": 0.08,
                           "min_trade_amount": 200000, "max_turnover_ratio": 1.0},
         }
+        rb.basket = rb.basket_cfg          # 리스크 정책 조회원(재진입 차단 등)
         rb.rebalance_cfg = rb.basket_cfg["rebalance"]
         rb.account_key = "t"
         rb.execution_strategy = "t"
@@ -733,6 +749,7 @@ class TestUnfillableSlotWarning:
             get_portfolio_summary=lambda current_prices=None: {"total_value": 1_000_000},
         )
         rb._is_live = lambda: False
+        rb._ledger_mode = lambda: "paper"
         rb._stock_fraction = lambda: 1.0
         rb.get_target_weights = lambda: {"000660": 0.5, "005930": 0.5}
         rb.get_current_weights = lambda prices=None: {}

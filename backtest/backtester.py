@@ -23,6 +23,22 @@ _FULL_EXIT_SELL_ACTIONS = frozenset(
 )
 _PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
 
+EXECUTION_MODEL_NEXT_OPEN = "next_open"
+EXECUTION_MODEL_LEGACY_SAME_CLOSE = "legacy_same_close"
+_SUPPORTED_EXECUTION_MODELS = frozenset(
+    (EXECUTION_MODEL_NEXT_OPEN, EXECUTION_MODEL_LEGACY_SAME_CLOSE)
+)
+
+
+def _validate_execution_model(execution_model: str) -> str:
+    """전략 신호 체결 모델을 검증한다."""
+    if execution_model not in _SUPPORTED_EXECUTION_MODELS:
+        supported = ", ".join(sorted(_SUPPORTED_EXECUTION_MODELS))
+        raise ValueError(
+            f"지원하지 않는 execution_model={execution_model!r}. 지원값: {supported}"
+        )
+    return execution_model
+
 
 def _count_roundtrips(trades: list) -> int:
     """완전 청산 1회당 왕복 1회 (부분 익절 후 잔량 청산까지 한 사이클로 묶음)."""
@@ -103,6 +119,8 @@ class Backtester:
         strict_lookahead: bool = True,
         param_overrides: dict = None,
         notify_overtrading: bool = False,
+        symbol: str = None,
+        execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
     ) -> dict:
         """
         백테스팅 실행
@@ -114,6 +132,11 @@ class Backtester:
             strict_lookahead: True면 매 시점 T에서 df[:T+1]만으로 지표/신호 계산 (Look-Ahead Bias 완전 방어, 느림)
             param_overrides: 전략 파라미터 덮어쓰기 (최적화 시 사용). 예: {"scoring": {"buy_threshold": 3, "sell_threshold": -3}}
             notify_overtrading: True면 과매매 경고 1건 이상일 때 Notifier(디스코드 등) 전송. 대량 백테스트는 False 권장.
+            symbol: 대상 종목코드. 종목별 거래세 면제·보유기간 과세에 사용.
+                None이면 기존 동작(일괄 주식 거래세)을 유지한다.
+            execution_model: 전략 신호 체결 모델. 기본값 ``next_open``은 T일 종가로
+                확정된 BUY/SELL 신호를 다음 거래일 시가에 체결한다.
+                과거 결과 재현이 필요할 때만 ``legacy_same_close``를 사용한다.
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -122,6 +145,8 @@ class Backtester:
             initial_capital = self.risk_params.get(
                 "position_sizing", {}
             ).get("initial_capital", 10000000)
+
+        execution_model = _validate_execution_model(execution_model)
 
         self._param_overrides = param_overrides
         strategy = self._get_strategy(strategy_name)
@@ -171,8 +196,15 @@ class Backtester:
         # 시장국면 시리즈 사전 계산 (TICKET-02)
         regime_series = self._precompute_regime_series(df_analyzed)
 
-        # 시뮬레이션 실행 (시점 T에서는 row T만 사용, T+1 이후 미참조)
-        result = self._simulate(df_analyzed, initial_capital, regime_series=regime_series)
+        # 전략 신호는 기본적으로 T 종가 확정 후 T+1 시가에 체결한다.
+        # 손절·갭·블랙스완 등 위험 청산은 _simulate 내부의 기존 즉시 규칙을 유지한다.
+        result = self._simulate(
+            df_analyzed,
+            initial_capital,
+            regime_series=regime_series,
+            symbol=symbol,
+            execution_model=execution_model,
+        )
         result["look_ahead_bias_verified"] = (
             "STRICT" if strict_lookahead else "DISABLED_WITH_WARNING"
         )
@@ -201,6 +233,7 @@ class Backtester:
             "strategy": strategy_name,
             "period": f"{df.index[0]} ~ {df.index[-1]}",
             "initial_capital": initial_capital,
+            "execution_model": execution_model,
             "look_ahead_bias_verified": result.get("look_ahead_bias_verified", "PASS"),
             "overtrading_warnings": warn_list,
         }
@@ -331,12 +364,21 @@ class Backtester:
         )
         return result
 
-    def _simulate(self, df: pd.DataFrame, initial_capital: float, regime_series: pd.Series = None) -> dict:
+    def _simulate(
+        self,
+        df: pd.DataFrame,
+        initial_capital: float,
+        regime_series: pd.Series = None,
+        symbol: str = None,
+        execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
+    ) -> dict:
         """
         거래 시뮬레이션 실행.
-        방어: 날짜 순으로 순회하며 당일(row T) 데이터만 사용 — T+1 이후 행 미참조로 Look-Ahead Bias 없음.
+        방어: 날짜 순으로 순회하며 미래 행을 참조하지 않는다. 기본 ``next_open``은
+        T일 종가로 확정된 전략 신호를 T+1일 시가에 체결한다.
         설정에 따라 ATR 손절, 1% 룰 포지션 사이징, 부분 익절을 반영한다.
         """
+        execution_model = _validate_execution_model(execution_model)
         assert df.index.is_monotonic_increasing or len(df) <= 1, (
             "시뮬레이션은 시간 순서대로만 순회해야 하며, 미래 데이터를 참조하지 않습니다."
         )
@@ -437,6 +479,8 @@ class Backtester:
         blackswan_triggers = 0
         blackswan_buy_blocks = 0
         blackswan_recovery_buys = 0
+        strategy_orders_skipped_missing_open = 0
+        skipped_strategy_orders: list[dict] = []
 
         def _is_near_backtest_earnings(row: pd.Series, date) -> bool:
             for flag_col in ("is_near_earnings", "near_earnings"):
@@ -492,6 +536,7 @@ class Backtester:
                 "SELL",
                 avg_daily_volume=row_volume,
                 avg_price=avg_price,
+                symbol=symbol,
             )
             sell_price = costs["execution_price"]
             sell_amount = sell_price * position
@@ -516,19 +561,309 @@ class Backtester:
             sold_today = True
             return True
 
+        def _execute_strategy_signal(
+            *,
+            signal: str,
+            signal_date,
+            strategy_execution_price: float | None,
+            strategy_row_atr,
+            strategy_row_volume,
+            regime_at_t: str,
+            date,
+            row: pd.Series,
+            current_idx: int,
+            previous_close: float | None,
+        ) -> None:
+            """확정된 전략 신호 하나를 해당 모델의 체결 시점에 처리한다."""
+            nonlocal cash, position, avg_price, partial_exit_done, high_water_mark
+            nonlocal buy_date, sold_today, regime_buy_blocks, regime_caution_buys
+            nonlocal gap_up_buy_blocks, earnings_buy_blocks, blackswan_buy_blocks
+            nonlocal blackswan_recovery_buys, strategy_orders_skipped_missing_open
+
+            action = str(signal or "HOLD").upper()
+            actionable = (action == "BUY" and position == 0 and not sold_today) or (
+                action == "SELL" and position > 0
+            )
+            if actionable and strategy_execution_price is None:
+                strategy_orders_skipped_missing_open += 1
+                skipped_strategy_orders.append(
+                    {
+                        "date": date,
+                        "signal_date": signal_date,
+                        "action": action,
+                        "reason": "missing_or_invalid_open",
+                    }
+                )
+                return
+
+            if position > 0 and min_holding_days > 0 and buy_date is not None:
+                holding_days_now = (date - buy_date).days
+                if holding_days_now < min_holding_days and action == "SELL":
+                    action = "HOLD"
+
+            if action == "BUY" and max_monthly_trades > 0:
+                try:
+                    month_key = date.strftime("%Y-%m")
+                except Exception:
+                    month_key = str(date)[:7]
+                if monthly_trade_counts.get(month_key, 0) >= max_monthly_trades:
+                    action = "HOLD"
+
+            if action == "BUY" and regime_at_t == "bearish":
+                action = "HOLD"
+                regime_buy_blocks += 1
+
+            if (
+                action == "BUY"
+                and gap_enabled
+                and gap_up_entry_block > 0
+                and previous_close is not None
+                and previous_close > 0
+            ):
+                # 갭은 체결 모델과 무관하게 당일 시가/전일 종가로 측정한다.
+                # legacy_same_close의 체결가(close)를 쓰면 장중 되돌림이 있었던
+                # 갭 상승일을 정상 진입으로 오판해 백테스트 손실 위험을 숨긴다.
+                raw_gap_open = row.get("open")
+                valid_gap_open = (
+                    raw_gap_open is not None
+                    and pd.notna(raw_gap_open)
+                    and float(raw_gap_open) > 0
+                )
+                if not valid_gap_open:
+                    action = "HOLD"
+                    strategy_orders_skipped_missing_open += 1
+                    skipped_strategy_orders.append(
+                        {
+                            "date": date,
+                            "signal_date": signal_date,
+                            "action": "BUY",
+                            "reason": "missing_or_invalid_open_for_gap_guard",
+                        }
+                    )
+                elif (float(raw_gap_open) - previous_close) / previous_close >= gap_up_entry_block:
+                    action = "HOLD"
+                    gap_up_buy_blocks += 1
+
+            if action == "BUY" and skip_earnings_days > 0 and _is_near_backtest_earnings(row, date):
+                action = "HOLD"
+                earnings_buy_blocks += 1
+
+            if action == "BUY" and bs_enabled and current_idx <= bs_cooldown_until_idx:
+                action = "HOLD"
+                blackswan_buy_blocks += 1
+
+            if action == "BUY" and position == 0 and not sold_today:
+                costs = self.risk_manager.calculate_transaction_costs(
+                    strategy_execution_price,
+                    1,
+                    "BUY",
+                    avg_daily_volume=strategy_row_volume,
+                    symbol=symbol,
+                )
+                buy_price = costs["execution_price"]
+                stop_at_buy = buy_price * (1 - sl_rate)
+                if (
+                    sl_type == "atr"
+                    and strategy_row_atr is not None
+                    and pd.notna(strategy_row_atr)
+                    and strategy_row_atr > 0
+                ):
+                    stop_at_buy = buy_price - float(strategy_row_atr) * atr_mult
+                risk_per_share = max(buy_price - stop_at_buy, buy_price * 0.001)
+                mark_price = (
+                    strategy_execution_price
+                    if execution_model == EXECUTION_MODEL_NEXT_OPEN
+                    else float(row["close"])
+                )
+                total_equity = cash + (position * mark_price)
+                risk_amount = total_equity * max_risk_per_trade
+                qty_by_1pct = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                invest_cap = total_equity * max_position_ratio
+                qty_by_cap = int(invest_cap / buy_price) if buy_price > 0 else 0
+                max_invest_value = total_equity * max_investment_ratio
+                qty_by_total_cap = int(max_invest_value / buy_price) if buy_price > 0 else 0
+                quantity = min(
+                    max(0, qty_by_1pct),
+                    max(0, qty_by_cap),
+                    max(0, qty_by_total_cap),
+                )
+
+                if quantity > 0 and regime_at_t == "caution":
+                    quantity = max(1, int(quantity * caution_scale))
+                    regime_caution_buys += 1
+
+                if (
+                    quantity > 0
+                    and bs_enabled
+                    and current_idx > bs_cooldown_until_idx
+                    and current_idx <= bs_recovery_until_idx
+                    and bs_recovery_scale < 1.0
+                ):
+                    quantity = max(1, int(quantity * bs_recovery_scale))
+                    blackswan_recovery_buys += 1
+
+                if (
+                    quantity > 0
+                    and bt_max_participation > 0
+                    and strategy_row_volume is not None
+                    and strategy_row_volume > 0
+                ):
+                    max_qty_by_volume = int(strategy_row_volume * bt_max_participation)
+                    if max_qty_by_volume <= 0:
+                        quantity = 0
+                    elif quantity > max_qty_by_volume:
+                        quantity = max_qty_by_volume
+
+                if quantity > 0:
+                    buy_costs = self.risk_manager.calculate_transaction_costs(
+                        strategy_execution_price,
+                        quantity,
+                        "BUY",
+                        avg_daily_volume=strategy_row_volume,
+                        symbol=symbol,
+                    )
+                    buy_price = buy_costs["execution_price"]
+                    buy_amount = buy_price * quantity
+                    commission = buy_costs["commission"]
+                else:
+                    buy_amount = 0
+                    commission = 0
+
+                if quantity > 0 and (buy_amount + commission) <= cash:
+                    cash -= buy_amount + commission
+                    position = quantity
+                    avg_price = buy_price
+                    partial_exit_done = False
+                    high_water_mark = buy_price
+                    buy_date = date
+                    trades.append(
+                        {
+                            "date": date,
+                            "action": "BUY",
+                            "price": buy_price,
+                            "quantity": quantity,
+                            "pnl": 0,
+                            "pnl_rate": 0,
+                            "commission": commission,
+                            "tax": 0.0,
+                            "slippage_cost": _slippage_cost_vs_close(
+                                buy_price, strategy_execution_price, quantity
+                            ),
+                            "signal_date": signal_date,
+                        }
+                    )
+                    if max_monthly_trades > 0:
+                        try:
+                            month_key = date.strftime("%Y-%m")
+                        except Exception:
+                            month_key = str(date)[:7]
+                        monthly_trade_counts[month_key] = monthly_trade_counts.get(month_key, 0) + 1
+
+            elif action == "SELL" and position > 0:
+                costs = self.risk_manager.calculate_transaction_costs(
+                    strategy_execution_price,
+                    position,
+                    "SELL",
+                    avg_daily_volume=strategy_row_volume,
+                    avg_price=avg_price,
+                    symbol=symbol,
+                )
+                sell_price = costs["execution_price"]
+                sell_amount = sell_price * position
+                commission = costs["commission"]
+                tax = costs["tax"] + costs.get("capital_gains_tax", 0)
+                pnl = (sell_price - avg_price) * position - commission - tax
+                cash += sell_amount - commission - tax
+                trades.append(
+                    {
+                        "date": date,
+                        "action": "SELL",
+                        "price": sell_price,
+                        "quantity": position,
+                        "pnl": pnl,
+                        "pnl_rate": ((sell_price / avg_price) - 1) * 100,
+                        "commission": commission,
+                        "tax": float(tax),
+                        "slippage_cost": _slippage_cost_vs_close(
+                            sell_price, strategy_execution_price, position
+                        ),
+                        "signal_date": signal_date,
+                    }
+                )
+                position = 0
+                avg_price = 0
+                partial_exit_done = False
+                high_water_mark = 0.0
+                buy_date = None
+                sold_today = True
+
         for i, (date, row) in enumerate(df.iterrows()):
             close = row["close"]
-            signal = row.get("signal", "HOLD")
-            open_price = row.get("open", close)
-            if pd.isna(open_price) or float(open_price) <= 0:
-                open_price = close
+            raw_open = row.get("open")
+            valid_open = (
+                raw_open is not None
+                and pd.notna(raw_open)
+                and float(raw_open) > 0
+            )
+            if valid_open:
+                open_price = float(raw_open)
+            elif execution_model == EXECUTION_MODEL_LEGACY_SAME_CLOSE:
+                open_price = float(close)
+            else:
+                open_price = None
+
+            # 전략 신호만 1봉 지연한다. 위험 청산은 아래에서 당일 가격을 사용해
+            # 기존처럼 즉시 처리되며, 그 뒤 남은 포지션에만 예약 전략 주문을 적용한다.
+            if execution_model == EXECUTION_MODEL_NEXT_OPEN:
+                if i > 0:
+                    strategy_row = df.iloc[i - 1]
+                    signal = strategy_row.get("signal", "HOLD")
+                    signal_date = df.index[i - 1]
+                else:
+                    strategy_row = None
+                    signal = "HOLD"
+                    signal_date = None
+                strategy_execution_price = open_price
+            else:
+                strategy_row = row
+                signal = row.get("signal", "HOLD")
+                signal_date = date
+                strategy_execution_price = float(close)
+
             row_atr = row.get("atr")
             avg_daily_vol = row.get("_avg_daily_volume")
             if pd.isna(avg_daily_vol) or avg_daily_vol <= 0:
                 avg_daily_vol = row.get("volume")
             row_volume = avg_daily_vol
+            strategy_row_atr = strategy_row.get("atr") if strategy_row is not None else None
+            strategy_row_volume = (
+                strategy_row.get("_avg_daily_volume") if strategy_row is not None else None
+            )
+            if strategy_row_volume is None or pd.isna(strategy_row_volume) or strategy_row_volume <= 0:
+                strategy_row_volume = strategy_row.get("volume") if strategy_row is not None else None
             sold_today = False
             previous_close = float(df["close"].iloc[i - 1]) if i > 0 else None
+            regime_at_t = "bullish"
+            if regime_enabled and date in regime_series.index:
+                regime_at_t = regime_series.loc[date]
+
+            # next_open은 당일 시가 전략 주문이 먼저, 이후 갭/블랙스완/종가 위험
+            # 청산이 발생하는 실제 시간 순서를 따른다. 시가 결측 주문은 종가로
+            # 대체하지 않고 명시적으로 스킵한다.
+            if execution_model == EXECUTION_MODEL_NEXT_OPEN:
+                _execute_strategy_signal(
+                    signal=signal,
+                    signal_date=signal_date,
+                    strategy_execution_price=strategy_execution_price,
+                    strategy_row_atr=strategy_row_atr,
+                    strategy_row_volume=strategy_row_volume,
+                    regime_at_t=regime_at_t,
+                    date=date,
+                    row=row,
+                    current_idx=i,
+                    previous_close=previous_close,
+                )
+
             stock_daily_return = None
             if previous_close is not None and previous_close > 0:
                 stock_daily_return = (float(close) - previous_close) / previous_close
@@ -538,12 +873,12 @@ class Backtester:
                         bs_daily_returns = bs_daily_returns[-bs_consecutive_days:]
 
             if position > 0 and previous_close is not None and previous_close > 0:
-                if gap_enabled:
-                    gap_pct = (float(open_price) - previous_close) / previous_close
+                if gap_enabled and open_price is not None:
+                    gap_pct = (open_price - previous_close) / previous_close
                     if gap_pct <= gap_down_threshold:
                         if _execute_full_exit(
                             "GAP_DOWN",
-                            float(open_price),
+                            open_price,
                             float(close),
                             f"gap_down {gap_pct * 100:.2f}%",
                         ):
@@ -578,7 +913,8 @@ class Backtester:
                 # 최대 보유 기간 초과 시 강제 청산
                 if max_holding_days > 0 and holding_days >= max_holding_days:
                     costs = self.risk_manager.calculate_transaction_costs(
-                        close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                        close, position, "SELL", avg_daily_volume=row_volume,
+                        avg_price=avg_price, symbol=symbol,
                     )
                     sell_price = costs["execution_price"]
                     sell_amount = sell_price * position
@@ -604,7 +940,8 @@ class Backtester:
                 # 손절
                 elif close <= stop_loss_price:
                     costs = self.risk_manager.calculate_transaction_costs(
-                        close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                        close, position, "SELL", avg_daily_volume=row_volume,
+                        avg_price=avg_price, symbol=symbol,
                     )
                     sell_price = costs["execution_price"]
                     sell_amount = sell_price * position
@@ -631,7 +968,8 @@ class Backtester:
                 elif partial_exit and not partial_exit_done and close >= avg_price * (1 + partial_target):
                     sell_qty = max(1, int(position * partial_ratio))
                     costs = self.risk_manager.calculate_transaction_costs(
-                        close, sell_qty, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                        close, sell_qty, "SELL", avg_daily_volume=row_volume,
+                        avg_price=avg_price, symbol=symbol,
                     )
                     sell_price = costs["execution_price"]
                     sell_amount = sell_price * sell_qty
@@ -659,7 +997,8 @@ class Backtester:
                 # 전량 익절
                 elif close >= take_profit_price:
                     costs = self.risk_manager.calculate_transaction_costs(
-                        close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                        close, position, "SELL", avg_daily_volume=row_volume,
+                        avg_price=avg_price, symbol=symbol,
                     )
                     sell_price = costs["execution_price"]
                     sell_amount = sell_price * position
@@ -687,7 +1026,8 @@ class Backtester:
                     trail_price = _trailing_stop_price(high_water_mark, row_atr)
                     if trail_price is not None and close <= trail_price:
                         costs = self.risk_manager.calculate_transaction_costs(
-                            close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
+                            close, position, "SELL", avg_daily_volume=row_volume,
+                            avg_price=avg_price, symbol=symbol,
                         )
                         sell_price = costs["execution_price"]
                         sell_amount = sell_price * position
@@ -710,148 +1050,21 @@ class Backtester:
                         buy_date = None
                         sold_today = True
 
-            # 최소 보유 기간 미달 시 신호 매도 차단 (손절/트레일링/익절은 위에서 이미 처리)
-            if position > 0 and min_holding_days > 0 and buy_date is not None:
-                holding_days_now = (date - buy_date).days if buy_date is not None else 0
-                if holding_days_now < min_holding_days and signal == "SELL":
-                    signal = "HOLD"
-
-            # 월간 거래 횟수 제한: 상한 도달 시 BUY 신호를 HOLD로 차단
-            if signal == "BUY" and max_monthly_trades > 0:
-                try:
-                    _mk = date.strftime("%Y-%m")
-                except Exception:
-                    _mk = str(date)[:7]
-                if monthly_trade_counts.get(_mk, 0) >= max_monthly_trades:
-                    signal = "HOLD"
-
-            # 시장국면 필터 (TICKET-02): bearish→매수 차단, caution→포지션 축소
-            # regime은 T-1일까지의 지수 종가로 사전 계산됨 (look-ahead bias 없음)
-            regime_at_t = "bullish"
-            if regime_enabled and date in regime_series.index:
-                regime_at_t = regime_series.loc[date]
-            if signal == "BUY" and regime_at_t == "bearish":
-                signal = "HOLD"
-                regime_buy_blocks += 1
-
-            if signal == "BUY" and gap_enabled and gap_up_entry_block > 0 and previous_close is not None and previous_close > 0:
-                gap_pct = (float(open_price) - previous_close) / previous_close
-                if gap_pct >= gap_up_entry_block:
-                    signal = "HOLD"
-                    gap_up_buy_blocks += 1
-
-            if signal == "BUY" and skip_earnings_days > 0 and _is_near_backtest_earnings(row, date):
-                signal = "HOLD"
-                earnings_buy_blocks += 1
-
-            if signal == "BUY" and bs_enabled and i <= bs_cooldown_until_idx:
-                signal = "HOLD"
-                blackswan_buy_blocks += 1
-
-            # 당일 매도 발생 시 재매수 방지 (같은 봉에서 손절 후 재진입은 비현실적)
-            if signal == "BUY" and position == 0 and not sold_today:
-                costs = self.risk_manager.calculate_transaction_costs(
-                    close, 1, "BUY", avg_daily_volume=row_volume
+            # legacy 모드는 종가 위험 규칙 이후 같은 종가에 전략 주문을 체결해
+            # 과거 결과를 재현한다. next_open 주문은 위에서 이미 처리됐다.
+            if execution_model == EXECUTION_MODEL_LEGACY_SAME_CLOSE:
+                _execute_strategy_signal(
+                    signal=signal,
+                    signal_date=signal_date,
+                    strategy_execution_price=strategy_execution_price,
+                    strategy_row_atr=strategy_row_atr,
+                    strategy_row_volume=strategy_row_volume,
+                    regime_at_t=regime_at_t,
+                    date=date,
+                    row=row,
+                    current_idx=i,
+                    previous_close=previous_close,
                 )
-                buy_price = costs["execution_price"]
-                stop_at_buy = buy_price * (1 - sl_rate)
-                if sl_type == "atr" and row_atr is not None and pd.notna(row_atr) and row_atr > 0:
-                    stop_at_buy = buy_price - float(row_atr) * atr_mult
-                risk_per_share = max(buy_price - stop_at_buy, buy_price * 0.001)
-                total_equity = cash + (position * close)
-                risk_amount = total_equity * max_risk_per_trade
-                qty_by_1pct = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
-                invest_cap = total_equity * max_position_ratio
-                qty_by_cap = int(invest_cap / buy_price) if buy_price > 0 else 0
-                # 전체 주식 투자 비중 상한 (총자산의 max_investment_ratio 이하)
-                max_invest_value = total_equity * max_investment_ratio
-                qty_by_total_cap = int(max_invest_value / buy_price) if buy_price > 0 else 0
-                quantity = min(
-                    max(0, qty_by_1pct),
-                    max(0, qty_by_cap),
-                    max(0, qty_by_total_cap),
-                )
-
-                # 시장국면 caution 시 포지션 축소 (TICKET-02)
-                if quantity > 0 and regime_at_t == "caution":
-                    quantity = max(1, int(quantity * caution_scale))
-                    regime_caution_buys += 1
-
-                if (
-                    quantity > 0
-                    and bs_enabled
-                    and i > bs_cooldown_until_idx
-                    and i <= bs_recovery_until_idx
-                    and bs_recovery_scale < 1.0
-                ):
-                    quantity = max(1, int(quantity * bs_recovery_scale))
-                    blackswan_recovery_buys += 1
-
-                # 유동성 필터: 주문량이 일평균 거래량의 N%를 초과하면 축소 또는 차단
-                if quantity > 0 and bt_max_participation > 0 and row_volume is not None and row_volume > 0:
-                    max_qty_by_volume = int(row_volume * bt_max_participation)
-                    if max_qty_by_volume <= 0:
-                        quantity = 0  # 유동성 부족 → 매수 불가
-                    elif quantity > max_qty_by_volume:
-                        quantity = max_qty_by_volume  # 유동성 한도까지만 매수
-
-                if quantity > 0:
-                    buy_costs = self.risk_manager.calculate_transaction_costs(
-                        close, quantity, "BUY", avg_daily_volume=row_volume
-                    )
-                    buy_price = buy_costs["execution_price"]
-                    buy_amount = buy_price * quantity
-                    commission = buy_costs["commission"]
-                else:
-                    buy_amount = 0
-                    commission = 0
-
-                if quantity > 0 and (buy_amount + commission) <= cash:
-                    cash -= (buy_amount + commission)
-                    position = quantity
-                    avg_price = buy_price
-                    partial_exit_done = False
-                    high_water_mark = buy_price
-                    buy_date = date
-                    trades.append({
-                        "date": date, "action": "BUY", "price": buy_price,
-                        "quantity": quantity, "pnl": 0, "pnl_rate": 0,
-                        "commission": commission,
-                        "tax": 0.0,
-                        "slippage_cost": _slippage_cost_vs_close(buy_price, close, quantity),
-                    })
-                    # 월간 거래 횟수 카운트
-                    if max_monthly_trades > 0:
-                        try:
-                            mk = date.strftime("%Y-%m")
-                        except Exception:
-                            mk = str(date)[:7]
-                        monthly_trade_counts[mk] = monthly_trade_counts.get(mk, 0) + 1
-
-            elif signal == "SELL" and position > 0:
-                costs = self.risk_manager.calculate_transaction_costs(
-                    close, position, "SELL", avg_daily_volume=row_volume, avg_price=avg_price
-                )
-                sell_price = costs["execution_price"]
-                sell_amount = sell_price * position
-                commission = costs["commission"]
-                tax = costs["tax"] + costs.get("capital_gains_tax", 0)
-                pnl = (sell_price - avg_price) * position - commission - tax
-
-                cash += sell_amount - commission - tax
-                trades.append({
-                    "date": date, "action": "SELL", "price": sell_price,
-                    "quantity": position, "pnl": pnl,
-                    "pnl_rate": ((sell_price / avg_price) - 1) * 100,
-                    "commission": commission,
-                    "tax": float(tax),
-                    "slippage_cost": _slippage_cost_vs_close(sell_price, close, position),
-                })
-                position = 0
-                avg_price = 0
-                high_water_mark = 0.0
-                buy_date = None
-                sold_today = True
 
             # 자본금 곡선 기록
             portfolio_value = cash + (position * close)
@@ -866,6 +1079,7 @@ class Backtester:
         return {
             "trades": trades,
             "equity_curve": pd.DataFrame(equity_curve),
+            "execution_model": execution_model,
             "regime_buy_blocks": regime_buy_blocks,
             "regime_caution_buys": regime_caution_buys,
             "gap_down_exits": gap_down_exits,
@@ -874,6 +1088,8 @@ class Backtester:
             "blackswan_triggers": blackswan_triggers,
             "blackswan_buy_blocks": blackswan_buy_blocks,
             "blackswan_recovery_buys": blackswan_recovery_buys,
+            "strategy_orders_skipped_missing_open": strategy_orders_skipped_missing_open,
+            "skipped_strategy_orders": skipped_strategy_orders,
         }
 
     def _calculate_metrics(self, result: dict, initial_capital: float) -> dict:
@@ -882,13 +1098,22 @@ class Backtester:
         equity = result["equity_curve"]
 
         if equity.empty:
-            return self._empty_metrics()
+            metrics = self._empty_metrics()
+            metrics["execution_model"] = result.get(
+                "execution_model", EXECUTION_MODEL_NEXT_OPEN
+            )
+            return metrics
 
         final_value = equity["value"].iloc[-1]
         total_return = ((final_value / initial_capital) - 1) * 100
 
-        # 일일 수익률
+        # 일일 수익률. 첫 관측값도 초기자본 대비 수익률로 포함해야 첫날 진입비용·손실이
+        # Sharpe/VaR에서 사라지지 않는다.
         equity["daily_return"] = equity["value"].pct_change()
+        if initial_capital > 0:
+            equity.loc[equity.index[0], "daily_return"] = (
+                float(equity["value"].iloc[0]) / initial_capital
+            ) - 1.0
         daily_returns = equity["daily_return"].dropna()
 
         # 샤프 지수 (연율화, 무위험수익률 3%)
@@ -941,7 +1166,11 @@ class Backtester:
                 cur_consec = 0
 
         # MDD (최대 낙폭)
+        # 초기자본을 0일차 고점으로 포함한다. 그렇지 않으면 1일차에 10% 손실 후
+        # 횡보한 곡선의 MDD가 0%로 잘못 계산된다.
         equity["peak"] = equity["value"].cummax()
+        if initial_capital > 0:
+            equity["peak"] = equity["peak"].clip(lower=initial_capital)
         equity["drawdown"] = (equity["value"] - equity["peak"]) / equity["peak"]
         max_drawdown = equity["drawdown"].min() * 100
 
@@ -1058,6 +1287,9 @@ class Backtester:
         cost_drag = round(gross_return - total_return, 2)
 
         metrics = {
+            "execution_model": result.get(
+                "execution_model", EXECUTION_MODEL_NEXT_OPEN
+            ),
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
             "cagr": round(cagr, 2),
@@ -1100,6 +1332,9 @@ class Backtester:
             "blackswan_triggers": result.get("blackswan_triggers", 0),
             "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
             "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
+            "strategy_orders_skipped_missing_open": result.get(
+                "strategy_orders_skipped_missing_open", 0
+            ),
         }
         cost_impact = summarize_cost_impact(metrics, trades)
         metrics.update(cost_impact_metric_fields(cost_impact))

@@ -245,6 +245,7 @@ class WeeklyReportGenerator:
         session = get_session()
         try:
             q = session.query(PortfolioSnapshot).filter(
+                PortfolioSnapshot.mode == self.mode,
                 PortfolioSnapshot.date >= start,
                 PortfolioSnapshot.date <= end,
             )
@@ -317,6 +318,7 @@ class GoLiveChecker:
         try:
             # 스냅샷 기간 확인
             snapshots = session.query(PortfolioSnapshot).filter(
+                PortfolioSnapshot.mode == "paper",
                 PortfolioSnapshot.account_key == (self.account_key or ""),
             ).order_by(PortfolioSnapshot.date).all()
 

@@ -22,6 +22,8 @@ def build_weekly_summary(
     week_nav_change_pct: float | None = None,
     missing_days: int = 0,
     cycle_errors: int = 0,
+    regime: dict[str, Any] | None = None,
+    risk: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """주간 다이제스트를 만든다(순수 함수).
 
@@ -66,6 +68,27 @@ def build_weekly_summary(
         fields.append({
             "name": "🔎 귀속 분해",
             "value": " · ".join(parts) + " (실행=통제가능 / 구성=설계수용)",
+            "inline": False,
+        })
+
+    # 2-b) 국면 분해 — 방어적 포지션은 하락장에서 항상 좋아 보인다. 상승·하락을
+    #      나눠 보고하지 않으면 '방어의 대가'(상승장 미스)가 통째로 숨는다.
+    #      실측(2026-08): 전체 +7.81%p 초과성과가 반등 구간 -8.97%p 미스를 덮고 있었다.
+    if regime:
+        from core.performance_lens import format_regime_line
+        fields.append({
+            "name": "🌗 국면 분해",
+            "value": format_regime_line(regime),
+            "inline": False,
+        })
+
+    # 2-c) 리스크 지표 — daily_return이 복구되기 전(~2026-08-10)에는 스냅샷의 이 열이
+    #      전부 0이라 변동성·샤프를 아예 계산할 수 없었다. 이제 표면화한다.
+    if risk:
+        from core.performance_lens import format_risk_line
+        fields.append({
+            "name": "📉 리스크",
+            "value": format_risk_line(risk),
             "inline": False,
         })
 

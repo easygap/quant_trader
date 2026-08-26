@@ -84,7 +84,7 @@ def test_scheduler_monitoring_runs_without_api(monkeypatch):
     """장중 모니터링: 포지션 없음 + KIS get_current_price 모킹으로 _run_monitoring 완료."""
     from core.scheduler import Scheduler
 
-    def fake_get_all():
+    def fake_get_all(account_key=None, mode="paper"):
         return []
 
     monkeypatch.setattr("core.scheduler.get_all_positions", fake_get_all)
@@ -118,6 +118,9 @@ def test_live_monitoring_blocks_new_entries_when_broker_sync_fails(monkeypatch):
     monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
 
     scheduler = Scheduler(strategy_name="scoring")
+    monkeypatch.setattr(
+        scheduler.config, "get_account_no", lambda strategy="": "12345678-01"
+    )
     old_mode = scheduler.config.trading.get("mode")
     exit_checked = {"value": False}
     try:
@@ -137,6 +140,7 @@ def test_live_monitoring_blocks_new_entries_when_broker_sync_fails(monkeypatch):
             is_on_cooldown=lambda: False,
         )
         scheduler.discord = MagicMock()
+        scheduler._log_monitoring_watchlist_preflight = lambda: None
         scheduler._maybe_recheck_market_regime = lambda: None
         scheduler._execute_entry_candidates = lambda: pytest.fail(
             "broker sync failure must block entry execution"
@@ -165,6 +169,9 @@ def test_live_monitoring_allows_entries_after_broker_sync_ok(monkeypatch):
     monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
 
     scheduler = Scheduler(strategy_name="scoring")
+    monkeypatch.setattr(
+        scheduler.config, "get_account_no", lambda strategy="": "12345678-01"
+    )
     old_mode = scheduler.config.trading.get("mode")
     calls = {"entry": 0, "rescan": 0, "exit": 0}
     try:
@@ -180,6 +187,7 @@ def test_live_monitoring_allows_entries_after_broker_sync_ok(monkeypatch):
             is_on_cooldown=lambda: False,
         )
         scheduler.discord = MagicMock()
+        scheduler._log_monitoring_watchlist_preflight = lambda: None
         scheduler._maybe_recheck_market_regime = lambda: None
         scheduler._execute_entry_candidates = lambda: calls.__setitem__("entry", calls["entry"] + 1)
         scheduler._rescan_for_new_entries = lambda: calls.__setitem__("rescan", calls["rescan"] + 1)
@@ -193,6 +201,35 @@ def test_live_monitoring_allows_entries_after_broker_sync_ok(monkeypatch):
         assert scheduler._last_broker_sync_ok is True
     finally:
         scheduler.config.trading["mode"] = old_mode
+
+
+def test_monitoring_checks_existing_exits_before_new_entries(monkeypatch):
+    """급락 첫 사이클에서 기존 노출 점검이 신규 BUY보다 먼저다."""
+    from core.scheduler import Scheduler
+
+    monkeypatch.setattr("api.kis_api.KISApi", _FakeKIS)
+    monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
+
+    scheduler = Scheduler(strategy_name="scoring")
+    calls = []
+    scheduler.auto_entry = True
+    scheduler._entry_candidates = [{"symbol": "005930", "price": 50_000}]
+    scheduler.blackswan = SimpleNamespace(
+        consume_cooldown_ended_flag=lambda: False,
+        is_on_cooldown=lambda: False,
+    )
+    scheduler.discord = MagicMock()
+    scheduler._log_monitoring_watchlist_preflight = lambda: None
+    scheduler._maybe_recheck_market_regime = lambda: None
+    scheduler._check_exit_signals = lambda kis=None: calls.append("exit")
+    scheduler._execute_entry_candidates = lambda: calls.append("entry")
+    scheduler._update_dynamic_stop_losses = lambda: None
+    scheduler._rescan_for_new_entries = lambda: calls.append("rescan")
+    scheduler._publish_dashboard_runtime_state = lambda kis=None: None
+
+    scheduler._run_monitoring()
+
+    assert calls == ["exit", "entry", "rescan"]
 
 
 def test_live_entry_loop_halts_when_order_requires_reconcile(monkeypatch):
@@ -233,7 +270,10 @@ def test_live_entry_loop_halts_when_order_requires_reconcile(monkeypatch):
         "core.market_regime.check_market_regime",
         lambda config, collector: {"allow_buys": True, "position_scale": 1.0},
     )
-    monkeypatch.setattr("core.scheduler.get_position", lambda symbol, account_key="": None)
+    monkeypatch.setattr(
+        "core.scheduler.get_position",
+        lambda symbol, account_key="", mode="paper": None,
+    )
     monkeypatch.setattr(
         "core.scheduler._log_op",
         lambda *args, **kwargs: op_events.append((args, kwargs)),
@@ -301,7 +341,10 @@ def test_entry_candidate_revalidation_failure_holds_candidate_without_order(monk
         "core.market_regime.check_market_regime",
         lambda config, collector: {"allow_buys": True, "position_scale": 1.0},
     )
-    monkeypatch.setattr("core.scheduler.get_position", lambda symbol, account_key="": None)
+    monkeypatch.setattr(
+        "core.scheduler.get_position",
+        lambda symbol, account_key="", mode="paper": None,
+    )
     monkeypatch.setattr(
         "core.scheduler._log_op",
         lambda *args, **kwargs: op_events.append((args, kwargs)),
@@ -350,6 +393,9 @@ def test_live_monitoring_skips_rescan_after_entry_requires_reconcile(monkeypatch
     monkeypatch.setattr("core.scheduler.PositionLock", _NoopLock)
 
     scheduler = Scheduler(strategy_name="scoring")
+    monkeypatch.setattr(
+        scheduler.config, "get_account_no", lambda strategy="": "12345678-01"
+    )
     old_mode = scheduler.config.trading.get("mode")
     calls = {"entry": 0, "rescan": 0, "exit": 0}
     try:
@@ -365,6 +411,7 @@ def test_live_monitoring_skips_rescan_after_entry_requires_reconcile(monkeypatch
             is_on_cooldown=lambda: False,
         )
         scheduler.discord = MagicMock()
+        scheduler._log_monitoring_watchlist_preflight = lambda: None
         scheduler._maybe_recheck_market_regime = lambda: None
 
         def mark_reconcile_block():
@@ -410,7 +457,10 @@ def test_exit_signals_skip_invalid_current_price(monkeypatch):
         def execute_sell(self, *args, **kwargs):
             pytest.fail("invalid price must not submit sell order")
 
-    monkeypatch.setattr("core.scheduler.get_all_positions", lambda account_key=None: [position])
+    monkeypatch.setattr(
+        "core.scheduler.get_all_positions",
+        lambda account_key=None, mode="paper": [position],
+    )
     monkeypatch.setattr(
         "core.scheduler._log_op",
         lambda *args, **kwargs: op_events.append((args, kwargs)),
@@ -456,7 +506,10 @@ def test_exit_signals_records_missing_current_price(monkeypatch):
         def execute_sell(self, *args, **kwargs):
             pytest.fail("missing price must not submit sell order")
 
-    monkeypatch.setattr("core.scheduler.get_all_positions", lambda account_key=None: [position])
+    monkeypatch.setattr(
+        "core.scheduler.get_all_positions",
+        lambda account_key=None, mode="paper": [position],
+    )
     monkeypatch.setattr(
         "core.scheduler._log_op",
         lambda *args, **kwargs: op_events.append((args, kwargs)),
@@ -480,6 +533,137 @@ def test_exit_signals_records_missing_current_price(monkeypatch):
     scheduler.discord.send_trade_alert.assert_not_called()
 
 
+def test_blackswan_preempts_gap_exit_and_activates_cooldown(monkeypatch):
+    """-5% 이하 급락은 gap continue 전에 BlackSwan cooldown을 켜야 한다."""
+    from core.blackswan_detector import BlackSwanDetector
+    from core.scheduler import Scheduler
+
+    position = SimpleNamespace(
+        symbol="005930",
+        avg_price=100_000,
+        quantity=3,
+        bought_at=None,
+    )
+
+    class CrashPriceKIS:
+        def get_current_price(self, symbol):
+            return {"price": 94_000, "prev_close": 100_000, "open": 94_000}
+
+    sell_calls = []
+
+    class FakeExecutor:
+        def execute_sell(self, symbol, price, **kwargs):
+            sell_calls.append({"symbol": symbol, "price": price, **kwargs})
+            return {"success": True}
+
+        def check_stop_loss_take_profit(self, *args, **kwargs):
+            pytest.fail("BlackSwan 청산 후 일반 stop 점검으로 진행하면 안 됨")
+
+    detector_config = SimpleNamespace(
+        risk_params={
+            "blackswan": {
+                "single_stock_threshold": -0.05,
+                "portfolio_threshold": -0.03,
+                "consecutive_days": 3,
+                "consecutive_threshold": -0.02,
+                "cooldown_minutes": 60,
+                "recovery_minutes": 120,
+                "recovery_scale": 0.5,
+            }
+        },
+        trading={},
+    )
+
+    monkeypatch.setattr(
+        "core.scheduler.get_all_positions",
+        lambda account_key=None, mode="paper": [position],
+    )
+    op_events = []
+    monkeypatch.setattr(
+        "core.scheduler._log_op",
+        lambda *args, **kwargs: op_events.append((args, kwargs)),
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_gap = scheduler.config.risk_params.get("gap_risk")
+    try:
+        scheduler.config.risk_params["gap_risk"] = {
+            "enabled": True,
+            "gap_down_threshold": -0.03,
+        }
+        scheduler.blackswan = BlackSwanDetector(detector_config)
+        scheduler._get_or_create_executor = lambda: FakeExecutor()
+        scheduler.discord = MagicMock()
+
+        scheduler._check_exit_signals(kis=CrashPriceKIS())
+
+        assert scheduler.blackswan.is_on_cooldown() is True
+        assert len(sell_calls) == 1
+        assert sell_calls[0]["reason"] == "블랙스완 긴급 매도"
+        assert op_events and op_events[0][0][0] == "BLACKSWAN"
+        messages = [call.args[0] for call in scheduler.discord.send_message.call_args_list]
+        assert any("블랙스완 발동" in message for message in messages)
+        assert all("갭다운 청산" not in message for message in messages)
+    finally:
+        if old_gap is None:
+            scheduler.config.risk_params.pop("gap_risk", None)
+        else:
+            scheduler.config.risk_params["gap_risk"] = old_gap
+
+
+def test_intraday_decline_is_not_misclassified_as_gap_down(monkeypatch):
+    """시가가 보합이면 장중 -4%를 gap 긴급 청산으로 오인하지 않는다."""
+    from core.scheduler import Scheduler
+
+    position = SimpleNamespace(
+        symbol="005930",
+        avg_price=100_000,
+        quantity=3,
+        bought_at=None,
+    )
+
+    class IntradayDropKIS:
+        def get_current_price(self, symbol):
+            return {
+                "price": 96_000,
+                "prev_close": 100_000,
+                "open": 100_000,
+            }
+
+    class FakeExecutor:
+        def execute_sell(self, *args, **kwargs):
+            pytest.fail("장중 하락만으로 gap 청산 주문을 내면 안 됨")
+
+        def check_stop_loss_take_profit(self, *args, **kwargs):
+            return {"action": None}
+
+    monkeypatch.setattr(
+        "core.scheduler.get_all_positions",
+        lambda account_key=None, mode="paper": [position],
+    )
+
+    scheduler = Scheduler(strategy_name="scoring")
+    old_gap = scheduler.config.risk_params.get("gap_risk")
+    try:
+        scheduler.config.risk_params["gap_risk"] = {
+            "enabled": True,
+            "gap_down_threshold": -0.03,
+        }
+        scheduler._get_or_create_executor = lambda: FakeExecutor()
+        scheduler.discord = MagicMock()
+
+        scheduler._check_exit_signals(kis=IntradayDropKIS())
+
+        assert scheduler.blackswan.is_on_cooldown() is False
+        scheduler.discord.send_message.assert_not_called()
+        scheduler.discord.send_trade_alert.assert_not_called()
+    finally:
+        if old_gap is None:
+            scheduler.config.risk_params.pop("gap_risk", None)
+        else:
+            scheduler.config.risk_params["gap_risk"] = old_gap
+
+
 def test_scheduler_post_market_runs():
     """장마감: _run_post_market 호출 시 DB 저장·디스코드 시도만 하고 예외 없이 완료."""
     from core.scheduler import Scheduler
@@ -487,6 +671,58 @@ def test_scheduler_post_market_runs():
     scheduler = Scheduler(strategy_name="scoring")
     scheduler._run_post_market()
     assert True
+
+
+def test_collect_snapshot_prices_fails_if_any_position_price_is_missing(monkeypatch):
+    """일부 종목의 가격 누락을 평균단가 폴백으로 숨기지 않는다."""
+    from types import SimpleNamespace
+
+    from core.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.strategy_name = "scoring"
+    scheduler._ledger_mode = "paper"
+    scheduler.config = SimpleNamespace(get_account_no=lambda key: "00000000-00")
+    monkeypatch.setattr(
+        "core.scheduler.get_all_positions",
+        lambda account_key=None, mode="paper": [
+            SimpleNamespace(symbol="005930"),
+            SimpleNamespace(symbol="000660"),
+        ],
+    )
+
+    class FakeKIS:
+        def __init__(self, account_no=None):
+            self.account_no = account_no
+
+        def get_current_price(self, symbol):
+            return {"price": 55000} if symbol == "005930" else None
+
+    monkeypatch.setattr("api.kis_api.KISApi", FakeKIS)
+
+    with pytest.raises(RuntimeError, match="000660 현재가"):
+        scheduler._collect_snapshot_prices()
+
+
+def test_post_market_stops_when_validated_snapshot_cannot_be_saved():
+    """스냅샷 실패 뒤 부정확한 일일 리포트를 계속 생성하지 않는다."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from core.scheduler import Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.strategy_name = "scoring"
+    scheduler.portfolio = MagicMock()
+    scheduler.portfolio.save_daily_snapshot.return_value = False
+    scheduler.discord = MagicMock()
+    scheduler.config = SimpleNamespace(trading={"mode": "paper"})
+    scheduler._collect_snapshot_prices = lambda: {"005930": 55000}
+
+    scheduler._run_post_market()
+
+    scheduler.portfolio.get_portfolio_summary.assert_not_called()
+    scheduler.discord.send_daily_report.assert_not_called()
 
 
 def test_scheduler_startup_recovery_paper_mode_no_crash(monkeypatch):
@@ -575,7 +811,9 @@ def test_live_scheduler_passes_gate_validation_to_order_executor(monkeypatch):
     scheduler._mode = "live"
     scheduler._live_gate_validated = True
 
-    assert scheduler._get_or_create_executor() is scheduler._order_executor
+    executor = scheduler._get_or_create_executor()
+    assert executor is scheduler._order_executor
+    assert executor.blackswan is scheduler.blackswan
     assert captured == {
         "account_key": "scoring",
         "live_gate_validated": True,
@@ -760,7 +998,7 @@ def test_scheduler_skips_next_cycle_after_overrun(monkeypatch):
     monkeypatch.setattr(scheduler, "_log_monitoring_watchlist_preflight", lambda: None)
     monkeypatch.setattr(scheduler, "_maybe_recheck_market_regime", lambda: None)
     monkeypatch.setattr(scheduler, "_execute_entry_candidates", slow_entry)
-    monkeypatch.setattr(scheduler, "_check_exit_signals", lambda: None)
+    monkeypatch.setattr(scheduler, "_check_exit_signals", lambda kis=None: None)
     monkeypatch.setattr(scheduler, "_update_dynamic_stop_losses", lambda: None)
     monkeypatch.setattr(scheduler, "_rescan_for_new_entries", lambda: None)
     monkeypatch.setattr(scheduler, "_publish_dashboard_runtime_state", lambda kis=None: None)

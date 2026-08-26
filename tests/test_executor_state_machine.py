@@ -215,6 +215,15 @@ class TestExecutorUsesStateMachine:
         executor.mode = "live"
         executor.live_gate_validated = True
         executor.kis_api = kis_api
+        # 이 클래스가 검증하는 건 주문 상태기계(ACK/체결확인/reconcile)이지 실계좌
+        # kill switch가 아니다. 실계좌 판정을 인스턴스 단위로 못박아 그 분기를
+        # 결정론적으로 비켜 간다(공유 Config 싱글톤은 건드리지 않는다).
+        #
+        # 종전에는 이걸 명시하지 않아 로컬 config/settings.yaml(git 미추적)의
+        # use_mock: true에 얹혀 통과했다. CI에는 그 파일이 없어 _is_real_money_live()가
+        # True가 되고 ENABLE_LIVE_TRADING kill switch에 9건이 막혔다 — 즉 이 테스트들은
+        # CI에서 한 번도 실제로 검증된 적이 없었다. 환경에 기대지 않고 스스로 선언한다.
+        executor._is_real_money_live = lambda: False
         executor.trading_hours = SimpleNamespace(
             can_place_order=lambda *a, **kw: {"allowed": True, "reason": ""}
         )
@@ -403,6 +412,7 @@ class TestExecutorUsesStateMachine:
             trailing_stop_price=68_000,
             strategy="scoring",
             account_key="test_sm",
+            mode="live",
         )
         kis_api = UnfilledLookupFailedKIS()
         executor = self._prepare_live_executor(self._make_executor(), kis_api)
@@ -418,7 +428,7 @@ class TestExecutorUsesStateMachine:
         assert "미체결 조회" in result["reason"]
         assert result["live_unfilled_check"]["checked"] is False
         assert kis_api.sell_called is False
-        position = get_position("000660", account_key="test_sm")
+        position = get_position("000660", account_key="test_sm", mode="live")
         assert position is not None
         assert position.quantity == 5
         assert not OrderGuard.has_pending("000660")
@@ -707,7 +717,7 @@ class TestExecutorUsesStateMachine:
             def has_unfilled_orders(self, symbol):
                 return False
 
-            def sell_order(self, symbol, quantity, price):
+            def sell_order(self, symbol, quantity, price, order_type="00"):
                 return {"odno": "S123"}
 
             def get_filled_avg_price_after_order(self, symbol, order_output):
@@ -723,6 +733,7 @@ class TestExecutorUsesStateMachine:
             trailing_stop_price=68_000,
             strategy="scoring",
             account_key="test_sm",
+            mode="live",
         )
         executor = self._prepare_live_executor(self._make_executor(), AckNoFillKIS())
 
@@ -737,7 +748,7 @@ class TestExecutorUsesStateMachine:
         assert result["order_pending"] is True
         assert result["requires_reconcile"] is True
         assert result["order_status"] == OrderStatus.ACKED.value
-        position = get_position("000660", account_key="test_sm")
+        position = get_position("000660", account_key="test_sm", mode="live")
         assert position is not None
         assert position.quantity == 5
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "000660"]
@@ -1005,7 +1016,7 @@ class TestExecutorUsesStateMachine:
         assert result["success"] is True, result.get("reason")
         assert result["quantity"] == 4
         assert kis.last_qty == 4  # 사이저가 덮어쓰지 않고 고정수량 그대로 주문
-        pos = get_position("005933", account_key="test_sm")
+        pos = get_position("005933", account_key="test_sm", mode="live")
         assert pos is not None and pos.quantity == 4
         orders = [o for o in executor.order_book._orders.values() if o.symbol == "005933"]
         assert orders[-1].status == OrderStatus.FILLED
