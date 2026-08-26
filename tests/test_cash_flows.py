@@ -395,3 +395,53 @@ class TestRecordDepositCli:
             ["record_deposit.py", "--basket", "no_such_basket", "--amount", "1000"],
         )
         assert rd.main() == 1
+
+
+class TestCashFlowShapeContract:
+    """get_cash_flows의 반환 형태를 고정한다.
+
+    2026-08-26에 헬스의 적립 이행 점검이 이 목록을 '객체'로 읽어(getattr(f, "occurred_at"))
+    항상 None을 잡았다. 입금을 기록해 둔 상태인데도 헬스가 '입금 기록 0건'이라고
+    보고했다 — 조용히 틀린 사실을 말하는, 이 저장소에서 가장 비싼 종류의 버그다.
+    """
+
+    def test_returns_occurred_at_amount_tuples(self):
+        from database.repositories import get_cash_flows
+
+        init_database()
+        key = "basket_rebalance:shape_contract"
+        record_cash_flow(amount=100000, account_key=key, mode="paper", note="계약 확인")
+
+        flows = get_cash_flows(account_key=key, mode="paper")
+        assert flows, "기록한 입금이 조회되지 않았다"
+        first = flows[0]
+        assert isinstance(first, tuple) and len(first) == 2, (
+            f"(occurred_at, amount) 튜플이어야 한다 — 실제: {type(first)}"
+        )
+        occurred_at, amount = first
+        assert isinstance(occurred_at, datetime)
+        assert amount == pytest.approx(100000)
+        # 객체 접근은 실패해야 한다 — 이 계약이 바뀌면 호출부가 조용히 None을 얻는다
+        assert getattr(first, "occurred_at", None) is None
+
+    def test_contribution_check_sees_a_recorded_deposit(self):
+        """기록된 입금이 적립 이행 점검에 실제로 잡히는지 — 헬스 배선 회귀 방지."""
+        from core.operator_health import summarize_contribution_plan
+        from database.repositories import get_cash_flows
+
+        init_database()
+        key = "basket_rebalance:contrib_wiring"
+        record_cash_flow(amount=100000, account_key=key, mode="paper", note="8월 적립")
+
+        flows = get_cash_flows(account_key=key, mode="paper")
+        last_flow = max((f[0] for f in flows if f and f[0] is not None), default=None)
+        assert last_flow is not None, "입금 시각을 못 읽었다 — 반환 형태 오해"
+
+        state = summarize_contribution_plan(
+            "kr_pocket",
+            {"enabled": True, "cadence": "monthly", "amount": 100000},
+            last_flow,
+            (datetime.now() - timedelta(days=60)).date(),
+            datetime.now().date(),
+        )
+        assert state["verdict"] == "OK", state["note"]
