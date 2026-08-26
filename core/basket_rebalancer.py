@@ -439,6 +439,41 @@ class BasketRebalancer:
             logger.debug("배치율 격차 계산 실패: {}", exc)
             return None
 
+    def _policy_exposure_limits(self, symbol: str) -> dict | None:
+        """이 바스켓이 선언한 비중에서 파생한 노출 상한. 선언이 없으면 None(전역 사용).
+
+        전역 상한(max_position_ratio 20%, max_investment_ratio 70%)은 재량 매매용
+        안전판이라, 비중을 명시로 선언한 바스켓에는 설계를 실행 불가능하게 만든다.
+        kr_pocket 설계는 종목당 47.5% / 투자 95%인데 전역은 20% / 70%다 — 그래서
+        적립금 10만원이 들어와도 매수가 '단일 종목 비중 20% 초과'로 전부 거부됐다
+        (2026-08-26 확인). 상한을 없애는 게 아니라 선언한 비중 + 허용 드리프트로
+        바꿔 단다. 어떤 경우에도 목표를 드리프트 임계값 이상 넘길 수는 없다.
+        """
+        targets = self.get_target_weights()
+        target_w = targets.get(symbol)
+        if target_w is None:
+            return None
+        stock_fraction = self._stock_fraction()
+        drift = float(self.rebalance_cfg.get("drift_threshold", 0.05))
+        band = float(self.rebalance_cfg.get("deployment_band", 0.03))
+        # 현금 하한도 이 바스켓이 선언한 값을 쓴다. 전역 20%는 개별 주식 바스켓용
+        # 안전판인데, 보유분 절반이 현금성(CD 파킹 ETF)인 kr_pocket에는 과잉이라
+        # 설계(현금 5%)를 실행 불가능하게 만든다. effective_stock_fraction과 같은
+        # 해석 규칙을 쓴다.
+        div_cfg = (self._risk_params or {}).get("diversification", {}) or {}
+        raw_mcr = self.basket.get("min_cash_ratio", div_cfg.get("min_cash_ratio", 0.20))
+        try:
+            min_cash = max(0.0, min(1.0, float(raw_mcr)))
+        except (TypeError, ValueError):
+            min_cash = float(div_cfg.get("min_cash_ratio", 0.20))
+
+        return {
+            # 슬리브 내 비중 상한을 총자산 기준으로 환산
+            "max_position_ratio": min(1.0, (float(target_w) + drift) * stock_fraction),
+            "max_investment_ratio": min(1.0, stock_fraction + band),
+            "min_cash_ratio": min_cash,
+        }
+
     # ------------------------------------------------------------------
     # 리스크 청산 (손절/익절/트레일링)
     # ------------------------------------------------------------------
@@ -781,6 +816,8 @@ class BasketRebalancer:
                         weight_policy_managed=True,
                         # 진입 레벨도 트랙 정책으로 기록한다(전역 단타 -3% 손절 금지).
                         risk_levels=basket_risk_levels(self.basket, order.price),
+                        # 노출 상한도 이 바스켓이 선언한 비중에서 파생한다.
+                        exposure_limits=self._policy_exposure_limits(order.symbol),
                     )
                 else:
                     res = executor.execute_sell(
