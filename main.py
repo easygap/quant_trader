@@ -682,6 +682,7 @@ def _run_rebalance_impl(args):
     from core.notifier import Notifier
     from core.cycle_observability import (
         detect_snapshot_gaps_for_account,
+        unreported_snapshot_gaps,
         format_gap_alert,
         record_cycle_event,
     )
@@ -916,6 +917,13 @@ def _run_rebalance_impl(args):
                     now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
                     gaps = detect_snapshot_gaps_for_account(
                         config, live_strategy_name, now,
+                    )
+                    # 이미 알린 결측일은 거른다. 복구 불가능한 과거 결측은 매 사이클
+                    # 다시 감지되므로, 거르지 않으면 같은 하루가 매일 경보를 울려
+                    # 진짜 신호를 덮는다(8/18 결측 하나가 3주간 16건의 warning을 만든
+                    # 것을 2026-08-26 점검에서 확인). 커버리지 집계는 별개로 전체를 본다.
+                    gaps = unreported_snapshot_gaps(
+                        live_strategy_name, gaps, mode=mode,
                     )
                     if gaps:
                         alert = format_gap_alert(name, gaps, today=now)
@@ -1927,6 +1935,48 @@ def run_health_check() -> int:
             None if (not last_dates or any(d is None for d in last_dates))
             else min(last_dates)
         )
+        # 적립 계획 이행 점검 — 적립식 트랙은 입금이 멈추면 '주문 실패 0건'인 채로
+        # 설계가 굴러가지 않는다(잔고가 1주 단위를 못 넘겨 배치율이 수렴 불가).
+        contribution_notes: list[str] = []
+        try:
+            from core.operator_health import summarize_contribution_plan
+            from database.repositories import get_cash_flows
+
+            for name in enabled_baskets:
+                cfg_b = baskets_cfg.get(name) or {}
+                plan = cfg_b.get("contribution_plan")
+                if not plan:
+                    continue
+                key = _rebalance_live_strategy_id(name)
+                flows = get_cash_flows(account_key=key, mode="paper")
+                last_flow = max(
+                    (getattr(f, "occurred_at", None) for f in flows if
+                     getattr(f, "occurred_at", None) is not None), default=None,
+                )
+                # 트랙 개시일 = 이 계정의 첫 스냅샷. 개시 직후에는 아직 적립 시점이
+                # 오지 않았을 수 있으므로 판정에 필요하다.
+                sess = get_session()
+                try:
+                    row = (
+                        sess.query(PortfolioSnapshot.date)
+                        .filter(
+                            PortfolioSnapshot.mode == "paper",
+                            PortfolioSnapshot.account_key == key,
+                        )
+                        .order_by(PortfolioSnapshot.date.asc())
+                        .first()
+                    )
+                finally:
+                    sess.close()
+                first_snap = row[0] if row else None
+                plan_state = summarize_contribution_plan(
+                    name, plan, last_flow, first_snap, date.today(),
+                )
+                if plan_state["note"]:
+                    contribution_notes.append(plan_state["note"])
+        except Exception as plan_exc:
+            logger.debug("적립 계획 점검 생략: {}", plan_exc)
+
         basket_operation = {
             "enabled_baskets": enabled_baskets,
             "last_snapshot_date": oldest_last,
@@ -1935,6 +1985,7 @@ def run_health_check() -> int:
             "deployment_ratio": worst_dep_ratio,
             "design_fraction": worst_design,
             "deployment_tolerance": worst_tolerance,
+            "contribution_notes": contribution_notes,
         }
     except Exception as exc:
         logger.warning("바스켓 운영 상태 조회 실패: {}", exc)

@@ -384,6 +384,18 @@ class BasketRebalancer:
             max_drift = max(abs(d["drift"]) for d in drifts.values()) if drifts else 0
             if max_drift >= threshold:
                 return True, f"최대 드리프트 {max_drift:.1%} >= 임계값 {threshold:.1%}"
+            # 종목별 드리프트가 전부 임계값 아래여도, 그 얇은 미달분의 합이 설계 배치율에서
+            # 크게 벗어나 있으면 리밸런싱이 필요하다. 종목별 트리거만 보면 '현금이 새는'
+            # 상태를 영영 못 본다 — 매도는 min_trade를 넘겨 집행되는데 그 대금을 되돌리는
+            # 매수는 9종목에 얇게 퍼져 전부 미달이라 집행되지 않기 때문이다(2026-08 실측:
+            # 배치율 61.0% → 54.9% 단조 감소, 19거래일간 재투자 0건).
+            gap = self._deployment_gap(prices)
+            band = float(self.rebalance_cfg.get("deployment_band", 0.03))
+            if gap is not None and abs(gap) >= band:
+                return True, (
+                    f"집계 배치율 이탈 {gap:+.1%} (허용 밴드 ±{band:.1%}) — "
+                    f"종목별 드리프트 {max_drift:.1%}는 임계값 미만"
+                )
             return False, f"드리프트 {max_drift:.1%} < 임계값 {threshold:.1%}"
 
         elif trigger == "weekly":
@@ -402,6 +414,30 @@ class BasketRebalancer:
             return False, f"리밸런싱 일 아님 (오늘: {today}, 대상: {day})"
 
         return False, f"알 수 없는 트리거: {trigger}"
+
+    def _deployment_gap(self, prices: dict[str, float] = None) -> float | None:
+        """설계 대비 집계 배치율 격차. 음수면 미달(현금 과다), 양수면 초과.
+
+        총자산 대비 비율로 반환한다(예: -0.05 = 설계보다 5%p 덜 투자된 상태).
+        계산 불가 시 None.
+        """
+        try:
+            prices = prices or self._fetch_current_prices()
+            summary = self.portfolio_mgr.get_portfolio_summary(current_prices=prices)
+            total_value = float(summary.get("total_value", 0) or 0)
+            if total_value <= 0:
+                return None
+            positions = get_all_positions(
+                account_key=self.account_key, mode=self._ledger_mode(),
+            )
+            stock_value = sum(
+                prices.get(p.symbol, p.avg_price) * p.quantity
+                for p in positions if p.symbol in self.holdings
+            )
+            return stock_value / total_value - self._stock_fraction()
+        except Exception as exc:
+            logger.debug("배치율 격차 계산 실패: {}", exc)
+            return None
 
     # ------------------------------------------------------------------
     # 리스크 청산 (손절/익절/트레일링)
@@ -543,6 +579,82 @@ class BasketRebalancer:
                     symbol=symbol, action="SELL", quantity=sell_qty, price=price,
                     reason=f"비중 초과 ({actual_w:.1%} → {target_w:.1%}, {drift:.1%})",
                 ), sell_qty * price))
+
+        # 1-b) 집계 배치율 보충: 종목별 드리프트가 전부 min_trade 미만이라 개별로는 아무것도
+        #      못 사는데, 그 얇은 미달분을 합치면 설계 배치율에서 크게 벗어나 있는 상태를 채운다.
+        #
+        #      이게 없으면 리밸런싱은 현금을 늘리기만 하는 한쪽 방향 래칫이 된다: 비중 초과
+        #      종목은 min_trade를 넘겨 팔리는데(매도 대금 → 현금), 그 현금을 되돌리는 매수는
+        #      9종목에 얇게 퍼져 전부 min_trade 미만이라 영원히 집행되지 않는다.
+        #      실측(2026-08-07~08-26): 8/07 리밸런싱이 현금을 +394,700원 늘린 뒤 19거래일간
+        #      단 한 건도 재투자되지 않아 배치율이 61.0% → 54.9%로 단조 감소했고, 그 사이
+        #      KOSPI는 +8.17% 반등해 유휴 현금이 반등분의 45%를 깎아먹었다.
+        #
+        #      집행 규칙은 하나다: **그 매수가 집계 격차를 실제로 줄일 때만 산다.**
+        #      1주 단위 절사와 min_trade 때문에 딱 맞게 살 수 없으므로, '얼마를 넘기면
+        #      안 된다'는 상한을 따로 두는 대신 매수 후 잔여 격차가 지금보다 작아지는지로
+        #      판정한다 — 항상 목표에 가까워지고, 과다 매수는 자동으로 걸러진다.
+        stock_value = sum(
+            prices.get(p.symbol, p.avg_price) * p.quantity
+            for p in positions if p.symbol in targets
+        )
+        shortfall = investable - stock_value
+        band = float(self.rebalance_cfg.get("deployment_band", 0.03)) * total_value
+        already = {o.symbol for o, _ in candidates}
+        if shortfall > band:
+            logger.info(
+                "바스켓 '{}' 집계 배치율 미달 {:,.0f}원 (실제 {:.1%} vs 설계 {:.1%}) — "
+                "격차를 줄이는 보충 매수만 집행",
+                self.basket_name, shortfall,
+                stock_value / total_value if total_value else 0,
+                self._stock_fraction(),
+            )
+            remaining = shortfall
+            drift_limit = float(self.rebalance_cfg.get("drift_threshold", 0.05))
+            topups: list[tuple[float, float, str, int, float]] = []
+            for symbol, target_w in targets.items():
+                if symbol in already or symbol in cooldown:
+                    continue
+                price = prices.get(symbol, 0)
+                if price <= 0:
+                    continue
+                if investable * (target_w - actuals.get(symbol, 0.0)) <= 0:
+                    continue  # 이미 목표 이상 보유 — 보충 대상 아님
+                # min_trade를 넘기는 최소 수량(정수주). 이보다 적게 사면 집행되지 않는다.
+                qty = max(1, int(min_trade // price) + (1 if min_trade % price else 0))
+                notional = qty * price
+                residual = abs(remaining - notional)
+                if residual >= abs(remaining):
+                    continue  # 격차를 줄이지 못함(과다 매수) — 건너뛴다
+                # 집계 격차만 보고 사면 개별 종목이 자기 목표를 크게 넘어설 수 있다
+                # (1주 단가가 총자산에 비해 클수록 심하다). 집계를 맞추자고 구성이
+                # 무너지면 다음 사이클이 그걸 다시 팔아 왕복매매가 된다 — 종목 드리프트
+                # 임계값 안에 들어오는 매수만 허용한다. 어느 종목도 통과 못 하면 주문
+                # 없이 두고, 배치율 미달은 헬스 경보로 드러난다(자본 부족 신호).
+                projected_w = (
+                    (investable * actuals.get(symbol, 0.0) + notional) / investable
+                    if investable > 0 else 1.0
+                )
+                if projected_w > target_w + drift_limit:
+                    logger.debug(
+                        "종목 {} 보충 보류: 매수 후 비중 {:.1%} > 목표 {:.1%} + 허용 {:.1%}",
+                        symbol, projected_w, target_w, drift_limit,
+                    )
+                    continue
+                topups.append((residual, notional, symbol, qty, price))
+            # 잔여 격차를 가장 많이 줄이는 순서로 집행한다(1주 단가가 낮을수록 정밀).
+            topups.sort()
+            for _residual, notional, symbol, qty, price in topups:
+                if abs(remaining - notional) >= abs(remaining):
+                    continue  # 앞선 체결로 격차가 줄어 더는 개선이 아님
+                candidates.append((RebalanceOrder(
+                    symbol=symbol, action="BUY", quantity=qty, price=price,
+                    reason=(
+                        f"배치율 보충 (집계 {stock_value / total_value:.1%} → "
+                        f"설계 {self._stock_fraction():.1%})"
+                    ),
+                ), notional))
+                remaining -= notional
 
         # 2) SELL을 먼저(현금 확보) 두고 거래액 큰 순으로 정렬해 회전율 예산 우선권을 준다.
         #    (기존엔 dict 순서대로라 BUY가 예산을 먼저 소진해 자금원 SELL이 누락될 수 있었다.)

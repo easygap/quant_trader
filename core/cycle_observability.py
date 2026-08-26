@@ -63,6 +63,47 @@ def format_gap_alert(basket_name: str, gaps: list[Any], *, today: Any = None) ->
     return f"{head}: {shown}{more}{tail}"
 
 
+def unreported_snapshot_gaps(
+    account_key: str,
+    gaps: list,
+    mode: str = "paper",
+) -> list:
+    """이미 경보를 남긴 결측일을 걸러 아직 알리지 않은 것만 반환한다.
+
+    복구 불가능한 과거 결측은 매 사이클 다시 감지되므로, 거르지 않으면 같은 하루가
+    영원히 매일 경보를 울린다 — 실측(2026-08-26 점검): 8/18 결측 하나가 3주간 16건의
+    warning을 만들어 다른 신호를 덮었다. 경보의 가치는 '새로운 사실'에 있으므로 결측일
+    기준으로 1회만 알린다(승격 게이트의 커버리지 집계는 별개로 항상 전체를 본다).
+
+    조회 실패 시에는 걸러내지 않고 원본을 그대로 돌려준다 — 관측 실패로 경보가 조용히
+    사라지는 것보다 중복이 낫다.
+    """
+    if not gaps:
+        return []
+    try:
+        from database.models import OperationEvent, get_session
+
+        session = get_session()
+        try:
+            rows = (
+                session.query(OperationEvent.message)
+                .filter(
+                    OperationEvent.event_type == "SNAPSHOT_GAP",
+                    OperationEvent.strategy == account_key,
+                    OperationEvent.mode == mode,
+                )
+                .all()
+            )
+        finally:
+            session.close()
+        reported = " ".join(str(r[0] or "") for r in rows)
+    except Exception as exc:  # pragma: no cover - 관측 실패는 경보를 막지 않는다
+        logger.debug("결측 경보 중복 판정 실패 — 원본 그대로 사용: {}", exc)
+        return list(gaps)
+
+    return [g for g in gaps if _as_date(g).isoformat() not in reported]
+
+
 def detect_snapshot_gaps_for_account(
     config: Any,
     account_key: str,
