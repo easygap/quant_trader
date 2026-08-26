@@ -1948,10 +1948,11 @@ def run_health_check() -> int:
                 if not plan:
                     continue
                 key = _rebalance_live_strategy_id(name)
+                # get_cash_flows는 (occurred_at, amount) 튜플 목록을 준다 — 객체가
+                # 아니다. getattr로 읽으면 항상 None이 잡혀 '입금 0건'으로 오판한다.
                 flows = get_cash_flows(account_key=key, mode="paper")
                 last_flow = max(
-                    (getattr(f, "occurred_at", None) for f in flows if
-                     getattr(f, "occurred_at", None) is not None), default=None,
+                    (f[0] for f in flows if f and f[0] is not None), default=None,
                 )
                 # 트랙 개시일 = 이 계정의 첫 스냅샷. 개시 직후에는 아직 적립 시점이
                 # 오지 않았을 수 있으므로 판정에 필요하다.
