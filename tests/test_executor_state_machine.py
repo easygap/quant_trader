@@ -215,6 +215,15 @@ class TestExecutorUsesStateMachine:
         executor.mode = "live"
         executor.live_gate_validated = True
         executor.kis_api = kis_api
+        # 이 클래스가 검증하는 건 주문 상태기계(ACK/체결확인/reconcile)이지 실계좌
+        # kill switch가 아니다. 실계좌 판정을 인스턴스 단위로 못박아 그 분기를
+        # 결정론적으로 비켜 간다(공유 Config 싱글톤은 건드리지 않는다).
+        #
+        # 종전에는 이걸 명시하지 않아 로컬 config/settings.yaml(git 미추적)의
+        # use_mock: true에 얹혀 통과했다. CI에는 그 파일이 없어 _is_real_money_live()가
+        # True가 되고 ENABLE_LIVE_TRADING kill switch에 9건이 막혔다 — 즉 이 테스트들은
+        # CI에서 한 번도 실제로 검증된 적이 없었다. 환경에 기대지 않고 스스로 선언한다.
+        executor._is_real_money_live = lambda: False
         executor.trading_hours = SimpleNamespace(
             can_place_order=lambda *a, **kw: {"allowed": True, "reason": ""}
         )
