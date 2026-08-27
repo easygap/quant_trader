@@ -156,3 +156,59 @@ def test_zero_variance_series_has_no_sharpe():
     m = risk_metrics([0.0, 0.0, 0.0])
     assert m["vol_annual_pct"] == pytest.approx(0.0)
     assert m["sharpe_annual"] is None
+
+
+class TestDepositNeutralisationWiring:
+    """입금 중화는 함수만 지원해선 안 되고 호출부가 실제로 넘겨야 한다.
+
+    2026-08-27 실측 버그: performance_lens는 flows 인자를 지원하는데 주간 리포트가
+    안 넘겨서, 전날 kr_pocket 적립 10만원이 그날 +35% 수익으로 잡혔다.
+    NAV 284,499 → 385,460. 그 결과 연환산 변동성 109%, 샤프 +2.28이 보고됐다
+    (유입 중화 후 실제는 29.5%, -1.18). 적립식 트랙은 이 경로가 상시다.
+    """
+
+    def test_flow_helper_groups_by_day(self, monkeypatch):
+        import main
+
+        monkeypatch.setattr(
+            "database.repositories.get_cash_flows",
+            lambda account_key, mode="paper": [
+                (datetime(2026, 8, 26, 17, 19), 100000.0),
+                (datetime(2026, 8, 26, 18, 0), 50000.0),
+                (datetime(2026, 9, 1, 9, 0), 100000.0),
+            ],
+        )
+        flows = main.account_flows_by_day("acct")
+        assert flows == {date(2026, 8, 26): 150000.0, date(2026, 9, 1): 100000.0}
+
+    def test_no_flows_is_empty(self, monkeypatch):
+        import main
+
+        monkeypatch.setattr(
+            "database.repositories.get_cash_flows",
+            lambda account_key, mode="paper": [],
+        )
+        assert main.account_flows_by_day("acct") == {}
+
+    def test_deposit_day_is_not_a_return(self):
+        """실측 수치로 고정 — 중화하면 0%, 안 하면 +35%."""
+        nav = [(date(2026, 8, 25), 280718.0), (date(2026, 8, 26), 385460.0)]
+        flows = {date(2026, 8, 26): 100000.0}
+
+        with_flow = daily_returns_from_nav(nav, flows=flows)[0][1]
+        without = daily_returns_from_nav(nav)[0][1]
+
+        assert without > 30, "중화 없이는 입금이 큰 수익으로 잡힌다(버그 재현)"
+        assert abs(with_flow) < 2.0, f"중화 후에도 {with_flow:.1f}% — 입금이 수익에 남았다"
+
+    def test_volatility_is_not_inflated_by_a_deposit(self):
+        """입금 하루가 변동성을 통째로 왜곡하지 않는지."""
+        base = [(date(2026, 8, 1 + i), 280000.0 + i * 500) for i in range(10)]
+        nav = base + [(date(2026, 8, 11), 380000.0)]   # 마지막 날 10만원 입금
+        flows = {date(2026, 8, 11): 100000.0}
+
+        inflated = risk_metrics([r for _, r in daily_returns_from_nav(nav)])
+        correct = risk_metrics([r for _, r in daily_returns_from_nav(nav, flows=flows)])
+
+        assert inflated["vol_annual_pct"] > correct["vol_annual_pct"] * 3
+        assert correct["vol_annual_pct"] < 30
