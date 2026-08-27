@@ -855,9 +855,16 @@ class TestPilotSchedulerIntegration:
 class TestPilotEvidenceFreshness:
 
     def test_business_day_freshness_ignores_weekends_and_holidays(self, evidence_dir, runtime_dir, fresh_db):
-        """긴 주말/휴장일은 stale 영업일 수에 포함하지 않는다."""
+        """긴 주말/휴장일은 stale 영업일 수에 포함하지 않는다.
+
+        2026-02-13(금) 이후 16~18일이 설 연휴라 다음 거래일은 19일이다. 달력이 이
+        연휴를 모르면 stale 일수가 3일이 아니라 6일로 잡혀 pilot이 막힌다.
+        (종전에는 1/26→2/3 구간을 썼는데, 1/27~29를 연휴로 가정한 것이었다. 그 날들은
+        실제로 개장했고 — 2025년 설 날짜가 달력에 잘못 들어가 있었다 — 2026-08-26에
+        시장 데이터와 대조해 바로잡았다.)
+        """
         _seed_v2(evidence_dir, PILOT_STRATEGY, [
-            {"date": "2026-01-26", "benchmark_status": "final"},
+            {"date": "2026-02-13", "benchmark_status": "final"},
         ])
 
         from core.paper_pilot import enable_pilot, check_pilot_entry, compute_launch_readiness
@@ -866,8 +873,8 @@ class TestPilotEvidenceFreshness:
 
         enable_pilot(PILOT_STRATEGY, "2026-01-01", "2026-02-28")
 
-        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-02-03")
-        readiness = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-02-03")
+        result = check_pilot_entry(PILOT_STRATEGY, as_of_date="2026-02-23")
+        readiness = compute_launch_readiness(PILOT_STRATEGY, as_of_date="2026-02-23")
 
         assert result.allowed is True
         assert readiness["evidence_fresh"] is True

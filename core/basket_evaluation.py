@@ -40,6 +40,7 @@ def evaluate_basket_paper_operation(
     trading_days_total: int,
     snapshot_days: int,
     pending_failed_orders: int,
+    reconstructed_days: int = 0,
     total_costs: float,
     initial_capital: float,
     nav_return_pct: float | None = None,
@@ -55,6 +56,8 @@ def evaluate_basket_paper_operation(
     """
     trading_days_total = max(int(trading_days_total), 0)
     snapshot_days = max(int(snapshot_days), 0)
+    reconstructed_days = max(0, min(int(reconstructed_days), snapshot_days))
+    measured_days = snapshot_days - reconstructed_days
     issues: list[str] = []
 
     # A. 운영 무결성
@@ -92,6 +95,11 @@ def evaluate_basket_paper_operation(
         "today": str(today),
         "progress_days": trading_days_total,
         "snapshot_days": snapshot_days,
+        "reconstructed_days": reconstructed_days,
+        "measured_days": measured_days,
+        "measured_coverage": round(
+            (measured_days / trading_days_total) if trading_days_total > 0 else 0.0, 4
+        ),
         "min_trading_days": min_trading_days,
         "progress_pct": min(1.0, trading_days_total / min_trading_days) if min_trading_days > 0 else 1.0,
         "snapshot_coverage": round(coverage, 4),
@@ -122,7 +130,12 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
             f" {result['progress_pct']:.0%})" if result["verdict"] == "WAIT" else ""
         ),
         f"  운영 기간: {result['operation_start']} ~ {result['today']}",
-        f"  스냅샷 커버리지: {result['snapshot_coverage']:.0%}",
+        f"  스냅샷 커버리지: {result['snapshot_coverage']:.0%}"
+        + (
+            f" (실측 {result['measured_days']}일 {result['measured_coverage']:.0%}"
+            f" + 사후 복원 {result['reconstructed_days']}일)"
+            if result.get("reconstructed_days") else ""
+        ),
         f"  비용 드래그: 누적 {result['cost_drag_cum']:.4%} | 연환산 {result['cost_drag_annualized']:.4%}"
         + (
             " (기간 미충족 — 초기 매입 일회성 비용이 과장되므로 판정 미적용)"
@@ -414,8 +427,14 @@ def collect_basket_paper_evaluation(
 
     th = TradingHours(config)
     snapshot_dates = {_d(s.date) for s in snaps}
+    # 사후 복원(reconstructed)된 날은 따로 센다. 커버리지 95% 게이트는 '시스템이 실제로
+    # 돌았는가'를 보는 장치라, 보정분이 실측인 척하면 게이트가 목적을 잃는다.
+    reconstructed_dates = {
+        _d(s.date) for s in snaps if bool(getattr(s, "reconstructed", False))
+    }
     trading_days_total = 0
     snapshot_days = 0
+    reconstructed_days = 0
     d = operation_start
     while d <= today:
         if th.is_trading_day(datetime(d.year, d.month, d.day)):
@@ -426,6 +445,8 @@ def collect_basket_paper_evaluation(
             trading_days_total += 1
             if d in snapshot_dates:
                 snapshot_days += 1
+                if d in reconstructed_dates:
+                    reconstructed_days += 1
         d += timedelta(days=1)
 
     total_costs = sum(
@@ -487,6 +508,7 @@ def collect_basket_paper_evaluation(
         today=today,
         trading_days_total=trading_days_total,
         snapshot_days=snapshot_days,
+        reconstructed_days=reconstructed_days,
         # dead-letter도 이 바스켓 계정 것만 집계 — 다른 전략의 잔여 실패 주문이
         # 바스켓 승격을 막는 오판 방지(바스켓 자신의 실패는 여전히 fail-closed).
         pending_failed_orders=len(get_pending_failed_orders(account_key=basket_key) or []),

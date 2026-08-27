@@ -170,6 +170,11 @@ class PortfolioSnapshot(Base):
     mdd = Column(Float)                                         # 현재 MDD (%)
     peak_value = Column(Float)                                   # 역대 최고 평가금 (MDD 기준점, 재시작 시 복구용)
     position_count = Column(Integer, default=0)                 # 보유 종목 수
+    # 이 행이 사이클 실행으로 실측된 것이 아니라, 사후에 원장 재생 + 과거 시세로
+    # 재구성된 것인지. 결측일을 메우되 '실측'과 섞이지 않게 구분한다 — 커버리지 95%
+    # 게이트는 '시스템이 실제로 돌았는가'를 보는 장치라, 보정분이 실측인 척하면
+    # 게이트가 목적을 잃는다. 평가 출력이 이 값으로 실측/보정을 나눠 표기한다.
+    reconstructed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
@@ -518,6 +523,36 @@ def _migrate_trade_history_slippage_columns(engine):
                 else:
                     conn.rollback()
                     raise
+
+
+def _migrate_snapshot_reconstructed_column(engine):
+    """기존 DB에 portfolio_snapshots.reconstructed 컬럼 추가.
+
+    결측일 보정 스냅샷을 실측과 구분하기 위한 표시. 없으면 보정분이 실측처럼 보여
+    커버리지 게이트가 '시스템이 돌았는가'를 더 이상 검증하지 못한다.
+    """
+    from sqlalchemy import text
+    dialect = engine.url.get_dialect().name
+    col_type = "BOOLEAN" if dialect == "sqlite" else "BOOLEAN"
+    with engine.connect() as conn:
+        try:
+            if dialect == "sqlite":
+                r = conn.execute(text("PRAGMA table_info(portfolio_snapshots)"))
+                if any(row[1] == "reconstructed" for row in r.fetchall()):
+                    return
+                conn.execute(text(
+                    f"ALTER TABLE portfolio_snapshots ADD COLUMN reconstructed {col_type} DEFAULT 0"
+                ))
+            else:
+                conn.execute(text(
+                    "ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS "
+                    f"reconstructed {col_type} DEFAULT FALSE"
+                ))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            if not ("duplicate column" in str(e).lower() or "already exists" in str(e).lower()):
+                raise
 
 
 def _migrate_trade_history_signal_columns(engine):
@@ -1107,6 +1142,10 @@ def init_database():
     _migrate_snapshot_unique_constraint(engine)
     try:
         _migrate_trade_history_slippage_columns(engine)
+    except Exception:
+        pass
+    try:
+        _migrate_snapshot_reconstructed_column(engine)
     except Exception:
         pass
     try:

@@ -34,6 +34,11 @@
 import os
 import sys
 import argparse
+
+# 결측 스냅샷 자동 보충의 소급 한도(달력일). 짧게 잡는다 — 며칠짜리 사고는 메우되
+# 장기 중단은 공백으로 남겨 드러나야 한다. 보충이 무제한이면 '시스템이 실제로
+# 돌았는가'를 보는 커버리지 게이트가 목적을 잃는다.
+BACKFILL_LOOKBACK_DAYS = 10
 from pathlib import Path
 
 # 프로젝트 루트를 경로에 추가
@@ -677,6 +682,7 @@ def run_rebalance(args):
 def _run_rebalance_impl(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from datetime import datetime
+    from datetime import timedelta
     from zoneinfo import ZoneInfo
     from core.basket_rebalancer import BasketRebalancer
     from core.notifier import Notifier
@@ -800,6 +806,44 @@ def _run_rebalance_impl(args):
                     ))
                 except Exception as guard_exc:
                     logger.debug("바스켓 '{}' 당일 체결 판정 실패(가드 생략): {}", name, guard_exc)
+
+            # 최근 결측 스냅샷 자동 보충 — 매매보다 먼저. 매매를 먼저 하면 원장이
+            # 바뀌어 과거 날짜 재구성이 헷갈릴 여지가 생긴다(재생 자체는 시각 기준이라
+            # 정확하지만, 순서를 고정해 두는 편이 읽기 쉽다).
+            #
+            # 왜 필요한가: _nav_attribution_date가 '오늘이 거래일이면 오늘'로 귀속하므로
+            # 어제 사이클이 안 돌면 그 하루는 영원히 빈다. 실제로 2026-08-18 결측이
+            # 8/19~8/26 내내 그대로 남아 커버리지를 승격 기준(95%) 아래로 끌어내렸다.
+            # 복원분은 reconstructed=True로 표시돼 평가가 실측과 나눠 표기한다.
+            if not dry_run:
+                try:
+                    from core.snapshot_backfill import backfill_account
+
+                    _cap = (baskets_cfg.get(name) or {}).get("initial_capital")
+                    _today = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None).date()
+                    filled = backfill_account(
+                        config,
+                        live_strategy_name,
+                        float(_cap) if _cap is not None else float(
+                            (config.risk_params.get("position_sizing") or {})
+                            .get("initial_capital", 10_000_000)
+                        ),
+                        _today - timedelta(days=BACKFILL_LOOKBACK_DAYS),
+                        _today - timedelta(days=1),   # 오늘은 아래 스냅샷 단계가 찍는다
+                        mode=mode,
+                    )
+                    if filled:
+                        msg = (
+                            f"바스켓 '{name}' 결측 스냅샷 {len(filled)}일 복원: "
+                            + ", ".join(str(f["date"]) for f in filled[:5])
+                        )
+                        logger.warning(msg)
+                        record_cycle_event(
+                            "SNAPSHOT_BACKFILLED", msg, severity="warning",
+                            strategy=live_strategy_name, mode=mode,
+                        )
+                except Exception as bf_exc:
+                    logger.warning("바스켓 '{}' 결측 보충 생략: {}", name, bf_exc)
 
             # 리스크 청산(손절/익절/트레일링)을 리밸런싱보다 먼저 평가한다.
             # 그동안 이 사이클은 비중 교정만 했고 손절/익절은 장중 스케줄러
