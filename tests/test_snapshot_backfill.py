@@ -210,11 +210,31 @@ class TestTradingCalendar:
         """검증 도구가 불일치를 실제로 잡아내는가(달력이 맞아도 로직은 살아 있어야)."""
         import tools.verify_trading_calendar as v
 
-        # 시장은 6/1만 열렸다고 가정 — 나머지 평일은 전부 wrong_open이어야 한다
-        monkeypatch.setattr(v, "market_open_days", lambda s, e, symbol=None: {date(2026, 6, 1)})
-        r = v.compare(date(2026, 6, 1), date(2026, 6, 5))
-        assert date(2026, 6, 1) not in r["wrong_open"]
-        assert date(2026, 6, 2) in r["wrong_open"]
+        # 6/8·6/10만 열렸다고 가정하면 그 사이 평일 6/9가 wrong_open으로 잡혀야 한다.
+        # (6/3은 실제 휴장일로 등록돼 있어 대조 대상에서 제외 — 순수 로직만 본다)
+        monkeypatch.setattr(
+            v, "market_open_days",
+            lambda s, e, symbol=None: {date(2026, 6, 8), date(2026, 6, 10)},
+        )
+        r = v.compare(date(2026, 6, 8), date(2026, 6, 12))
+        assert date(2026, 6, 9) in r["wrong_open"]
+        assert date(2026, 6, 8) not in r["wrong_open"]
+        assert date(2026, 6, 10) not in r["wrong_open"]
+
+    def test_verifier_ignores_days_beyond_last_known_bar(self, monkeypatch):
+        """데이터가 아직 안 올라온 최근 날은 '휴장'이 아니라 '모름'이다.
+
+        장중에 돌리면 오늘 봉이 없어서 오늘이 휴장으로 오판됐다(실제 오탐).
+        """
+        import tools.verify_trading_calendar as v
+
+        monkeypatch.setattr(
+            v, "market_open_days",
+            lambda s, e, symbol=None: {date(2026, 6, 1), date(2026, 6, 2)},
+        )
+        r = v.compare(date(2026, 6, 1), date(2026, 6, 30))
+        assert r["verified_through"] == date(2026, 6, 2)
+        assert r["wrong_open"] == [], "데이터 없는 미래 날짜를 휴장 오류로 보고했다"
 
     def test_verifier_does_not_report_when_data_unavailable(self, monkeypatch):
         """데이터 소스 장애를 달력 오류로 둔갑시키지 않는다."""

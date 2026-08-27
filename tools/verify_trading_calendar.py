@@ -60,6 +60,13 @@ def compare(start: date, end: date) -> dict:
     if opened is None:
         return {"error": "시장 데이터를 가져오지 못해 대조 불가", "wrong_open": [], "wrong_closed": []}
 
+    # 데이터가 아직 안 올라온 최근 날은 '휴장'이 아니라 '모름'이다. 장중에 돌리면
+    # 오늘 봉이 없어서 오늘이 휴장으로 오판된다 — 확인 범위를 지수의 마지막 봉까지로
+    # 자른다. 없는 사실을 오류로 보고하지 않는 게 이 도구의 존재 이유다.
+    last_known = max(opened)
+    if end > last_known:
+        end = last_known
+
     th = TradingHours(Config.get())
     wrong_open: list[date] = []
     wrong_closed: list[date] = []
@@ -77,7 +84,12 @@ def compare(start: date, end: date) -> dict:
                 wrong_closed.append(d)
         d += timedelta(days=1)
 
-    return {"wrong_open": wrong_open, "wrong_closed": wrong_closed, "checked": checked}
+    return {
+        "wrong_open": wrong_open,
+        "wrong_closed": wrong_closed,
+        "checked": checked,
+        "verified_through": end,
+    }
 
 
 def main() -> int:
@@ -96,7 +108,8 @@ def main() -> int:
         return 0  # 데이터 소스 장애를 달력 오류로 보고하지 않는다
 
     wo, wc = result["wrong_open"], result["wrong_closed"]
-    print(f"  평일 {result['checked']}일 확인")
+    through = result.get("verified_through")
+    print(f"  평일 {result['checked']}일 확인 (~{through} 까지 — 지수 마지막 봉 기준)")
 
     if wo:
         print(f"\n  ❌ 거래일로 판정했지만 실제 휴장 ({len(wo)}일) — 커버리지 분모 과대")
