@@ -2061,6 +2061,30 @@ def run_health_check() -> int:
     return {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}.get(health["verdict"], 1)
 
 
+def account_flows_by_day(account_key: str, mode: str = "paper") -> dict:
+    """계정의 외부 현금흐름을 {날짜: 그날 순유입}으로 모은다.
+
+    성과 지표(변동성·샤프·국면 분해)는 이 값을 분모에서 중화해야 한다. 안 넘기면
+    적립 하루가 통째로 수익률로 잡힌다 — 2026-08-26 kr_pocket에 10만원을 넣자 NAV가
+    284,499 → 385,460이 되면서 그날이 +35% 수익으로 계산돼 연환산 변동성 109%,
+    샤프 +2.28이라는 허구가 나왔다(실제로는 29.5%, -1.18). 적립식 트랙은 이 경로가
+    상시라 한 번 새면 계속 샌다.
+
+    get_cash_flows는 (occurred_at, amount) 튜플 목록을 준다 — 객체가 아니다.
+    조회 실패 시 빈 dict(중화 없음)로 폴백하지 않고 예외를 올린다: 조용히 중화를
+    건너뛰면 지표가 틀린 채로 보고된다.
+    """
+    from database.repositories import get_cash_flows
+
+    out: dict = {}
+    for occurred_at, amount in get_cash_flows(account_key=account_key, mode=mode):
+        if occurred_at is None:
+            continue
+        day = occurred_at.date() if hasattr(occurred_at, "date") else occurred_at
+        out[day] = out.get(day, 0.0) + float(amount or 0)
+    return out
+
+
 def _fetch_benchmark_closes(start, end) -> dict:
     """벤치마크(KS11) 종가를 {date: close}로. 실패하면 빈 dict.
 
@@ -2197,7 +2221,14 @@ def run_weekly_report() -> int:
                 # 그 열은 2026-08-10 이전 전 구간이 0.0이라(값을 안 넘기던 버그)
                 # 그대로 쓰면 변동성이 0으로 깔려 없는 안정성을 주장하게 된다.
                 nav_points = [(s.date, s.total_value) for s in snaps]
-                daily = daily_returns_from_nav(nav_points)
+                # 입금은 수익이 아니다 — 날짜별 유입을 넘겨 분모에서 중화한다.
+                # 안 넘기면 적립 하루가 통째로 수익률로 잡힌다: 2026-08-26 kr_pocket에
+                # 10만원을 넣자 NAV가 284,499 → 385,460이 되면서 그날이 +35% 수익으로
+                # 계산돼 연환산 변동성 109%, 샤프 +2.28이라는 허구가 나왔다.
+                # 적립식 트랙은 이 경로가 상시라 한 번 새면 계속 샌다.
+                flows = account_flows_by_day(key, mode="paper")
+
+                daily = daily_returns_from_nav(nav_points, flows=flows)
                 risk = risk_metrics([r for _, r in daily])
                 if len(nav_points) >= 2:
                     closes = _fetch_benchmark_closes(
@@ -2205,7 +2236,8 @@ def run_weekly_report() -> int:
                     )
                     if closes:
                         pairs = [
-                            (m, b) for _d, m, b in aligned_returns(nav_points, closes)
+                            (m, b)
+                            for _d, m, b in aligned_returns(nav_points, closes, flows=flows)
                         ]
                         if pairs:
                             regime = split_by_regime(pairs)
