@@ -784,6 +784,7 @@ def save_portfolio_snapshot(
     peak_value: float = None,
     snapshot_date: datetime = None,
     mode: str = "paper",
+    reconstructed: bool = False,
 ):
     """일일 포트폴리오 스냅샷 저장 (mode+account_key 장부별 격리).
 
@@ -810,6 +811,7 @@ def save_portfolio_snapshot(
             mdd=mdd,
             peak_value=peak_value,
             position_count=position_count,
+            reconstructed=bool(reconstructed),
         )
         # merge by (mode, account_key, date)
         existing = session.query(PortfolioSnapshot).filter(
@@ -826,6 +828,10 @@ def save_portfolio_snapshot(
             existing.mdd = mdd
             existing.peak_value = peak_value
             existing.position_count = position_count
+            # 실측이 나중에 들어오면 보정 표시를 걷어낸다(실측이 항상 우선).
+            # 반대로 복원이 실측 행을 보정으로 덮어쓰지는 않는다.
+            if not reconstructed:
+                existing.reconstructed = False
             # created_at은 '이 값이 마지막으로 측정된 시각'이다 — TWR 체인의 유입 경계가
             # 이 시각을 쓰므로, 같은 날 재실행(upsert) 때 갱신하지 않으면 재실행 전에
             # 반영된 입금이 다음 날 구간에 이중 산입돼 수익률이 영구 왜곡된다(적대적 리뷰 HIGH).

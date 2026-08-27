@@ -8444,12 +8444,14 @@ def test_recommend_pilot_caps_matches_target_weight_plan(monkeypatch):
     assert rec["suggested_preview"]["allowed"] is True
     assert rec["valid_from"] == "2026-04-10"
     # 2026-05-25(부처님오신날 대체휴일) 반영으로 60영업일 만기가 1영업일 밀림
-    assert rec["valid_to"] == "2026-07-06"
+    # 2026-08-26 달력 교정으로 05-01(근로자의날)·06-03(지방선거)이 휴장일로 추가돼
+    # 영업일 창이 이틀 뒤로 밀렸다(07-06 → 07-08). 로직 변경이 아니라 달력 정정 결과다.
+    assert rec["valid_to"] == "2026-07-08"
     assert rec["target_pilot_days"] == 60
     assert "YYYY-MM-DD" not in rec["enable_command"]
     assert "\n" not in rec["enable_command"]
     assert "\\" not in rec["enable_command"]
-    assert "--from 2026-04-10 --to 2026-07-06" in rec["enable_command"]
+    assert "--from 2026-04-10 --to 2026-07-08" in rec["enable_command"]
     assert "--max-orders 3 --max-positions 3" in rec["enable_command"]
     assert "--max-notional 1260000 --max-exposure 3360000" in rec["enable_command"]
 
