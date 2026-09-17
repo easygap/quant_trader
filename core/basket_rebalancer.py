@@ -143,17 +143,131 @@ class BasketRebalancer:
         tsw = self.basket.get("target_stock_weight")
         self._target_stock_weight = float(tsw) if tsw is not None else None
 
+        # 리스크 오버레이(추세 필터·낙폭 제어·변동성 목표): 설계 주식 비중에 곱할 배수.
+        # 판단은 인스턴스당 한 번만 계산해 plan→execute 한 사이클 안에서 같은 값을 쓴다.
+        from core.risk_overlays import parse_overlay_config
+        self._overlay_cfg = parse_overlay_config(self.basket)
+        self._overlay_decision = None
+
         logger.info(
-            "BasketRebalancer 초기화: {} ({}종목, trigger={}, target_stock_weight={})",
+            "BasketRebalancer 초기화: {} ({}종목, trigger={}, target_stock_weight={}, overlays={})",
             basket_name, len(self.holdings), self.rebalance_cfg.get("trigger", "drift"),
             self._target_stock_weight if self._target_stock_weight is not None else "기본",
+            "on" if self._overlay_cfg.any_enabled else "off",
         )
 
-    def _stock_fraction(self) -> float:
-        """총자산 중 주식에 배정할 비중 — 규칙은 effective_stock_fraction 한 곳에만 둔다
+    def base_stock_fraction(self) -> float:
+        """설계 주식 비중(오버레이 적용 전) — 규칙은 effective_stock_fraction 한 곳에만 둔다
         (리밸런서·평가·헬스가 각자 계산하면 '설계 비중'이 서로 어긋난다)."""
         from core.basket_deploy import effective_stock_fraction
         return effective_stock_fraction(self.basket, self._risk_params)
+
+    def _stock_fraction(self) -> float:
+        """총자산 중 주식에 배정할 비중 = 설계 비중 × 리스크 오버레이 배수.
+
+        오버레이는 설계를 대체하지 않고 위임한다(설계 60% × 배수 0.5 = 목표 30%).
+        배치 진단·트리거·주문 계획이 전부 이 값을 쓰므로, 오버레이가 비중을 줄인 날
+        '현금 래칫' 감시가 설계 비중을 향해 되사는 일은 생기지 않는다.
+        """
+        return self.base_stock_fraction() * self._overlay_scale()
+
+    def _overlay_scale(self) -> float:
+        decision = self.overlay_decision()
+        return float(decision.scale) if decision is not None else 1.0
+
+    def overlay_decision(self):
+        """오버레이 판단(인스턴스당 1회 계산·캐시). 켜진 오버레이가 없으면 None.
+
+        - 추세 필터: 지수 종가는 전일까지만 쓴다(장중 미확정 봉 제외).
+        - 낙폭 제어·변동성 목표: 이 바스켓 계정의 NAV 스냅샷(시간가중 누적수익률)으로 잰다.
+        - 데이터가 없으면 직전 상태를 유지하고 data_issues에 남긴다(헬스가 표면화).
+        - 판단은 상태 파일로 이어져 다음 실행의 히스테리시스 입력이 된다.
+        """
+        from core.risk_overlays import compute_decision, load_overlay_state, parse_overlay_config, save_overlay_state
+
+        # __init__을 거치지 않고 만든 인스턴스(일부 테스트의 object.__new__ 경로)도 설정에서 복원한다.
+        if getattr(self, "_overlay_cfg", None) is None:
+            self._overlay_cfg = parse_overlay_config(getattr(self, "basket", None) or {})
+            self._overlay_decision = None
+        if not self._overlay_cfg.any_enabled:
+            return None
+        if getattr(self, "_overlay_decision", None) is not None:
+            return self._overlay_decision
+
+        prev = load_overlay_state(self.basket_name)
+        index_closes = None
+        if self._overlay_cfg.trend.enabled:
+            index_closes = self._fetch_index_closes(
+                self._overlay_cfg.trend.index_symbol, self._overlay_cfg.trend.ma_days,
+            )
+        cumulative = None
+        daily = None
+        if self._overlay_cfg.drawdown.enabled or self._overlay_cfg.volatility.enabled:
+            cumulative, daily = self._nav_series_for_overlay()
+        decision = compute_decision(
+            self._overlay_cfg,
+            index_closes=index_closes,
+            cumulative_returns_pct=cumulative,
+            daily_returns=daily,
+            prev_state=prev,
+        )
+        try:
+            save_overlay_state(self.basket_name, decision)
+        except OSError as exc:
+            logger.warning("바스켓 '{}' 오버레이 상태 저장 실패: {}", self.basket_name, exc)
+        if decision.data_issues:
+            logger.warning("바스켓 '{}' 오버레이 데이터 문제: {}", self.basket_name, "; ".join(decision.data_issues))
+        if decision.reasons:
+            logger.info("바스켓 '{}' 리스크 오버레이 발동: {} (배수 {})", self.basket_name, " · ".join(decision.reasons), decision.scale)
+        else:
+            logger.info("바스켓 '{}' 리스크 오버레이 발동 없음 (배수 1.0)", self.basket_name)
+        self._overlay_decision = decision
+        return decision
+
+    def _fetch_index_closes(self, symbol: str, ma_days: int) -> list[float] | None:
+        """추세 판단용 지수 종가(오래된 순). 오늘 날짜 봉은 제외 — 전일까지의 정보만."""
+        start, end = self._recent_range(int(ma_days * 1.7) + 30)
+        try:
+            df = self.data_collector.fetch_korean_stock(symbol, start, end)
+        except Exception as exc:
+            logger.warning("오버레이 지수 조회 실패 {}: {}", symbol, exc)
+            return None
+        if df is None or df.empty or "close" not in df.columns:
+            return None
+        frame = df.copy()
+        today = datetime.now(_KST).date()
+        dates = None
+        if "date" in frame.columns:
+            dates = frame["date"]
+        elif hasattr(frame.index, "date"):
+            dates = frame.index.to_series()
+        if dates is not None:
+            try:
+                import pandas as pd
+                parsed = pd.to_datetime(dates).dt.date if hasattr(pd.to_datetime(dates), "dt") else pd.to_datetime(dates).date
+                mask = [d != today for d in parsed]
+                frame = frame[mask]
+            except Exception:
+                pass
+        closes = [float(c) for c in frame["close"].dropna().tolist()]
+        return closes or None
+
+    def _nav_series_for_overlay(self) -> tuple[list[float] | None, list[float] | None]:
+        """이 바스켓 계정의 시간가중 누적수익률(%)과 일간 수익률."""
+        try:
+            from database.repositories import get_portfolio_snapshots
+            snaps = get_portfolio_snapshots(
+                days=3650, account_key=self.account_key, mode=self._ledger_mode(),
+            )
+        except Exception as exc:
+            logger.warning("오버레이 NAV 조회 실패 {}: {}", self.basket_name, exc)
+            return None, None
+        if snaps is None or getattr(snaps, "empty", True) or "cumulative_return" not in snaps.columns:
+            return None, None
+        cumulative = [float(v) for v in snaps["cumulative_return"].tolist() if v is not None]
+        index = [1.0 + c / 100.0 for c in cumulative]
+        daily = [index[i] / index[i - 1] - 1.0 for i in range(1, len(index)) if index[i - 1] > 0]
+        return cumulative, daily
 
     def _is_live(self) -> bool:
         """실전(live) 모드 여부."""
@@ -361,12 +475,15 @@ class BasketRebalancer:
                     "target_weight": float(target_w),
                 })
 
+        overlay = self.overlay_decision()
         return {
             "total_value": total_value,
             "stock_value": stock_value,
             "cash": cash,
             "deployment_ratio": deployment_ratio,
-            "design_fraction": design_fraction,
+            "design_fraction": design_fraction,          # 오버레이 적용 후 '그날의 목표'
+            "base_stock_fraction": self.base_stock_fraction(),
+            "overlay": overlay.to_dict() if overlay is not None else None,
             "unfilled_slots": unfilled,
         }
 
