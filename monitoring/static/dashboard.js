@@ -1612,8 +1612,10 @@
 
   /* ---------- 갱신 주기 ---------- */
 
-  async function refreshCore() {
-    if (document.visibilityState === "hidden") return;
+  // 주기 갱신은 숨은 탭에서 쉬지만, 첫 로드는 탭이 뒤에 있어도 반드시 한 번 채운다
+  // (백그라운드로 연 탭이 빈 화면으로 남던 문제).
+  async function refreshCore(force = false) {
+    if (!force && document.visibilityState === "hidden") return;
     state.coreStatus = "loading";
     updateSyncIndicator();
     const basketTask = fetchJson("/api/baskets", { timeout: 12_000, key: "baskets" })
@@ -1644,8 +1646,8 @@
     renderDecision();
   }
 
-  async function refreshSlow() {
-    if (document.visibilityState === "hidden") return;
+  async function refreshSlow(force = false) {
+    if (!force && document.visibilityState === "hidden") return;
     if (!state.runtime) { state.runtimeStatus = "loading"; updateSyncIndicator(); }
     const evalTask = fetchJson("/api/basket_evaluation", { timeout: 30_000, key: "evaluation" })
       .then((data) => renderEvaluations((data && data.evaluations) || []))
@@ -1657,8 +1659,8 @@
     await Promise.allSettled([evalTask, runtimeTask]);
   }
 
-  async function refreshAll() {
-    await Promise.allSettled([refreshCore(), refreshSlow()]);
+  async function refreshAll(force = false) {
+    await Promise.allSettled([refreshCore(force), refreshSlow(force)]);
   }
 
   /* ---------- 이벤트 ---------- */
@@ -1684,7 +1686,7 @@
     $("closeDepositButton").addEventListener("click", closeDeposit);
     $("depositCancelButton").addEventListener("click", closeDeposit);
     el.depositBack.addEventListener("click", showDepositFields);
-    $("retryButton").addEventListener("click", refreshAll);
+    $("retryButton").addEventListener("click", () => refreshAll(true));
 
     el.decisionAction.addEventListener("click", () => {
       const action = el.decisionAction.dataset.action;
@@ -1733,7 +1735,7 @@
       if (!inside) closeDeposit();
     });
 
-    window.addEventListener("online", refreshAll);
+    window.addEventListener("online", () => refreshAll());
     window.addEventListener("offline", () => {
       state.coreError = new Error("오프라인");
       state.coreStatus = "error";
@@ -1752,10 +1754,10 @@
     }
     document.querySelectorAll("#chartRange button").forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.days) === state.chartDays)));
     window.setTimeout(finishBoot, 8000);
-    await refreshAll();
+    await refreshAll(true);
     finishBoot();
-    window.setInterval(refreshCore, 30_000);
-    window.setInterval(refreshSlow, 60_000);
+    window.setInterval(() => refreshCore(), 30_000);
+    window.setInterval(() => refreshSlow(), 60_000);
   }
 
   main();
