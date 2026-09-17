@@ -108,7 +108,7 @@ def test_index_page_serves_200_with_progress_section():
             html = await res.text()
         finally:
             await client.close()
-        assert "basketEval" in html and "모의 운용 검증" in html
+        assert "basketEval" in html and "모의투자 검증" in html
 
     asyncio.run(run())
 
