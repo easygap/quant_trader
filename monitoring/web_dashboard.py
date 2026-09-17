@@ -113,6 +113,12 @@ def get_baskets_json() -> dict:
     """활성 바스켓별 원금·평가금·배치율·보유 현황을 DB에서만 읽는다."""
     from core.basket_deploy import effective_stock_fraction
     from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
+    from core.risk_overlays import (
+        applied_stock_fraction,
+        describe_decision,
+        load_overlay_state,
+        parse_overlay_config,
+    )
     from database.models import PortfolioSnapshot, get_session
     from database.repositories import get_all_positions, get_cash_flow_total
 
@@ -190,6 +196,45 @@ def get_baskets_json() -> dict:
             "cadence": str(plan_config.get("cadence") or ""),
             "amount": float(plan_config.get("amount") or 0),
         }
+        base_fraction = effective_stock_fraction(basket_config, config.risk_params)
+        # 리스크 오버레이(추세 필터·낙폭 제어)가 켜진 바스켓은 마지막 실행이 남긴 배수를
+        # 곱한 '적용 비중'이 그날의 목표다. 화면의 목표 비중·목표 범위 판정은 적용 비중을 쓴다.
+        overlay_cfg = parse_overlay_config(basket_config)
+        overlay_state = load_overlay_state(name) if overlay_cfg.any_enabled else None
+        design_fraction = (
+            applied_stock_fraction(base_fraction, overlay_state)
+            if overlay_cfg.any_enabled
+            else base_fraction
+        )
+        overlay = None
+        if overlay_cfg.any_enabled:
+            overlay = {
+                "enabled": True,
+                "scale": float((overlay_state or {}).get("scale", 1.0) or 1.0) if overlay_state else None,
+                "summary": describe_decision(overlay_state),
+                "reasons": list((overlay_state or {}).get("reasons") or []),
+                "data_issues": list((overlay_state or {}).get("data_issues") or []),
+                "evaluated_at": (overlay_state or {}).get("evaluated_at"),
+                "trend_filter": overlay_cfg.trend.enabled,
+                "drawdown_guard": overlay_cfg.drawdown.enabled,
+                "volatility_target": overlay_cfg.volatility.enabled,
+            }
+        # 종목별 목표 비중(총자산 대비) = 바스켓 내 비중 정규화 × 적용 투자 비중.
+        # 현재가는 장부에 저장하지 않으므로 화면은 매입금액 기준 비중과 나란히 보여준다.
+        holdings_cfg = basket_config.get("holdings") or {}
+        weight_total = sum(float(weight or 0) for weight in holdings_cfg.values())
+        target_weights = (
+            {
+                str(symbol): float(weight or 0) / weight_total * design_fraction
+                for symbol, weight in holdings_cfg.items()
+            }
+            if weight_total > 0
+            else {}
+        )
+        holdings_cost = float(sum(position["invested"] for position in positions))
+        holdings_value = (
+            snapshot["total_value"] - snapshot["cash"] if snapshot else None
+        )
         out.append(
             {
                 "basket": name,
@@ -207,9 +252,12 @@ def get_baskets_json() -> dict:
                     snapshot["total_value"] - principal if snapshot else None
                 ),
                 "deployment_ratio": deployment_ratio,
-                "design_fraction": effective_stock_fraction(
-                    basket_config, config.risk_params
-                ),
+                "design_fraction": design_fraction,
+                "base_stock_fraction": base_fraction,
+                "overlay": overlay,
+                "target_weights": target_weights,
+                "holdings_cost": holdings_cost,
+                "holdings_value": holdings_value,
                 "positions": positions,
             }
         )

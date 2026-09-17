@@ -109,6 +109,58 @@ class TestGetBasketsJson:
             "enabled": True, "cadence": "monthly", "amount": 100_000.0,
         }
 
+    def test_target_weights_and_holdings_totals(self):
+        """종목별 목표 비중은 총자산 기준(바스켓 내 비중 × 설계 투자 비중)이고,
+        보유분 매입금액·평가금액 합계가 함께 나와 화면이 비중을 계산하지 않아도 된다."""
+        name = "kr_pocket_t_weights"
+        _seed_pocket(name)
+        from monitoring import web_dashboard as wd
+
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",
+            return_value=[name],
+        ), patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=_cfg(name),
+        ):
+            b = wd.get_baskets_json()["baskets"][0]
+
+        # holdings {"069500": 1.0} × target_stock_weight 0.5 → 총자산의 50%
+        assert b["target_weights"] == {"069500": pytest.approx(0.5)}
+        assert b["holdings_cost"] == pytest.approx(128_135)
+        # 평가금액(보유분) = 총자산 − 현금
+        assert b["holdings_value"] == pytest.approx(400_126 - 171_846)
+        # 오버레이가 없는 바스켓: 적용 비중 = 설계 비중, overlay는 None
+        assert b["base_stock_fraction"] == pytest.approx(0.5)
+        assert b["overlay"] is None
+
+    def test_overlay_state_scales_applied_fraction(self, tmp_path, monkeypatch):
+        """오버레이가 켜진 바스켓은 마지막 실행이 남긴 배수를 곱한 '적용 비중'이 목표다."""
+        from core.risk_overlays import OverlayDecision, save_overlay_state
+
+        monkeypatch.setenv("QUANT_OVERLAY_STATE_DIR", str(tmp_path))
+        name = "kr_pocket_t_overlay"
+        _seed_pocket(name)
+        cfg = _cfg(name)
+        cfg[name]["overlays"] = {"trend_filter": {"enabled": True}}
+        save_overlay_state(name, OverlayDecision(scale=0.5, reasons=["KS200 200일선 아래 → 주식 비중 ×0.5"], trend_below=True))
+        from monitoring import web_dashboard as wd
+
+        with patch(
+            "core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",
+            return_value=[name],
+        ), patch(
+            "core.basket_rebalancer.BasketRebalancer._load_baskets_config",
+            return_value=cfg,
+        ):
+            b = wd.get_baskets_json()["baskets"][0]
+
+        assert b["base_stock_fraction"] == pytest.approx(0.5)
+        assert b["design_fraction"] == pytest.approx(0.25)
+        assert b["target_weights"] == {"069500": pytest.approx(0.25)}
+        assert b["overlay"]["enabled"] is True and b["overlay"]["scale"] == pytest.approx(0.5)
+        assert "200일선" in b["overlay"]["summary"]
+
     def test_no_snapshot_yet_is_null_not_crash(self):
         name = "kr_pocket_empty"  # 시드 없음 — 운영 전 상태
         init_database()

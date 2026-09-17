@@ -1906,10 +1906,20 @@ def run_health_check() -> int:
         enabled_baskets = BasketRebalancer.get_enabled_baskets()
         baskets_cfg = BasketRebalancer._load_baskets_config()
 
-        def _design_fraction(cfg: dict) -> float:
-            """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산)."""
+        def _design_fraction(cfg: dict, basket_name: str | None = None) -> float:
+            """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산).
+
+            리스크 오버레이가 켜진 바스켓은 마지막 실행이 남긴 배수를 곱한 '적용 비중'을
+            쓴다 — 오버레이가 비중을 절반으로 줄인 날 설계 비중과 비교하면 매일 거짓
+            미달 경보가 울리기 때문이다(선언한 숫자마다 감시가 붙는 원칙의 대상은
+            그날 실제로 유효한 목표다).
+            """
             from core.basket_deploy import effective_stock_fraction
-            return effective_stock_fraction(cfg, config.risk_params)
+            from core.risk_overlays import applied_stock_fraction, load_overlay_state, parse_overlay_config
+            design = effective_stock_fraction(cfg, config.risk_params)
+            if basket_name and parse_overlay_config(cfg).any_enabled:
+                return applied_stock_fraction(design, load_overlay_state(basket_name))
+            return design
 
         # 바스켓별 전용 계정 키(basket_rebalance:<name>) 기준으로 조회한다.
         # 복수 바스켓이면 '가장 오래된 최신 스냅샷'을 기준으로(가장 뒤처진 사이클 감시).
@@ -1952,7 +1962,7 @@ def run_health_check() -> int:
 
                         cfg_b = baskets_cfg.get(name) or {}
                         dep_ratio = max(0.0, (snap.total_value - (snap.cash or 0)) / snap.total_value)
-                        design = _design_fraction(cfg_b)
+                        design = _design_fraction(cfg_b, name)
                         floor_tol = float(
                             (cfg_b.get("monitoring") or {}).get("deployment_tolerance", 0.05)
                         )

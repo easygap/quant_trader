@@ -225,3 +225,14 @@ Paper trade quality gate: `tools/paper_trade_quality_report.py`는 체결 품질
 Target-weight 승격 증거 보강: target-weight 계열 전략은 일반 `execution_backed=True` paper record만으로 promotion evidence day를 채우지 않습니다. `pilot_paper`/authorized record가 target-weight plan과 execution proof를 포함하고, record date와 plan trade day가 일치하며, `execution_trade_day_allowed=True`, `execution_market_session_allowed=True`, `pilot_authorization_snapshot_allowed=True`, liquidity/pre-trade risk/order result/fill/position reconciliation complete 및 plan/execution params hash 일치를 만족한 날만 승격 카운트에 들어갑니다. 60영업일 전체 verified pilot evidence는 하나의 params hash로 고정되어야 하며, promotion package 생성과 promotion/live gate는 canonical `strategy_specs`의 `base_strategy=target_weight_rotation`을 우선 기준으로 target-weight 후보를 식별합니다. paper evidence package도 canonical params hash와 pilot proof가 맞지 않으면 `BLOCKED`로 남기며, live gate도 canonical metadata의 params hash와 paper evidence params hash가 다르면 target-weight live 전환을 차단합니다.
 
 Target-weight finalize 성과 진단: `--finalize-pilot-evidence`가 `total_value`/`daily_return` 미확정으로 막히면 finalize report에 source record 보유 성과 필드, portfolio metrics probe 수행 여부, probe에서 확인된 필드, 최종 누락 필드를 기록합니다. current blockers와 `paper_pilot_control.py --status`도 이 정보를 노출해, 성과 snapshot 대기인지 benchmark 대기인지 운영자가 구분할 수 있게 합니다. `daily_return`/`portfolio_value`/benchmark excess 누락처럼 finalize로 promotable record가 될 수 있는 사유는 repair보다 finalize를 먼저 안내합니다.
+
+## 2026-09-17 리스크 오버레이 — 주식 비중을 언제 줄이는가
+
+종목 선택 알파가 없다는 확정 결론 위에서, 운용 중인 두 트랙의 주식 비중 조절 규칙만 바꿔 비교했다(`tools/risk_overlay_backtest.py`, 전체 표는 `docs/RISK_OVERLAY_FINDINGS.md`). 비용은 실제와 같게(ETF 거래세 없음, 주식 매도세 0.20%), 적립은 시간가중으로 분리, 신호는 전일 정보만 사용.
+
+- 적립 트랙(코스피200 50% + 현금성, 2002~2026): 200일선 ±2% 히스테리시스 추세 필터(아래면 절반)는 연수익률 7.45→7.19%에 최대낙폭 −28.8→−21.8%, 최악 연도 −18.7→−12.3%, 샤프 0.42→0.45. 히스테리시스가 없으면 회전율이 184%/년으로 3배가 된다.
+- 적립 트랙(KODEX 200 실제 ETF, 2014~): 추세 필터로 최악 연도 −11.2→−4.6%. 200일선 위에서 한 달 안에 무너진 구간(2020-03, 2026 여름)은 추세 필터가 못 막고 낙폭 제어(−10%에서 절반)가 맡는다: 최대낙폭 −21.7→−17.3%, 결합 시 −16.3%, 샤프 0.59→0.64.
+- 관찰 트랙(대형주 10종목, 2021-12~): 낙폭 제어가 최대낙폭 −26.1→−16.4%, 샤프 0.82→0.85, 칼마 0.70→0.97(연수익률 18.3→15.8%). 추세 필터는 거래세 때문에 회전 비용이 크고 낙폭도 거의 못 줄였다.
+- 변동성 목표(15~20%)는 고변동 구간이 고수익 구간이라 연수익률을 2~9%p 깎는다. 옵션으로만 남기고 기본 off.
+
+반영: `core/risk_overlays.py`(순수 함수 + 상태 파일 `data/overlay_state/<basket>.json`) + `BasketRebalancer._stock_fraction = 설계 × 배수`. 배치 진단·트리거·헬스(`main.py --mode health`)·대시보드 API가 전부 '그날의 적용 비중'을 본다. 데이터가 없으면 직전 상태를 유지하고 `data_issues`로 표면화한다. `kr_pocket`은 추세 필터 + 낙폭 제어를 켰고(2026-09-17 현재 코스피200 200일선 +12%, 낙폭 −5%라 즉시 바뀌는 주문 없음), `kr_diversified_hold`는 실전 전환 승인 대기 중이라 권장값만 기록하고 껐다. 신호형 전략은 손대지 않았다 — 구조(회전율 1,860%/년, 익절 상한) 문제라 오버레이 대상이 아니다.

@@ -21,6 +21,11 @@ from pathlib import Path
 
 
 def pytest_configure(config):
+    # 리스크 오버레이 상태 파일(data/overlay_state/*.json)도 운영 파일이다. 테스트가
+    # 운영 바스켓의 '추세 아래/낙폭 발동' 상태를 덮어쓰지 않도록 임시 디렉터리로 격리한다.
+    if not os.environ.get("QUANT_OVERLAY_STATE_DIR"):
+        os.environ["QUANT_OVERLAY_STATE_DIR"] = tempfile.mkdtemp(prefix="quant_test_overlay_")
+
     # 사용자가 명시적으로 DB 경로를 지정했다면 존중한다.
     if os.environ.get("QUANT_DB_PATH"):
         return

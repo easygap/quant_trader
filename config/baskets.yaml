@@ -70,6 +70,22 @@ baskets:
       # 60%로 명시한 지금은 미달이 곧 조치 대상(현금 누수)이다. 실제로 감시가 꺼져 있는
       # 동안 배치율이 61.0% → 54.9%로 새는 것을 헬스가 전혀 잡지 못했다.
       deployment_tolerance: 0.05
+    # 리스크 오버레이는 이 트랙에선 아직 끈다 — 60거래일 검증을 마치고 실전 전환 승인을
+    # 기다리는 중이라, 정책을 바꾸면 검증 대상이 달라진다. 백테스트(2021-12~2026-09,
+    # docs/RISK_OVERLAY_FINDINGS.md)에서 낙폭 제어(-10%에서 절반)는 최대낙폭 -26.1→-16.4%,
+    # 샤프 0.82→0.85(연수익률 18.3→15.8%)였다. 켜려면 enabled: true.
+    overlays:
+      drawdown_guard:
+        enabled: false
+        trigger: -0.10
+        release: -0.05
+        scale: 0.5
+      trend_filter:
+        enabled: false
+        index_symbol: "KS200"
+        ma_days: 200
+        band: 0.02
+        off_scale: 0.5
     rebalance:
       trigger: drift               # 분기 점검을 권장하나 drift로 큰 이탈만 교정
       drift_threshold: 0.08        # 8%p 이상 이탈 시에만 리밸런싱(잦은 매매 억제)
@@ -168,6 +184,38 @@ baskets:
     # (1주가/총액)과의 max로 자동 완화·조임한다 — 잔고가 커지면 이 값이 다시 지배한다.
     monitoring:
       deployment_tolerance: 0.10
+    # --- 리스크 오버레이 (2026-09-17, docs/RISK_OVERLAY_FINDINGS.md) ---
+    # 종목을 고르지 않고 '주식 비중을 언제 줄이는가'만 바꾼다. 배수는 설계 비중(95%)에
+    # 곱한다: 추세 필터 발동 시 95% × 0.5 = 47.5%(지수 23.75 + 파킹 23.75), 나머지 현금.
+    #   추세 필터: 코스피200이 200일선 아래로 2% 넘게 내려가면 절반, 위로 2% 넘게 올라와야
+    #             복귀. 2002~2026 백테스트: 연수익률 7.45→7.19%(-0.26%p), 최대낙폭
+    #             -28.8→-21.8%, 최악 연도 -18.7→-12.3%, 샤프 0.42→0.45. ETF 구간(2014~)도
+    #             연 9.62→9.32%에 최악 연도 -11.2→-4.6%. 비용은 ETF라 거래세 없이 수수료뿐.
+    #   낙폭 제어: 시간가중 NAV가 고점 대비 -10% 아래면 절반, -5% 안으로 회복해야 복귀.
+    #             ETF 구간 최대낙폭 -21.7→-16.3%(추세와 결합), 샤프 0.59→0.64.
+    #   변동성 목표: 한국 시장에선 수익을 2~4%p 깎아(고변동 구간이 고수익 구간) 끈다.
+    # 상태(추세 아래/낙폭 발동)는 data/overlay_state/kr_pocket.json으로 이어지고, 헬스와
+    # 대시보드는 '설계 × 배수'를 그날의 목표로 본다(오버레이가 줄인 날 미달 경보 안 울림).
+    # 끄려면 enabled: false — 다음 사이클부터 설계 비중으로 되돌아간다.
+    overlays:
+      trend_filter:
+        enabled: true
+        index_symbol: "KS200"
+        ma_days: 200
+        band: 0.02
+        off_scale: 0.5
+      drawdown_guard:
+        enabled: true
+        trigger: -0.10
+        release: -0.05
+        scale: 0.5
+      volatility_target:
+        enabled: false
+        target: 0.20
+        lookback_days: 60
+        min_scale: 0.5
+        max_scale: 1.0
+        step: 0.1
     # 이 트랙의 리스크 정책은 '손절 없음'이며, 이는 누락이 아니라 결정이다.
     # 069500은 200종목 분산 지수 ETF고 이 트랙은 월 적립(DCA) 엔진이다. 지수에
     # 손절을 걸면 하락을 손실로 확정하면서 회복 구간을 통째로 놓치고, 적립식이
