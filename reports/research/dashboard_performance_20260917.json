@@ -1,0 +1,172 @@
+{
+  "environment": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "viewport": [
+      390,
+      844
+    ],
+    "cpuSlowdown": 4,
+    "downloadMbps": 1.6,
+    "rttMs": 150,
+    "cache": "disabled",
+    "reducedMotion": false
+  },
+  "dataReadyMs": 1640.199999999255,
+  "fcpMs": 628,
+  "lcpMs": 628,
+  "cls": 0.03408044418879106,
+  "longTasks": [
+    {
+      "start": 3059.5999999996275,
+      "duration": 168
+    }
+  ],
+  "blockingMs": 118,
+  "idleRafCalls": 0,
+  "documentBytes": 22915,
+  "resources": [
+    {
+      "path": "/static/fonts/nungum-ui.woff2",
+      "bytes": 441212,
+      "encoded": 440912,
+      "decoded": 440912,
+      "duration": 2837
+    },
+    {
+      "path": "/static/dashboard.css",
+      "bytes": 6632,
+      "encoded": 6332,
+      "decoded": 28389,
+      "duration": 249
+    },
+    {
+      "path": "/static/nungum-symbol.svg",
+      "bytes": 595,
+      "encoded": 295,
+      "decoded": 364,
+      "duration": 202
+    },
+    {
+      "path": "/static/dashboard.js",
+      "bytes": 21213,
+      "encoded": 20913,
+      "decoded": 77165,
+      "duration": 386
+    },
+    {
+      "path": "/api/baskets",
+      "bytes": 3619,
+      "encoded": 3319,
+      "decoded": 3319,
+      "duration": 242
+    },
+    {
+      "path": "/api/portfolio",
+      "bytes": 2607,
+      "encoded": 2307,
+      "decoded": 2307,
+      "duration": 225
+    },
+    {
+      "path": "/api/basket_evaluation",
+      "bytes": 800,
+      "encoded": 500,
+      "decoded": 500,
+      "duration": 178
+    },
+    {
+      "path": "/api/runtime",
+      "bytes": 2639,
+      "encoded": 2339,
+      "decoded": 2339,
+      "duration": 208
+    },
+    {
+      "path": "/api/cash_flows",
+      "bytes": 363,
+      "encoded": 63,
+      "decoded": 63,
+      "duration": 170
+    },
+    {
+      "path": "/api/cash_flows",
+      "bytes": 440,
+      "encoded": 140,
+      "decoded": 140,
+      "duration": 169
+    },
+    {
+      "path": "/api/snapshots",
+      "bytes": 15650,
+      "encoded": 15350,
+      "decoded": 15350,
+      "duration": 372
+    },
+    {
+      "path": "/api/snapshots",
+      "bytes": 10775,
+      "encoded": 10475,
+      "decoded": 10475,
+      "duration": 323
+    },
+    {
+      "path": "/api/snapshots",
+      "bytes": 10773,
+      "encoded": 10473,
+      "decoded": 10473,
+      "duration": 283
+    }
+  ],
+  "interactionEvents": [
+    {
+      "name": "pointerdown",
+      "duration": 56,
+      "interactionId": 8588
+    },
+    {
+      "name": "pointerup",
+      "duration": 56,
+      "interactionId": 8588
+    },
+    {
+      "name": "click",
+      "duration": 56,
+      "interactionId": 8588
+    },
+    {
+      "name": "pointerdown",
+      "duration": 56,
+      "interactionId": 8595
+    },
+    {
+      "name": "pointerup",
+      "duration": 56,
+      "interactionId": 8595
+    },
+    {
+      "name": "click",
+      "duration": 56,
+      "interactionId": 8595
+    },
+    {
+      "name": "pointerdown",
+      "duration": 40,
+      "interactionId": 8602
+    },
+    {
+      "name": "pointerup",
+      "duration": 40,
+      "interactionId": 8602
+    },
+    {
+      "name": "click",
+      "duration": 40,
+      "interactionId": 8602
+    },
+    {
+      "name": "keydown",
+      "duration": 40,
+      "interactionId": 8609
+    }
+  ]
+}

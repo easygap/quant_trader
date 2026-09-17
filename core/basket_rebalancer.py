@@ -169,7 +169,11 @@ class BasketRebalancer:
         배치 진단·트리거·주문 계획이 전부 이 값을 쓰므로, 오버레이가 비중을 줄인 날
         '현금 래칫' 감시가 설계 비중을 향해 되사는 일은 생기지 않는다.
         """
-        return self.base_stock_fraction() * self._overlay_scale()
+        from core.risk_overlays import overlay_target_weights
+        return sum(overlay_target_weights(
+            self.holdings, self.base_stock_fraction(), self._overlay_scale(),
+            (self.basket.get("overlays") or {}).get("defensive_symbol"),
+        ).values())
 
     def _overlay_scale(self) -> float:
         decision = self.overlay_decision()
@@ -220,7 +224,7 @@ class BasketRebalancer:
         if decision.reasons:
             logger.info("바스켓 '{}' 리스크 오버레이 발동: {} (배수 {})", self.basket_name, " · ".join(decision.reasons), decision.scale)
         else:
-            logger.info("바스켓 '{}' 리스크 오버레이 발동 없음 (배수 1.0)", self.basket_name)
+            logger.info("바스켓 '{}' 리스크 오버레이 계산 완료 (배수 {})", self.basket_name, decision.scale)
         self._overlay_decision = decision
         return decision
 
@@ -245,11 +249,21 @@ class BasketRebalancer:
             try:
                 import pandas as pd
                 parsed = pd.to_datetime(dates).dt.date if hasattr(pd.to_datetime(dates), "dt") else pd.to_datetime(dates).date
-                mask = [d != today for d in parsed]
-                frame = frame[mask]
+                mask = [d < today for d in parsed]
+                frame = frame[mask].copy()
+                frame["_overlay_date"] = [d for d, keep in zip(parsed, mask) if keep]
+                frame = frame.sort_values("_overlay_date")
+                if frame["_overlay_date"].duplicated().any():
+                    return None
             except Exception:
-                pass
-        closes = [float(c) for c in frame["close"].dropna().tolist()]
+                return None
+        else:
+            return None
+        # 누락 봉을 삭제하면 이동평균 창이 과거로 밀려 잘못 복귀할 수 있다.
+        try:
+            closes = [float(c) if c is not None else float("nan") for c in frame["close"].tolist()]
+        except (TypeError, ValueError):
+            return None
         return closes or None
 
     def _nav_series_for_overlay(self) -> tuple[list[float] | None, list[float] | None]:
@@ -264,9 +278,17 @@ class BasketRebalancer:
             return None, None
         if snaps is None or getattr(snaps, "empty", True) or "cumulative_return" not in snaps.columns:
             return None, None
-        cumulative = [float(v) for v in snaps["cumulative_return"].tolist() if v is not None]
+        if "date" in snaps.columns:
+            import pandas as pd
+            snaps = snaps.copy()
+            snaps["date"] = pd.to_datetime(snaps["date"], errors="coerce")
+            snaps = snaps[snaps["date"].dt.date < datetime.now(_KST).date()].sort_values("date")
+        try:
+            cumulative = [float(v) if v is not None else float("nan") for v in snaps["cumulative_return"].tolist()]
+        except (TypeError, ValueError):
+            return None, None
         index = [1.0 + c / 100.0 for c in cumulative]
-        daily = [index[i] / index[i - 1] - 1.0 for i in range(1, len(index)) if index[i - 1] > 0]
+        daily = [index[i] / index[i - 1] - 1.0 if index[i - 1] > 0 else float("nan") for i in range(1, len(index))]
         return cumulative, daily
 
     def _is_live(self) -> bool:
@@ -374,7 +396,13 @@ class BasketRebalancer:
         if total > 0 and abs(total - 1.0) > 0.001:
             base = {s: w / total for s, w in base.items()}
 
-        return base
+        from core.risk_overlays import overlay_target_weights
+        targets = overlay_target_weights(
+            base, self.base_stock_fraction(), self._overlay_scale(),
+            (self.basket.get("overlays") or {}).get("defensive_symbol"),
+        )
+        invested = sum(targets.values())
+        return {s: w / invested for s, w in targets.items()} if invested > 0 else base
 
     def get_current_weights(self, prices: dict[str, float] = None) -> dict[str, float]:
         """

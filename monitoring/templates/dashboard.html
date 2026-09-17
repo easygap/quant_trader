@@ -1,284 +1,629 @@
 <!doctype html>
 <html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f2f0ec">
-  <meta name="description" content="눈금 — 오래 투자하기 위한 기준과 기록">
-  <title>눈금 — 오래 투자하기 위한 기준과 기록</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500&family=Noto+Sans+KR:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="icon" href="/static/nungum-symbol.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <script defer src="/static/dashboard.js"></script>
-</head>
-<body>
-  <a class="skip-link" href="#today">본문으로 건너뛰기</a>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#f5f6f8" />
+    <meta name="description" content="눈금 | 투자 현황" />
+    <title>눈금 | 투자 현황</title>
+    <link
+      rel="preload"
+      href="/static/fonts/nungum-ui.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="icon" href="/static/nungum-symbol.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#top">본문으로 건너뛰기</a>
 
-  <div class="boot" id="boot" role="status" aria-live="polite">
-    <div class="boot-bar"><i id="bootBar"></i></div>
-    <p id="bootPct">장부 여는 중 0%</p>
-  </div>
-
-  <i class="meter" id="meter" aria-hidden="true"></i>
-
-  <header class="chrome" id="chrome">
-    <a class="mark" href="#top" aria-label="눈금, 맨 위로">
-      <img src="/static/nungum-symbol.svg" width="18" height="18" alt="">
-      <span>눈금</span>
-    </a>
-    <nav class="nav" aria-label="바로가기">
-      <a href="#today">오늘</a>
-      <a href="#portfolio">포트폴리오</a>
-      <a href="#performance">성과</a>
-      <a href="#review">검증</a>
-      <a href="#operations">운영</a>
-      <span class="state" id="syncState" aria-live="polite" aria-atomic="true">
-        <i class="dot" id="syncMark" data-state="loading" aria-hidden="true"></i>
-        <span id="syncStatus">연결 확인 중</span>
-        <time id="lastUpdate" datetime="" hidden></time>
-      </span>
-      <span class="mode" id="modeBadge" data-mode="unknown">모드 확인 중</span>
-      <button class="pill" id="openDepositButton" type="button" disabled aria-describedby="depositAvailability">적립 기록</button>
-      <span class="sr-only" id="depositAvailability" aria-live="polite">장부와 거래 상태를 확인한 뒤 기록할 수 있습니다.</span>
-    </nav>
-  </header>
-
-  <main id="main">
-    <section class="story" id="top" aria-label="자산 요약">
-      <div class="stage">
-        <canvas id="storyCanvas" aria-hidden="true"></canvas>
-        <div class="grain" aria-hidden="true"></div>
-
-        <div class="panels">
-          <article class="panel" data-panel>
-            <p class="eyebrow" id="p1Eyebrow">장부를 여는 중입니다</p>
-            <h1 class="display" id="p1Title"><span class="num">—</span></h1>
-            <p class="sub" id="p1Sub"></p>
-            <p class="cta"><a class="pill pill-line" href="#portfolio">포트폴리오 보기</a></p>
-          </article>
-          <article class="panel" data-panel>
-            <p class="eyebrow" id="p2Eyebrow">적립을 뺀 운용 성과</p>
-            <h1 class="display" id="p2Title"><span class="num">—</span></h1>
-            <p class="sub" id="p2Sub"></p>
-            <p class="cta"><a class="pill pill-line" href="#performance">성과 차트 보기</a></p>
-          </article>
-          <article class="panel" data-panel>
-            <p class="eyebrow" id="p3Eyebrow">고점 대비 최대 낙폭</p>
-            <h1 class="display" id="p3Title"><span class="num">—</span></h1>
-            <p class="sub" id="p3Sub"></p>
-            <p class="cta"><a class="pill pill-line" href="#performance">낙폭 그래프 보기</a></p>
-          </article>
-        </div>
-
-        <p class="story-hint" id="storyHint" aria-hidden="true"><i></i>내려서 기록 보기</p>
+    <aside class="rail" aria-label="주 메뉴">
+      <a class="brand" href="#top" aria-label="눈금, 계좌 현황"
+        ><img
+          src="/static/nungum-symbol.svg"
+          alt=""
+          width="28"
+          height="28"
+        /><span>눈금</span></a
+      >
+      <nav class="nav" aria-label="바로가기">
+        <a href="#top" aria-current="page"
+          ><svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="3" width="7" height="7" rx="1.5" />
+            <rect x="14" y="3" width="7" height="7" rx="1.5" />
+            <rect x="3" y="14" width="7" height="7" rx="1.5" />
+            <rect x="14" y="14" width="7" height="7" rx="1.5" /></svg
+          ><span>계좌 현황</span></a
+        >
+        <a href="#portfolio"
+          ><svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16v13H4zM9 7V4h6v3M4 12h16M10 12v3h4v-3" /></svg
+          ><span>보유 종목</span></a
+        >
+        <a href="#performance"
+          ><svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 3v18h18M6 15l5-5 4 3 6-7" /></svg
+          ><span>자산 추이</span></a
+        >
+        <a href="#review"
+          ><svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="5" y="4" width="14" height="17" rx="2" />
+            <path d="M9 4V2h6v2M8 13l3 3 5-6" /></svg
+          ><span>모의투자</span></a
+        >
+        <a href="#operations"
+          ><svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 12h4l3-8 4 16 3-8h4" /></svg
+          ><span>운영 현황</span></a
+        >
+      </nav>
+      <div class="rail-bottom">
+        <span class="rail-caption">개인 퀀트 투자</span
+        ><a
+          href="https://github.com/easygap/quant_trader"
+          target="_blank"
+          rel="noopener noreferrer"
+          >프로젝트 소개 <span aria-hidden="true">↗</span
+          ><span class="sr-only">, 새 탭</span></a
+        >
       </div>
-    </section>
+    </aside>
 
-    <div class="page">
-      <section class="sec" id="today" aria-labelledby="todayTitle">
-        <div class="sec-head">
-          <h2 class="sec-label" id="todayTitle">오늘</h2>
-          <p class="sec-meta" id="decisionMeta"></p>
-        </div>
-        <div class="today">
-          <h3 class="today-title" id="decisionTitle">현재 상태를 확인하고 있습니다</h3>
-          <p class="today-desc" id="decisionDescription">장부와 운영 기록을 불러오는 중입니다.</p>
-          <p class="today-act"><button class="link" id="decisionAction" type="button" hidden>확인하기</button></p>
-          <ul class="status-row" id="statusRow" aria-label="운영 상태 요약"></ul>
-        </div>
-      </section>
-
-      <section class="sec" id="portfolio" aria-labelledby="portfolioTitle">
-        <div class="sec-head">
-          <h2 class="sec-label" id="portfolioTitle">포트폴리오</h2>
-          <time class="sec-meta" id="portfolioAsOf" datetime="">기준일 확인 중</time>
-        </div>
-        <div class="tracks" id="basketTracks" aria-live="polite" aria-busy="true">
-          <p class="loading">포트폴리오를 불러오는 중입니다.</p>
-        </div>
-      </section>
-
-      <section class="sec" id="performance" aria-labelledby="performanceTitle">
-        <div class="sec-head">
-          <h2 class="sec-label" id="performanceTitle">성과</h2>
-          <p class="sec-meta" id="chartSummary">성과 기록을 불러오는 중입니다.</p>
-        </div>
-
-        <div class="chart-controls">
-          <label class="sr-only" for="chartAccount">계좌 선택</label>
-          <select id="chartAccount" name="chart_account" autocomplete="off"></select>
-          <div class="seg" id="chartRange" role="group" aria-label="조회 기간">
-            <button type="button" data-days="30" aria-pressed="false">1개월</button>
-            <button type="button" data-days="90" aria-pressed="true">3개월</button>
-            <button type="button" data-days="365" aria-pressed="false">1년</button>
-            <button type="button" data-days="3650" aria-pressed="false">전체</button>
-          </div>
-          <p class="chart-maturity" id="chartMaturity"></p>
-        </div>
-
-        <div id="chartWrap">
-          <figure class="chart">
-            <figcaption class="chart-title">평가금액 <span>점선은 투자원금, 세로 눈금은 적립 시점</span></figcaption>
-            <div class="chart-box" id="chartBox">
-              <canvas id="chartEquity" role="img" aria-label="선택한 계좌의 기간별 평가금액 추이" width="960" height="320"></canvas>
-              <div class="tip" id="chartTip" hidden><time></time><strong></strong><span></span></div>
-            </div>
-          </figure>
-          <figure class="chart">
-            <figcaption class="chart-title">고점 대비 낙폭 <span>시간가중 기준</span></figcaption>
-            <div class="chart-box chart-box-small" id="drawdownBox">
-              <canvas id="chartDrawdown" role="img" aria-label="고점 대비 낙폭 추이" width="960" height="120"></canvas>
-            </div>
-          </figure>
-          <div class="months" id="monthStrip" aria-label="월별 시간가중수익률"></div>
-        </div>
-        <div class="empty" id="chartEmpty" hidden>
-          <strong>아직 표시할 기록이 없습니다.</strong>
-          <span>모의투자를 한 번 실행하면 첫 자산 기록이 생깁니다.</span>
-        </div>
-        <p class="fine">평가금액에는 적립금이 포함됩니다. 운용 성과는 입금 시점의 영향을 제거한 시간가중수익률(TWR)로 읽으세요. 차트 위에 커서를 올리면 날짜별 값이 보입니다.</p>
-
-        <details class="disclosure">
-          <summary>표로 보기</summary>
-          <div class="table-scroll" tabindex="0" role="region" aria-label="성과 데이터 표">
-            <table>
-              <caption>선택한 기간의 평가금액과 시간가중수익률</caption>
-              <thead>
-                <tr><th scope="col">날짜</th><th scope="col" class="num">평가금액</th><th scope="col" class="num">투자원금</th><th scope="col" class="num">시간가중수익률</th></tr>
-              </thead>
-              <tbody id="chartDataRows"></tbody>
-            </table>
-          </div>
-        </details>
-      </section>
-
-      <section class="sec" id="review" aria-labelledby="reviewTitle">
-        <div class="sec-head">
-          <h2 class="sec-label" id="reviewTitle">모의투자 검증</h2>
-          <p class="sec-meta">기준: 60거래일 · 기록 누락 없음 · 운영 이슈 없음</p>
-        </div>
-        <div id="basketEval" aria-live="polite" aria-busy="true">
-          <p class="loading">검증 상태를 불러오는 중입니다.</p>
-        </div>
-        <p class="fine">기록이 충분해도 실전 전환은 자동으로 되지 않습니다. 검토를 마친 뒤 직접 전환합니다.</p>
-      </section>
-
-      <section class="sec" id="operations" aria-labelledby="operationsTitle">
-        <div class="sec-head">
-          <h2 class="sec-label" id="operationsTitle">운영 상태</h2>
-          <button class="link" id="retryButton" type="button">다시 확인</button>
-        </div>
-        <dl class="status-table" id="runtimeOps" aria-live="polite" aria-busy="true"></dl>
-        <p class="fine" id="runtimeMeta"></p>
-
-        <aside class="halt" id="haltGuidance" aria-labelledby="haltGuidanceTitle" hidden>
-          <h3 id="haltGuidanceTitle">거래 중지 상태에서 먼저 할 일</h3>
-          <p id="haltGuidanceReason">신규 매수는 직접 해제하기 전까지 막혀 있습니다.</p>
-          <ol>
-            <li>KIS 체결·미체결 내역과 실제 잔고를 대조합니다.</li>
-            <li>매도·청산 가능 여부는 신규 매수와 따로 확인합니다.</li>
-            <li>원인을 해결한 뒤 복구 절차대로 직접 해제합니다.</li>
-          </ol>
-          <a href="https://github.com/easygap/quant_trader/blob/main/docs/SAFETY_MODEL.md" target="_blank" rel="noopener noreferrer">복구 절차 문서<span class="sr-only">, 새 탭</span></a>
-        </aside>
-
-        <details class="disclosure">
-          <summary>오늘 생성된 신호 <span class="count" id="signalCount">0건</span></summary>
-          <div class="table-scroll" id="signalsTableWrap" tabindex="0" role="region" aria-label="오늘의 자동매매 신호">
-            <table>
-              <caption>오늘 생성된 자동매매 신호</caption>
-              <thead><tr><th scope="col">시각</th><th scope="col">종목</th><th scope="col">신호</th><th scope="col" class="num">점수</th><th scope="col">시점</th></tr></thead>
-              <tbody id="signalRows"></tbody>
-            </table>
-          </div>
-          <p id="signalEmpty" class="fine" hidden>오늘 생성된 신호가 없습니다. 이상 상태는 아닙니다.</p>
-          <p id="signalError" class="fine error" hidden>신호 기록을 불러오지 못했습니다. 잠시 후 다시 확인하세요.</p>
-        </details>
-
-        <details class="disclosure">
-          <summary>연결 상태와 레거시 계정</summary>
-          <dl class="status-table compact" id="wsGapSummary"></dl>
-          <div class="table-scroll" id="wsGapTableWrap" tabindex="0" role="region" aria-label="웹소켓 연결 이력" hidden>
-            <table>
-              <caption>최근 웹소켓 끊김과 복구 내역</caption>
-              <thead><tr><th scope="col">끊김</th><th scope="col">재연결</th><th scope="col" class="num">공백</th><th scope="col">영향 종목</th><th scope="col">REST 보충</th><th scope="col">안전장치</th></tr></thead>
-              <tbody id="wsGapRows"></tbody>
-            </table>
-          </div>
-          <p id="wsGapEmpty" class="fine" hidden>최근 연결 끊김이 없습니다.</p>
-          <p id="wsGapNA" class="fine" hidden>웹소켓 상태를 아직 받지 못했습니다.</p>
-
-          <h4 class="sub-label">레거시 기본 계정</h4>
-          <dl class="status-table compact" id="summary"></dl>
-          <div class="table-scroll" id="positionsWrap" tabindex="0" role="region" aria-label="레거시 계정 보유 종목">
-            <table>
-              <caption>레거시 기본 계정의 보유 종목</caption>
-              <thead><tr><th scope="col">종목</th><th scope="col" class="num">수량</th><th scope="col" class="num">평단가</th><th scope="col" class="num">현재가</th><th scope="col" class="num">평가금액</th><th scope="col" class="num">수익률</th></tr></thead>
-              <tbody id="positions"></tbody>
-            </table>
-          </div>
-          <p id="noPositions" class="fine" hidden>레거시 계정에 보유 종목이 없습니다.</p>
-        </details>
-      </section>
-
-      <footer class="foot">
-        <p><img src="/static/nungum-symbol.svg" width="14" height="14" alt="">눈금 · 오래 투자하기 위한 기준과 기록</p>
-        <p>이 화면은 수익을 보장하지 않습니다. 실전 전환 전에 설정과 증권사 계좌를 직접 확인하세요.</p>
-      </footer>
-    </div>
-  </main>
-
-  <dialog class="deposit-dialog" id="depositDialog" aria-labelledby="depositTitle" aria-describedby="depositDescription">
-    <form id="depositForm" novalidate>
-      <header class="dialog-head">
-        <h2 id="depositTitle">적립 기록</h2>
-        <button class="icon-button" id="closeDepositButton" type="button" aria-label="닫기">
-          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+    <header class="chrome" id="chrome">
+      <span class="location">내 투자 / <strong>계좌 현황</strong></span>
+      <div class="header-actions">
+        <span class="state" id="syncState" aria-live="polite" aria-atomic="true"
+          ><i
+            class="dot"
+            id="syncMark"
+            data-state="loading"
+            aria-hidden="true"
+          ></i
+          ><span id="syncStatus">연결 확인 중</span
+          ><time id="lastUpdate" datetime="" hidden></time
+        ></span>
+        <span class="mode" id="modeBadge" data-mode="unknown">확인 중</span>
+        <button
+          class="pill"
+          id="openDepositButton"
+          type="button"
+          disabled
+          aria-describedby="depositAvailability"
+        >
+          적립금 기록
         </button>
-      </header>
-      <p class="dialog-desc" id="depositDescription">입금은 수익이 아니므로 수익률 계산에서 분리됩니다. 실제 입금이 끝난 뒤 같은 금액을 기록하세요.</p>
+        <span class="sr-only" id="depositAvailability" aria-live="polite"
+          >계좌와 거래 상태를 확인한 뒤 기록할 수 있습니다.</span
+        >
+      </div>
+    </header>
 
-      <div id="depositFields">
-        <div class="field">
-          <label for="depBasket">계좌</label>
-          <select id="depBasket" name="basket" autocomplete="off" required></select>
+    <main id="main" class="page">
+      <div class="page-heading" id="top">
+        <div>
+          <h1>계좌 현황</h1>
+          <p>투자한 금액과 수익, 보유 종목을 확인하세요.</p>
         </div>
-        <div class="field">
-          <label for="depAmount">금액</label>
-          <div class="money"><input id="depAmount" name="amount" type="number" min="1" step="10000" inputmode="numeric" autocomplete="off" placeholder="100000" aria-describedby="amountHelp depositError" required><span>원</span></div>
-          <p class="help" id="amountHelp">실제로 입금한 금액과 같게 적습니다.</p>
-          <div class="quick" role="group" aria-label="빠른 입력">
-            <button type="button" data-amount="50000" aria-pressed="false">5만</button>
-            <button type="button" data-amount="100000" aria-pressed="false">10만</button>
-            <button type="button" data-amount="200000" aria-pressed="false">20만</button>
+        <time id="overviewDate"></time>
+      </div>
+      <div
+        class="account-tabs"
+        id="accountTabs"
+        role="group"
+        aria-label="조회할 계좌"
+      >
+        <span class="loading">계좌를 불러오는 중입니다.</span>
+      </div>
+      <section
+        class="overview"
+        aria-label="선택한 계좌 요약"
+        aria-busy="true"
+        id="overview"
+      >
+        <div class="overview-total">
+          <p>총자산</p>
+          <strong id="overviewTotal">—</strong
+          ><span id="overviewPnl">계좌를 불러오는 중입니다.</span>
+          <p class="overview-cash" id="overviewCash">현금 —</p>
+        </div>
+        <dl class="overview-stats">
+          <div>
+            <dt>투자원금</dt>
+            <dd id="overviewPrincipal">—</dd>
+            <small id="overviewDeposits">초기 자금 + 적립금</small>
+          </div>
+          <div>
+            <dt>
+              누적 수익률
+              <abbr title="입금·출금의 영향을 제외한 시간가중수익률">TWR</abbr>
+            </dt>
+            <dd id="overviewReturn">—</dd>
+            <small>적립금은 수익에서 제외</small>
+          </div>
+          <div>
+            <dt>최대 낙폭</dt>
+            <dd id="overviewDrawdown">—</dd>
+            <small>운용 중 고점 대비 최대 하락률</small>
+          </div>
+        </dl>
+      </section>
+      <div class="workspace">
+        <div class="main-column" id="mainColumn">
+          <section
+            class="sec"
+            id="performance"
+            aria-labelledby="performanceTitle"
+          >
+            <div class="sec-head">
+              <h2 class="sec-label" id="performanceTitle">자산 추이</h2>
+              <p class="sec-meta" id="chartSummary">
+                성과 기록을 불러오는 중입니다.
+              </p>
+            </div>
+
+            <div class="chart-controls">
+              <select
+                id="chartAccount"
+                name="chart_account"
+                autocomplete="off"
+                aria-label="선택한 계좌"
+                hidden
+              ></select>
+              <div
+                class="seg"
+                id="chartRange"
+                role="group"
+                aria-label="조회 기간"
+              >
+                <button type="button" data-days="30" aria-pressed="false">
+                  1개월
+                </button>
+                <button type="button" data-days="90" aria-pressed="true">
+                  3개월
+                </button>
+                <button type="button" data-days="365" aria-pressed="false">
+                  1년
+                </button>
+                <button type="button" data-days="3650" aria-pressed="false">
+                  전체
+                </button>
+              </div>
+              <p class="chart-maturity" id="chartMaturity"></p>
+            </div>
+
+            <div id="chartWrap">
+              <figure class="chart">
+                <figcaption class="chart-title">
+                  <span class="legend-value">평가금액</span
+                  ><span class="legend-principal">투자원금</span>
+                </figcaption>
+                <div class="chart-box" id="chartBox">
+                  <canvas
+                    id="chartEquity"
+                    role="img"
+                    aria-label="선택한 계좌의 기간별 평가금액 추이"
+                    width="960"
+                    height="320"
+                  ></canvas>
+                  <div class="tip" id="chartTip" hidden>
+                    <time></time><strong></strong><span></span>
+                  </div>
+                </div>
+              </figure>
+              <figure class="chart">
+                <figcaption class="chart-title">
+                  고점 대비 하락률 <span>입출금을 제외한 수익률 기준</span>
+                </figcaption>
+                <div class="chart-box chart-box-small" id="drawdownBox">
+                  <canvas
+                    id="chartDrawdown"
+                    role="img"
+                    aria-label="고점 대비 낙폭 추이"
+                    width="960"
+                    height="120"
+                  ></canvas>
+                </div>
+              </figure>
+              <div
+                class="months"
+                id="monthStrip"
+                aria-label="월별 시간가중수익률"
+              ></div>
+            </div>
+            <div class="empty" id="chartEmpty" hidden>
+              <strong>아직 표시할 기록이 없습니다.</strong>
+              <span>모의투자를 한 번 실행하면 첫 자산 기록이 생깁니다.</span>
+            </div>
+            <p class="fine">
+              점선은 투자원금입니다. 차트에 마우스를 올리거나 터치하면 해당
+              날짜의 금액을 볼 수 있습니다.
+            </p>
+
+            <details class="disclosure">
+              <summary>표로 보기</summary>
+              <div
+                class="table-scroll"
+                tabindex="0"
+                role="region"
+                aria-label="성과 데이터 표"
+              >
+                <table>
+                  <caption>
+                    선택한 기간의 평가금액과 시간가중수익률
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">날짜</th>
+                      <th scope="col" class="num">평가금액</th>
+                      <th scope="col" class="num">투자원금</th>
+                      <th scope="col" class="num">시간가중수익률</th>
+                    </tr>
+                  </thead>
+                  <tbody id="chartDataRows"></tbody>
+                </table>
+              </div>
+            </details>
+          </section>
+
+          <section class="sec" id="portfolio" aria-labelledby="portfolioTitle">
+            <div class="sec-head">
+              <h2 class="sec-label" id="portfolioTitle">보유 종목</h2>
+              <time class="sec-meta" id="portfolioAsOf" datetime=""
+                >기준일 확인 중</time
+              >
+            </div>
+            <div
+              class="tracks"
+              id="basketTracks"
+              aria-live="polite"
+              aria-busy="true"
+            >
+              <p class="loading">포트폴리오를 불러오는 중입니다.</p>
+            </div>
+          </section>
+
+          <section class="sec" id="review" aria-labelledby="reviewTitle">
+            <div class="sec-head">
+              <h2 class="sec-label" id="reviewTitle">모의투자 검증</h2>
+              <p class="sec-meta">실전 전환 전 확인</p>
+            </div>
+            <div id="basketEval" aria-live="polite" aria-busy="true">
+              <p class="loading">검증 상태를 불러오는 중입니다.</p>
+            </div>
+            <p class="fine">
+              기록이 충분해도 실전 전환은 자동으로 되지 않습니다. 검토를 마친 뒤
+              직접 전환합니다.
+            </p>
+          </section>
+
+          <section
+            class="sec"
+            id="operations"
+            aria-labelledby="operationsTitle"
+          >
+            <div class="sec-head">
+              <h2 class="sec-label" id="operationsTitle">자동매매 상태</h2>
+              <button class="link" id="retryButton" type="button">
+                다시 확인
+              </button>
+            </div>
+            <dl
+              class="status-table"
+              id="runtimeOps"
+              aria-live="polite"
+              aria-busy="true"
+            ></dl>
+            <p class="fine" id="runtimeMeta"></p>
+
+            <aside
+              class="halt"
+              id="haltGuidance"
+              aria-labelledby="haltGuidanceTitle"
+              hidden
+            >
+              <h3 id="haltGuidanceTitle">거래 중지 상태에서 먼저 할 일</h3>
+              <p id="haltGuidanceReason">
+                신규 매수는 직접 해제하기 전까지 막혀 있습니다.
+              </p>
+              <ol>
+                <li>KIS 체결·미체결 내역과 실제 잔고를 대조합니다.</li>
+                <li>매도·청산 가능 여부는 신규 매수와 따로 확인합니다.</li>
+                <li>원인을 해결한 뒤 복구 절차대로 직접 해제합니다.</li>
+              </ol>
+              <a
+                href="https://github.com/easygap/quant_trader/blob/main/docs/SAFETY_MODEL.md"
+                target="_blank"
+                rel="noopener noreferrer"
+                >복구 절차 문서<span class="sr-only">, 새 탭</span></a
+              >
+            </aside>
+
+            <details class="disclosure">
+              <summary>
+                오늘 생성된 신호 <span class="count" id="signalCount">0건</span>
+              </summary>
+              <div
+                class="table-scroll"
+                id="signalsTableWrap"
+                tabindex="0"
+                role="region"
+                aria-label="오늘의 자동매매 신호"
+              >
+                <table>
+                  <caption>
+                    오늘 생성된 자동매매 신호
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">시각</th>
+                      <th scope="col">종목</th>
+                      <th scope="col">신호</th>
+                      <th scope="col" class="num">점수</th>
+                      <th scope="col">시점</th>
+                    </tr>
+                  </thead>
+                  <tbody id="signalRows"></tbody>
+                </table>
+              </div>
+              <p id="signalEmpty" class="fine" hidden>
+                오늘 생성된 신호가 없습니다.
+              </p>
+              <p id="signalError" class="fine error" hidden>
+                신호 기록을 불러오지 못했습니다. 잠시 후 다시 확인하세요.
+              </p>
+            </details>
+
+            <details class="disclosure">
+              <summary>연결 기록 및 이전 계좌</summary>
+              <dl class="status-table compact" id="wsGapSummary"></dl>
+              <div
+                class="table-scroll"
+                id="wsGapTableWrap"
+                tabindex="0"
+                role="region"
+                aria-label="웹소켓 연결 이력"
+                hidden
+              >
+                <table>
+                  <caption>
+                    최근 웹소켓 끊김과 복구 내역
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">끊김</th>
+                      <th scope="col">재연결</th>
+                      <th scope="col" class="num">공백</th>
+                      <th scope="col">영향 종목</th>
+                      <th scope="col">REST 보충</th>
+                      <th scope="col">안전장치</th>
+                    </tr>
+                  </thead>
+                  <tbody id="wsGapRows"></tbody>
+                </table>
+              </div>
+              <p id="wsGapEmpty" class="fine" hidden>
+                최근 연결 끊김이 없습니다.
+              </p>
+              <p id="wsGapNA" class="fine" hidden>
+                웹소켓 상태를 아직 받지 못했습니다.
+              </p>
+
+              <h4 class="sub-label">이전 기본 계좌</h4>
+              <dl class="status-table compact" id="summary"></dl>
+              <div
+                class="table-scroll"
+                id="positionsWrap"
+                tabindex="0"
+                role="region"
+                aria-label="이전 계좌 보유 종목"
+              >
+                <table>
+                  <caption>
+                    이전 기본 계좌의 보유 종목
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">종목</th>
+                      <th scope="col" class="num">수량</th>
+                      <th scope="col" class="num">평단가</th>
+                      <th scope="col" class="num">현재가</th>
+                      <th scope="col" class="num">평가금액</th>
+                      <th scope="col" class="num">수익률</th>
+                    </tr>
+                  </thead>
+                  <tbody id="positions"></tbody>
+                </table>
+              </div>
+              <p id="noPositions" class="fine" hidden>
+                이전 계좌에 보유 종목이 없습니다.
+              </p>
+            </details>
+          </section>
+        </div>
+        <aside class="side-column" aria-label="확인할 일과 자산 구성">
+          <section
+            class="sec attention"
+            id="today"
+            aria-labelledby="todayTitle"
+          >
+            <div class="sec-head">
+              <h2 id="todayTitle">확인할 일</h2>
+              <span class="notice-symbol" aria-hidden="true">!</span>
+            </div>
+            <h3 id="decisionTitle">현재 상태를 확인하고 있습니다</h3>
+            <p id="decisionDescription">
+              계좌와 자동매매 기록을 불러오는 중입니다.
+            </p>
+            <button class="link" id="decisionAction" type="button" hidden>
+              확인하기
+            </button>
+            <p class="sec-meta" id="decisionMeta"></p>
+          </section>
+          <section class="sec allocation" aria-labelledby="allocationTitle">
+            <h2 id="allocationTitle">자산 구성</h2>
+            <div
+              class="allocation-ring"
+              id="allocationRing"
+              role="img"
+              aria-label="자산 구성 확인 중"
+            >
+              <span
+                ><small>현금 비중</small
+                ><strong id="allocationCash">—</strong></span
+              >
+            </div>
+            <dl id="allocationList"></dl>
+            <p class="fine">보유 자산에는 주식과 ETF가 포함됩니다.</p>
+          </section>
+          <section
+            class="sec system-summary"
+            aria-labelledby="systemSummaryTitle"
+          >
+            <h2 id="systemSummaryTitle">자동매매</h2>
+            <ul class="status-row" id="statusRow"></ul>
+            <a class="link" href="#operations">상태 자세히 보기</a>
+          </section>
+        </aside>
+      </div>
+      <footer class="foot">
+        <p>눈금 <span>국내 주식·ETF 자동매매</span></p>
+        <p>모의투자와 과거 성과는 실제 투자 결과와 다를 수 있습니다.</p>
+      </footer>
+    </main>
+
+    <dialog
+      class="deposit-dialog"
+      id="depositDialog"
+      aria-labelledby="depositTitle"
+      aria-describedby="depositDescription"
+    >
+      <form id="depositForm" novalidate>
+        <header class="dialog-head">
+          <h2 id="depositTitle">적립금 기록</h2>
+          <button
+            class="icon-button"
+            id="closeDepositButton"
+            type="button"
+            aria-label="닫기"
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+              <path
+                d="M5 5l10 10M15 5L5 15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+              />
+            </svg>
+          </button>
+        </header>
+        <p class="dialog-desc" id="depositDescription">
+          모의투자 계좌에 추가할 적립금을 입력하세요.
+        </p>
+
+        <div id="depositFields">
+          <div class="field">
+            <label for="depBasket">계좌</label>
+            <select
+              id="depBasket"
+              name="basket"
+              autocomplete="off"
+              required
+            ></select>
+          </div>
+          <div class="field">
+            <label for="depAmount">금액</label>
+            <div class="money">
+              <input
+                id="depAmount"
+                name="amount"
+                type="number"
+                min="1"
+                step="10000"
+                inputmode="numeric"
+                autocomplete="off"
+                placeholder="100000"
+                aria-describedby="amountHelp depositError"
+                required
+              /><span>원</span>
+            </div>
+            <p class="help" id="amountHelp">
+              입력한 금액은 모의투자 원금에 더해집니다.
+            </p>
+            <div class="quick" role="group" aria-label="빠른 입력">
+              <button type="button" data-amount="50000" aria-pressed="false">
+                5만
+              </button>
+              <button type="button" data-amount="100000" aria-pressed="false">
+                10만
+              </button>
+              <button type="button" data-amount="200000" aria-pressed="false">
+                20만
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="depNote">메모 <span>선택</span></label>
+            <input
+              id="depNote"
+              name="note"
+              type="text"
+              maxlength="200"
+              autocomplete="off"
+              placeholder="9월 적립"
+            />
           </div>
         </div>
-        <div class="field">
-          <label for="depNote">메모 <span>선택</span></label>
-          <input id="depNote" name="note" type="text" maxlength="200" autocomplete="off" placeholder="9월 적립">
+
+        <div class="confirm" id="depositConfirm" hidden>
+          <p>계좌와 금액을 확인해 주세요.</p>
+          <dl>
+            <div>
+              <dt>계좌</dt>
+              <dd id="confirmBasket">—</dd>
+            </div>
+            <div>
+              <dt>금액</dt>
+              <dd id="confirmAmount">—</dd>
+            </div>
+            <div>
+              <dt>구분</dt>
+              <dd id="confirmMode">—</dd>
+            </div>
+          </dl>
         </div>
-      </div>
 
-      <div class="confirm" id="depositConfirm" hidden>
-        <p>아래 내용으로 장부에 기록합니다.</p>
-        <dl>
-          <div><dt>계좌</dt><dd id="confirmBasket">—</dd></div>
-          <div><dt>금액</dt><dd id="confirmAmount">—</dd></div>
-          <div><dt>장부</dt><dd id="confirmMode">—</dd></div>
-        </dl>
-      </div>
+        <p class="form-error" id="depositError" role="alert" hidden></p>
+        <footer class="dialog-actions">
+          <button
+            class="pill pill-line"
+            id="depositBackButton"
+            type="button"
+            hidden
+          >
+            다시 입력
+          </button>
+          <button class="pill pill-line" id="depositCancelButton" type="button">
+            취소
+          </button>
+          <button class="pill" id="depositSubmitButton" type="submit">
+            내용 확인
+          </button>
+        </footer>
+      </form>
+    </dialog>
 
-      <p class="form-error" id="depositError" role="alert" hidden></p>
-      <footer class="dialog-actions">
-        <button class="pill pill-line" id="depositBackButton" type="button" hidden>다시 입력</button>
-        <button class="pill pill-line" id="depositCancelButton" type="button">취소</button>
-        <button class="pill" id="depositSubmitButton" type="submit">내용 확인</button>
-      </footer>
-    </form>
-  </dialog>
-
-  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
-</body>
+    <div
+      class="toast"
+      id="toast"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+    <script src="/static/dashboard.js"></script>
+  </body>
 </html>

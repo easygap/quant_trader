@@ -139,7 +139,7 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
         f"  비용 드래그: 누적 {result['cost_drag_cum']:.4%} | 연환산 {result['cost_drag_annualized']:.4%}"
         + (
             " (기간 미충족 — 초기 매입 일회성 비용이 과장되므로 판정 미적용)"
-            if result["verdict"] == "WAIT" else ""
+            if result["progress_days"] < result["min_trading_days"] else ""
         ),
     ]
     if m.get("nav_return_pct") is not None:
@@ -539,5 +539,15 @@ def collect_basket_paper_evaluation(
         result["metrics"]["execution_gap_pct"] = gaps["execution_gap_pct"]
         result["metrics"]["composition_gap_pct"] = gaps["composition_gap_pct"]
         result["metrics"]["total_gap_pct"] = gaps["total_gap_pct"]
+
+    promotion = basket_cfg.get("promotion") or {}
+    if promotion.get("paper_only", False):
+        # 운영 일수는 남겨 두되, 이전 규칙의 기록으로 새 정책이 통과하지 않게 한다.
+        result["operation_verdict"] = result["verdict"]
+        result["paper_only"] = True
+        if result["verdict"] == "PASS_CANDIDATE":
+            result["verdict"] = "WAIT"
+        result["issues"].append(str(promotion.get("review_note") or
+            "변경한 운용 규칙을 모의투자로 검증하고 있습니다. 실전 전환은 제한됩니다."))
 
     return result, basket_name

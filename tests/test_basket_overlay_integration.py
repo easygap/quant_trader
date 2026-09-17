@@ -111,6 +111,14 @@ class TestTrendFilter:
         assert decision.scale == pytest.approx(0.5)
         assert decision.data_issues and "부족" in decision.data_issues[0]
 
+    def test_missing_last_close_cannot_look_like_a_trend_recovery(self):
+        save_overlay_state("t", OverlayDecision(scale=0.5, trend_below=True))
+        rb = _make(_basket(self.overlays), [100.] * 199 + [110., float("nan")])
+        with _patch_snapshots(rb):
+            decision = rb.overlay_decision()
+        assert decision.scale == .5
+        assert decision.data_issues
+
     def test_today_bar_is_excluded(self):
         """오늘 날짜 봉은 전일까지의 정보가 아니므로 제외한다."""
         from datetime import datetime
@@ -143,3 +151,37 @@ class TestDrawdownGuard:
         rb = _make(_basket(self.overlays), closes=None, cumulative=[0.0, 10.0, 5.0, 6.0])
         with _patch_snapshots(rb):
             assert rb._stock_fraction() == pytest.approx(0.6)   # 낙폭 -3.6% → -5% 안 → 해제
+
+
+def test_defensive_etf_is_retained_and_gets_released_equity_allocation():
+    cfg = _basket({"combination": "minimum", "defensive_symbol": "357870",
+                   "trend_filter": {"enabled": True}, "drawdown_guard": {"enabled": True}}, target=.95)
+    cfg["holdings"] = {"069500": .5, "357870": .5}
+    rb = _make(cfg, closes=[100.]*199+[90.], cumulative=[0., -12.])
+    with _patch_snapshots(rb):
+        assert rb.overlay_decision().scale == .5
+        assert rb._stock_fraction() == pytest.approx(.95)
+        targets = rb.get_target_weights()
+        assert targets == pytest.approx({"069500": .25, "357870": .75})
+        assert targets["357870"] * rb._stock_fraction() == pytest.approx(.7125)
+
+
+def test_future_index_bar_and_unsorted_rows_cannot_change_signal():
+    cfg = _basket({"trend_filter": {"enabled": True, "ma_days": 200}})
+    rb = _make(cfg, closes=[])
+    from datetime import datetime, timedelta
+    future = datetime.now() + timedelta(days=2)
+    dates = list(pd.date_range(end="2020-01-01", periods=200, freq="B")) + [future]
+    frame = pd.DataFrame({"date":dates,"close":[100.]*200 + [10000.]})
+    rb.data_collector.fetch_korean_stock = lambda *a: frame.iloc[::-1]
+    assert rb._fetch_index_closes("KS200", 200) == [100.]*200
+
+
+def test_nav_ignores_today_and_future_snapshots():
+    cfg = _basket({"drawdown_guard": {"enabled": True}})
+    rb = _make(cfg, closes=[], cumulative=[0., -12., 100.])
+    from datetime import datetime, timedelta
+    today = datetime.now().date()
+    rb._nav_frame["date"] = [today-timedelta(days=2), today-timedelta(days=1), today]
+    with _patch_snapshots(rb):
+        assert rb.overlay_decision().drawdown_active is True

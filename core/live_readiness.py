@@ -42,6 +42,11 @@ def check_basket_live_readiness(config, strategy_name: str) -> list[str]:
             issues.append(
                 f"바스켓 '{basket_name}'이 enabled=false — paper 운영(트랙레코드)부터 시작하세요."
             )
+        if (basket.get("promotion") or {}).get("paper_only", False):
+            issues.append(
+                f"바스켓 '{basket_name}'은 모의투자 전용(paper_only)입니다. "
+                "변경한 운용 규칙을 검증하기 전에는 실전으로 전환할 수 없습니다."
+            )
         holdings = basket.get("holdings", {}) or {}
         total_w = sum(float(w) for w in holdings.values())
         if abs(total_w - 1.0) > 0.001:

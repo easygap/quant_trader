@@ -69,6 +69,23 @@ def _cfg(basket_name):
 
 
 class TestGetBasketsJson:
+    def test_defensive_target_and_zero_scale_match_order_planner(self, tmp_path, monkeypatch):
+        from core.risk_overlays import OverlayDecision, save_overlay_state
+        monkeypatch.setenv("QUANT_OVERLAY_STATE_DIR", str(tmp_path))
+        name = "dashboard_defensive_zero"
+        _seed_pocket(name)
+        cfg = _cfg(name)
+        cfg[name].update({"target_stock_weight": .95, "min_cash_ratio": .05,
+                          "holdings": {"069500":.5,"357870":.5},
+                          "overlays":{"trend_filter":{"enabled":True},"defensive_symbol":"357870"}})
+        save_overlay_state(name, OverlayDecision(scale=0.))
+        from monitoring import web_dashboard as wd
+        with patch("core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",return_value=[name]), patch("core.basket_rebalancer.BasketRebalancer._load_baskets_config",return_value=cfg):
+            b = wd.get_baskets_json()["baskets"][0]
+        assert b["overlay"]["scale"] == 0.
+        assert b["design_fraction"] == pytest.approx(.95)
+        assert b["target_weights"] == pytest.approx({"069500":0.,"357870":.95})
+
     def test_principal_snapshot_deployment_positions(self):
         name = "kr_pocket_t1"
         acct = _seed_pocket(name)
@@ -335,8 +352,9 @@ def test_html_page_contains_basket_tracks_section():
     assert "basketTracks" in html              # 주력 포트폴리오 섹션
     assert "chartAccount" in html              # 장기 차트 계정 선택기
     assert 'id="decisionTitle"' in html        # 오늘의 단일 판단
-    assert '<dialog class="deposit-dialog"' in html
-    assert 'role="status" aria-live="polite"' in html
+    import re
+    assert re.search(r'<dialog\s+class="deposit-dialog"', html)
+    assert re.search(r'role="status"\s+aria-live="polite"', html)
     assert 'class="skip-link"' in html
     assert '/static/nungum-symbol.svg' in html  # BI 심볼
     assert '/static/dashboard.js' in html       # 동작은 외부 자산으로 분리
@@ -419,11 +437,42 @@ def test_dashboard_responses_include_security_headers():
             response = await client.get("/")
             assert response.status == 200
             html = await response.text()
-            assert 'id="openDepositButton" type="button" disabled' in html
+            import re
+            assert re.search(r'id="openDepositButton"\s+type="button"\s+disabled', html)
             assert response.headers["Cache-Control"] == "no-store"
             assert response.headers["X-Frame-Options"] == "DENY"
             assert response.headers["X-Content-Type-Options"] == "nosniff"
             assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(not _has_aiohttp, reason="aiohttp 미설치")
+def test_static_assets_are_compressed_and_revalidated_without_caching_account_data():
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from monitoring import web_dashboard as wd
+
+    async def run():
+        client = TestClient(TestServer(wd.create_app()))
+        await client.start_server()
+        try:
+            response = await client.get("/static/dashboard.js", headers={"Accept-Encoding": "gzip"})
+            assert response.status == 200
+            assert response.headers["Content-Encoding"] == "gzip"
+            assert response.headers["Cache-Control"] == "no-cache"
+            assert "/api/baskets" in await response.text()
+            font = await client.get("/static/fonts/nungum-ui.woff2")
+            assert font.status == 200
+            assert font.headers["Cache-Control"] == "no-cache"
+            etag = font.headers["ETag"]
+            await font.read()
+            cached = await client.get("/static/fonts/nungum-ui.woff2", headers={"If-None-Match": etag})
+            assert cached.status == 304
+            private = await client.get("/api/baskets")
+            assert private.headers["Cache-Control"] == "no-store"
         finally:
             await client.close()
 
