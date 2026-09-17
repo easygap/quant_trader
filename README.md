@@ -76,8 +76,10 @@ python -m venv .venv
 pip install -r requirements.txt
 cp config/settings.yaml.example config/settings.yaml
 cp .env.example .env
-python main.py --mode dashboard   # http://127.0.0.1:8080
+python main.py --mode dashboard
 ```
+
+기본 바인드는 http://127.0.0.1:8080 입니다. 대시보드는 인증 없이 계좌 숫자를 보여주므로 이 PC에서만 열리고, 외부 공개는 설정으로도 권장하지 않습니다.
 
 처음 실행해 화면에 기록이 없다면 모의투자 사이클을 한 번 돌립니다.
 
