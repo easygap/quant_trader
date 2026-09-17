@@ -1,22 +1,10 @@
-"""바스켓 주식 비중 리스크 오버레이 — 추세 필터·낙폭 제어·변동성 목표.
+"""추세·낙폭·변동성에 따라 주식 목표 비중을 조절한다.
 
-이 저장소의 확정 결론은 "종목 선택으로 시장을 이길 알파는 없다"이고, 손익을 가르는 것은
-주식 비중이다. 그래서 여기서는 종목을 고르지 않고, **설계 주식 비중에 곱할 배수(0~1)**만
-계산한다. 배수는 설계를 대체하지 않고 위임한다: 설계 60%에 배수 0.5면 목표 30%.
+전일까지의 자료와 직전 상태로 위험 배수(0~1)를 계산한다. product는 기존처럼
+배수를 곱하고, minimum은 가장 낮은 배수 하나를 사용한다. 방어 자산이 지정돼
+있으면 줄인 주식 비중을 해당 자산에 배분한다. 자료가 부족하면 확대를 보류한다.
 
-근거와 숫자는 tools/risk_overlay_backtest.py → docs/RISK_OVERLAY_FINDINGS.md.
-  - 추세 필터: 지수가 200일선 아래로 band(2%)만큼 내려가면 off_scale(0.5)배, 위로
-    band만큼 올라와야 복귀. 히스테리시스가 없으면 선 근처에서 왕복 매매가 난다.
-  - 낙폭 제어: 시간가중 NAV가 고점 대비 trigger(-10%) 아래면 scale(0.5)배, release(-5%)
-    안으로 회복해야 복귀.
-  - 변동성 목표: 실현 변동성이 목표(20%)를 넘으면 목표/실현 비율로 축소(0.1 단위).
-    한국 시장에선 수익을 많이 깎아 기본 off — 옵션으로만 둔다.
-
-원칙
-  - 모든 판단은 전일까지의 정보만 쓴다(리밸런싱은 장 시작 전에 전일 종가로 돌아간다).
-  - 상태(추세 아래/낙폭 발동)는 파일로 이어진다. 히스테리시스는 상태가 있어야 성립한다.
-  - 데이터가 없으면 새 상태를 지어내지 않고 직전 상태를 유지하며 data_issues에 남긴다.
-    헬스가 그 사실을 표면화한다("오류 0건인데 설계대로 안 돈다"를 막기 위해).
+검증 근거와 한계: docs/RISK_REVIEW_20260917.md.
 """
 from __future__ import annotations
 
@@ -64,6 +52,7 @@ class OverlayConfig:
     trend: TrendFilterConfig = TrendFilterConfig()
     drawdown: DrawdownGuardConfig = DrawdownGuardConfig()
     volatility: VolatilityTargetConfig = VolatilityTargetConfig()
+    combination: str = "product"
 
     @property
     def any_enabled(self) -> bool:
@@ -89,7 +78,8 @@ class OverlayDecision:
 
 def _f(value: Any, default: float) -> float:
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else float(default)
     except (TypeError, ValueError):
         return float(default)
 
@@ -123,7 +113,10 @@ def parse_overlay_config(basket_cfg: dict[str, Any] | None) -> OverlayConfig:
         max_scale=min(1.0, max(0.0, _f(v.get("max_scale"), 1.0))),
         step=max(0.0, _f(v.get("step"), 0.1)),
     )
-    return OverlayConfig(trend=trend, drawdown=drawdown, volatility=volatility)
+    combination = str(raw.get("combination", "product"))
+    if combination not in {"product", "minimum"}:
+        raise ValueError("overlays.combination은 product 또는 minimum이어야 합니다")
+    return OverlayConfig(trend=trend, drawdown=drawdown, volatility=volatility, combination=combination)
 
 
 # ------------------------------------------------------------------
@@ -138,7 +131,14 @@ def trend_below_ma(
     반환 (below, rel). 데이터가 ma_days 미만이면 (prev_below, None): 판단을 지어내지 않는다.
     prev_below가 None(첫 실행)이면 band 없이 선 아래/위로 초기화한다.
     """
-    closes = [float(c) for c in index_closes if c is not None and not math.isnan(float(c))]
+    closes = list(index_closes)
+    if len(closes) >= cfg.ma_days:
+        try:
+            closes = [float(c) for c in closes[-cfg.ma_days:]]
+        except (TypeError, ValueError):
+            return prev_below, None
+        if any(not math.isfinite(c) or c <= 0 for c in closes):
+            return prev_below, None
     if len(closes) < cfg.ma_days:
         return prev_below, None
     window = closes[-cfg.ma_days:]
@@ -161,13 +161,13 @@ def drawdown_from_cumulative_returns(cumulative_returns_pct: Sequence[float]) ->
     last = None
     for cr in cumulative_returns_pct:
         if cr is None:
-            continue
+            return None
         try:
             idx = 1.0 + float(cr) / 100.0
         except (TypeError, ValueError):
-            continue
-        if math.isnan(idx):
-            continue
+            return None
+        if not math.isfinite(idx) or idx <= 0:
+            return None
         peak = max(peak, idx)
         last = idx
     if last is None:
@@ -189,7 +189,12 @@ def drawdown_guard_active(drawdown: float | None, cfg: DrawdownGuardConfig, prev
 
 def realized_volatility(daily_returns: Sequence[float], lookback_days: int) -> float | None:
     """최근 lookback_days 일간수익률의 연환산 표준편차."""
-    rets = [float(r) for r in daily_returns if r is not None and not math.isnan(float(r))]
+    try:
+        rets = [float(r) for r in list(daily_returns)[-lookback_days:]]
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(r) or r <= -1 for r in rets):
+        return None
     if len(rets) < lookback_days:
         return None
     window = rets[-lookback_days:]
@@ -228,6 +233,7 @@ def compute_decision(
     prev = prev_state or {}
     decision = OverlayDecision(evaluated_at=(now or datetime.now()).isoformat(timespec="seconds"))
     scale = 1.0
+    scales = []
 
     if cfg.trend.enabled:
         below, rel = trend_below_ma(index_closes or [], cfg.trend, prev.get("trend_below"))
@@ -239,6 +245,7 @@ def compute_decision(
         decision.trend_below = below
         if below:
             scale *= cfg.trend.off_scale
+            scales.append(cfg.trend.off_scale)
             decision.reasons.append(
                 f"{cfg.trend.index_symbol} {cfg.trend.ma_days}일선 아래"
                 + (f"({rel:+.1%})" if rel is not None else "")
@@ -254,6 +261,7 @@ def compute_decision(
         decision.drawdown_active = active
         if active:
             scale *= cfg.drawdown.scale
+            scales.append(cfg.drawdown.scale)
             decision.reasons.append(
                 f"고점 대비 낙폭 {dd:+.1%}" if dd is not None else "낙폭 제어 발동 중"
             )
@@ -263,17 +271,28 @@ def compute_decision(
         vs, vol = volatility_scale(daily_returns or [], cfg.volatility)
         decision.realized_vol = None if vol is None else round(vol, 4)
         if vs is None:
-            decision.data_issues.append("변동성 목표: 일간 수익률 부족 — 배수 1.0")
+            decision.data_issues.append("변동성 계산에 필요한 일간 수익률이 부족해 비중 확대를 보류했습니다")
             prev_vs = prev.get("vol_scale")
             vs = float(prev_vs) if isinstance(prev_vs, (int, float)) else 1.0
         decision.vol_scale = vs
         if vs < 1.0:
             scale *= vs
+            scales.append(vs)
             decision.reasons.append(
                 f"실현 변동성 {vol:.0%} > 목표 {cfg.volatility.target:.0%} → 주식 비중 ×{vs:g}"
                 if vol is not None else f"변동성 목표 배수 ×{vs:g}"
             )
 
+    if cfg.combination == "minimum":
+        scale = min(scales, default=1.0)
+    if decision.data_issues:
+        # 자료가 없다는 이유로 직전보다 투자 위험을 늘리지 않는다.
+        previous_scale = _f(prev.get("scale"), min(
+            [1.0] + ([cfg.trend.off_scale] if cfg.trend.enabled else [])
+            + ([cfg.drawdown.scale] if cfg.drawdown.enabled else [])
+            + ([cfg.volatility.min_scale] if cfg.volatility.enabled else [])
+        ))
+        scale = min(scale, previous_scale)
     decision.scale = round(min(1.0, max(0.0, scale)), 4)
     return decision
 
@@ -281,18 +300,46 @@ def compute_decision(
 def describe_decision(decision: OverlayDecision | dict[str, Any] | None, cfg: OverlayConfig | None = None) -> str:
     """대시보드·헬스용 한 줄 설명."""
     if decision is None:
-        return "위험 조절 상태 없음 — 첫 실행 대기"
+        return "첫 실행 대기: 위험 관리 조건을 아직 확인하지 않았습니다"
     d = decision.to_dict() if isinstance(decision, OverlayDecision) else dict(decision)
     scale = float(d.get("scale", 1.0))
     parts = list(d.get("reasons") or [])
     issues = list(d.get("data_issues") or [])
     if not parts:
-        text = "위험 조절 발동 없음 · 설계 비중 그대로"
+        text = "자료 확인 전 비중 확대 보류" if issues else "기본 투자 비중 유지"
     else:
         text = " · ".join(parts)
     if issues:
         text += " · 확인 필요: " + "; ".join(issues)
-    return f"{text} (배수 {scale:g})"
+    return f"{text}. 주식 목표 비중은 기본 설정의 {scale:.0%}입니다"
+
+
+def overlay_target_weights(
+    weights: dict[str, float], design_fraction: float, scale: float,
+    defensive_symbol: str | None = None,
+) -> dict[str, float]:
+    """총자산 기준 목표 비중. 방어 자산이 있으면 주식 축소분을 그 자산에 배분한다.
+
+    예: 주식 47.5%, CD ETF 47.5%, 현금 5%에서 위험 배수 0.5는
+    주식 23.75%, CD ETF 71.25%, 현금 5%다. CD ETF를 주식처럼 매도하지 않는다.
+    방어 자산 미지정 시에는 기존처럼 모든 보유 비중을 줄여 현금으로 둔다.
+    """
+    clean = {str(s): float(w) for s, w in weights.items()}
+    if any(not math.isfinite(w) or w < 0 for w in clean.values()):
+        raise ValueError("목표 비중은 유한한 0 이상의 값이어야 합니다")
+    total = sum(clean.values())
+    if total <= 0:
+        return {}
+    if not math.isfinite(design_fraction) or not 0 <= design_fraction <= 1:
+        raise ValueError("투자 비중은 0~1 사이여야 합니다")
+    if not math.isfinite(scale) or not 0 <= scale <= 1:
+        raise ValueError("위험 배수는 0~1 사이여야 합니다")
+    if defensive_symbol and clean.get(defensive_symbol, 0) <= 0:
+        raise ValueError("방어 자산은 보유 비중에 포함된 종목이어야 합니다")
+    target = {s: w / total * design_fraction * scale for s, w in clean.items()}
+    if defensive_symbol:
+        target[defensive_symbol] += design_fraction * (1.0 - scale)
+    return target
 
 
 # ------------------------------------------------------------------

@@ -84,6 +84,8 @@ class TestDrawdown:
         assert drawdown_from_cumulative_returns([10.0, 21.0, 9.9]) == pytest.approx(1.099 / 1.21 - 1)
         assert drawdown_from_cumulative_returns([]) is None
         assert drawdown_from_cumulative_returns([None, "x"]) is None
+        assert drawdown_from_cumulative_returns([0., None, 10.]) is None
+        assert drawdown_from_cumulative_returns([0., "오류", 10.]) is None
 
     def test_trigger_and_release(self):
         assert drawdown_guard_active(-0.09, self.cfg, False) is False
@@ -135,8 +137,42 @@ class TestDecision:
     def test_describe_is_korean_one_liner(self):
         cfg = parse_overlay_config({"overlays": {"trend_filter": {"enabled": True}}})
         d = compute_decision(cfg, index_closes=_closes(103.0), prev_state=None)
-        assert describe_decision(d).startswith("위험 조절 발동 없음")
+        assert describe_decision(d).startswith("기본 투자 비중 유지")
         assert "첫 실행 대기" in describe_decision(None)
+
+    def test_minimum_combination_does_not_cut_same_risk_twice(self):
+        cfg = parse_overlay_config({"overlays": {"combination": "minimum", "trend_filter": {"enabled": True}, "drawdown_guard": {"enabled": True}}})
+        d = compute_decision(cfg, index_closes=_closes(95.), cumulative_returns_pct=[0., -12.])
+        assert d.scale == .5
+
+    def test_missing_data_cannot_increase_previous_exposure(self):
+        cfg = parse_overlay_config({"overlays": {"trend_filter": {"enabled": True}}})
+        d = compute_decision(cfg, index_closes=[], prev_state={"scale": .25})
+        assert d.scale == .25
+        assert d.data_issues
+
+    def test_nonfinite_price_is_not_a_recovery_signal(self):
+        cfg = parse_overlay_config({"overlays": {"trend_filter": {"enabled": True}}})
+        d = compute_decision(cfg, index_closes=_closes(float('inf')), prev_state={"trend_below": True, "scale": .5})
+        assert d.scale == .5
+        assert d.data_issues
+
+
+class TestDefensiveAllocation:
+    def test_released_stock_weight_goes_to_defensive_asset(self):
+        from core.risk_overlays import overlay_target_weights
+        result = overlay_target_weights({"069500": .5, "357870": .5}, .95, .5, "357870")
+        assert result == pytest.approx({"069500": .2375, "357870": .7125})
+        assert sum(result.values()) == pytest.approx(.95)
+
+    def test_stock_only_basket_keeps_cash_fallback(self):
+        from core.risk_overlays import overlay_target_weights
+        assert overlay_target_weights({"A": 1}, .6, .5) == {"A": .3}
+
+    def test_unknown_defensive_asset_is_not_silently_accepted(self):
+        from core.risk_overlays import overlay_target_weights
+        with pytest.raises(ValueError):
+            overlay_target_weights({"A": 1}, .6, .5, "missing")
 
 
 class TestState:

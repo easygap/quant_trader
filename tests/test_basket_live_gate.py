@@ -64,6 +64,14 @@ class TestBasketLiveGate:
         issues = self._run("basket_rebalance:kr_diversified_hold")
         assert issues == []
 
+    def test_changed_policy_cannot_reuse_old_pass_or_mock_bypass(self):
+        baskets = {"changed": {"enabled": True, "holdings": {"069500": 1.},
+                                "promotion": {"paper_only": True}}}
+        for use_mock in (False, True):
+            issues = self._run("basket_rebalance:changed", baskets=baskets,
+                               verdict="PASS_CANDIDATE", use_mock=use_mock)
+            assert any("paper_only" in issue for issue in issues)
+
     def test_gate_evaluates_its_own_basket_record(self):
         """게이트는 반드시 '자기 바스켓'의 기록으로 평가한다 — 이름 없이 합산하면
         다른 바스켓의 60일 트랙레코드로 신규 바스켓이 승격되는 구멍."""

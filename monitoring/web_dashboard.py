@@ -114,7 +114,7 @@ def get_baskets_json() -> dict:
     from core.basket_deploy import effective_stock_fraction
     from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
     from core.risk_overlays import (
-        applied_stock_fraction,
+        overlay_target_weights,
         describe_decision,
         load_overlay_state,
         parse_overlay_config,
@@ -201,16 +201,17 @@ def get_baskets_json() -> dict:
         # 곱한 '적용 비중'이 그날의 목표다. 화면의 목표 비중·목표 범위 판정은 적용 비중을 쓴다.
         overlay_cfg = parse_overlay_config(basket_config)
         overlay_state = load_overlay_state(name) if overlay_cfg.any_enabled else None
-        design_fraction = (
-            applied_stock_fraction(base_fraction, overlay_state)
-            if overlay_cfg.any_enabled
-            else base_fraction
+        scale = float((overlay_state or {}).get("scale", 1.0))
+        target_weights = overlay_target_weights(
+            basket_config.get("holdings") or {}, base_fraction, scale,
+            (basket_config.get("overlays") or {}).get("defensive_symbol"),
         )
+        design_fraction = sum(target_weights.values())
         overlay = None
         if overlay_cfg.any_enabled:
             overlay = {
                 "enabled": True,
-                "scale": float((overlay_state or {}).get("scale", 1.0) or 1.0) if overlay_state else None,
+                "scale": scale if overlay_state else None,
                 "summary": describe_decision(overlay_state),
                 "reasons": list((overlay_state or {}).get("reasons") or []),
                 "data_issues": list((overlay_state or {}).get("data_issues") or []),
@@ -221,16 +222,6 @@ def get_baskets_json() -> dict:
             }
         # 종목별 목표 비중(총자산 대비) = 바스켓 내 비중 정규화 × 적용 투자 비중.
         # 현재가는 장부에 저장하지 않으므로 화면은 매입금액 기준 비중과 나란히 보여준다.
-        holdings_cfg = basket_config.get("holdings") or {}
-        weight_total = sum(float(weight or 0) for weight in holdings_cfg.values())
-        target_weights = (
-            {
-                str(symbol): float(weight or 0) / weight_total * design_fraction
-                for symbol, weight in holdings_cfg.items()
-            }
-            if weight_total > 0
-            else {}
-        )
         holdings_cost = float(sum(position["invested"] for position in positions))
         holdings_value = (
             snapshot["total_value"] - snapshot["cash"] if snapshot else None
@@ -352,12 +343,16 @@ def _api_error(label: str, exc: Exception, message: str) -> web.Response:
 
 async def _security_headers(request: web.Request, handler):
     response = await handler(request)
-    response.headers["Cache-Control"] = "no-store"
+    static_asset = request.path.startswith("/static/")
+    # 정적 파일은 변경 여부를 확인해 재사용한다. 계좌 응답은 디스크에 캐시하지 않는다.
+    response.headers["Cache-Control"] = "no-cache" if static_asset else "no-store"
+    if static_asset and request.path.endswith((".css", ".js", ".svg")):
+        response.enable_compression()
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; "
         "img-src 'self' data:; connect-src 'self'; "
         "object-src 'none'; base-uri 'none'; form-action 'self'; "
         "frame-ancestors 'none'"
@@ -537,6 +532,7 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
                 {
                     "basket": basket_name,
                     "verdict": result.get("verdict"),
+                    "paper_only": bool(result.get("paper_only", False)),
                     "progress_days": result.get("progress_days"),
                     "min_trading_days": result.get("min_trading_days"),
                     "snapshot_coverage": result.get("snapshot_coverage"),

@@ -1,117 +1,114 @@
-<img src="monitoring/static/nungum-symbol.svg" alt="눈금 심볼" width="48">
+<img src="monitoring/static/nungum-symbol.svg" alt="" width="40">
 
-# 눈금 — 오래 투자하기 위한 기준과 기록
+# 눈금
 
-한국 주식 ETF·대형주 바스켓을 매일 자동으로 굴리고, 그 결과를 숫자로 남기고, 정한 기준을 지키게 만드는 개인용 퀀트 시스템입니다. 주가를 맞히는 프로그램이 아닙니다. 종목을 고르는 알파는 없다는 걸 검증으로 확인했고, 그 대신 **비용을 최소로 시장 수익(베타)을 담고, 떨어질 때 덜 잃는 것**에 집중합니다.
+**국내 주식·ETF 자동매매와 계좌 관리**
 
-![스크롤하면 자산 곡선이 그려지는 첫 화면](docs/images/dashboard-story.png)
+정해 둔 비중에 맞춰 주식과 ETF를 사고팔고, 원금·수익률·보유 종목을 한 화면에서 확인하는 개인용 투자 도구입니다. 과거 데이터로 운용 규칙을 비교하고, 모의투자로 실제 동작을 점검할 수 있습니다.
 
-## 한눈에 보기
+![눈금의 계좌 현황 화면 — 총자산, 투자원금, 수익률과 자산 추이](docs/images/dashboard-account-20260917.png)
 
-| | 내용 |
-|---|---|
-| 하는 일 | 한국 주식 바스켓 자동 리밸런싱, 매일 자산 기록(NAV), 적립 관리, 운영 상태 감시, 웹 대시보드 |
-| 지금 굴러가는 것 | 모의투자 2개 트랙 (실전 주문은 운영자가 직접 켜기 전엔 나가지 않음) |
-| 주력 트랙 | `kr_pocket` — 코스피200 ETF + CD금리 ETF, 시작 30만원에 매월 10만원 적립 |
-| 관찰 트랙 | `kr_diversified_hold` — 대형주 9종목 동일비중, 주식 60% / 현금 40% |
-| 리스크 관리 | 주식 비중 고정 + 2026-09 추가한 추세 필터·낙폭 제어 오버레이, 거래 중지·급락 감지·갭 방어 |
-| 기술 | Python 3.11/3.12, aiohttp, SQLite, FinanceDataReader/pykrx, KIS API(모의·실전), 대시보드는 순수 HTML/CSS/JS |
+*2026년 9월 17일 모의투자 기록을 불러온 실제 화면입니다. 아래 백테스트와는 별도의 계좌 기록입니다.*
 
-## 돈이 어떻게 굴러가나
+## 할 수 있는 일
 
-두 트랙 모두 `config/baskets.yaml`에 선언된 목표 비중을 향해 큰 이탈이 생길 때만 사고팝니다. 매일 아침 스케줄러가 시세를 받아 리밸런싱이 필요한지 보고, 그날의 총자산을 장부에 남깁니다. 적립금은 수익이 아니므로 시간가중수익률(TWR)로 분리해서 계산합니다.
+- **계좌 확인** — 총자산, 투자원금, 현금, 보유 종목과 목표 비중을 확인합니다.
+- **성과 확인** — 적립금을 수익에서 제외한 수익률, 자산 추이, 고점 대비 하락률을 봅니다.
+- **자동 리밸런싱** — 실제 비중이 설정 범위를 벗어나면 조정합니다. 최소 주문금액과 1주 단위를 반영합니다.
+- **모의투자 검증** — 운영 기록, 누락된 자산 기록, 거래비용과 미해결 주문을 확인합니다.
+- **운영 점검** — 자동매매 실행 여부, 거래 중지 상태, 증권사 연결과 데이터 갱신 상태를 봅니다.
 
-| 트랙 | 구성 | 목표 주식 비중 | 리밸런싱 | 손절 |
-|---|---|---|---|---|
-| `kr_pocket` (주력) | KODEX 200 50% + TIGER CD금리 50% | 95% 투자 (지수 47.5 · 파킹 47.5) | 비중 8%p 이탈 시 | 없음 — 지수 적립식이라 비중으로만 위험 통제 |
-| `kr_diversified_hold` (관찰) | 삼성전자·현대차·NAVER 등 9종목 동일비중 | 60% | 비중 8%p 이탈 시, 회전 상한 15% | 종목 −25%, 재매수 금지 60일 |
-
-정직한 기대치는 이렇습니다. 2022년 약세장을 포함한 검증에서 대형주 동일비중 보유는 연 13% 안팎, 주식 50%짜리 적립 트랙은 연 7~9%였습니다. 강세장 한 번의 숫자(연 30%대)는 상한이지 약속이 아닙니다. 자세한 근거는 [docs/PROFITABILITY_FINDINGS.md](docs/PROFITABILITY_FINDINGS.md)에 있습니다.
-
-## 2026년 9월 업데이트 — 손실을 줄이는 두 가지 규칙
-
-![적립 트랙 오버레이 백테스트](docs/images/overlay-pocket-etf.png)
-
-"수익률을 올리는 신호"는 여러 번 시도해서 전부 시장 보유에 졌습니다. 그래서 이번에는 **주식 비중을 언제 줄이는지**만 바꿨습니다. 2002년부터의 코스피200, 2014년부터의 KODEX 200 실제 ETF, 2021년 말부터의 대형주 10종목으로 같은 비용·같은 적립 규칙 아래 비교했습니다.
-
-| 규칙 | 무엇을 하나 | 적립 트랙(ETF, 2014~) 결과 |
-|---|---|---|
-| 추세 필터 | 코스피200이 200일선 아래로 2% 넘게 내려가면 주식 비중을 절반으로, 위로 2% 넘게 올라와야 복귀 | 연수익률 9.6 → 9.3%, 최악 연도 −11.2 → −4.6%, 샤프 0.59 → 0.62 |
-| 낙폭 제어 | 시간가중 자산이 고점 대비 −10% 아래면 절반, −5% 안으로 회복해야 복귀 | 최대낙폭 −21.7 → −17.3% (추세 필터와 함께 −16.3%) |
-| 변동성 목표 | 실현 변동성이 20%를 넘으면 그만큼 축소 | 연수익률을 2~4%p 깎아 **기본 꺼 둠** |
-
-주력 적립 트랙에는 추세 필터와 낙폭 제어를 켰습니다. 관찰 트랙은 60거래일 검증을 끝내고 실전 전환 승인을 기다리는 중이라 권장값만 적어 두고 껐습니다. 전체 표와 읽는 법은 [docs/RISK_OVERLAY_FINDINGS.md](docs/RISK_OVERLAY_FINDINGS.md), 재현은 `python tools/risk_overlay_backtest.py`입니다.
+Python·aiohttp·SQLite·한국투자증권 KIS API를 사용합니다. 화면은 HTML/CSS/JavaScript로 만들었으며 프런트엔드 설치나 빌드 과정이 없습니다.
 
 ## 화면
 
-대시보드는 매일 아침 한 번 보는 용도로 만들었습니다. 첫 화면은 스크롤에 따라 자산 곡선이 그려지면서 총자산, 적립을 뺀 수익률, 최대 낙폭을 차례로 보여줍니다.
+### 보유 종목과 비중
 
-![고점 대비 낙폭 구간이 음영으로 드러나는 첫 화면](docs/images/dashboard-story-drawdown.png)
+매입금액과 목표 비중을 나란히 보여 줍니다. 계좌를 바꾸면 요약, 종목표, 차트, 적립금 입력 대상이 함께 바뀝니다.
 
-**오늘** — 확인할 일이 있으면 그것만 먼저 말합니다. 적립을 아직 기록하지 않았는지, 자동매매가 멈췄는지, 거래가 중지됐는지. 없으면 "오늘은 손댈 것이 없습니다"라고 씁니다.
+![대형주 분산 투자 계좌의 보유 종목](docs/images/dashboard-holdings-20260917.png)
 
-![오늘 할 일과 운영 상태 요약](docs/images/dashboard-today.png)
+### 모바일과 운영 상태
 
-**포트폴리오** — 트랙별 총자산·투자원금·평가손익·시간가중수익률·최대낙폭·현금 비중, 투자 비중과 목표, 종목별 매입 비중과 목표 비중, 그리고 오늘 위험 조절 규칙이 무엇을 판단했는지.
+작은 화면에서도 잔액과 수익률을 먼저 보여 줍니다. 적립금은 계좌·금액·모의/실전 구분을 확인한 뒤 기록합니다. 모의투자 적립은 가상 계좌에만 반영됩니다.
 
-![트랙별 지표와 종목표](docs/images/dashboard-portfolio.png)
+<details>
+<summary>모바일 화면 보기</summary>
 
-**성과** — 평가금액(점선은 투자원금, 세로 눈금은 적립 시점), 고점 대비 낙폭, 월별 시간가중수익률. 차트 위에 커서를 올리면 날짜별 값이 보입니다.
+<img src="docs/images/dashboard-mobile-20260917.png" alt="모바일 계좌 현황 — 잔액, 현금, 원금, 수익률" width="390">
 
-![평가금액 · 낙폭 · 월별 수익률](docs/images/dashboard-performance.png)
+</details>
 
-**검증·운영** — 60거래일 모의투자 검증 진행률, 거래 안전·장 상태·자동매매·증권사 연결·데이터 갱신 상태, 오늘 생성된 신호, 웹소켓 연결 이력.
+<details>
+<summary>자동매매 상태 화면 보기</summary>
 
-![운영 상태표](docs/images/dashboard-operations.png)
+![거래 안전, 장 상태, 자동매매와 데이터 갱신 확인](docs/images/dashboard-operations-20260917.png)
 
-## 실행하기
+</details>
 
-Python 3.11 또는 3.12가 필요합니다.
+## 기본 운용 구성
 
-```bash
+| 계좌 | 구성과 역할 | 현재 상태 |
+|---|---|---|
+| ETF 적립 | KODEX 200 + TIGER CD금리 ETF. 시작 30만원, 매월 10만원 적립 | 변경한 위험 관리 규칙을 모의투자로 검증 중 |
+| 대형주 분산 투자 | 국내 대형주 9종목. 주식 60%·현금 40%, 큰 비중 이탈 시 조정 | 기존 규칙으로 모의투자 운용 |
+
+ETF 적립의 기본 목표는 주식 ETF 47.5%·CD금리 ETF 47.5%·현금 5%입니다. 방어 조건에 들어가면 주식 ETF 목표를 23.75%로 낮추고, 줄인 만큼을 CD금리 ETF에 배분합니다. 소액 계좌는 1주 가격과 최소 주문금액 때문에 실제 비중이 목표와 다를 수 있습니다. CD금리 ETF도 원금 보장 상품은 아닙니다.
+
+설정은 [config/baskets.yaml](config/baskets.yaml)에 있습니다. 실전 주문에는 별도의 활성화와 검증이 필요하며, ETF 적립 계좌는 `paper_only: true`로 실전 전환을 제한하고 있습니다.
+
+## 위험 관리 검증
+
+적립금이 들어오면 낙폭이 작아 보이던 백테스트 계산을 고쳤습니다. 이어서 추세·낙폭 조건이 겹칠 때 비중을 중복해서 줄이지 않고, 주식 축소분을 기존 CD금리 ETF로 옮기도록 바꿨습니다.
+
+![동일 기간·비용으로 비교한 세 가지 운용 방식의 수익과 낙폭](docs/images/risk-review-20260917.png)
+
+**2020-07-07~2026-09-16, 실제 ETF 종가·1주 단위·월 10만원 적립 비교**
+
+| 방식 | 연환산 수익률 | 최대 낙폭 | 샤프² |
+|---|---:|---:|---:|
+| 고정 비중 | 13.54% | -21.72% | 0.80 |
+| 기존 위험 관리¹ | 10.74% | -16.02% | 0.74 |
+| 변경한 위험 관리 | 12.97% | -15.74% | 0.90 |
+
+¹ 기존 방식도 적립금 계산 오류를 수정한 뒤 같은 조건으로 다시 계산했습니다. ² 샤프 계산의 기준금리는 연 3%로 고정했습니다.
+
+변경한 방식은 이 전체 기간에서 기존 방식보다 수익률이 높고 최대 낙폭이 작았습니다. **고정 비중보다 수익률은 낮았고, 2023~2025년에는 기존 방식보다 낙폭이 컸습니다.** 수수료·슬리피지와 CD ETF의 보수적 세금 근사를 반영했지만, ETF 분배금·실시간 호가·미체결은 재현하지 못했습니다. 이미 살펴본 과거 자료로 비교한 결과이며 향후 수익을 보장하지 않습니다.
+
+기간별 결과, 비용 3배 조건, 2014년부터의 보조 실험, 2026년 9월까지 확인한 자료와 코드 변경 근거는 [위험 관리 검증 보고서](docs/RISK_REVIEW_20260917.md)에 정리했습니다.
+
+## 시작하기
+
+Python 3.11 또는 3.12를 사용합니다. 아래는 Windows PowerShell 기준입니다.
+
+```powershell
 git clone https://github.com/easygap/quant_trader.git
 cd quant_trader
 python -m venv .venv
-.venv\Scripts\Activate.ps1        # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-cp config/settings.yaml.example config/settings.yaml
-cp .env.example .env
-python main.py --mode dashboard
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item config/settings.yaml.example config/settings.yaml
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe main.py --mode dashboard
 ```
 
-기본 바인드는 http://127.0.0.1:8080 입니다. 대시보드는 인증 없이 계좌 숫자를 보여주므로 이 PC에서만 열리고, 외부 공개는 설정으로도 권장하지 않습니다.
+브라우저에서 [127.0.0.1:8080](http://127.0.0.1:8080)을 엽니다. 새로 설치한 계좌에는 기록이 없습니다. 설정의 `trading.mode`가 `paper`인지 확인한 뒤 아래 순서로 모의투자를 실행할 수 있습니다.
 
-처음 실행해 화면에 기록이 없다면 모의투자 사이클을 한 번 돌립니다.
+```powershell
+# 주문 계획만 확인
+.\.venv\Scripts\python.exe main.py --mode rebalance --basket kr_pocket --dry-run
 
-```bash
-python main.py --mode rebalance --basket kr_pocket --dry-run   # 주문 미리보기
-python main.py --mode rebalance --basket kr_pocket             # 모의투자 실행 + 자산 기록
+# 모의투자 실행과 자산 기록
+.\.venv\Scripts\python.exe main.py --mode rebalance --basket kr_pocket
+
+# 같은 조건으로 백테스트 재현
+.\.venv\Scripts\python.exe tools/risk_review.py --as-of 2026-09-17
 ```
 
-매일 자동으로 돌리려면 `python main.py --mode schedule`을 작업 스케줄러나 systemd에 등록합니다. 적립금은 대시보드의 **적립 기록** 버튼이나 `python tools/record_deposit.py --basket kr_pocket --amount 100000`으로 남깁니다. KIS 모의투자나 알림을 쓸 때만 `.env`를 채우고, `.env`와 계좌 정보는 Git에 올리지 않습니다.
+매일 자동 실행하려면 `main.py --mode schedule`을 사용합니다. KIS API 키 등 개인 설정은 `.env`에 넣고 Git에는 올리지 않습니다. 대시보드는 계좌 정보를 표시하므로 기본 설정대로 이 PC에서만 접속해 사용합니다.
 
-## 안전장치
+## 자세히 보기
 
-실전 주문은 다음이 모두 맞아야만 나갑니다. 60거래일 이상의 모의투자 기록, 기록 누락 5% 이하, 실패 주문 0건, 연 비용 1% 이하, `--mode live --confirm-live` 명시. 그 밖에 전역 거래 중지(HALT), 개별 종목 −5%·포트폴리오 −3% 급락 감지, 갭다운 −3% 즉시 청산, 일일 손실 3%·낙폭 15% 한도가 있습니다. 상세는 [docs/SAFETY_MODEL.md](docs/SAFETY_MODEL.md)와 [docs/OPERATING_PRINCIPLES.md](docs/OPERATING_PRINCIPLES.md)를 보세요. 후자는 이 저장소에서 실제로 났던 사고(오류 0건인데 설계대로 안 돌던 경우들)에서 뽑은 원칙입니다.
-
-## 백테스트와 연구
-
-```bash
-python tools/risk_overlay_backtest.py                 # 오버레이 비교 (본 README 그림)
-python main.py --mode validate --strategy scoring --symbol 005930 --walk-forward --validation-years 5
-python tools/buy_hold_robustness.py                   # 대형주 보유의 연도별 강건성
-python tools/static_allocation_analysis.py            # 주식·현금 비중별 낙폭
-```
-
-신호형 전략(`scoring` 등)은 정직 평가에서 동일비중 보유 대비 −140%p 뒤져 `paper_only`로 강등돼 있습니다. 백테스트 결과가 나쁘게 보이는 건 버그가 아니라 그 결론 자체입니다. 왜 그런지, 무엇을 시도했는지는 [docs/RESEARCH_LOG.md](docs/RESEARCH_LOG.md)에 날짜별로 남겨 두었습니다.
-
-## 문서
-
-- [docs/PROJECT_GUIDE.md](docs/PROJECT_GUIDE.md) — 구조와 흐름, 파일별 역할
-- [docs/PROFITABILITY_FINDINGS.md](docs/PROFITABILITY_FINDINGS.md) — 수익성 정직 점검 결론
-- [docs/RISK_OVERLAY_FINDINGS.md](docs/RISK_OVERLAY_FINDINGS.md) — 추세 필터·낙폭 제어 검증 (2026-09)
-- [docs/POCKET_TRACK_PLAN.md](docs/POCKET_TRACK_PLAN.md) — 소액 적립 트랙 설계와 기대치
-- [docs/BASKET_PAPER_EVALUATION.md](docs/BASKET_PAPER_EVALUATION.md) · [docs/PAPER_TO_LIVE_RUNBOOK.md](docs/PAPER_TO_LIVE_RUNBOOK.md) — 모의투자 검증 기준과 실전 전환 절차
-- [docs/BACKTEST_IMPROVEMENT.md](docs/BACKTEST_IMPROVEMENT.md) — 미래 정보 누출·생존 편향·비용 반영 내역
-
-이 저장소는 수익과 원금을 보장하지 않습니다. 실전 전환 전에 설정과 증권사 계좌를 직접 확인하세요.
+- [위험 관리 검증과 한계](docs/RISK_REVIEW_20260917.md)
+- [화면 설계·한글 글꼴·성능 측정](docs/DASHBOARD_REVIEW_20260917.md)
+- [모의투자 평가 기준](docs/BASKET_PAPER_EVALUATION.md) · [실전 전환 절차](docs/PAPER_TO_LIVE_RUNBOOK.md)
+- [거래 안전장치](docs/SAFETY_MODEL.md) · [프로젝트 구조](docs/PROJECT_GUIDE.md)

@@ -44,6 +44,8 @@ reports/validation_walkforward_*.txt
 # --- 테스트/에이전트 임시 산출물 ---
 pytest_tmp*/
 .claude/worktrees/
+output/
+.playwright-mcp/
 
 # --- IDE / OS ---
 .idea/

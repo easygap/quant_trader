@@ -201,6 +201,19 @@ class TestEvaluatorPerBasketCapital:
             )
         assert result["metrics"]["initial_capital"] == 30_000_000
 
+    def test_changed_policy_reports_wait_even_if_old_operation_passed(self):
+        from unittest.mock import patch
+        from core.basket_evaluation import collect_basket_paper_evaluation
+        baskets = {"changed": {"enabled": True, "holdings": {"069500": 1.},
+                               "promotion": {"paper_only": True, "review_note": "새 규칙 검증 중"}}}
+        with patch("core.basket_rebalancer.BasketRebalancer._load_baskets_config", return_value=baskets), \
+             patch("core.basket_evaluation.evaluate_basket_paper_operation", return_value={"verdict": "PASS_CANDIDATE", "issues": []}):
+            result, _ = collect_basket_paper_evaluation(basket_name="changed", include_benchmark=False)
+        assert result["verdict"] == "WAIT"
+        assert result["operation_verdict"] == "PASS_CANDIDATE"
+        assert result["paper_only"] is True
+        assert "새 규칙 검증 중" in result["issues"]
+
     def test_collector_falls_back_to_global_capital(self):
         from unittest.mock import patch
         from core.basket_rebalancer import BasketRebalancer

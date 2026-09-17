@@ -945,7 +945,9 @@ class TestForceLiveRemoved:
             settings = settings_path.read_text(encoding="utf-8")
             assert 'host: "127.0.0.1"' in settings
         assert 'host: "127.0.0.1"' in example
-        assert "기본 바인드는 http://127.0.0.1:8080" in readme
+        # 문장과 Markdown 표현은 바뀌어도 로컬 접속 주소 계약은 유지한다.
+        assert "http://127.0.0.1:8080" in readme
+        assert "http://0.0.0.0:8080" not in readme
         assert "| **dashboard** | host(127.0.0.1), port(8080) |" in project_guide
         assert "| **dashboard** | host(0.0.0.0), port(8080) |" not in project_guide
 
