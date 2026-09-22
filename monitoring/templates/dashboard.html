@@ -265,7 +265,7 @@
           </div>
         </dl>
       </section>
-      <details class="history-details disclosure" id="historyDetails">
+      <details class="history-details disclosure" id="historyDetails" hidden>
         <summary>낙폭과 일별 기록 자세히 보기</summary>
         <figure class="chart">
           <figcaption class="chart-title">
@@ -282,7 +282,21 @@
           </div>
         </figure>
         <div
+          class="history-pagination"
+          role="group"
+          aria-label="일별 기록 페이지"
+        >
+          <button type="button" id="historyTablePrev" disabled>
+            이전 기록
+          </button>
+          <output id="historyTablePosition" aria-live="polite"></output>
+          <button type="button" id="historyTableNext" disabled>
+            다음 기록
+          </button>
+        </div>
+        <div
           class="table-scroll"
+          id="historyTableScroll"
           tabindex="0"
           role="region"
           aria-label="성과 데이터 표"

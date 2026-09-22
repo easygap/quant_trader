@@ -30,9 +30,6 @@ def test_basket_evaluation_endpoint_returns_progress():
         "issues": [],
     }
 
-    from monitoring import web_dashboard as wd0
-    wd0._BASKET_EVAL_CACHE.update({"at": 0.0, "data": None})
-
     async def run():
         with patch(
             "core.basket_rebalancer.BasketRebalancer.get_enabled_baskets",
@@ -67,9 +64,6 @@ def test_basket_evaluation_endpoint_fails_soft():
     from aiohttp.test_utils import TestClient, TestServer
     import asyncio
     from monitoring import web_dashboard as wd
-
-    from monitoring import web_dashboard as wd0
-    wd0._BASKET_EVAL_CACHE.update({"at": 0.0, "data": None})
 
     async def run():
         with patch(
@@ -120,7 +114,6 @@ def test_basket_evaluation_endpoint_caches_for_ttl():
     import asyncio
     from monitoring import web_dashboard as wd
 
-    wd._BASKET_EVAL_CACHE.update({"at": 0.0, "data": None})
     fake_result = {"verdict": "WAIT", "progress_days": 2, "min_trading_days": 60,
                    "snapshot_coverage": 1.0, "issues": []}
 

@@ -1,0 +1,197 @@
+{
+  "date": "2026-09-22",
+  "baseline_commit": "3be97d0bd22b399515913815d1bb5f26708b2769",
+  "method": "Playwright Chromium에서 해당 페이지의 CPU를 감속하고 조회 API를 합성 데이터로 대체했다. 수정 전후를 번갈아 3회 실행했다. 시간은 renderChartTable/updateChart 함수 실행 구간을 측정한 값이며 실제 사용자 Web Vitals는 측정하지 않았다.",
+  "fixture": "합성 일별 기록 2500개, 1280x900, CPU 4배 감속, 서울 시간대",
+  "output": [
+    {
+      "version": "before",
+      "run": 1,
+      "initial": {
+        "table": [
+          120.39999999850988
+        ],
+        "update": [
+          245.20000000298023
+        ],
+        "longTasks": [
+          469,
+          138,
+          74,
+          269
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 15665,
+        "tableRows": 2500,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 2500,
+        "tableTimes": [
+          120.39999999850988
+        ]
+      }
+    },
+    {
+      "version": "after",
+      "run": 1,
+      "initial": {
+        "table": [
+          0.4000000022351742
+        ],
+        "update": [
+          169
+        ],
+        "longTasks": [
+          356,
+          83,
+          54,
+          191
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 669,
+        "tableRows": 0,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 100,
+        "tableTimes": [
+          0.4000000022351742,
+          7.699999999254942
+        ]
+      }
+    },
+    {
+      "version": "before",
+      "run": 2,
+      "initial": {
+        "table": [
+          107.69999999925494
+        ],
+        "update": [
+          215.5
+        ],
+        "longTasks": [
+          370,
+          87,
+          53,
+          233
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 15665,
+        "tableRows": 2500,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 2500,
+        "tableTimes": [
+          107.69999999925494
+        ]
+      }
+    },
+    {
+      "version": "after",
+      "run": 2,
+      "initial": {
+        "table": [
+          0.19999999925494194
+        ],
+        "update": [
+          175.30000000074506
+        ],
+        "longTasks": [
+          397,
+          105,
+          75,
+          202
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 669,
+        "tableRows": 0,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 100,
+        "tableTimes": [
+          0.19999999925494194,
+          7.300000000745058
+        ]
+      }
+    },
+    {
+      "version": "before",
+      "run": 3,
+      "initial": {
+        "table": [
+          112.19999999925494
+        ],
+        "update": [
+          235.39999999850988
+        ],
+        "longTasks": [
+          439,
+          132,
+          89,
+          253
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 15665,
+        "tableRows": 2500,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 2500,
+        "tableTimes": [
+          112.19999999925494
+        ]
+      }
+    },
+    {
+      "version": "after",
+      "run": 3,
+      "initial": {
+        "table": [
+          0.3999999985098839
+        ],
+        "update": [
+          170.10000000149012
+        ],
+        "longTasks": [
+          446,
+          118,
+          62,
+          195
+        ],
+        "layoutShift": 0.05250376435778996,
+        "domNodes": 669,
+        "tableRows": 0,
+        "recordCount": "2500 / 2500개 기록"
+      },
+      "opened": {
+        "tableRows": 100,
+        "tableTimes": [
+          0.3999999985098839,
+          6.800000000745058
+        ]
+      }
+    }
+  ],
+  "pagination_mobile_qa": {
+    "latest": "2401–2500 / 2500개 기록",
+    "older": "2301–2400 / 2500개 기록",
+    "returned": "2401–2500 / 2500개 기록",
+    "data": {
+      "csvLines": 2501,
+      "rows": 100,
+      "pageWidth": 320,
+      "scrollWidth": 320,
+      "date": "2026년 9월 22일"
+    },
+    "sticky": {
+      "top": 515,
+      "headerTop": 515,
+      "height": 552.5
+    },
+    "errors": []
+  }
+}

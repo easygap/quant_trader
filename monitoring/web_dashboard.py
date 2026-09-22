@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import ipaddress
 from pathlib import Path
 import re
+import time
 from typing import Optional
 
 try:
@@ -389,7 +391,7 @@ async def handle_api_portfolio(_request: web.Request) -> web.Response:
 
 async def handle_api_baskets(_request: web.Request) -> web.Response:
     try:
-        return web.json_response(get_baskets_json())
+        return web.json_response(await asyncio.to_thread(get_baskets_json))
     except Exception as exc:
         return _api_error(
             "API /api/baskets 오류", exc, "포트폴리오를 불러오지 못했습니다"
@@ -457,8 +459,8 @@ async def handle_api_cash_flows(request: web.Request) -> web.Response:
             {
                 "basket": basket,
                 "mode": ledger_mode,
-                "flows": get_recent_cash_flows(
-                    account_key, mode=ledger_mode
+                "flows": await asyncio.to_thread(
+                    get_recent_cash_flows, account_key, mode=ledger_mode
                 ),
             }
         )
@@ -468,26 +470,41 @@ async def handle_api_cash_flows(request: web.Request) -> web.Response:
         )
 
 
-_RUNTIME_CACHE: dict = {"at": 0.0, "data": None}
+class _ReadCache:
+    """같은 앱의 동시 조회는 한 번만 수집하고, 완료 시점부터 캐시한다."""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._data = None
+        self._mode = None
+        self._expires_at = 0.0
+
+    async def get(self, collect, ttl: float, mode: str):
+        async with self._lock:
+            if (
+                self._data is not None
+                and self._mode == mode
+                and time.monotonic() < self._expires_at
+            ):
+                return self._data
+            data = await asyncio.to_thread(collect)
+            self._data = data
+            self._mode = mode
+            self._expires_at = time.monotonic() + ttl
+            return data
+
+
+_RUNTIME_CACHE_KEY = web.AppKey("runtime_cache", _ReadCache) if web else None
+_BASKET_EVAL_CACHE_KEY = web.AppKey("basket_eval_cache", _ReadCache) if web else None
 _RUNTIME_TTL_SEC = 60.0
 
 
-async def handle_api_runtime(_request: web.Request) -> web.Response:
+async def handle_api_runtime(request: web.Request) -> web.Response:
     """느린 외부 시장 조회를 이벤트 루프 밖에서 실행하고 60초간 캐시한다."""
-    import asyncio
-    import time as _time
-
     try:
-        now = _time.monotonic()
-        if (
-            _RUNTIME_CACHE["data"] is not None
-            and now - _RUNTIME_CACHE["at"] < _RUNTIME_TTL_SEC
-        ):
-            cached = _RUNTIME_CACHE["data"]
-        else:
-            cached = await asyncio.to_thread(get_runtime_json)
-            _RUNTIME_CACHE["at"] = now
-            _RUNTIME_CACHE["data"] = cached
+        cached = await request.app[_RUNTIME_CACHE_KEY].get(
+            get_runtime_json, _RUNTIME_TTL_SEC, _active_ledger_mode()
+        )
         # HALT는 안전 판단의 현재값이므로 느린 시장 상태 캐시와 분리한다.
         data = dict(cached)
         data["trading_halt"] = await asyncio.to_thread(_get_trading_halt_json)
@@ -505,7 +522,7 @@ async def handle_api_snapshots(request: web.Request) -> web.Response:
         raw_key = request.query.get("account_key")
         account_key = raw_key if raw_key is not None else None
         return web.json_response(
-            get_snapshots_json(days=days, account_key=account_key)
+            await asyncio.to_thread(get_snapshots_json, days=days, account_key=account_key)
         )
     except Exception as exc:
         return _api_error(
@@ -513,15 +530,11 @@ async def handle_api_snapshots(request: web.Request) -> web.Response:
         )
 
 
-_BASKET_EVAL_CACHE: dict = {"at": 0.0, "data": None}
 _BASKET_EVAL_TTL_SEC = 60.0
 
 
-async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
+async def handle_api_basket_evaluation(request: web.Request) -> web.Response:
     """바스켓 paper 운영 평가를 읽기 전용으로 반환한다."""
-    import asyncio
-    import time as _time
-
     def _collect_all() -> dict:
         from core.basket_evaluation import collect_basket_paper_evaluation
         from core.basket_rebalancer import BasketRebalancer
@@ -546,16 +559,9 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
         return {"evaluations": evaluations}
 
     try:
-        now = _time.monotonic()
-        if (
-            _BASKET_EVAL_CACHE["data"] is not None
-            and now - _BASKET_EVAL_CACHE["at"] < _BASKET_EVAL_TTL_SEC
-        ):
-            return web.json_response(_BASKET_EVAL_CACHE["data"])
-
-        payload = await asyncio.to_thread(_collect_all)
-        _BASKET_EVAL_CACHE["at"] = now
-        _BASKET_EVAL_CACHE["data"] = payload
+        payload = await request.app[_BASKET_EVAL_CACHE_KEY].get(
+            _collect_all, _BASKET_EVAL_TTL_SEC, _active_ledger_mode()
+        )
         return web.json_response(payload)
     except Exception as exc:
         return _api_error(
@@ -568,6 +574,8 @@ async def handle_api_basket_evaluation(_request: web.Request) -> web.Response:
 def create_app() -> web.Application:
     web_mod = _require_aiohttp_web()
     app = web_mod.Application(middlewares=[web_mod.middleware(_security_headers)])
+    app[_RUNTIME_CACHE_KEY] = _ReadCache()
+    app[_BASKET_EVAL_CACHE_KEY] = _ReadCache()
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/portfolio", handle_api_portfolio)
     app.router.add_get("/api/runtime", handle_api_runtime)

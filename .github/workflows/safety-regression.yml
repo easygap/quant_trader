@@ -38,6 +38,14 @@ jobs:
         run: |
           python -m py_compile main.py api/websocket_handler.py core/data_collector.py core/order_executor.py core/paper_preflight.py core/scheduler.py core/live_gate.py core/target_weight_rotation.py monitoring/liquidate_trigger.py tools/target_weight_rotation_pilot.py tools/paper_pilot_control.py
 
+      - name: Set up Node for dashboard tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check dashboard date calculations and refresh behavior
+        run: node --test tests/js/dashboard.test.cjs
+
       - name: Run safety regression tests
         env:
           TMPDIR: ${{ runner.temp }}
