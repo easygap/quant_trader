@@ -52,9 +52,12 @@
 
 로컬 전체 테스트는 Python 2,091개와 JavaScript 19개가 통과했습니다. Python 테스트에서 나온 경고 2개는 기존 라이브러리의 지원 종료 예정 API에 관한 내용입니다.
 
+GitHub 자동 검사에서 지원이 끝난 Node 20 기반 액션 경고도 확인했습니다. 공식 릴리스를 확인해 checkout은 7.0.1, setup-python과 setup-node는 7.0.0으로 업데이트했습니다. 프로그램의 Python 버전이나 설치 방법은 바꾸지 않았습니다.
+
 ## 참고 자료
 
 - [MDN Date](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date): 기기 시간대에 따라 달라지는 날짜 필드와 UTC 필드의 차이
 - [Python asyncio.to_thread](https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread): 동기 I/O가 이벤트 루프를 막지 않도록 실행하는 방법
 - [aiohttp의 앱별 상태 관리](https://docs.aiohttp.org/en/stable/web_advanced.html#data-sharing-aka-no-singletons-please): 전역 상태 대신 앱 안에서 조회 결과 관리
 - [Web Vitals](https://web.dev/articles/vitals): 실험실 측정과 실제 사용자 지표의 구분
+- [checkout 7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1), [setup-python 7.0.0](https://github.com/actions/setup-python/releases/tag/v7.0.0), [setup-node 7.0.0](https://github.com/actions/setup-node/releases/tag/v7.0.0): 자동 검사 도구의 공식 릴리스
