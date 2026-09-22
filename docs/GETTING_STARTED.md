@@ -38,6 +38,8 @@ if (-not (Test-Path .env)) {
 
 처음 설치하면 저장된 거래가 없어 계좌가 비어 있습니다. README의 캡처는 기존 모의투자 계좌의 기록입니다. 설치 직후에는 캡처에 나온 금액과 수익률이 표시되지 않습니다.
 
+계좌 선택, 날짜별 수익률, 적립금 입력은 [계좌 화면 사용법](USER_GUIDE.md)에 설명했습니다.
+
 기본 접속 주소는 이 PC에서만 열립니다. 포트를 바꾸려면 다음처럼 실행합니다.
 
 ```powershell
@@ -45,6 +47,8 @@ if (-not (Test-Path .env)) {
 ```
 
 ## 모의투자
+
+계좌 화면을 켜 둔 채 진행하려면 PowerShell 창을 새로 열고, 설치한 `quant_trader` 폴더로 이동하세요.
 
 매매할 종목과 비중은 [config/baskets.yaml](../config/baskets.yaml)에서 정합니다. `kr_pocket`은 ETF 적립 계좌, `kr_diversified_hold`는 대형주 분산 계좌입니다.
 
