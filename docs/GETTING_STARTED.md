@@ -48,6 +48,8 @@ if (-not (Test-Path .env)) {
 
 ## 모의투자
 
+계좌 화면을 켜 둔 채 진행하려면 PowerShell 창을 새로 열고, 설치한 `quant_trader` 폴더로 이동하세요.
+
 매매할 종목과 비중은 [config/baskets.yaml](../config/baskets.yaml)에서 정합니다. `kr_pocket`은 ETF 적립 계좌, `kr_diversified_hold`는 대형주 분산 계좌입니다.
 
 먼저 어떤 주문을 낼지 확인합니다. 주가를 불러오므로 인터넷 연결이 필요합니다.
