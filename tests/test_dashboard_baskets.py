@@ -497,23 +497,19 @@ def test_runtime_cache_never_caches_trading_halt():
     ]
 
     async def run():
-        wd._RUNTIME_CACHE.update({"at": 0.0, "data": None})
-        try:
-            with patch.object(wd, "get_runtime_json", return_value=base) as slow, patch.object(
-                wd, "_get_trading_halt_json", side_effect=halts,
-            ):
-                client = TestClient(TestServer(wd.create_app()))
-                await client.start_server()
-                try:
-                    first = await (await client.get("/api/runtime")).json()
-                    second = await (await client.get("/api/runtime")).json()
-                finally:
-                    await client.close()
-            assert slow.call_count == 1
-            assert first["trading_halt"]["halted"] is False
-            assert second["trading_halt"]["halted"] is True
-        finally:
-            wd._RUNTIME_CACHE.update({"at": 0.0, "data": None})
+        with patch.object(wd, "get_runtime_json", return_value=base) as slow, patch.object(
+            wd, "_get_trading_halt_json", side_effect=halts,
+        ):
+            client = TestClient(TestServer(wd.create_app()))
+            await client.start_server()
+            try:
+                first = await (await client.get("/api/runtime")).json()
+                second = await (await client.get("/api/runtime")).json()
+            finally:
+                await client.close()
+        assert slow.call_count == 1
+        assert first["trading_halt"]["halted"] is False
+        assert second["trading_halt"]["halted"] is True
 
     asyncio.run(run())
 

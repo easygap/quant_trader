@@ -46,34 +46,48 @@
   }
   function parseDate(value) {
     if (!value) return null;
-    const text = String(value);
+    if (value instanceof Date)
+      return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
+    const text = String(value).trim().replace(" ", "T");
+    // 장부의 시간대 없는 시각은 한국 시간이다. Z·UTC 오프셋이 있으면 그대로 읽는다.
     const normalized = /^\d{4}-\d{2}-\d{2}$/.test(text)
       ? `${text}T00:00:00+09:00`
-      : /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text)
-        ? `${text.replace(" ", "T")}+09:00`
+      : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text)
+        ? `${text}+09:00`
         : text;
     const parsed = new Date(normalized);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
   const pad2 = (n) => String(n).padStart(2, "0");
+  const DAY_MS = 86_400_000;
+  const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+  // 표시용 날짜만 +9시간 옮겨 UTC 필드로 읽는다. 시간 비교에는 원래 시각을 쓴다.
+  function koreaClock(value) {
+    const instant = parseDate(value);
+    return instant ? new Date(instant.getTime() + KST_OFFSET_MS) : null;
+  }
+  function koreaDate(value) {
+    return koreaClock(value)?.toISOString().slice(0, 10) || "";
+  }
   function fmtLong(value) {
-    const d = parseDate(value);
+    const d = koreaClock(value);
     return d
-      ? `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일`
+      ? `${d.getUTCFullYear()}년 ${d.getUTCMonth() + 1}월 ${d.getUTCDate()}일`
       : "—";
   }
   function fmtMD(value) {
-    const d = parseDate(value);
-    return d ? `${d.getMonth() + 1}월 ${d.getDate()}일` : "—";
+    const d = koreaClock(value);
+    return d ? `${d.getUTCMonth() + 1}월 ${d.getUTCDate()}일` : "—";
   }
   function fmtDT(value) {
-    const d = parseDate(value);
+    const d = koreaClock(value);
     return d
-      ? `${d.getMonth() + 1}월 ${d.getDate()}일 ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+      ? `${d.getUTCMonth() + 1}월 ${d.getUTCDate()}일 ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`
       : "—";
   }
-  function fmtHM(d) {
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  function fmtHM(value) {
+    const d = koreaClock(value);
+    return d ? `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}` : "—";
   }
   function formatAge(minutes) {
     if (minutes == null) return "기록 없음";
@@ -82,20 +96,13 @@
     if (minutes < 1440) return `${Math.round(minutes / 60)}시간 전`;
     return `${Math.round(minutes / 1440)}일 전`;
   }
-  function localIsoDate(value = new Date()) {
-    return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
-  }
   function calendarAgeDays(value) {
-    const parsed = parseDate(value);
-    if (!parsed) return null;
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const target = new Date(
-      parsed.getFullYear(),
-      parsed.getMonth(),
-      parsed.getDate(),
+    const date = koreaDate(value);
+    if (!date) return null;
+    return Math.max(
+      0,
+      Math.round((parseDate(koreaDate(new Date())) - parseDate(date)) / DAY_MS),
     );
-    return Math.max(0, Math.floor((today - target) / 86_400_000));
   }
   function escapeHtml(value) {
     return String(value == null ? "" : value)
@@ -317,9 +324,8 @@
     if (!d) return null;
     const created = parseDate(row.created_at);
     // 과거 날짜를 나중에 복원한 행의 저장 시각으로 미래 입금을 당겨 넣지 않는다.
-    if (created && localIsoDate(created) === localIsoDate(d)) return created;
-    d.setHours(23, 59, 59, 999);
-    return d;
+    if (created && koreaDate(created) === koreaDate(d)) return created;
+    return new Date(`${koreaDate(d)}T23:59:59.999+09:00`);
   }
 
   /** 스냅샷·입금 기록으로 평가금액, 투자원금(계단), 시간가중 자산, 낙폭 시계열을 만든다. */
@@ -412,13 +418,14 @@
     const out = [];
     let prevIndex = null;
     let current = null;
+    const currentYear = koreaDate(new Date()).slice(0, 4);
     series.dates.forEach((d, i) => {
-      const key = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+      const key = koreaDate(d).slice(0, 7);
       if (!current || current.key !== key) {
         if (current) out.push(current);
         current = {
           key,
-          label: `${d.getFullYear() !== new Date().getFullYear() ? `${String(d.getFullYear()).slice(2)}년 ` : ""}${d.getMonth() + 1}월`,
+          label: `${key.slice(0, 4) !== currentYear ? `${key.slice(2, 4)}년 ` : ""}${Number(key.slice(5, 7))}월`,
           startIndex: prevIndex,
           endIndex: i,
         };
@@ -604,14 +611,9 @@
   function currentMonthContributionState(basket) {
     if (!basket || !basket.contribution_plan?.enabled) return "not-planned";
     if (state.flowStatus.get(basket.basket) !== "ready") return "unknown";
-    const now = new Date();
+    const month = koreaDate(new Date()).slice(0, 7);
     const recorded = (state.flows.get(basket.basket) || []).some((flow) => {
-      const when = parseDate(flow.occurred_at);
-      return (
-        when &&
-        when.getFullYear() === now.getFullYear() &&
-        when.getMonth() === now.getMonth()
-      );
+      return koreaDate(flow.occurred_at).slice(0, 7) === month;
     });
     return recorded ? "recorded" : "empty";
   }
@@ -1003,6 +1005,9 @@
     perspective: 1,
     selected: null,
     paintFrame: null,
+    tableSeries: null,
+    tablePage: null,
+    tableRenderedPage: null,
   };
 
   function ensureChartAccountOptions() {
@@ -1076,21 +1081,53 @@
   }
 
   function renderChartTable(series) {
+    if (!$("historyDetails").open || !series.rows.length) return;
+    const lastPage = Math.ceil(series.rows.length / 100) - 1;
+    const page = clamp(chart.tablePage ?? lastPage, 0, lastPage);
+    if (chart.tableSeries === series && chart.tableRenderedPage === page)
+      return;
+    const start = page * 100;
+    const end = Math.min(start + 100, series.rows.length);
     el.chartRows.innerHTML = series.rows
+      .slice(start, end)
       .map(
-        (row, i) => `<tr>
+        (row, offset) => `<tr>
       <td><time datetime="${escapeHtml(String(row.date).slice(0, 10))}">${escapeHtml(fmtLong(row.date))}</time></td>
       <td class="num">${won(row.total_value)}</td>
-      <td class="num">${won(series.principal[i])}</td>
+      <td class="num">${won(series.principal[start + offset])}</td>
       <td class="num ${tone(row.cumulative_return)}">${pct(row.cumulative_return)}</td>
     </tr>`,
       )
       .join("");
+    chart.tableSeries = series;
+    chart.tableRenderedPage = page;
+    $("historyTablePosition").textContent =
+      `${start + 1}–${end} / ${series.rows.length}개 기록`;
+    $("historyTablePrev").disabled = page === 0;
+    $("historyTableNext").disabled = page === lastPage;
+  }
+
+  function moveHistoryTable(direction) {
+    if (!chart.series || $("historyDetails").hidden) return;
+    const lastPage = Math.ceil(chart.series.rows.length / 100) - 1;
+    const currentPage = clamp(chart.tablePage ?? lastPage, 0, lastPage);
+    chart.tablePage = clamp(currentPage + direction, 0, lastPage);
+    // 마지막 페이지는 새 기록이 추가돼도 최근 날짜를 계속 보여 준다.
+    if (chart.tablePage === lastPage) chart.tablePage = null;
+    renderChartTable(chart.series);
+    $("historyTableScroll").scrollTop = 0;
+  }
+
+  function clearChartDetails() {
+    $("historyDetails").hidden = true;
+    el.chartRows.innerHTML = "";
+    chart.tableSeries = null;
+    chart.tableRenderedPage = null;
   }
 
   function renderMonthStrip(series, history) {
     const visibleMonths = new Set(
-      series.dates.map((d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`),
+      series.dates.map((d) => koreaDate(d).slice(0, 7)),
     );
     // 조회 기간이 월 중간에서 시작해도 전월 말 기준 수익률을 사용한다.
     const months = monthlyReturns(history).filter((month) =>
@@ -1489,6 +1526,7 @@
       chart.selected === chart.series?.rows.length - 1;
     const previousDate = chart.series?.rows[chart.selected]?.date;
     const sameAccount = state.chartDataAccount === state.chartAccount;
+    if (!sameAccount) chart.tablePage = null;
     chart.series = series;
     state.chartDataAccount = state.chartAccount;
     state.chartRows = series.rows;
@@ -1502,6 +1540,8 @@
     $("historyLatest").disabled = !series.rows.length;
     $("historyStart").textContent = fmtMD(series.rows[0]?.date);
     $("historyEnd").textContent = fmtMD(series.rows.at(-1)?.date);
+    // 접힌 표의 수천 개 행을 매 갱신마다 만들지 않는다.
+    clearChartDetails();
 
     if (!series.rows.length) {
       el.chartWrap.hidden = true;
@@ -1521,6 +1561,7 @@
     el.chartSummary.textContent = `${fmtMD(first.date)} ~ ${fmtMD(last.date)} · 평가금액 ${signedWon(change)}${deposits ? ` (적립 ${won(deposits)} 포함)` : ""} · 누적 수익률 ${pct(last.cumulative_return)}`;
     el.chartWrap.hidden = false;
     el.chartEmpty.hidden = true;
+    $("historyDetails").hidden = false;
     renderChartTable(series);
     renderMonthStrip(series, history);
     const previousIndex =
@@ -1543,8 +1584,10 @@
     $("performance").setAttribute("aria-busy", "true");
     $("exportHistory").disabled = true;
     $("historyCursor").disabled = true;
+    $("historyLatest").disabled = true;
     // 계좌가 바뀌면 이전 숫자를 남기지 않는다. 오래 걸린 이전 응답도 폐기한다.
     if (state.chartDataAccount !== account) {
+      clearChartDetails();
       el.chartWrap.hidden = true;
       el.chartEmpty.hidden = false;
       el.chartEmpty.innerHTML =
@@ -1562,9 +1605,9 @@
         );
       const cached = state.series.get(account);
       // 전체 기록은 갱신 주기에 한 번 읽는다. 기간·계좌 변경 때 같은 데이터를 다시 받지 않는다.
-      const cutoff = new Date();
-      cutoff.setDate(cutoff.getDate() - days);
-      cutoff.setHours(0, 0, 0, 0);
+      const cutoff = new Date(
+        parseDate(koreaDate(new Date())).getTime() - days * DAY_MS,
+      );
       const data = cached
         ? { snapshots: cached.filter((row) => parseDate(row.date) >= cutoff) }
         : await fetchJson(
@@ -1580,6 +1623,7 @@
       updateChart(data?.snapshots || []);
     } catch {
       if (request !== state.chartRequest) return;
+      clearChartDetails();
       el.chartSummary.textContent =
         "성과 기록을 읽지 못했습니다. 운영 영역의 다시 확인을 눌러주세요.";
       el.chartWrap.hidden = true;
@@ -1821,7 +1865,7 @@
       count.textContent = "확인 불가";
       return;
     }
-    const isToday = !signalsDate || signalsDate === localIsoDate();
+    const isToday = !signalsDate || signalsDate === koreaDate(new Date());
     const rows = isToday && Array.isArray(signals) ? signals : [];
     count.textContent = `${rows.length}건`;
     table.hidden = !rows.length;
@@ -2055,7 +2099,9 @@
       showToast(
         `${state.mode === "live" ? "실전 입금" : "모의투자 적립"} ${won(data.amount)}을 기록했습니다.`,
       );
-      await refreshCore();
+      // 적립 전에 시작한 조회가 있으면 끝낸 뒤 새 금액을 다시 읽는다.
+      await coreRefresh;
+      await refreshCore(true);
     } catch (error) {
       showDepositError(
         `기록하지 못했습니다. ${error.message || "연결을 확인한 뒤 다시 시도하세요."}`,
@@ -2079,8 +2125,19 @@
 
   // 주기 갱신은 숨은 탭에서 쉬지만, 첫 로드는 탭이 뒤에 있어도 반드시 한 번 채운다
   // (백그라운드로 연 탭이 빈 화면으로 남던 문제).
-  async function refreshCore(force = false) {
+  let coreRefresh = null;
+  let slowRefresh = null;
+  function refreshCore(force = false) {
     if (!force && document.visibilityState === "hidden") return;
+    // 타이머·탭 복귀·버튼 클릭이 겹쳐도 진행 중인 조회를 취소하지 않는다.
+    if (!coreRefresh)
+      coreRefresh = loadCore().finally(() => {
+        coreRefresh = null;
+      });
+    return coreRefresh;
+  }
+
+  async function loadCore() {
     state.coreStatus = "loading";
     updateSyncIndicator();
     const basketTask = fetchJson("/api/baskets", {
@@ -2122,8 +2179,16 @@
     renderDecision();
   }
 
-  async function refreshSlow(force = false) {
+  function refreshSlow(force = false) {
     if (!force && document.visibilityState === "hidden") return;
+    if (!slowRefresh)
+      slowRefresh = loadSlow().finally(() => {
+        slowRefresh = null;
+      });
+    return slowRefresh;
+  }
+
+  async function loadSlow() {
     if (!state.runtime) {
       state.runtimeStatus = "loading";
       updateSyncIndicator();
@@ -2254,8 +2319,17 @@
     );
     $("exportHistory").addEventListener("click", exportHistory);
     $("historyDetails").addEventListener("toggle", () => {
-      if ($("historyDetails").open && chart.series) drawDrawdown(chart.series);
+      if ($("historyDetails").hidden || !chart.series) return;
+      if ($("historyDetails").open) {
+        renderChartTable(chart.series);
+        drawDrawdown(chart.series);
+      } else {
+        el.chartRows.innerHTML = "";
+        chart.tableSeries = null;
+      }
     });
+    $("historyTablePrev").addEventListener("click", () => moveHistoryTable(-1));
+    $("historyTableNext").addEventListener("click", () => moveHistoryTable(1));
     $("chartView").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-view]");
       if (button) setChartView(button.dataset.view);

@@ -762,6 +762,39 @@ h1 {
 .history-details > summary {
   color: var(--ink-soft);
 }
+.history-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 16px 0 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.history-pagination button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+}
+.history-pagination button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.history-pagination button:not(:disabled):hover {
+  background: var(--surface);
+}
+#historyTableScroll {
+  max-height: min(560px, 65vh);
+  scrollbar-gutter: stable;
+}
+.history-details th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+}
 .chart-title {
   display: flex;
   justify-content: space-between;

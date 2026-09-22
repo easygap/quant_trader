@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.12"
           cache: pip
@@ -37,6 +37,15 @@ jobs:
       - name: Compile safety modules
         run: |
           python -m py_compile main.py api/websocket_handler.py core/data_collector.py core/order_executor.py core/paper_preflight.py core/scheduler.py core/live_gate.py core/target_weight_rotation.py monitoring/liquidate_trigger.py tools/target_weight_rotation_pilot.py tools/paper_pilot_control.py
+
+      - name: Set up Node for dashboard tests
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Check dashboard date calculations and refresh behavior
+        run: node --test tests/js/dashboard.test.cjs
 
       - name: Run safety regression tests
         env:
