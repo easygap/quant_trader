@@ -196,6 +196,10 @@ transaction_costs:
 #
 # 면제되는 것은 위 두 가지뿐이다. 노출 상한·유동성·갭·현금·거래중단은 그대로 적용된다.
 instrument_classes:
+  # 국내 ETF 호가: 2,000원 미만 1원, 그 이상 5원. 거래비용의 틱 계산에만 사용한다.
+  krx_etf_symbols:
+    - "069500"
+    - "357870"
   non_company_symbols:
     - "069500"                # KODEX 200 — 200종목 지수 ETF
     - "357870"                # TIGER CD금리투자KIS(합성) — 금리 파킹, 주식 아님

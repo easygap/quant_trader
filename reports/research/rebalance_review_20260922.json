@@ -1,0 +1,561 @@
+{
+  "as_of": "2026-09-22",
+  "baseline_commit": "4f16e55ead3b105eb625f0d8e5316a50e260c83d",
+  "planner_sha256": "4d60cf97d57a05700f132f1d2edeac68c3e3d9d1ec8fa41afb4ef81bde788aa6",
+  "cost_model_sha256": "a6684044c1205e2eaebe52e13fd523fa0f5d3aa0143648303229b4901398c35b",
+  "data_audit": {
+    "common_last_bar": "2026-09-17",
+    "latest_available": {
+      "069500": "2026-09-21",
+      "357870": "2026-09-21",
+      "KS200": "2026-09-17"
+    },
+    "excluded_after_common_bar": {
+      "069500": 2,
+      "357870": 2,
+      "KS200": 0
+    }
+  },
+  "input_sha256": "1f0d1dcd7063d843eb3b140a47d5c69f45cb3de35e952d630de20975df77f7d8",
+  "basket": {
+    "name": "ETF 적립",
+    "enabled": true,
+    "primary": true,
+    "purpose": "월 적립 중심",
+    "promotion": {
+      "paper_only": true,
+      "review_note": "9월 17일 변경한 위험 관리 규칙을 모의투자로 검증하고 있습니다."
+    },
+    "contribution_plan": {
+      "enabled": true,
+      "cadence": "monthly",
+      "amount": 100000
+    },
+    "initial_capital": 300000,
+    "target_stock_weight": 0.95,
+    "min_cash_ratio": 0.05,
+    "monitoring": {
+      "deployment_tolerance": 0.1
+    },
+    "overlays": {
+      "combination": "minimum",
+      "defensive_symbol": "357870",
+      "trend_filter": {
+        "enabled": true,
+        "index_symbol": "KS200",
+        "ma_days": 200,
+        "band": 0.02,
+        "off_scale": 0.5
+      },
+      "drawdown_guard": {
+        "enabled": true,
+        "trigger": -0.1,
+        "release": -0.05,
+        "scale": 0.5
+      },
+      "volatility_target": {
+        "enabled": false,
+        "target": 0.2,
+        "lookback_days": 60,
+        "min_scale": 0.5,
+        "max_scale": 1.0,
+        "step": 0.1
+      }
+    },
+    "risk": {
+      "stop_loss_pct": 0,
+      "take_profit_pct": 0,
+      "trailing_stop_pct": 0
+    },
+    "rebalance": {
+      "trigger": "drift",
+      "drift_threshold": 0.08,
+      "min_trade_amount": 50000,
+      "max_turnover_ratio": 0.6,
+      "deployment_band": 0.03
+    },
+    "holdings": {
+      "069500": 0.5,
+      "357870": 0.5
+    },
+    "holding_names": {
+      "069500": "KODEX 200",
+      "357870": "TIGER CD금리투자KIS(합성)"
+    }
+  },
+  "cost_config": {
+    "commission_rate": 0.00015,
+    "tax_rate": 0.002,
+    "tax_exempt_symbols": [
+      "069500",
+      "357870"
+    ],
+    "holding_period_income_tax": {
+      "enabled": true,
+      "rate": 0.154,
+      "symbols": [
+        "357870"
+      ]
+    },
+    "slippage": 0.0005,
+    "slippage_ticks": 1,
+    "capital_gains_tax": {
+      "enabled": false,
+      "rate": 0.2
+    },
+    "dynamic_slippage": {
+      "enabled": true,
+      "warn_at_volume_ratio": 0.01,
+      "warn_slippage_multiplier": 2.0,
+      "critical_at_volume_ratio": 0.03,
+      "critical_slippage_multiplier": 4.0
+    }
+  },
+  "instrument_classes": {
+    "krx_etf_symbols": [
+      "069500",
+      "357870"
+    ],
+    "non_company_symbols": [
+      "069500",
+      "357870"
+    ]
+  },
+  "comparisons": {
+    "cost_1x": {
+      "before": {
+        "all": {
+          "years": 6.19,
+          "cagr_pct": 13.45,
+          "period_return_pct": 118.46,
+          "vol_pct": 11.28,
+          "sharpe": 0.94,
+          "mdd_pct": -15.28,
+          "calmar": 0.88,
+          "worst_year_pct": -4.58,
+          "losing_years": 2,
+          "total_years": 7,
+          "negative_months_pct": 40.0,
+          "avg_exposure_pct": 36.9,
+          "turnover_per_year_pct": 185.6,
+          "final_value": 13463321,
+          "contributed": 7700000,
+          "profit": 5763321,
+          "yearly": {
+            "2020": 16.84,
+            "2021": 2.17,
+            "2022": -4.58,
+            "2023": 8.58,
+            "2024": -3.79,
+            "2025": 36.97,
+            "2026": 34.03
+          },
+          "planned_orders": 222,
+          "filled_orders": 121,
+          "rejected_orders": 101,
+          "trade_value": 55423578.0,
+          "cost": 76478.0,
+          "fees_and_tax": 48769.0,
+          "slippage_cost": 27709.0
+        },
+        "periods": {
+          "2020_2022": {
+            "years": 2.48,
+            "cagr_pct": 5.4,
+            "period_return_pct": 13.91,
+            "vol_pct": 6.87,
+            "sharpe": 0.38,
+            "mdd_pct": -10.01,
+            "calmar": 0.54,
+            "worst_year_pct": -4.58,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 36.7,
+            "avg_exposure_pct": 35.6,
+            "turnover_per_year_pct": 92.0,
+            "final_value": 3205638,
+            "contributed": 3200000,
+            "profit": 5638,
+            "yearly": {
+              "2020": 16.84,
+              "2021": 2.17,
+              "2022": -4.58
+            }
+          },
+          "2023_2025": {
+            "years": 2.99,
+            "cagr_pct": 12.72,
+            "period_return_pct": 43.09,
+            "vol_pct": 7.87,
+            "sharpe": 1.23,
+            "mdd_pct": -8.78,
+            "calmar": 1.45,
+            "worst_year_pct": -3.79,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 41.7,
+            "avg_exposure_pct": 37.7,
+            "turnover_per_year_pct": 142.3,
+            "final_value": 9318647,
+            "contributed": 6800000,
+            "profit": 2518647,
+            "yearly": {
+              "2023": 8.58,
+              "2024": -3.79,
+              "2025": 36.97
+            }
+          },
+          "2026": {
+            "years": 0.71,
+            "cagr_pct": 51.39,
+            "period_return_pct": 34.03,
+            "vol_pct": 26.06,
+            "sharpe": 1.63,
+            "mdd_pct": -15.28,
+            "calmar": 3.36,
+            "worst_year_pct": 34.03,
+            "losing_years": 0,
+            "total_years": 1,
+            "negative_months_pct": 44.4,
+            "avg_exposure_pct": 38.4,
+            "turnover_per_year_pct": 317.4,
+            "final_value": 13463321,
+            "contributed": 7700000,
+            "profit": 5763321,
+            "yearly": {
+              "2026": 34.03
+            }
+          }
+        }
+      },
+      "after": {
+        "all": {
+          "years": 6.19,
+          "cagr_pct": 13.31,
+          "period_return_pct": 116.77,
+          "vol_pct": 11.34,
+          "sharpe": 0.92,
+          "mdd_pct": -15.82,
+          "calmar": 0.84,
+          "worst_year_pct": -4.17,
+          "losing_years": 2,
+          "total_years": 7,
+          "negative_months_pct": 40.0,
+          "avg_exposure_pct": 37.2,
+          "turnover_per_year_pct": 189.5,
+          "final_value": 13413156,
+          "contributed": 7700000,
+          "profit": 5713156,
+          "yearly": {
+            "2020": 16.76,
+            "2021": 2.05,
+            "2022": -4.17,
+            "2023": 7.41,
+            "2024": -3.53,
+            "2025": 36.82,
+            "2026": 33.91
+          },
+          "planned_orders": 109,
+          "filled_orders": 106,
+          "rejected_orders": 3,
+          "trade_value": 56454932.0,
+          "cost": 76443.0,
+          "fees_and_tax": 48216.0,
+          "slippage_cost": 28227.0
+        },
+        "periods": {
+          "2020_2022": {
+            "years": 2.48,
+            "cagr_pct": 5.51,
+            "period_return_pct": 14.19,
+            "vol_pct": 6.62,
+            "sharpe": 0.4,
+            "mdd_pct": -9.34,
+            "calmar": 0.59,
+            "worst_year_pct": -4.17,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 36.7,
+            "avg_exposure_pct": 34.3,
+            "turnover_per_year_pct": 80.6,
+            "final_value": 3216716,
+            "contributed": 3200000,
+            "profit": 16716,
+            "yearly": {
+              "2020": 16.76,
+              "2021": 2.05,
+              "2022": -4.17
+            }
+          },
+          "2023_2025": {
+            "years": 2.99,
+            "cagr_pct": 12.37,
+            "period_return_pct": 41.76,
+            "vol_pct": 8.08,
+            "sharpe": 1.16,
+            "mdd_pct": -8.7,
+            "calmar": 1.42,
+            "worst_year_pct": -3.53,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 41.7,
+            "avg_exposure_pct": 39.3,
+            "turnover_per_year_pct": 156.4,
+            "final_value": 9291294,
+            "contributed": 6800000,
+            "profit": 2491294,
+            "yearly": {
+              "2023": 7.41,
+              "2024": -3.53,
+              "2025": 36.82
+            }
+          },
+          "2026": {
+            "years": 0.71,
+            "cagr_pct": 51.19,
+            "period_return_pct": 33.91,
+            "vol_pct": 26.25,
+            "sharpe": 1.62,
+            "mdd_pct": -15.82,
+            "calmar": 3.24,
+            "worst_year_pct": 33.91,
+            "losing_years": 0,
+            "total_years": 1,
+            "negative_months_pct": 44.4,
+            "avg_exposure_pct": 38.8,
+            "turnover_per_year_pct": 310.0,
+            "final_value": 13413156,
+            "contributed": 7700000,
+            "profit": 5713156,
+            "yearly": {
+              "2026": 33.91
+            }
+          }
+        }
+      }
+    },
+    "cost_3x": {
+      "before": {
+        "all": {
+          "years": 6.19,
+          "cagr_pct": 12.83,
+          "period_return_pct": 111.16,
+          "vol_pct": 11.21,
+          "sharpe": 0.89,
+          "mdd_pct": -15.44,
+          "calmar": 0.83,
+          "worst_year_pct": -4.71,
+          "losing_years": 2,
+          "total_years": 7,
+          "negative_months_pct": 41.3,
+          "avg_exposure_pct": 36.7,
+          "turnover_per_year_pct": 182.5,
+          "final_value": 13286050,
+          "contributed": 7700000,
+          "profit": 5586050,
+          "yearly": {
+            "2020": 15.34,
+            "2021": 1.58,
+            "2022": -4.71,
+            "2023": 8.24,
+            "2024": -4.27,
+            "2025": 36.43,
+            "2026": 33.77
+          },
+          "planned_orders": 299,
+          "filled_orders": 110,
+          "rejected_orders": 189,
+          "trade_value": 53952187.0,
+          "cost": 143827.0,
+          "fees_and_tax": 62913.0,
+          "slippage_cost": 80914.0
+        },
+        "periods": {
+          "2020_2022": {
+            "years": 2.48,
+            "cagr_pct": 4.55,
+            "period_return_pct": 11.65,
+            "vol_pct": 6.66,
+            "sharpe": 0.26,
+            "mdd_pct": -10.18,
+            "calmar": 0.45,
+            "worst_year_pct": -4.71,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 36.7,
+            "avg_exposure_pct": 34.9,
+            "turnover_per_year_pct": 83.5,
+            "final_value": 3186065,
+            "contributed": 3200000,
+            "profit": -13935,
+            "yearly": {
+              "2020": 15.34,
+              "2021": 1.58,
+              "2022": -4.71
+            }
+          },
+          "2023_2025": {
+            "years": 2.99,
+            "cagr_pct": 12.27,
+            "period_return_pct": 41.38,
+            "vol_pct": 7.9,
+            "sharpe": 1.17,
+            "mdd_pct": -8.98,
+            "calmar": 1.37,
+            "worst_year_pct": -4.27,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 44.4,
+            "avg_exposure_pct": 37.8,
+            "turnover_per_year_pct": 140.1,
+            "final_value": 9206293,
+            "contributed": 6800000,
+            "profit": 2406293,
+            "yearly": {
+              "2023": 8.24,
+              "2024": -4.27,
+              "2025": 36.43
+            }
+          },
+          "2026": {
+            "years": 0.71,
+            "cagr_pct": 50.96,
+            "period_return_pct": 33.77,
+            "vol_pct": 25.96,
+            "sharpe": 1.63,
+            "mdd_pct": -15.44,
+            "calmar": 3.3,
+            "worst_year_pct": 33.77,
+            "losing_years": 0,
+            "total_years": 1,
+            "negative_months_pct": 44.4,
+            "avg_exposure_pct": 38.4,
+            "turnover_per_year_pct": 315.7,
+            "final_value": 13286050,
+            "contributed": 7700000,
+            "profit": 5586050,
+            "yearly": {
+              "2026": 33.77
+            }
+          }
+        }
+      },
+      "after": {
+        "all": {
+          "years": 6.19,
+          "cagr_pct": 12.92,
+          "period_return_pct": 112.25,
+          "vol_pct": 11.3,
+          "sharpe": 0.9,
+          "mdd_pct": -15.7,
+          "calmar": 0.82,
+          "worst_year_pct": -4.15,
+          "losing_years": 2,
+          "total_years": 7,
+          "negative_months_pct": 40.0,
+          "avg_exposure_pct": 37.2,
+          "turnover_per_year_pct": 189.1,
+          "final_value": 13216792,
+          "contributed": 7700000,
+          "profit": 5516792,
+          "yearly": {
+            "2020": 16.53,
+            "2021": 1.94,
+            "2022": -4.15,
+            "2023": 6.94,
+            "2024": -3.87,
+            "2025": 36.36,
+            "2026": 32.98
+          },
+          "planned_orders": 112,
+          "filled_orders": 110,
+          "rejected_orders": 2,
+          "trade_value": 55930809.0,
+          "cost": 146855.0,
+          "fees_and_tax": 62973.0,
+          "slippage_cost": 83882.0
+        },
+        "periods": {
+          "2020_2022": {
+            "years": 2.48,
+            "cagr_pct": 5.39,
+            "period_return_pct": 13.86,
+            "vol_pct": 6.59,
+            "sharpe": 0.39,
+            "mdd_pct": -9.39,
+            "calmar": 0.57,
+            "worst_year_pct": -4.15,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 36.7,
+            "avg_exposure_pct": 34.3,
+            "turnover_per_year_pct": 80.7,
+            "final_value": 3214538,
+            "contributed": 3200000,
+            "profit": 14538,
+            "yearly": {
+              "2020": 16.53,
+              "2021": 1.94,
+              "2022": -4.15
+            }
+          },
+          "2023_2025": {
+            "years": 2.99,
+            "cagr_pct": 11.95,
+            "period_return_pct": 40.17,
+            "vol_pct": 8.08,
+            "sharpe": 1.11,
+            "mdd_pct": -8.92,
+            "calmar": 1.34,
+            "worst_year_pct": -3.87,
+            "losing_years": 1,
+            "total_years": 3,
+            "negative_months_pct": 41.7,
+            "avg_exposure_pct": 39.3,
+            "turnover_per_year_pct": 154.4,
+            "final_value": 9211752,
+            "contributed": 6800000,
+            "profit": 2411752,
+            "yearly": {
+              "2023": 6.94,
+              "2024": -3.87,
+              "2025": 36.36
+            }
+          },
+          "2026": {
+            "years": 0.71,
+            "cagr_pct": 49.71,
+            "period_return_pct": 32.98,
+            "vol_pct": 26.12,
+            "sharpe": 1.59,
+            "mdd_pct": -15.7,
+            "calmar": 3.17,
+            "worst_year_pct": 32.98,
+            "losing_years": 0,
+            "total_years": 1,
+            "negative_months_pct": 44.4,
+            "avg_exposure_pct": 38.7,
+            "turnover_per_year_pct": 313.2,
+            "final_value": 13216792,
+            "contributed": 7700000,
+            "profit": 5516792,
+            "yearly": {
+              "2026": 32.98
+            }
+          }
+        }
+      }
+    }
+  },
+  "limitations": [
+    "같은 과거 자료를 다시 사용한 사후 비교이며 향후 수익률 검증이 아님",
+    "전일 종가로 주문 수량 결정, 다음 거래일 종가에 수수료·슬리피지를 반영한 체결 근사",
+    "분배금·실제 호가·유동성·부분체결 미반영, 실제 주문 실행부를 호출하지 않음",
+    "현금 이자 0%, CD ETF 양의 매매차익에 15.4% 과세 상한 근사",
+    "매수 시 시장가 기준 현금·비중 한도를 확인하는 별도 모형, 운영 엔진 전체의 재현이 아님",
+    "3배 비용은 수수료·슬리피지만 늘리고 세율과 매매 설정은 유지",
+    "주문 계획 차이를 보기 위해 수정 전후 모두 ETF 호가를 고친 현재 비용 계산 사용"
+  ],
+  "start": "2020-07-08",
+  "end": "2026-09-17"
+}
