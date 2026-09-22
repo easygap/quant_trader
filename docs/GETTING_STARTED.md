@@ -1,4 +1,4 @@
-**한국어** · [English](en/GETTING_STARTED.md) · [日本語](ja/GETTING_STARTED.md) · [简体中文](zh-CN/GETTING_STARTED.md)
+**한국어** · [English](en/GETTING_STARTED.md) · [日本語](ja/GETTING_STARTED.md) · [中文](zh-CN/GETTING_STARTED.md)
 
 # 설치와 모의투자
 

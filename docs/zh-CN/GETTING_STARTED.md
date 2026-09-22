@@ -1,4 +1,4 @@
-[한국어](../GETTING_STARTED.md) · [English](../en/GETTING_STARTED.md) · [日本語](../ja/GETTING_STARTED.md) · **简体中文**
+[한국어](../GETTING_STARTED.md) · [English](../en/GETTING_STARTED.md) · [日本語](../ja/GETTING_STARTED.md) · **中文**
 
 # 安装与模拟交易
 

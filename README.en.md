@@ -1,8 +1,6 @@
-[한국어](README.md) · **English** · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
+[한국어](README.md) · **English** · [日本語](README.ja.md) · [中文](README.zh-CN.md)
 
-<img src="monitoring/static/nungum-symbol.svg" alt="" width="40">
-
-# Nungum · 눈금
+# <img src="monitoring/static/nungum-symbol.svg" alt="" width="32"> Nungum · 눈금
 
 **Automated trading for Korean stocks and ETFs, on your own PC.**
 

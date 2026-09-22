@@ -1,8 +1,6 @@
-**한국어** · [English](README.en.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
+**한국어** · [English](README.en.md) · [日本語](README.ja.md) · [中文](README.zh-CN.md)
 
-<img src="monitoring/static/nungum-symbol.svg" alt="" width="40">
-
-# 눈금
+# <img src="monitoring/static/nungum-symbol.svg" alt="" width="32"> 눈금
 
 **국내 주식·ETF 자동매매 프로그램**
 

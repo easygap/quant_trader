@@ -1,4 +1,4 @@
-[한국어](../GETTING_STARTED.md) · [English](../en/GETTING_STARTED.md) · **日本語** · [简体中文](../zh-CN/GETTING_STARTED.md)
+[한국어](../GETTING_STARTED.md) · [English](../en/GETTING_STARTED.md) · **日本語** · [中文](../zh-CN/GETTING_STARTED.md)
 
 # インストールとデモ取引
 
