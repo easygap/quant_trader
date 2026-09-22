@@ -1,6 +1,8 @@
+**한국어** · [English](en/GETTING_STARTED.md) · [日本語](ja/GETTING_STARTED.md) · [简体中文](zh-CN/GETTING_STARTED.md)
+
 # 설치와 모의투자
 
-눈금은 내 PC에서 실행하는 국내 주식·ETF 자동매매 프로그램입니다. 설치 후 계좌 화면을 열고, 가상 자금으로 첫 매매를 해 보는 순서로 설명합니다.
+프로그램을 설치하고, 가상 자금으로 첫 매매를 해 보는 방법입니다.
 
 아래 명령은 **Windows PowerShell, Python 3.11 또는 3.12** 기준입니다. Python과 Git이 설치되어 있어야 합니다.
 
@@ -24,7 +26,7 @@ if (-not (Test-Path .env)) {
 }
 ```
 
-`config/settings.yaml`에서 `trading.mode`가 `paper`인지 확인하세요. 예제 파일의 기본값은 모의투자입니다. 이 모드의 매매는 프로그램 안에서 가상 자금으로 처리합니다.
+`config/settings.yaml`에서 `trading.mode`가 `paper`인지 확인하세요. 예제 파일의 기본값은 모의투자입니다. 이 모드의 매매는 프로그램 안에서 가상 자금으로 처리하며, 증권사에서 제공하는 모의투자 서비스와는 별개입니다.
 
 한국투자증권 KIS API를 연결할 때는 키와 계좌번호를 `.env`에 입력합니다. 이 파일은 Git에 올리지 마세요. 실제 돈으로 주문하려면 [실제 계좌 연결 안내](PAPER_TO_LIVE_RUNBOOK.md)를 먼저 읽어 주세요.
 
@@ -34,7 +36,7 @@ if (-not (Test-Path .env)) {
 .\.venv\Scripts\python.exe main.py --mode dashboard
 ```
 
-브라우저에서 [127.0.0.1:8080](http://127.0.0.1:8080)을 엽니다. 이 명령은 계좌를 보여 주는 웹 서버를 실행합니다. 자동매매는 별도로 실행해야 합니다.
+PowerShell 창을 켜 둔 채, 같은 PC의 브라우저에서 [127.0.0.1:8080](http://127.0.0.1:8080)을 엽니다. 이 명령으로 계좌 화면을 실행합니다. 자동매매는 별도로 실행해야 합니다.
 
 처음 설치하면 저장된 거래가 없어 계좌가 비어 있습니다. README의 캡처는 기존 모의투자 계좌의 기록입니다. 설치 직후에는 캡처에 나온 금액과 수익률이 표시되지 않습니다.
 
@@ -45,6 +47,8 @@ if (-not (Test-Path .env)) {
 ```powershell
 .\.venv\Scripts\python.exe main.py --mode dashboard --dashboard-port 8081
 ```
+
+이때는 [127.0.0.1:8081](http://127.0.0.1:8081)로 접속합니다.
 
 ## 모의투자
 
