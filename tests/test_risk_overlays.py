@@ -13,6 +13,7 @@ import pytest
 from core.risk_overlays import (
     DrawdownGuardConfig,
     OverlayConfig,
+    OverlayDecision,
     TrendFilterConfig,
     VolatilityTargetConfig,
     applied_stock_fraction,
@@ -176,6 +177,24 @@ class TestDefensiveAllocation:
 
 
 class TestState:
+    def test_paper_and_live_states_are_isolated(self, tmp_path):
+        save_overlay_state("basket", OverlayDecision(scale=.5, trend_below=True), tmp_path, mode="paper")
+        assert load_overlay_state("basket", tmp_path, mode="live") is None
+        save_overlay_state("basket", OverlayDecision(scale=1., trend_below=False), tmp_path, mode="live")
+        assert load_overlay_state("basket", tmp_path, mode="paper")["scale"] == .5
+        assert load_overlay_state("basket", tmp_path, mode="live")["scale"] == 1.
+
+    def test_legacy_state_is_only_used_for_paper_migration(self, tmp_path):
+        save_overlay_state("basket", OverlayDecision(scale=.5), tmp_path)
+        assert load_overlay_state("basket", tmp_path, mode="paper")["scale"] == .5
+        assert load_overlay_state("basket", tmp_path, mode="live") is None
+
+    @pytest.mark.parametrize("scale", [float("nan"), float("inf"), -1., 2., "broken"])
+    def test_invalid_saved_scale_is_not_used(self, tmp_path, scale):
+        import json
+        (tmp_path / "basket.json").write_text(json.dumps({"scale": scale}), encoding="utf-8")
+        assert load_overlay_state("basket", tmp_path) is None
+
     def test_roundtrip_and_applied_fraction(self, tmp_path):
         cfg = parse_overlay_config({"overlays": {"trend_filter": {"enabled": True}}})
         d = compute_decision(cfg, index_closes=_closes(90.0), prev_state=None)

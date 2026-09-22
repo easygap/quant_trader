@@ -195,10 +195,14 @@ class BasketRebalancer:
             self._overlay_decision = None
         if not self._overlay_cfg.any_enabled:
             return None
-        if getattr(self, "_overlay_decision", None) is not None:
+        evaluation_date = datetime.now(_KST).date()
+        if (getattr(self, "_overlay_decision", None) is not None
+                and getattr(self, "_overlay_evaluation_date", None) == evaluation_date):
             return self._overlay_decision
 
-        prev = load_overlay_state(self.basket_name)
+        self._overlay_input_issues = []
+        self._overlay_source_dates = {}
+        prev = load_overlay_state(self.basket_name, mode=self._ledger_mode())
         index_closes = None
         if self._overlay_cfg.trend.enabled:
             index_closes = self._fetch_index_closes(
@@ -215,8 +219,10 @@ class BasketRebalancer:
             daily_returns=daily,
             prev_state=prev,
         )
+        decision.data_issues.extend(self._overlay_input_issues)
+        decision.source_dates = dict(self._overlay_source_dates)
         try:
-            save_overlay_state(self.basket_name, decision)
+            save_overlay_state(self.basket_name, decision, mode=self._ledger_mode())
         except OSError as exc:
             logger.warning("바스켓 '{}' 오버레이 상태 저장 실패: {}", self.basket_name, exc)
         if decision.data_issues:
@@ -226,7 +232,60 @@ class BasketRebalancer:
         else:
             logger.info("바스켓 '{}' 리스크 오버레이 계산 완료 (배수 {})", self.basket_name, decision.scale)
         self._overlay_decision = decision
+        self._overlay_evaluation_date = evaluation_date
         return decision
+
+    def _overlay_previous_session(self):
+        """한국 거래일 기준 직전 완료 일봉. 주말·설정된 휴장일은 건너뛴다."""
+        from core.trading_hours import TradingHours
+
+        calendar = TradingHours(self.config)
+        day = datetime.now(_KST) - timedelta(days=1)
+        for _ in range(31):
+            if calendar.is_trading_day(day):
+                return day.date()
+            day -= timedelta(days=1)
+        raise ValueError("직전 거래일을 확인할 수 없습니다")
+
+    def _overlay_data_issue(self, message: str):
+        if not hasattr(self, "_overlay_input_issues"):
+            self._overlay_input_issues = []
+        self._overlay_input_issues.append(message)
+
+    def _overlay_dated_frame(self, frame, source: str):
+        """날짜 오류·중복·오래된 자료는 버림 없이 전체 입력을 보류한다."""
+        import pandas as pd
+
+        try:
+            values = frame["date"] if "date" in frame.columns else frame.index
+            if "date" not in frame.columns and not isinstance(frame.index, pd.DatetimeIndex):
+                raise ValueError("날짜 열 없음")
+            dates = pd.to_datetime(values, errors="coerce")
+            parsed = [
+                (value.tz_convert(_KST) if value.tzinfo is not None else value).date()
+                if not pd.isna(value) else None
+                for value in dates
+            ]
+            if any(value is None for value in parsed):
+                raise ValueError("날짜를 읽지 못한 행 있음")
+            today = datetime.now(_KST).date()
+            keep = [value < today for value in parsed]
+            result = frame.loc[keep].copy()
+            result["_overlay_date"] = [value for value in parsed if value < today]
+            result = result.sort_values("_overlay_date")
+            if result["_overlay_date"].duplicated().any():
+                raise ValueError("같은 날짜의 기록이 둘 이상 있음")
+            expected = self._overlay_previous_session()
+            latest = result["_overlay_date"].iloc[-1] if not result.empty else None
+            if not hasattr(self, "_overlay_source_dates"):
+                self._overlay_source_dates = {}
+            self._overlay_source_dates[source] = str(latest) if latest else None
+            if latest != expected:
+                raise ValueError(f"최근 기록 {latest or '없음'}, 필요한 기준일 {expected}")
+            return result
+        except (ValueError, TypeError, OverflowError) as exc:
+            self._overlay_data_issue(f"{source}: {exc}. 자료 확인 전 비중 확대 보류")
+            return None
 
     def _fetch_index_closes(self, symbol: str, ma_days: int) -> list[float] | None:
         """추세 판단용 지수 종가(오래된 순). 오늘 날짜 봉은 제외 — 전일까지의 정보만."""
@@ -238,26 +297,8 @@ class BasketRebalancer:
             return None
         if df is None or df.empty or "close" not in df.columns:
             return None
-        frame = df.copy()
-        today = datetime.now(_KST).date()
-        dates = None
-        if "date" in frame.columns:
-            dates = frame["date"]
-        elif hasattr(frame.index, "date"):
-            dates = frame.index.to_series()
-        if dates is not None:
-            try:
-                import pandas as pd
-                parsed = pd.to_datetime(dates).dt.date if hasattr(pd.to_datetime(dates), "dt") else pd.to_datetime(dates).date
-                mask = [d < today for d in parsed]
-                frame = frame[mask].copy()
-                frame["_overlay_date"] = [d for d, keep in zip(parsed, mask) if keep]
-                frame = frame.sort_values("_overlay_date")
-                if frame["_overlay_date"].duplicated().any():
-                    return None
-            except Exception:
-                return None
-        else:
+        frame = self._overlay_dated_frame(df, "지수 종가")
+        if frame is None:
             return None
         # 누락 봉을 삭제하면 이동평균 창이 과거로 밀려 잘못 복귀할 수 있다.
         try:
@@ -278,11 +319,9 @@ class BasketRebalancer:
             return None, None
         if snaps is None or getattr(snaps, "empty", True) or "cumulative_return" not in snaps.columns:
             return None, None
-        if "date" in snaps.columns:
-            import pandas as pd
-            snaps = snaps.copy()
-            snaps["date"] = pd.to_datetime(snaps["date"], errors="coerce")
-            snaps = snaps[snaps["date"].dt.date < datetime.now(_KST).date()].sort_values("date")
+        snaps = self._overlay_dated_frame(snaps, "계좌 기록")
+        if snaps is None:
+            return None, None
         try:
             cumulative = [float(v) if v is not None else float("nan") for v in snaps["cumulative_return"].tolist()]
         except (TypeError, ValueError):

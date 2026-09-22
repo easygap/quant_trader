@@ -27,6 +27,44 @@ from core.risk_overlays import (
 from tools import risk_overlay_backtest as research
 
 
+def align_report_inputs(series, as_of):
+    """공통 확정일까지만 비교하고, 기간 중 누락된 종가는 채우지 않는다."""
+    cutoff = pd.Timestamp(as_of)
+    clean = {}
+    for symbol in ("069500", "357870", "KS200"):
+        values = series[symbol].loc[series[symbol].index < cutoff]
+        if (
+            values.empty
+            or not values.index.is_unique
+            or not values.index.is_monotonic_increasing
+            or not all(math.isfinite(v) and v > 0 for v in values)
+        ):
+            raise ValueError(f"{symbol}: 종가와 날짜를 확인하세요")
+        clean[symbol] = values
+    end = min(values.index[-1] for values in clean.values())
+    aligned = {symbol: values.loc[:end] for symbol, values in clean.items()}
+    if any(values.empty for values in aligned.values()):
+        raise ValueError("세 자료가 겹치는 비교 기간이 없습니다")
+    panel = pd.DataFrame(aligned)
+    start = max(values.index[0] for values in aligned.values())
+    incomplete = panel.loc[start:].isna().any(axis=1)
+    if incomplete.any():
+        dates = ", ".join(str(day.date()) for day in incomplete[incomplete].index[:5])
+        raise ValueError(
+            f"비교 기간 중 종가 누락: {dates}. 누락을 채우지 않고 검증을 중단합니다"
+        )
+    audit = {
+        "common_last_bar": str(end.date()),
+        "latest_available": {
+            symbol: str(values.index[-1].date()) for symbol, values in clean.items()
+        },
+        "excluded_after_common_bar": {
+            symbol: int((values.index > end).sum()) for symbol, values in clean.items()
+        },
+    }
+    return aligned, panel, audit
+
+
 def integer_etf_simulation(
     panel,
     policy,
@@ -70,13 +108,17 @@ def integer_etf_simulation(
     previous_state = None
     previous_month = None
     rows = []
-    # 200日 선 계산 기간은 성과 집계 전에 따로 확보한다.
+    # 200일선 계산 기간은 성과 집계 전에 따로 확보한다.
     start = max(200, panel.index.get_indexer([panel[symbols].dropna().index[0]])[0])
     commission = research.COMMISSION * cost_multiple
     slippage = research.SLIPPAGE * cost_multiple
+    # 일마다 전체 과거를 복사하지 않고 필요한 이동평균 창만 전달한다.
+    # 다음 날짜와 당일 종가는 신호 입력에 포함하지 않는다.
+    index_prices = panel["KS200"].to_numpy()
+    execution_prices = panel[symbols].to_numpy()
     for i in range(start, len(panel)):
         day = panel.index[i]
-        prices = {s: float(panel[s].iloc[i]) for s in symbols}
+        prices = {s: float(execution_prices[i, j]) for j, s in enumerate(symbols)}
         if any(not math.isfinite(p) or p <= 0 for p in prices.values()):
             raise ValueError("ETF 종가가 누락됐습니다")
         month = (day.year, day.month)
@@ -88,7 +130,7 @@ def integer_etf_simulation(
         previous_month = month
         decision = compute_decision(
             cfg,
-            index_closes=panel["KS200"].iloc[:i].tolist(),
+            index_closes=index_prices[max(0, i - cfg.trend.ma_days) : i].tolist(),
             cumulative_returns_pct=[(peak - 1) * 100, (twr - 1) * 100],
             prev_state=previous_state,
             now=day.to_pydatetime(),
@@ -216,7 +258,7 @@ def plot_comparison(frames, path):
         "old_product": "기존 방식 (TWR 오류 수정)",
         "minimum": "주식만 조절·중복 축소 방지",
     }
-    colors = {"static": "#9aa5b5", "old_product": "#8e6853", "minimum": "#3157a4"}
+    colors = {"static": "#6f6f6f", "old_product": "#9f1853", "minimum": "#0f62fe"}
     for key, f in frames.items():
         if key not in names:
             continue
@@ -228,15 +270,15 @@ def plot_comparison(frames, path):
     ax[0].legend(frameon=False, fontsize=9, loc="upper left")
     for a in ax:
         a.spines[["top", "right"]].set_visible(False)
-        a.spines[["left", "bottom"]].set_color("#cbd1dd")
+        a.spines[["left", "bottom"]].set_color("#c6c6c6")
         a.grid(axis="y", alpha=0.12)
-        a.tick_params(labelsize=9, colors="#596579")
+        a.tick_params(labelsize=9, colors="#525252")
     fig.text(
         0.07,
         0.025,
         "실제 ETF 종가 · 1주 단위 · 월 10만원 적립 · 수수료·슬리피지 반영 · 과거 성과이며 미래 수익을 보장하지 않음",
         fontsize=9,
-        color="#596579",
+        color="#525252",
     )
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,14 +289,15 @@ def plot_comparison(frames, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--as-of", default="2026-09-17")
-    parser.add_argument(
-        "--output", default="reports/research/risk_review_20260917.json"
-    )
-    parser.add_argument("--image", default="docs/images/risk-review-20260917.png")
+    parser.add_argument("--output")
+    parser.add_argument("--image")
     args = parser.parse_args()
+    stamp = pd.Timestamp(args.as_of).strftime("%Y%m%d")
+    args.output = args.output or f"reports/research/risk_review_{stamp}.json"
+    args.image = args.image or f"docs/images/risk-review-{stamp}.png"
     research.AS_OF = args.as_of
     series = {s: research._fdr(s, "2014-01-01") for s in ["069500", "357870", "KS200"]}
-    panel = pd.DataFrame(series).loc[: args.as_of]
+    series, panel, data_audit = align_report_inputs(series, args.as_of)
     policies = {
         "static": research.Policy("static", "고정 비중"),
         "old_product": research.Policy("old_product", "기존 방식", trend=True, dd=True),
@@ -322,6 +365,7 @@ def main():
         "last_complete_bar": str(frames["static"].index[-1].date()),
         "integer_start": str(frames["static"].index[0].date()),
         "source": "FinanceDataReader, close prices",
+        "data_audit": data_audit,
         "data": manifest,
         "integer_etf": result,
         "fractional_research": long_run,
@@ -331,6 +375,7 @@ def main():
             "다음 거래일 종가에 비용을 더한 근사 체결; 실시간 호가·괴리율·미체결 미재현",
             "소수 주 연구의 현금금리는 연 3% 고정 가정; 금리 0% 민감도도 공개",
             "부분 연도는 연도 전체 수익률이 아님; 실전 자동 전환 없음",
+            "자료별 마지막 날짜가 다르면 공통 확정일까지 비교; 뒤 날짜는 제외",
         ],
     }
     target = Path(args.output)
@@ -344,6 +389,7 @@ def main():
         json.dumps(
             {
                 "integer_start": payload["integer_start"],
+                "data_audit": data_audit,
                 "last": payload["last_complete_bar"],
                 "integer_etf": result,
                 "fractional": long_run,

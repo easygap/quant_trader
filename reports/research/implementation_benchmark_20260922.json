@@ -1,0 +1,78 @@
+{
+  "date": "2026-09-22",
+  "baseline_commit": "9a7c145",
+  "input_as_of": "2026-09-17",
+  "input_sha256": {
+    "069500": "1ef75c687434ead55cc128f9f933ca589bb4eff2a3390ad3dd104b44822ad933",
+    "357870": "fbc29674729fc175cf2f1ff78fee361a96a8cfed0279b9fe7cb3b444562cf810",
+    "KS200": "3834a4d6f22a7278ae4327cd5aa88337681ba0db6e877ff9ede325ebfded70f0"
+  },
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "rows": 3119,
+  "repetitions": 3,
+  "policies": {
+    "static": {
+      "seconds": {
+        "before": [
+          0.23429969999779132,
+          0.23586300000170013,
+          0.21607280000171158
+        ],
+        "after": [
+          0.0977578000020003,
+          0.05446730000039679,
+          0.050483499999245396
+        ]
+      },
+      "median_seconds": {
+        "before": 0.23429969999779132,
+        "after": 0.05446730000039679
+      },
+      "speedup": 4.301658058983729,
+      "all_daily_values_exactly_equal": true,
+      "output_rows": 1520
+    },
+    "old_product": {
+      "seconds": {
+        "before": [
+          0.3308458999999857,
+          0.27771930000017164,
+          0.26015770000230987
+        ],
+        "after": [
+          0.09260569999969448,
+          0.08979030000045896,
+          0.0883538000016415
+        ]
+      },
+      "median_seconds": {
+        "before": 0.27771930000017164,
+        "after": 0.08979030000045896
+      },
+      "speedup": 3.092976635546959,
+      "all_daily_values_exactly_equal": true,
+      "output_rows": 1520
+    },
+    "minimum": {
+      "seconds": {
+        "before": [
+          0.27083330000095884,
+          0.30301369999870076,
+          0.2586730000002717
+        ],
+        "after": [
+          0.07846160000190139,
+          0.07897890000094776,
+          0.07652740000048652
+        ]
+      },
+      "median_seconds": {
+        "before": 0.27083330000095884,
+        "after": 0.07846160000190139
+      },
+      "speedup": 3.4517942534232753,
+      "all_daily_values_exactly_equal": true,
+      "output_rows": 1520
+    }
+  }
+}

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from core.basket_rebalancer import BasketRebalancer
+from core.basket_rebalancer import BasketRebalancer, _KST
 from core.risk_overlays import load_overlay_state, save_overlay_state, OverlayDecision
 
 
@@ -29,8 +29,19 @@ class _Collector:
         self.calls.append((symbol, start_date, end_date))
         if self.closes is None:
             return pd.DataFrame()
-        dates = pd.date_range(end="2020-01-01", periods=len(self.closes), freq="B")
+        dates = pd.date_range(end=_previous_session(), periods=len(self.closes), freq="B")
         return pd.DataFrame({"date": dates, "close": self.closes})
+
+
+def _previous_session():
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from core.trading_hours import TradingHours
+    day = datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=1)
+    calendar = TradingHours()
+    while not calendar.is_trading_day(day):
+        day -= timedelta(days=1)
+    return day.date()
 
 
 def _basket(overlays=None, target=0.6):
@@ -49,7 +60,8 @@ def _make(basket_cfg, closes, cumulative=None):
     with patch.object(BasketRebalancer, "_load_baskets_config", return_value={"t": basket_cfg}):
         rb = BasketRebalancer(basket_name="t")
     rb.data_collector = _Collector(closes)
-    frame = pd.DataFrame({"cumulative_return": cumulative}) if cumulative is not None else pd.DataFrame()
+    frame = pd.DataFrame({"date": pd.bdate_range(end=_previous_session(), periods=len(cumulative)),
+                          "cumulative_return": cumulative}) if cumulative is not None else pd.DataFrame()
     rb._nav_frame = frame
     return rb
 
@@ -83,7 +95,7 @@ class TestTrendFilter:
         assert decision.trend_below is True and decision.scale == pytest.approx(0.5)
         assert rb._stock_fraction() == pytest.approx(0.3)
         assert rb.data_collector.calls[0][0] == "KS200"
-        state = load_overlay_state("t")
+        state = load_overlay_state("t", mode="paper")
         assert state["scale"] == pytest.approx(0.5) and state["trend_below"] is True
         # 같은 인스턴스에서는 한 번만 계산한다(plan→execute 사이클 내 동일 값)
         assert rb.overlay_decision() is decision and len(rb.data_collector.calls) == 1
@@ -125,7 +137,7 @@ class TestTrendFilter:
         closes = [100.0] * 200 + [50.0]
         rb = _make(_basket(self.overlays), closes)
         today = datetime.now().strftime("%Y-%m-%d")
-        dates = list(pd.date_range(end=today, periods=len(closes), freq="D"))
+        dates = list(pd.bdate_range(end=_previous_session(), periods=200)) + [pd.Timestamp(today)]
         rb.data_collector.fetch_korean_stock = lambda symbol, start_date=None, end_date=None: pd.DataFrame({"date": dates, "close": closes})
         got = rb._fetch_index_closes("KS200", 200)
         assert got[-1] == 100.0 and len(got) == 200
@@ -171,7 +183,7 @@ def test_future_index_bar_and_unsorted_rows_cannot_change_signal():
     rb = _make(cfg, closes=[])
     from datetime import datetime, timedelta
     future = datetime.now() + timedelta(days=2)
-    dates = list(pd.date_range(end="2020-01-01", periods=200, freq="B")) + [future]
+    dates = list(pd.date_range(end=_previous_session(), periods=200, freq="B")) + [future]
     frame = pd.DataFrame({"date":dates,"close":[100.]*200 + [10000.]})
     rb.data_collector.fetch_korean_stock = lambda *a: frame.iloc[::-1]
     assert rb._fetch_index_closes("KS200", 200) == [100.]*200
@@ -181,7 +193,57 @@ def test_nav_ignores_today_and_future_snapshots():
     cfg = _basket({"drawdown_guard": {"enabled": True}})
     rb = _make(cfg, closes=[], cumulative=[0., -12., 100.])
     from datetime import datetime, timedelta
-    today = datetime.now().date()
-    rb._nav_frame["date"] = [today-timedelta(days=2), today-timedelta(days=1), today]
+    today = datetime.now(_KST).date()
+    previous = _previous_session()
+    rb._nav_frame["date"] = [previous-timedelta(days=1), previous, today]
     with _patch_snapshots(rb):
         assert rb.overlay_decision().drawdown_active is True
+
+
+def test_stale_index_cannot_release_defensive_allocation():
+    save_overlay_state("t", OverlayDecision(scale=.5, trend_below=True), mode="paper")
+    rb = _make(_basket(TestTrendFilter.overlays), [100.] * 199 + [130.])
+    stale = pd.DataFrame({"date": pd.bdate_range(end="2020-01-01", periods=200),
+                          "close": [100.] * 199 + [130.]})
+    rb.data_collector.fetch_korean_stock = lambda *args: stale
+    decision = rb.overlay_decision()
+    assert decision.scale == .5 and decision.trend_below is True
+    assert any("필요한 기준일" in issue for issue in decision.data_issues)
+    assert decision.source_dates["지수 종가"] == "2020-01-01"
+
+
+@pytest.mark.parametrize("fault", ["missing_date", "invalid_date", "duplicate_date", "stale_date"])
+def test_bad_nav_dates_cannot_hide_a_loss_or_release_guard(fault):
+    save_overlay_state("t", OverlayDecision(scale=.5, drawdown_active=True), mode="paper")
+    rb = _make(_basket(TestDrawdownGuard.overlays), None, [0., -12., 0.])
+    if fault == "missing_date":
+        rb._nav_frame = rb._nav_frame.drop(columns=["date"])
+    elif fault == "invalid_date":
+        rb._nav_frame["date"] = rb._nav_frame["date"].astype(object)
+        rb._nav_frame.loc[1, "date"] = "잘못된 날짜"
+    elif fault == "duplicate_date":
+        rb._nav_frame.loc[1, "date"] = rb._nav_frame.loc[2, "date"]
+    else:
+        rb._nav_frame["date"] -= pd.Timedelta(days=30)
+    with _patch_snapshots(rb):
+        decision = rb.overlay_decision()
+    assert decision.scale == .5 and decision.drawdown_active is True
+    assert decision.data_issues
+
+
+def test_previous_session_skips_weekend_and_configured_holiday():
+    from datetime import datetime
+    rb = _make(_basket(TestTrendFilter.overlays), [])
+    # 월요일 8월 17일이 휴장일이라고 가정하면 화요일 판단의 종가는 금요일이다.
+    with patch("core.basket_rebalancer.datetime") as clock, patch("core.trading_hours.TradingHours") as calendar:
+        clock.now.return_value = datetime(2026, 8, 18, 9)
+        calendar.return_value.is_trading_day.side_effect = lambda day: day.weekday() < 5 and day.day != 17
+        assert str(rb._overlay_previous_session()) == "2026-08-14"
+
+
+def test_cached_decision_is_recomputed_on_new_day():
+    rb = _make(_basket(TestTrendFilter.overlays), [100.] * 199 + [130.])
+    first = rb.overlay_decision()
+    rb._overlay_evaluation_date = None
+    assert rb.overlay_decision() is not first
+    assert len(rb.data_collector.calls) == 2
