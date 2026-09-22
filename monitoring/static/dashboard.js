@@ -110,12 +110,12 @@
   const FONT =
     '"Nungum UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
   const COLORS = {
-    ink: "#3157a4",
-    up: "#c4383c",
-    down: "#2563c7",
-    warn: "#976019",
+    ink: "#0f62fe",
+    up: "#da1e28",
+    down: "#0072c3",
+    warn: "#a2191f",
   };
-  const inkAlpha = (a) => `rgba(48, 60, 78, ${a})`;
+  const inkAlpha = (a) => `rgba(22, 22, 22, ${a})`;
 
   /* ---------- 상태 ---------- */
 
@@ -142,6 +142,8 @@
     coreStatus: "loading",
     runtimeStatus: "loading",
     activeRequests: new Map(),
+    chartRequest: 0,
+    chartDataAccount: null,
     depositConfirming: false,
     depositRequestId: null,
   };
@@ -233,7 +235,7 @@
       setSync("partial", "계좌 기록 정상 · 운영 상태 확인 불가");
     else if (state.coreStatus === "partial")
       setSync("partial", "일부 데이터 지연");
-    else setSync("ok", "연결 정상");
+    else setSync("ok", "계좌 기록 연결 정상");
     updateDepositAvailability();
   }
   function markCoreSuccess(timestamp) {
@@ -246,9 +248,17 @@
   }
   function setMode(mode) {
     const normalized = String(mode || "unknown").toLowerCase();
-    state.mode = ["paper", "live"].includes(normalized)
+    const nextMode = ["paper", "live"].includes(normalized)
       ? normalized
       : "unknown";
+    if (state.mode !== nextMode) {
+      state.flows.clear();
+      state.flowStatus.clear();
+      state.series.clear();
+      state.seriesStatus.clear();
+      state.chartDataAccount = null;
+    }
+    state.mode = nextMode;
     el.modeBadge.dataset.mode = state.mode;
     el.modeBadge.textContent =
       state.mode === "paper"
@@ -314,12 +324,27 @@
 
   /** 스냅샷·입금 기록으로 평가금액, 투자원금(계단), 시간가중 자산, 낙폭 시계열을 만든다. */
   function buildSeries(rows, flows, initialCapital) {
+    if (
+      rows.some(
+        (r) =>
+          !parseDate(r.date) ||
+          !Number.isFinite(num(r.total_value)) ||
+          num(r.total_value) < 0 ||
+          !Number.isFinite(num(r.cumulative_return)) ||
+          num(r.cumulative_return) < -100,
+      )
+    )
+      throw new Error("날짜 또는 계좌 금액이 올바르지 않습니다.");
+    if (
+      new Set(rows.map((r) => String(r.date).slice(0, 10))).size !== rows.length
+    )
+      throw new Error("같은 날짜의 계좌 기록이 중복됐습니다.");
     const sorted = [...rows]
       .filter((r) => parseDate(r.date))
       .sort((a, b) => parseDate(a.date) - parseDate(b.date));
     const dates = sorted.map((r) => parseDate(r.date));
-    const value = sorted.map((r) => Number(r.total_value || 0));
-    const cr = sorted.map((r) => Number(r.cumulative_return || 0));
+    const value = sorted.map((r) => Number(r.total_value));
+    const cr = sorted.map((r) => Number(r.cumulative_return));
     const twr = cr.map((c) => initialCapital * (1 + c / 100));
     const sortedFlows = [...(flows || [])]
       .map((f) => ({
@@ -330,13 +355,18 @@
       .filter((f) => f.at)
       .sort((a, b) => a.at - b.at);
     const instants = sorted.map(rowInstant);
-    const principal = instants.map(
-      (at) =>
-        initialCapital +
-        sortedFlows
-          .filter((f) => at && f.at <= at)
-          .reduce((s, f) => s + f.amount, 0),
-    );
+    let flowIndex = 0;
+    let principalAt = initialCapital;
+    const principal = instants.map((at) => {
+      while (
+        flowIndex < sortedFlows.length &&
+        at &&
+        sortedFlows[flowIndex].at <= at
+      ) {
+        principalAt += sortedFlows[flowIndex++].amount;
+      }
+      return principalAt;
+    });
     // 계좌 기록과 같은 규칙: 시작 자본을 첫 고점으로 두고 시간가중 자산으로 낙폭을 잰다.
     let peak = initialCapital > 0 ? initialCapital : -Infinity;
     let peakIdx = -1;
@@ -531,8 +561,40 @@
         ? "자산 구성 기록 없음"
         : `보유 자산 ${(100 - cashPct).toFixed(1)}%, 현금 ${cashPct.toFixed(1)}%`,
     );
+    renderRiskExplanation(b);
     $("allocationList").innerHTML =
       `<div><dt><i class="asset-dot"></i>보유 자산</dt><dd>${won(snap ? snap.total_value - snap.cash : null)}</dd></div><div><dt><i class="cash-dot"></i>현금</dt><dd>${won(snap?.cash)}</dd></div>`;
+  }
+
+  function renderRiskExplanation(basket) {
+    const target = $("riskExplanation");
+    const overlay = basket?.overlay;
+    if (!basket) {
+      target.innerHTML =
+        '<p class="loading">계좌 기록을 불러오는 중입니다.</p>';
+      return;
+    }
+    if (!overlay?.enabled) {
+      target.innerHTML = `<div class="risk-scale"><strong>${Math.round((basket.design_fraction || 0) * 100)}%</strong><span>보유 자산 목표 비중</span></div><p class="fine">설정한 비중을 유지합니다. 추세와 낙폭에 따른 자동 축소는 사용하지 않습니다.</p>`;
+      return;
+    }
+    const riskWeights = Object.entries(basket.target_weights || {})
+      .filter(([symbol]) => symbol !== overlay.defensive_symbol)
+      .reduce((sum, [, weight]) => sum + weight, 0);
+    const issues = overlay.data_issues || [];
+    const trend =
+      overlay.trend_below == null
+        ? "판단 기록 확인 필요"
+        : overlay.trend_below
+          ? "장기 추세 아래 · 비중 축소"
+          : "장기 추세 기준 유지";
+    const dd =
+      overlay.drawdown_active == null
+        ? "판단 기록 확인 필요"
+        : overlay.drawdown_active
+          ? "낙폭 기준 도달 · 비중 축소"
+          : "낙폭 기준 이내";
+    target.innerHTML = `<div class="risk-scale"><strong>${(riskWeights * 100).toFixed(1)}%</strong><span>주식 목표 비중</span></div><dl class="risk-facts"><div><dt>추세 판단</dt><dd>${escapeHtml(trend)}</dd></div><div><dt>손실 관리</dt><dd>${escapeHtml(dd)}</dd></div><div><dt>비중을 줄이면</dt><dd>${overlay.defensive_symbol ? "줄인 금액은 CD금리 ETF에 배분" : "현금으로 보유"}</dd></div></dl>${issues.length ? `<p class="fine warn">${escapeHtml(issues.join(" / "))}</p>` : ""}${overlay.evaluated_at ? `<time datetime="${escapeHtml(overlay.evaluated_at)}">${escapeHtml(fmtDT(overlay.evaluated_at))} 판단</time>` : '<p class="fine">첫 판단 기록을 기다리고 있습니다.</p>'}`;
   }
 
   function latestSnapshotDate() {
@@ -572,6 +634,11 @@
     el.decisionAction.hidden = !action;
     el.decisionAction.dataset.action = action || "";
     el.decisionAction.textContent = actionLabel;
+    const urgent = ["operations", "retry"].includes(action);
+    $("today").dataset.state = urgent ? "alert" : action ? "info" : "quiet";
+    $("today").querySelector(".notice-symbol").textContent = urgent ? "!" : "·";
+    $("priorityNotice").hidden = !urgent;
+    $("priorityNotice").textContent = `${title} · ${actionLabel} →`;
   }
   function renderDecision() {
     const baskets = state.baskets;
@@ -932,6 +999,10 @@
     hover: null,
     geometry: null,
     series: null,
+    view: "ribbon",
+    perspective: 1,
+    selected: null,
+    paintFrame: null,
   };
 
   function ensureChartAccountOptions() {
@@ -1033,156 +1104,287 @@
       .join("");
   }
 
-  function equityGeometry(series, width, height) {
-    const padding = {
-      top: 20,
-      right: 12,
-      bottom: 28,
-      left: width < 480 ? 52 : 64,
-    };
-    const n = series.rows.length;
-    const x = (i) =>
-      padding.left +
-      ((width - padding.left - padding.right) * i) / Math.max(1, n - 1);
-    const scale = makeScale(
-      [...series.value, ...series.principal],
-      padding.top,
-      height - padding.bottom,
-      0.08,
-    );
-    return { padding, x, scale, width, height, n };
-  }
-
-  function drawChart(rows) {
+  // 같은 기록을 입체와 평면으로 표현한다. 깊이는 별도 지표가 아니다.
+  // 최대 420개 꼭짓점으로 표현하되 원본 기록·날짜 선택·다운로드는 생략하지 않는다.
+  function drawChart() {
     if (!chart.series || el.chartWrap.hidden) return;
     const series = chart.series;
+    const n = series.rows.length;
+    if (!n) return;
     const width = Math.max(1, el.chartBox.clientWidth);
-    const height = Math.max(200, el.chartBox.clientHeight);
-    const context = setupCanvas(el.chartEquity, width, height);
-    const g = equityGeometry(series, width, height);
-    chart.geometry = g;
-    const { padding, x, scale, n } = g;
-    context.font = `400 11.5px ${FONT}`;
-    context.textBaseline = "middle";
-
-    context.textAlign = "right";
-    niceTicks(scale.min, scale.max, 4).forEach((v, i) => {
-      const y = scale.y(v);
-      context.strokeStyle = inkAlpha(i === 4 ? 0.34 : 0.12);
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(padding.left, y);
-      context.lineTo(width - padding.right, y);
-      context.stroke();
-      context.fillStyle = inkAlpha(0.7);
-      context.fillText(compactWon(v), padding.left - 8, y);
+    const height = Math.max(180, el.chartBox.clientHeight);
+    const ctx = setupCanvas(el.chartEquity, width, height);
+    const p = chart.perspective;
+    const small = width < 480;
+    const dx = (small ? 23 : 45) * p;
+    const dy = (small ? 42 : 65) * p;
+    const left = small ? 37 : 57;
+    const right = small ? 26 : 42;
+    const plotWidth = Math.max(1, width - left - right - dx);
+    const max = Math.max(0, ...series.cr);
+    const min = Math.min(0, ...series.cr);
+    const spread = Math.max(2, max - min);
+    const top = 36 + dy;
+    const floor = height - 44;
+    const span = Math.max(50, floor - top - 25 * p);
+    const x = (i) => left + (plotWidth * i) / Math.max(1, n - 1);
+    const y = (v, i = 0) =>
+      top +
+      ((max + spread * 0.15 - v) / (spread * 1.3)) * span +
+      (22 * p * i) / Math.max(1, n - 1);
+    chart.geometry = {
+      width,
+      height,
+      n,
+      x,
+      padding: { left, right: right + dx },
+      scale: { y },
+      dx,
+      dy,
+    };
+    ctx.font = `400 ${small ? 11 : 12}px ${FONT}`;
+    ctx.lineWidth = 1;
+    ctx.textBaseline = "middle";
+    // 그리드와 기준선도 같은 투영을 사용한다. 0%가 손익의 기준이다.
+    const grid = [min, (min + max) / 2, max];
+    grid.forEach((v, index) => {
+      if (index > 0 && Math.abs(v - grid[index - 1]) < 0.01) return;
+      ctx.beginPath();
+      ctx.moveTo(left, y(v));
+      ctx.lineTo(x(n - 1), y(v, n - 1));
+      ctx.lineTo(x(n - 1) + dx, y(v, n - 1) - dy);
+      ctx.strokeStyle = "#a6c8ff44";
+      ctx.stroke();
+      ctx.fillStyle = "#d0e2ff";
+      ctx.textAlign = "right";
+      ctx.fillText(`${v.toFixed(0)}%`, left - 10, y(v));
     });
-    const step = Math.max(1, Math.ceil((n - 1) / (width < 480 ? 3 : 6)));
-    context.fillStyle = inkAlpha(0.7);
-    for (let i = 0; i < n - 1; i += step) {
-      if (n > 1 && i > n - 1 - step * 0.5) break;
-      context.textAlign = i === 0 ? "left" : "center";
-      context.fillText(
-        fmtMD(series.rows[i].date),
-        x(i),
-        height - padding.bottom + 14,
-      );
+    for (let t = 0; t <= 6; t++) {
+      const i = ((n - 1) * t) / 6;
+      ctx.beginPath();
+      ctx.moveTo(x(i), floor);
+      ctx.lineTo(x(i) + dx, floor - dy);
+      ctx.strokeStyle = "#a6c8ff30";
+      ctx.stroke();
     }
-    context.textAlign = n > 1 ? "right" : "left";
-    context.fillText(
-      fmtMD(series.rows[n - 1].date),
-      x(n - 1),
-      height - padding.bottom + 14,
-    );
-
-    const visible = Math.max(1, Math.ceil((n - 1) * chart.progress) + 1);
-    const clipRight = n > 1 ? x(0) + (x(n - 1) - x(0)) * chart.progress : width;
-    context.save();
-    context.beginPath();
-    context.rect(0, 0, clipRight + 1, height);
-    context.clip();
-
-    context.save();
-    context.setLineDash([3, 4]);
-    context.strokeStyle = inkAlpha(0.5);
-    context.lineWidth = 1;
-    context.beginPath();
-    series.principal.forEach((v, i) => {
-      if (i >= visible) return;
-      const px = x(i);
-      const py = scale.y(v);
-      if (i === 0) context.moveTo(px, py);
-      else {
-        context.lineTo(px, scale.y(series.principal[i - 1]));
-        context.lineTo(px, py);
+    ctx.setLineDash([4, 5]);
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(0));
+    ctx.lineTo(x(n - 1), y(0, n - 1));
+    ctx.strokeStyle = "#a6c8ff99";
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const step = Math.max(1, Math.ceil((n - 1) / 420));
+    const indices = [];
+    for (let i = 0; i < n; i += step) indices.push(i);
+    if (indices.at(-1) !== n - 1) indices.push(n - 1);
+    const polygon = (points, fill) => {
+      ctx.beginPath();
+      points.forEach(([a, b], i) => (i ? ctx.lineTo(a, b) : ctx.moveTo(a, b)));
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+    };
+    if (p > 0.001) {
+      // 2D Canvas에 투영한 띠: WebGL 컨텍스트, 텍스처, 3D 모델 다운로드가 없다.
+      for (let k = 0; k < indices.length - 1; k++) {
+        const a = indices[k],
+          b = indices[k + 1];
+        const ax = x(a),
+          ay = y(series.cr[a], a),
+          bx = x(b),
+          by = y(series.cr[b], b);
+        polygon(
+          [
+            [ax, ay],
+            [bx, by],
+            [bx, by + 5 * p],
+            [ax, ay + 5 * p],
+          ],
+          `rgba(15,98,254,${p})`,
+        );
+        const light = clamp(67 + (ay - by) * 0.6, 55, 81);
+        polygon(
+          [
+            [ax, ay],
+            [bx, by],
+            [bx + dx, by - dy],
+            [ax + dx, ay - dy],
+          ],
+          `hsla(215,90%,${light}%,${p * 0.96})`,
+        );
       }
-    });
-    context.stroke();
-    context.restore();
-
-    series.markers.forEach((m) => {
-      if (m.index >= visible) return;
-      const mx = x(m.index);
-      context.strokeStyle = inkAlpha(0.28);
-      context.beginPath();
-      context.moveTo(mx, padding.top);
-      context.lineTo(mx, height - padding.bottom);
-      context.stroke();
-      context.fillStyle = inkAlpha(0.7);
-      context.font = `500 11.5px ${FONT}`;
-      context.textAlign = mx > width * 0.8 ? "right" : "left";
-      context.fillText(
-        `${signedWon(m.amount)} 적립`,
-        mx + (mx > width * 0.8 ? -5 : 5),
-        padding.top - 8,
+      ctx.beginPath();
+      indices.forEach((i, k) =>
+        k
+          ? ctx.lineTo(x(i) + dx, y(series.cr[i], i) - dy)
+          : ctx.moveTo(x(i) + dx, y(series.cr[i], i) - dy),
       );
-      context.font = `400 11.5px ${FONT}`;
-    });
-
-    context.strokeStyle = COLORS.ink;
-    context.lineWidth = 1.6;
-    context.lineJoin = "round";
-    context.beginPath();
-    series.value.forEach((v, i) => {
-      if (i >= visible) return;
-      const px = x(i);
-      const py = scale.y(v);
-      if (i === 0) context.moveTo(px, py);
-      else context.lineTo(px, py);
-    });
-    context.stroke();
-    if (n <= 14) {
-      series.value.forEach((v, i) => {
-        if (i >= visible) return;
-        context.beginPath();
-        context.arc(x(i), scale.y(v), 2.5, 0, Math.PI * 2);
-        context.fillStyle = COLORS.ink;
-        context.fill();
-      });
+      ctx.strokeStyle = `rgba(186,230,255,${p * 0.95})`;
+      ctx.stroke();
     }
-    context.restore();
-
-    if (chart.hover != null && chart.progress >= 1) {
-      const i = chart.hover;
-      const px = x(i);
-      const py = scale.y(series.value[i]);
-      context.save();
-      context.setLineDash([2, 3]);
-      context.strokeStyle = inkAlpha(0.5);
-      context.beginPath();
-      context.moveTo(px, padding.top);
-      context.lineTo(px, height - padding.bottom);
-      context.stroke();
-      context.restore();
-      context.beginPath();
-      context.arc(px, py, 4.5, 0, Math.PI * 2);
-      context.fillStyle = COLORS.ink;
-      context.fill();
-      context.strokeStyle = "#ffffff";
-      context.lineWidth = 2;
-      context.stroke();
+    ctx.beginPath();
+    indices.forEach((i, k) =>
+      k
+        ? ctx.lineTo(x(i), y(series.cr[i], i))
+        : ctx.moveTo(x(i), y(series.cr[i], i)),
+    );
+    ctx.strokeStyle = "#bae6ff";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    if (n === 1) {
+      ctx.beginPath();
+      ctx.arc(x(0), y(series.cr[0]), 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#bae6ff";
+      ctx.fill();
     }
-    drawDrawdown(series);
+    series.markers.forEach((m) => {
+      const mx = x(m.index),
+        my = y(series.cr[m.index], m.index);
+      ctx.beginPath();
+      ctx.moveTo(mx, my - 5);
+      ctx.lineTo(mx + 5, my);
+      ctx.lineTo(mx, my + 5);
+      ctx.lineTo(mx - 5, my);
+      ctx.closePath();
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+    });
+    const chosen = chart.selected ?? n - 1;
+    const cx = x(chosen),
+      cy = y(series.cr[chosen], chosen);
+    polygon(
+      [
+        [cx, cy],
+        [cx + dx, cy - dy],
+        [cx + dx, floor - dy],
+        [cx, floor],
+      ],
+      "rgba(255,255,255,.08)",
+    );
+    ctx.beginPath();
+    ctx.moveTo(cx, floor);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx + dx, cy - dy);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.strokeStyle = "#002d9c";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = chosen > n * 0.75 ? "right" : "left";
+    ctx.fillText(
+      pct(series.cr[chosen]),
+      cx + (chosen > n * 0.75 ? -9 : 9),
+      cy - 15,
+    );
+    ctx.fillStyle = "#d0e2ff";
+    ctx.textAlign = "left";
+    ctx.fillText(fmtMD(series.rows[0].date), left, floor + 22);
+    ctx.textAlign = "right";
+    ctx.fillText(fmtMD(series.rows[n - 1].date), x(n - 1) + dx, floor + 22);
+    if ($("historyDetails").open) drawDrawdown(series);
+  }
+
+  function scheduleChartPaint() {
+    if (chart.paintFrame != null) return;
+    chart.paintFrame = requestAnimationFrame(() => {
+      chart.paintFrame = null;
+      drawChart();
+    });
+  }
+
+  function setChartView(view) {
+    chart.view = view;
+    $("performance").dataset.view = view;
+    $("chartView")
+      .querySelectorAll("button")
+      .forEach((b) =>
+        b.setAttribute("aria-pressed", String(b.dataset.view === view)),
+      );
+    if (chart.frame != null) cancelAnimationFrame(chart.frame);
+    const from = chart.perspective,
+      to = view === "ribbon" ? 1 : 0;
+    if (reducedMotion.matches || document.hidden) {
+      chart.frame = null;
+      chart.perspective = to;
+      drawChart();
+      return;
+    }
+    const began = performance.now();
+    const step = (now) => {
+      const t = clamp((now - began) / 360, 0, 1);
+      chart.perspective = from + (to - from) * (1 - Math.pow(1 - t, 3));
+      drawChart();
+      chart.frame = t < 1 ? requestAnimationFrame(step) : null;
+    };
+    chart.frame = requestAnimationFrame(step);
+  }
+
+  function selectHistory(index) {
+    const s = chart.series;
+    if (!s?.rows.length) return;
+    const i = clamp(index, 0, s.rows.length - 1);
+    chart.selected = i;
+    chart.hover = i;
+    const row = s.rows[i];
+    $("historyDate").textContent = fmtLong(row.date);
+    $("historyDate").dateTime = String(row.date).slice(0, 10);
+    $("historyTag").textContent =
+      i === s.rows.length - 1 ? "최근 기록" : "선택한 날짜";
+    $("historyReturn").textContent = pct(s.cr[i]);
+    $("historyReturn").className = `readout-return ${tone(s.cr[i])}`;
+    $("historyValue").textContent = won(s.value[i]);
+    $("historyPrincipal").textContent = won(s.principal[i]);
+    $("historyDrawdown").textContent = pct(s.dd[i] * 100);
+    const amount = s.markers
+      .filter((m) => m.index === i)
+      .reduce((sum, m) => sum + m.amount, 0);
+    $("historyEvent").textContent = amount
+      ? `적립금 ${signedWon(amount)} 기록`
+      : i === s.rows.length - 1
+        ? "날짜 눈금을 움직여 기록을 살펴보세요."
+        : "이 날짜의 계좌 기록을 보고 있습니다.";
+    const cursor = $("historyCursor");
+    cursor.value = String(i);
+    cursor.setAttribute(
+      "aria-valuetext",
+      `${fmtLong(row.date)}, 수익률 ${pct(s.cr[i])}, 평가금액 ${won(s.value[i])}`,
+    );
+    $("historyPosition").textContent = `${i + 1} / ${s.rows.length}개 기록`;
+    scheduleChartPaint();
+  }
+
+  function exportHistory() {
+    const s = chart.series;
+    if (!s?.rows.length || state.chartDataAccount !== state.chartAccount)
+      return;
+    const csv = [
+      "날짜,평가금액(원),투자원금(원),누적시간가중수익률(%),고점대비하락률(%)",
+      ...s.rows.map((r, i) =>
+        [
+          String(r.date).slice(0, 10),
+          s.value[i],
+          s.principal[i],
+          s.cr[i],
+          (s.dd[i] * 100).toFixed(6),
+        ].join(","),
+      ),
+    ].join("\r\n");
+    const url = URL.createObjectURL(
+      new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" }),
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `nungum-${state.chartAccount.replace(/[^a-z0-9_-]/gi, "-")}-${String(s.rows.at(-1).date).slice(0, 10)}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function drawDrawdown(series) {
@@ -1248,37 +1450,20 @@
     }
   }
 
-  function hideChartTip() {
-    if (chart.hover == null) return;
-    chart.hover = null;
-    el.chartTip.hidden = true;
-    drawChart();
-  }
   function handleChartPointer(event) {
-    const series = chart.series;
     const g = chart.geometry;
-    if (!series || !g || chart.progress < 1) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const px = event.clientX - bounds.left;
-    const plotWidth = g.width - g.padding.left - g.padding.right;
-    const index = clamp(
-      Math.round(((px - g.padding.left) / Math.max(1, plotWidth)) * (g.n - 1)),
+    if (!chart.series || !g || $("performance").dataset.loading === "true")
+      return;
+    const px = event.clientX - event.currentTarget.getBoundingClientRect().left;
+    const i = clamp(
+      Math.round(
+        ((px - g.padding.left) / (g.width - g.padding.left - g.padding.right)) *
+          Math.max(1, g.n - 1),
+      ),
       0,
       g.n - 1,
     );
-    if (index === chart.hover) return;
-    chart.hover = index;
-    const row = series.rows[index];
-    const tip = el.chartTip;
-    tip.querySelector("time").textContent = fmtLong(row.date);
-    tip.querySelector("strong").textContent = won(row.total_value);
-    const twr = tip.querySelector("span");
-    twr.textContent = `투자원금 ${won(series.principal[index])} · 시간가중 ${pct(row.cumulative_return)} · 낙폭 ${pct(series.dd[index] * 100, { digits: 1 })}`;
-    twr.className = tone(row.cumulative_return);
-    const tipX = clamp(g.x(index), 110, g.width - 110);
-    tip.style.transform = `translate(${tipX}px, ${g.scale.y(series.value[index])}px) translate(-50%, calc(-100% - 12px))`;
-    tip.hidden = false;
-    drawChart();
+    if (chart.selected !== i) selectHistory(i);
   }
 
   function updateChart(snapshots) {
@@ -1299,15 +1484,30 @@
     series.dd = series.rows.map(
       (row, i) => historicalDD.get(row.date) ?? series.dd[i],
     );
+    const wasLatest =
+      chart.selected == null ||
+      chart.selected === chart.series?.rows.length - 1;
+    const previousDate = chart.series?.rows[chart.selected]?.date;
+    const sameAccount = state.chartDataAccount === state.chartAccount;
     chart.series = series;
+    state.chartDataAccount = state.chartAccount;
     state.chartRows = series.rows;
     chart.hover = null;
     el.chartTip.hidden = true;
     renderChartMaturity();
+    const cursor = $("historyCursor");
+    cursor.max = String(Math.max(0, series.rows.length - 1));
+    cursor.disabled = !series.rows.length;
+    $("exportHistory").disabled = !series.rows.length;
+    $("historyLatest").disabled = !series.rows.length;
+    $("historyStart").textContent = fmtMD(series.rows[0]?.date);
+    $("historyEnd").textContent = fmtMD(series.rows.at(-1)?.date);
 
     if (!series.rows.length) {
       el.chartWrap.hidden = true;
       el.chartEmpty.hidden = false;
+      el.chartEmpty.innerHTML =
+        "<strong>선택한 기간에 기록이 없습니다.</strong><span>조회 기간을 넓히거나 모의투자 기록을 확인해 주세요.</span>";
       el.chartSummary.textContent = "선택한 기간에 자산 기록이 없습니다.";
       el.chartRows.innerHTML = "";
       el.monthStrip.innerHTML = "";
@@ -1323,6 +1523,11 @@
     el.chartEmpty.hidden = true;
     renderChartTable(series);
     renderMonthStrip(series, history);
+    const previousIndex =
+      sameAccount && !wasLatest
+        ? series.rows.findIndex((r) => r.date === previousDate)
+        : -1;
+    selectHistory(previousIndex >= 0 ? previousIndex : series.rows.length - 1);
     drawChart();
   }
 
@@ -1331,19 +1536,61 @@
     state.chartAccount = el.chartAccount.value;
     updateOverview();
     syncChartQuery();
-    try {
-      const data = await fetchJson(
-        `/api/snapshots?days=${state.chartDays}&account_key=${encodeURIComponent(state.chartAccount || "")}`,
-        { timeout: 15_000, key: "chart" },
-      );
-      updateChart((data && data.snapshots) || []);
-    } catch {
-      el.chartSummary.textContent =
-        "성과 기록을 불러오지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.";
+    const request = ++state.chartRequest;
+    const account = state.chartAccount,
+      days = state.chartDays;
+    $("performance").dataset.loading = "true";
+    $("performance").setAttribute("aria-busy", "true");
+    $("exportHistory").disabled = true;
+    $("historyCursor").disabled = true;
+    // 계좌가 바뀌면 이전 숫자를 남기지 않는다. 오래 걸린 이전 응답도 폐기한다.
+    if (state.chartDataAccount !== account) {
       el.chartWrap.hidden = true;
       el.chartEmpty.hidden = false;
       el.chartEmpty.innerHTML =
-        "<strong>성과 기록을 읽지 못했습니다.</strong><span>계좌 기록은 바뀌지 않았습니다. 잠시 후 다시 확인하세요.</span>";
+        "<strong>선택한 계좌를 불러오는 중입니다.</strong><span>날짜별 성과 기록을 확인하고 있습니다.</span>";
+    }
+    try {
+      const basket = chartBasket();
+      if (
+        basket &&
+        (state.seriesStatus.get(account) !== "ready" ||
+          state.flowStatus.get(basket.basket) !== "ready")
+      )
+        throw new Error(
+          "수익률 계산에 필요한 전체 기록을 확인하지 못했습니다.",
+        );
+      const cached = state.series.get(account);
+      // 전체 기록은 갱신 주기에 한 번 읽는다. 기간·계좌 변경 때 같은 데이터를 다시 받지 않는다.
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      cutoff.setHours(0, 0, 0, 0);
+      const data = cached
+        ? { snapshots: cached.filter((row) => parseDate(row.date) >= cutoff) }
+        : await fetchJson(
+            `/api/snapshots?days=${days}&account_key=${encodeURIComponent(account || "")}`,
+            { timeout: 15_000, key: "chart" },
+          );
+      if (
+        request !== state.chartRequest ||
+        account !== state.chartAccount ||
+        days !== state.chartDays
+      )
+        return;
+      updateChart(data?.snapshots || []);
+    } catch {
+      if (request !== state.chartRequest) return;
+      el.chartSummary.textContent =
+        "성과 기록을 읽지 못했습니다. 운영 영역의 다시 확인을 눌러주세요.";
+      el.chartWrap.hidden = true;
+      el.chartEmpty.hidden = false;
+      el.chartEmpty.innerHTML =
+        "<strong>성과 기록을 읽지 못했습니다.</strong><span>계좌 기록은 바뀌지 않았습니다. 연결 상태를 확인해 주세요.</span>";
+    } finally {
+      if (request === state.chartRequest) {
+        $("performance").dataset.loading = "false";
+        $("performance").setAttribute("aria-busy", "false");
+      }
     }
   }
 
@@ -1864,7 +2111,8 @@
         '<div class="empty"><strong>포트폴리오를 불러오지 못했습니다.</strong><span>이전 화면의 숫자는 최신이 아닐 수 있습니다.</span></div>';
     } else if (
       results.some((r) => r.status === "rejected") ||
-      state.flowError
+      state.flowError ||
+      [...state.seriesStatus.values()].some((status) => status === "error")
     ) {
       state.coreStatus = "partial";
     } else {
@@ -1968,6 +2216,9 @@
     $("depositCancelButton").addEventListener("click", closeDeposit);
     el.depositBack.addEventListener("click", showDepositFields);
     $("retryButton").addEventListener("click", () => refreshAll(true));
+    $("priorityNotice").addEventListener("click", () =>
+      el.decisionAction.click(),
+    );
 
     el.decisionAction.addEventListener("click", () => {
       const action = el.decisionAction.dataset.action;
@@ -1995,7 +2246,23 @@
     });
     el.chartEquity.addEventListener("pointermove", handleChartPointer);
     el.chartEquity.addEventListener("pointerdown", handleChartPointer);
-    el.chartEquity.addEventListener("pointerleave", hideChartTip);
+    $("historyCursor").addEventListener("input", (event) =>
+      selectHistory(Number(event.target.value)),
+    );
+    $("historyLatest").addEventListener("click", () =>
+      selectHistory((chart.series?.rows.length || 1) - 1),
+    );
+    $("exportHistory").addEventListener("click", exportHistory);
+    $("historyDetails").addEventListener("toggle", () => {
+      if ($("historyDetails").open && chart.series) drawDrawdown(chart.series);
+    });
+    $("chartView").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-view]");
+      if (button) setChartView(button.dataset.view);
+    });
+    reducedMotion.addEventListener("change", () => {
+      if (reducedMotion.matches) setChartView(chart.view);
+    });
 
     document.querySelectorAll("[data-amount]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2059,7 +2326,7 @@
     wireEvents();
     initScrollSpy();
     if ("ResizeObserver" in window) {
-      new ResizeObserver(() => drawChart()).observe(el.chartBox);
+      new ResizeObserver(scheduleChartPaint).observe(el.chartBox);
     }
     document
       .querySelectorAll("#chartRange button")
@@ -2069,6 +2336,7 @@
           String(Number(b.dataset.days) === state.chartDays),
         ),
       );
+    document.fonts?.ready.then(scheduleChartPaint);
     await refreshAll(true);
     window.setInterval(() => refreshCore(), 30_000);
     window.setInterval(() => refreshSlow(), 60_000);

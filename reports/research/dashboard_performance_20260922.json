@@ -1,0 +1,33 @@
+{
+  "measured_on": "2026-09-22",
+  "tool": "Playwright, Chrome DevTools Protocol, PerformanceObserver",
+  "browser": "Chromium 153.0.8010.53",
+  "server": "localhost aiohttp dashboard",
+  "profile": {
+    "viewport": [390, 844],
+    "cpu_slowdown": 4,
+    "latency_ms": 150,
+    "download_bytes_per_second": 200000,
+    "upload_bytes_per_second": 93750,
+    "cache_disabled": true
+  },
+  "measurements": {
+    "lcp_ms": 1156,
+    "cls": 0.01331540084314144,
+    "load_ms": 3206.699999999255,
+    "initial_long_tasks_ms": [125, 99, 346],
+    "largest_sampled_event_duration_ms": 56,
+    "idle_raf_requests_in_one_second": 0,
+    "css_transfer_bytes": 7620,
+    "css_decoded_bytes": 34991,
+    "js_transfer_bytes": 24596,
+    "js_decoded_bytes": 87940,
+    "font_decoded_bytes": 440912
+  },
+  "limits": [
+    "로컬 서버 단일 측정, 실제 사용자 성능 집계 아님",
+    "Event Timing 표본은 입체·평면 전환과 날짜 슬라이더 키보드 조작이며 INP로 보고하지 않음",
+    "이후 오류 알림 배경색과 조회 실패 상태의 소규모 수정으로 최종 파일 크기는 다를 수 있음",
+    "모든 기기에서 지연이 없다는 보장이 아님"
+  ]
+}

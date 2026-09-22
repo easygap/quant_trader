@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#f5f6f8" />
+    <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="눈금 | 투자 현황" />
     <title>눈금 | 투자 현황</title>
     <link
@@ -22,60 +22,20 @@
   <body>
     <a class="skip-link" href="#top">본문으로 건너뛰기</a>
 
-    <aside class="rail" aria-label="주 메뉴">
+    <header class="chrome" id="chrome">
       <a class="brand" href="#top" aria-label="눈금, 계좌 현황"
         ><img
           src="/static/nungum-symbol.svg"
           alt=""
-          width="28"
-          height="28"
+          width="30"
+          height="30"
         /><span>눈금</span></a
       >
       <nav class="nav" aria-label="바로가기">
-        <a href="#top" aria-current="page"
-          ><svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="3" y="3" width="7" height="7" rx="1.5" />
-            <rect x="14" y="3" width="7" height="7" rx="1.5" />
-            <rect x="3" y="14" width="7" height="7" rx="1.5" />
-            <rect x="14" y="14" width="7" height="7" rx="1.5" /></svg
-          ><span>계좌 현황</span></a
-        >
-        <a href="#portfolio"
-          ><svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 7h16v13H4zM9 7V4h6v3M4 12h16M10 12v3h4v-3" /></svg
-          ><span>보유 종목</span></a
-        >
-        <a href="#performance"
-          ><svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 3v18h18M6 15l5-5 4 3 6-7" /></svg
-          ><span>자산 추이</span></a
-        >
-        <a href="#review"
-          ><svg viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="5" y="4" width="14" height="17" rx="2" />
-            <path d="M9 4V2h6v2M8 13l3 3 5-6" /></svg
-          ><span>모의투자</span></a
-        >
-        <a href="#operations"
-          ><svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 12h4l3-8 4 16 3-8h4" /></svg
-          ><span>운영 현황</span></a
-        >
+        <a href="#top" aria-current="page">계좌</a
+        ><a href="#portfolio">보유 종목</a><a href="#review">검증</a
+        ><a href="#operations">운영</a>
       </nav>
-      <div class="rail-bottom">
-        <span class="rail-caption">개인 퀀트 투자</span
-        ><a
-          href="https://github.com/easygap/quant_trader"
-          target="_blank"
-          rel="noopener noreferrer"
-          >프로젝트 소개 <span aria-hidden="true">↗</span
-          ><span class="sr-only">, 새 탭</span></a
-        >
-      </div>
-    </aside>
-
-    <header class="chrome" id="chrome">
-      <span class="location">내 투자 / <strong>계좌 현황</strong></span>
       <div class="header-actions">
         <span class="state" id="syncState" aria-live="polite" aria-atomic="true"
           ><i
@@ -104,12 +64,20 @@
     </header>
 
     <main id="main" class="page">
+      <button
+        id="priorityNotice"
+        class="priority-notice"
+        type="button"
+        hidden
+      ></button>
       <div class="page-heading" id="top">
         <div>
-          <h1>계좌 현황</h1>
-          <p>투자한 금액과 수익, 보유 종목을 확인하세요.</p>
+          <p class="page-kicker">국내 주식과 ETF</p>
+          <h1>나의 투자 기록</h1>
         </div>
-        <time id="overviewDate"></time>
+        <div class="record-date">
+          <span>마지막 자산 기록</span><time id="overviewDate">확인 중</time>
+        </div>
       </div>
       <div
         class="account-tabs"
@@ -120,13 +88,158 @@
         <span class="loading">계좌를 불러오는 중입니다.</span>
       </div>
       <section
+        class="instrument"
+        id="performance"
+        aria-labelledby="performanceTitle"
+        data-view="ribbon"
+      >
+        <div class="instrument-head">
+          <div>
+            <h2 id="performanceTitle">수익의 흐름</h2>
+            <p>입출금을 제외한 시간가중수익률</p>
+          </div>
+          <div
+            class="view-switch"
+            id="chartView"
+            role="group"
+            aria-label="차트 표현"
+          >
+            <button type="button" data-view="ribbon" aria-pressed="true">
+              입체</button
+            ><button type="button" data-view="flat" aria-pressed="false">
+              평면
+            </button>
+          </div>
+        </div>
+        <div class="chart-controls">
+          <select
+            id="chartAccount"
+            name="chart_account"
+            autocomplete="off"
+            aria-label="선택한 계좌"
+            hidden
+          ></select>
+          <div class="seg" id="chartRange" role="group" aria-label="조회 기간">
+            <button type="button" data-days="30" aria-pressed="false">
+              1개월</button
+            ><button type="button" data-days="90" aria-pressed="true">
+              3개월</button
+            ><button type="button" data-days="365" aria-pressed="false">
+              1년</button
+            ><button type="button" data-days="3650" aria-pressed="false">
+              전체
+            </button>
+          </div>
+          <p class="chart-maturity" id="chartMaturity"></p>
+        </div>
+        <div id="chartWrap">
+          <div class="instrument-body">
+            <div class="readout" id="historyReadout">
+              <p class="readout-date">
+                <i aria-hidden="true"></i><time id="historyDate">—</time
+                ><span id="historyTag">최근 기록</span>
+              </p>
+              <p class="readout-label">이날까지의 수익률</p>
+              <strong class="readout-return" id="historyReturn">—</strong>
+              <dl>
+                <div>
+                  <dt>평가금액</dt>
+                  <dd id="historyValue">—</dd>
+                </div>
+                <div>
+                  <dt>투자원금</dt>
+                  <dd id="historyPrincipal">—</dd>
+                </div>
+                <div>
+                  <dt>고점 대비</dt>
+                  <dd id="historyDrawdown">—</dd>
+                </div>
+              </dl>
+              <p class="readout-event" id="historyEvent">
+                날짜 눈금을 움직여 기록을 살펴보세요.
+              </p>
+            </div>
+            <figure class="chart chart-main">
+              <figcaption class="sr-only">
+                날짜별 누적 시간가중수익률. 아래 날짜 슬라이더나 표로도 확인할
+                수 있습니다. 띠의 폭은 지표를 나타내지 않습니다.
+              </figcaption>
+              <div class="chart-box" id="chartBox">
+                <canvas
+                  id="chartEquity"
+                  role="img"
+                  aria-label="선택한 계좌의 날짜별 시간가중수익률"
+                  width="960"
+                  height="380"
+                ></canvas>
+                <div class="tip" id="chartTip" hidden>
+                  <time></time><strong></strong><span></span>
+                </div>
+              </div>
+              <div class="chart-legend">
+                <span><i class="line-key"></i>누적 수익률</span
+                ><span><i class="zero-key"></i>수익률 0%</span
+                ><span><i class="point-key"></i>적립 기록</span>
+              </div>
+            </figure>
+          </div>
+          <div class="timeline">
+            <div class="timeline-labels">
+              <label for="historyCursor">날짜 탐색</label
+              ><output id="historyPosition" for="historyCursor">—</output
+              ><button class="latest-button" id="historyLatest" type="button">
+                최근 날짜
+              </button>
+            </div>
+            <div class="timeline-track">
+              <input
+                id="historyCursor"
+                type="range"
+                min="0"
+                max="0"
+                value="0"
+                step="1"
+                aria-label="기록 날짜 선택"
+                disabled
+              />
+            </div>
+            <div class="timeline-dates">
+              <span id="historyStart">—</span><span id="historyEnd">—</span>
+            </div>
+          </div>
+          <div class="instrument-foot">
+            <span>월별 수익률</span>
+            <div
+              class="months"
+              id="monthStrip"
+              aria-label="월별 시간가중수익률"
+            ></div>
+          </div>
+        </div>
+        <div class="empty instrument-empty" id="chartEmpty" hidden>
+          <strong>아직 표시할 기록이 없습니다.</strong
+          ><span>모의투자를 실행하면 이곳에 실제 자산 기록이 쌓입니다.</span>
+        </div>
+        <div class="instrument-status">
+          <p id="chartSummary">성과 기록을 불러오는 중입니다.</p>
+          <button
+            class="instrument-export"
+            type="button"
+            id="exportHistory"
+            disabled
+          >
+            기록 내려받기 <span aria-hidden="true">↓</span>
+          </button>
+        </div>
+      </section>
+      <section
         class="overview"
         aria-label="선택한 계좌 요약"
         aria-busy="true"
         id="overview"
       >
         <div class="overview-total">
-          <p>총자산</p>
+          <p>최근 총자산</p>
           <strong id="overviewTotal">—</strong
           ><span id="overviewPnl">계좌를 불러오는 중입니다.</span>
           <p class="overview-cash" id="overviewCash">현금 —</p>
@@ -152,124 +265,46 @@
           </div>
         </dl>
       </section>
+      <details class="history-details disclosure" id="historyDetails">
+        <summary>낙폭과 일별 기록 자세히 보기</summary>
+        <figure class="chart">
+          <figcaption class="chart-title">
+            고점 대비 하락률 <span>입출금을 제외한 수익률 기준</span>
+          </figcaption>
+          <div class="chart-box chart-box-small" id="drawdownBox">
+            <canvas
+              id="chartDrawdown"
+              role="img"
+              aria-label="고점 대비 낙폭 추이"
+              width="960"
+              height="120"
+            ></canvas>
+          </div>
+        </figure>
+        <div
+          class="table-scroll"
+          tabindex="0"
+          role="region"
+          aria-label="성과 데이터 표"
+        >
+          <table>
+            <caption>
+              선택한 기간의 평가금액과 시간가중수익률
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">날짜</th>
+                <th scope="col" class="num">평가금액</th>
+                <th scope="col" class="num">투자원금</th>
+                <th scope="col" class="num">시간가중수익률</th>
+              </tr>
+            </thead>
+            <tbody id="chartDataRows"></tbody>
+          </table>
+        </div>
+      </details>
       <div class="workspace">
         <div class="main-column" id="mainColumn">
-          <section
-            class="sec"
-            id="performance"
-            aria-labelledby="performanceTitle"
-          >
-            <div class="sec-head">
-              <h2 class="sec-label" id="performanceTitle">자산 추이</h2>
-              <p class="sec-meta" id="chartSummary">
-                성과 기록을 불러오는 중입니다.
-              </p>
-            </div>
-
-            <div class="chart-controls">
-              <select
-                id="chartAccount"
-                name="chart_account"
-                autocomplete="off"
-                aria-label="선택한 계좌"
-                hidden
-              ></select>
-              <div
-                class="seg"
-                id="chartRange"
-                role="group"
-                aria-label="조회 기간"
-              >
-                <button type="button" data-days="30" aria-pressed="false">
-                  1개월
-                </button>
-                <button type="button" data-days="90" aria-pressed="true">
-                  3개월
-                </button>
-                <button type="button" data-days="365" aria-pressed="false">
-                  1년
-                </button>
-                <button type="button" data-days="3650" aria-pressed="false">
-                  전체
-                </button>
-              </div>
-              <p class="chart-maturity" id="chartMaturity"></p>
-            </div>
-
-            <div id="chartWrap">
-              <figure class="chart">
-                <figcaption class="chart-title">
-                  <span class="legend-value">평가금액</span
-                  ><span class="legend-principal">투자원금</span>
-                </figcaption>
-                <div class="chart-box" id="chartBox">
-                  <canvas
-                    id="chartEquity"
-                    role="img"
-                    aria-label="선택한 계좌의 기간별 평가금액 추이"
-                    width="960"
-                    height="320"
-                  ></canvas>
-                  <div class="tip" id="chartTip" hidden>
-                    <time></time><strong></strong><span></span>
-                  </div>
-                </div>
-              </figure>
-              <figure class="chart">
-                <figcaption class="chart-title">
-                  고점 대비 하락률 <span>입출금을 제외한 수익률 기준</span>
-                </figcaption>
-                <div class="chart-box chart-box-small" id="drawdownBox">
-                  <canvas
-                    id="chartDrawdown"
-                    role="img"
-                    aria-label="고점 대비 낙폭 추이"
-                    width="960"
-                    height="120"
-                  ></canvas>
-                </div>
-              </figure>
-              <div
-                class="months"
-                id="monthStrip"
-                aria-label="월별 시간가중수익률"
-              ></div>
-            </div>
-            <div class="empty" id="chartEmpty" hidden>
-              <strong>아직 표시할 기록이 없습니다.</strong>
-              <span>모의투자를 한 번 실행하면 첫 자산 기록이 생깁니다.</span>
-            </div>
-            <p class="fine">
-              점선은 투자원금입니다. 차트에 마우스를 올리거나 터치하면 해당
-              날짜의 금액을 볼 수 있습니다.
-            </p>
-
-            <details class="disclosure">
-              <summary>표로 보기</summary>
-              <div
-                class="table-scroll"
-                tabindex="0"
-                role="region"
-                aria-label="성과 데이터 표"
-              >
-                <table>
-                  <caption>
-                    선택한 기간의 평가금액과 시간가중수익률
-                  </caption>
-                  <thead>
-                    <tr>
-                      <th scope="col">날짜</th>
-                      <th scope="col" class="num">평가금액</th>
-                      <th scope="col" class="num">투자원금</th>
-                      <th scope="col" class="num">시간가중수익률</th>
-                    </tr>
-                  </thead>
-                  <tbody id="chartDataRows"></tbody>
-                </table>
-              </div>
-            </details>
-          </section>
-
           <section class="sec" id="portfolio" aria-labelledby="portfolioTitle">
             <div class="sec-head">
               <h2 class="sec-label" id="portfolioTitle">보유 종목</h2>
@@ -446,6 +481,12 @@
           </section>
         </div>
         <aside class="side-column" aria-label="확인할 일과 자산 구성">
+          <section class="sec risk-explainer" aria-labelledby="riskTitle">
+            <h2 id="riskTitle">투자 비중의 기준</h2>
+            <div id="riskExplanation">
+              <p class="loading">판단 기록을 확인하고 있습니다.</p>
+            </div>
+          </section>
           <section
             class="sec attention"
             id="today"
@@ -453,7 +494,7 @@
           >
             <div class="sec-head">
               <h2 id="todayTitle">확인할 일</h2>
-              <span class="notice-symbol" aria-hidden="true">!</span>
+              <span class="notice-symbol" aria-hidden="true">·</span>
             </div>
             <h3 id="decisionTitle">현재 상태를 확인하고 있습니다</h3>
             <p id="decisionDescription">
@@ -574,7 +615,7 @@
               type="text"
               maxlength="200"
               autocomplete="off"
-              placeholder="9월 적립"
+              placeholder="이번 달 적립"
             />
           </div>
         </div>

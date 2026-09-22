@@ -200,7 +200,7 @@ def get_baskets_json() -> dict:
         # 리스크 오버레이(추세 필터·낙폭 제어)가 켜진 바스켓은 마지막 실행이 남긴 배수를
         # 곱한 '적용 비중'이 그날의 목표다. 화면의 목표 비중·목표 범위 판정은 적용 비중을 쓴다.
         overlay_cfg = parse_overlay_config(basket_config)
-        overlay_state = load_overlay_state(name) if overlay_cfg.any_enabled else None
+        overlay_state = load_overlay_state(name, mode=ledger_mode) if overlay_cfg.any_enabled else None
         scale = float((overlay_state or {}).get("scale", 1.0))
         target_weights = overlay_target_weights(
             basket_config.get("holdings") or {}, base_fraction, scale,
@@ -219,6 +219,10 @@ def get_baskets_json() -> dict:
                 "trend_filter": overlay_cfg.trend.enabled,
                 "drawdown_guard": overlay_cfg.drawdown.enabled,
                 "volatility_target": overlay_cfg.volatility.enabled,
+                "trend_below": (overlay_state or {}).get("trend_below"),
+                "drawdown_active": (overlay_state or {}).get("drawdown_active"),
+                "defensive_symbol": (basket_config.get("overlays") or {}).get("defensive_symbol"),
+                "source_dates": (overlay_state or {}).get("source_dates") or {},
             }
         # 종목별 목표 비중(총자산 대비) = 바스켓 내 비중 정규화 × 적용 투자 비중.
         # 현재가는 장부에 저장하지 않으므로 화면은 매입금액 기준 비중과 나란히 보여준다.

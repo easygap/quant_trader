@@ -71,6 +71,7 @@ class OverlayDecision:
     vol_scale: float | None = None
     realized_vol: float | None = None
     evaluated_at: str = ""
+    source_dates: dict[str, str | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -229,7 +230,7 @@ def compute_decision(
     prev_state: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> OverlayDecision:
-    """설정된 오버레이를 모두 평가해 배수 하나로 합친다(곱)."""
+    """설정한 결합 방식에 따라 하나의 위험 배수를 계산한다."""
     prev = prev_state or {}
     decision = OverlayDecision(evaluated_at=(now or datetime.now()).isoformat(timespec="seconds"))
     scale = 1.0
@@ -358,21 +359,49 @@ def overlay_state_path(basket_name: str, state_dir: str | os.PathLike | None = N
     return overlay_state_dir(state_dir) / f"{safe}.json"
 
 
-def load_overlay_state(basket_name: str, state_dir: str | os.PathLike | None = None) -> dict[str, Any] | None:
-    path = overlay_state_path(basket_name, state_dir)
+def load_overlay_state(
+    basket_name: str, state_dir: str | os.PathLike | None = None, *, mode: str | None = None,
+) -> dict[str, Any] | None:
+    directory = overlay_state_dir(state_dir)
+    if mode is not None and mode not in {"paper", "live"}:
+        raise ValueError("위험 관리 기록의 모드는 paper 또는 live여야 합니다")
+    path = overlay_state_path(basket_name, directory / mode if mode else directory)
+    # 이전 버전의 공용 기록은 모의투자만 이어받는다. 실전 계좌로 전파하지 않는다.
+    if mode == "paper" and not path.exists():
+        path = overlay_state_path(basket_name, directory)
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        scale = float(data["scale"])
+        if not math.isfinite(scale) or not 0 <= scale <= 1:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    for key in ("trend_below", "drawdown_active"):
+        if data.get(key) is not None and not isinstance(data[key], bool):
+            return None
+    for key in ("reasons", "data_issues"):
+        if key in data and (not isinstance(data[key], list)
+                            or any(not isinstance(item, str) for item in data[key])):
+            return None
+    data["scale"] = scale
+    return data
 
 
 def save_overlay_state(
     basket_name: str, decision: OverlayDecision, state_dir: str | os.PathLike | None = None,
+    *, mode: str | None = None,
 ) -> Path:
-    path = overlay_state_path(basket_name, state_dir)
+    directory = overlay_state_dir(state_dir)
+    if mode is not None and mode not in {"paper", "live"}:
+        raise ValueError("위험 관리 기록의 모드는 paper 또는 live여야 합니다")
+    path = overlay_state_path(basket_name, directory / mode if mode else directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = decision.to_dict()
     payload["basket"] = str(basket_name)
