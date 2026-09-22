@@ -1,0 +1,27 @@
+name: 오류 제보
+description: 실행이 안 되거나 화면·계산 결과가 이상할 때 알려 주세요.
+title: "[오류] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        문제가 생긴 상황을 알려 주세요. 화면이나 로그를 올릴 때는 계좌번호, API 키, 비밀번호를 지워 주세요.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 어떤 문제가 생겼나요?
+      description: 어떤 작업을 했고, 어떤 결과가 나왔는지 적어 주세요.
+      placeholder: 계좌 화면에서 CSV 저장을 눌렀는데 파일이 내려받아지지 않습니다.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 사용 환경
+      description: 아는 항목만 적어 주셔도 됩니다.
+      placeholder: Windows 11 / Python 3.12 / Chrome / 모의투자
+  - type: textarea
+    id: details
+    attributes:
+      label: 오류 메시지나 화면
+      description: 문제가 생긴 화면을 붙여 넣거나, 터미널에 나온 메시지를 적어 주세요.

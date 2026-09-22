@@ -1,0 +1,17 @@
+name: 기능 제안
+description: 필요한 기능이나 사용하면서 불편했던 점을 알려 주세요.
+title: "[제안] "
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: 어떤 기능이 필요한가요?
+      description: 언제 필요했는지, 지금은 어떻게 하고 있는지도 알려 주시면 도움이 됩니다.
+      placeholder: 두 계좌의 수익률을 같은 차트에서 비교하고 싶습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: 참고할 화면이나 예시
+      description: 참고할 만한 화면이나 링크가 있으면 남겨 주세요. 없어도 괜찮습니다.
