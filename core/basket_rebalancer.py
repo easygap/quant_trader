@@ -10,8 +10,10 @@ fintics의 BasketRebalanceTask 개념을 차용하여 Python으로 구현.
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -799,7 +801,25 @@ class BasketRebalancer:
                     reason=f"비중 초과 ({actual_w:.1%} → {target_w:.1%}, {drift:.1%})",
                 ), sell_qty * price))
 
-        # 1-b) 집계 배치율 보충: 종목별 드리프트가 전부 min_trade 미만이라 개별로는 아무것도
+        # 2) 매도부터 회전 한도를 배정한다. 정수 주로 줄인 실제 주문금액에
+        # 최소 거래금액을 적용해야 소액 주문이 기준을 우회하지 않는다.
+        candidates.sort(key=lambda c: (0 if c[0].action == "SELL" else 1, -c[1]))
+        orders: list[RebalanceOrder] = []
+        total_trade_amount = 0.0
+        for order, notional in candidates:
+            budget_left = max_turnover_amount - total_trade_amount
+            if budget_left < min_trade:
+                break
+            if notional > budget_left:
+                order.quantity = int(budget_left / order.price)
+                notional = order.quantity * order.price
+                order.reason += " (회전상한 부분 실행)"
+            if order.quantity <= 0 or notional < min_trade:
+                continue
+            orders.append(order)
+            total_trade_amount += notional
+
+        # 3) 집계 배치율 보충: 종목별 드리프트가 전부 min_trade 미만이라 개별로는 아무것도
         #      못 사는데, 그 얇은 미달분을 합치면 설계 배치율에서 크게 벗어나 있는 상태를 채운다.
         #
         #      이게 없으면 리밸런싱은 현금을 늘리기만 하는 한쪽 방향 래칫이 된다: 비중 초과
@@ -817,15 +837,21 @@ class BasketRebalancer:
             prices.get(p.symbol, p.avg_price) * p.quantity
             for p in positions if p.symbol in targets
         )
-        shortfall = investable - stock_value
+        # 앞에서 확정한 매수·매도를 먼저 반영한다. 후보 전체를 쓰면 회전 한도로
+        # 줄이거나 제외한 주문까지 체결된 것으로 계산해 보충량이 잘못된다.
+        projected_stock_value = stock_value + sum(
+            (1 if order.action == "BUY" else -1) * order.quantity * order.price
+            for order in orders
+        )
+        shortfall = investable - projected_stock_value
         band = float(self.rebalance_cfg.get("deployment_band", 0.03)) * total_value
-        already = {o.symbol for o, _ in candidates}
-        if shortfall > band:
+        already = {o.symbol for o in orders}
+        if shortfall > band and max_turnover_amount - total_trade_amount >= min_trade:
             logger.info(
-                "바스켓 '{}' 집계 배치율 미달 {:,.0f}원 (실제 {:.1%} vs 설계 {:.1%}) — "
-                "격차를 줄이는 보충 매수만 집행",
+                "바스켓 '{}' 기존 주문 반영 후 투자금 {:,.0f}원 부족 "
+                "(계획 {:.1%}, 목표 {:.1%}) — 남은 한도에서 보충 매수",
                 self.basket_name, shortfall,
-                stock_value / total_value if total_value else 0,
+                projected_stock_value / total_value,
                 self._stock_fraction(),
             )
             remaining = shortfall
@@ -864,44 +890,25 @@ class BasketRebalancer:
             # 잔여 격차를 가장 많이 줄이는 순서로 집행한다(1주 단가가 낮을수록 정밀).
             topups.sort()
             for _residual, notional, symbol, qty, price in topups:
+                # 이미 허용 범위에 들어왔으면 정확한 목표까지 억지로 채우지 않는다.
+                if remaining <= band:
+                    break
+                if notional > max_turnover_amount - total_trade_amount:
+                    continue
                 if abs(remaining - notional) >= abs(remaining):
                     continue  # 앞선 체결로 격차가 줄어 더는 개선이 아님
-                candidates.append((RebalanceOrder(
+                orders.append(RebalanceOrder(
                     symbol=symbol, action="BUY", quantity=qty, price=price,
                     reason=(
                         f"배치율 보충 (집계 {stock_value / total_value:.1%} → "
                         f"설계 {self._stock_fraction():.1%})"
                     ),
-                ), notional))
+                ))
                 remaining -= notional
+                total_trade_amount += notional
 
-        # 2) SELL을 먼저(현금 확보) 두고 거래액 큰 순으로 정렬해 회전율 예산 우선권을 준다.
-        #    (기존엔 dict 순서대로라 BUY가 예산을 먼저 소진해 자금원 SELL이 누락될 수 있었다.)
-        candidates.sort(key=lambda c: (0 if c[0].action == "SELL" else 1, -c[1]))
-
-        # 3) 회전율 예산 적용: 개별 거래가 예산을 넘으면 그 거래만 건너뛰고(continue) 더 작은
-        #    거래는 계속 검토한다(기존 break는 이후 거래를 모두 누락시켰다).
-        orders: list[RebalanceOrder] = []
-        total_trade_amount = 0.0
-        for order, notional in candidates:
-            remaining = max_turnover_amount - total_trade_amount
-            if remaining < min_trade:
-                # 예산 소진 — 이후 후보는 모두 min_trade 이상이라 어차피 담을 수 없다.
-                break
-            if notional > remaining:
-                # 부분 실행: 예산 잔여분만큼 수량을 줄여 집행한다(드리프트 점진 수렴).
-                shrunk_qty = int(remaining / order.price)
-                if shrunk_qty <= 0:
-                    continue
-                shrunk_notional = shrunk_qty * order.price
-                if shrunk_notional < min_trade:
-                    continue
-                order.quantity = shrunk_qty
-                order.reason += " (회전상한 부분 실행)"
-                notional = shrunk_notional
-            orders.append(order)
-            total_trade_amount += notional
-
+        orders = self._fit_cash_orders(orders, summary, prices, positions)
+        total_trade_amount = sum(o.quantity * o.price for o in orders)
         sells = [o for o in orders if o.action == "SELL"]
         buys = [o for o in orders if o.action == "BUY"]
         ordered = sells + buys
@@ -912,6 +919,68 @@ class BasketRebalancer:
         )
 
         return ordered
+
+    def _fit_cash_orders(self, orders, summary, prices, positions):
+        """매도 후 남는 현금과 예상 비용 안에서 매수 수량을 정한다.
+
+        계획의 매도가 실제로 체결된다는 보장은 없으므로, 실행부의 잔고·비중 검사는
+        그대로 필요하다. 여기서는 계획 시점부터 현금 부족인 주문을 줄인다.
+        """
+        if not orders:
+            return orders
+        from core.risk_manager import RiskManager
+
+        total = float(summary["total_value"])
+        held_value = sum(prices.get(p.symbol, p.avg_price) * p.quantity for p in positions)
+        cash = float(summary.get("cash", total - held_value))
+        div = (self._risk_params or {}).get("diversification", {}) or {}
+        min_cash = float(self.basket.get("min_cash_ratio", div.get("min_cash_ratio", 0.20)))
+        if not all(math.isfinite(v) for v in (total, cash, min_cash)) or not 0 <= min_cash <= 1:
+            logger.error("리밸런싱 보류: 잔고 또는 최소 현금 비중을 확인할 수 없습니다")
+            return []
+        reserve = total * min_cash
+        min_trade = self.rebalance_cfg.get("min_trade_amount", 100000)
+        rm = RiskManager(SimpleNamespace(risk_params=self._risk_params))
+        pos_map = {p.symbol: p for p in positions}
+        snapshot = getattr(self, "_market_snapshot", None) or {}
+        funded = []
+        for order in orders:  # plan_rebalance가 정한 매도 → 매수 순서
+            pos = pos_map.get(order.symbol)
+
+            def estimate(qty):
+                return rm.calculate_transaction_costs(
+                    order.price, qty, order.action, symbol=order.symbol,
+                    avg_price=pos.avg_price if pos else None,
+                    avg_daily_volume=snapshot.get(order.symbol, {}).get("avg_volume"),
+                )
+
+            if order.action == "SELL":
+                costs = estimate(order.quantity)
+                cash += costs["execution_price"] * order.quantity - sum(
+                    costs[k] for k in ("commission", "tax", "capital_gains_tax")
+                )
+            else:
+                # 거래량 구간에 따라 슬리피지 배수가 달라지므로 1주 비용의 단순 배수 대신
+                # 후보 수량별 비용을 계산한다. 큰 계좌도 주 수만큼 반복하지 않는다.
+                low, high = 0, order.quantity
+                budget = max(0.0, cash - reserve)
+                while low < high:
+                    qty = (low + high + 1) // 2
+                    costs = estimate(qty)
+                    required = costs["execution_price"] * qty + costs["commission"]
+                    if required <= budget:
+                        low = qty
+                    else:
+                        high = qty - 1
+                if low <= 0 or low * order.price < min_trade:
+                    continue
+                if low < order.quantity:
+                    order.quantity = low
+                    order.reason += " (비용·현금 한도에 맞춰 수량 조정)"
+                costs = estimate(order.quantity)
+                cash -= costs["execution_price"] * order.quantity + costs["commission"]
+            funded.append(order)
+        return funded
 
     def execute(
         self,

@@ -69,8 +69,6 @@
 
 오류가 나거나 필요한 기능이 있으면 [오류 제보·기능 제안](https://github.com/easygap/quant_trader/issues/new/choose)에 남겨 주세요. 화면이나 오류 메시지를 올릴 때는 계좌번호와 API 키를 지워 주세요.
 
-도움이 됐다면 **Star**를 눌러 주세요.
-
 <details>
 <summary>개발 문서</summary>
 

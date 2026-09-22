@@ -10,10 +10,10 @@ import numpy as np
 from loguru import logger
 
 from config.config_loader import Config
-from core.instrument_classes import is_non_company_symbol
+from core.instrument_classes import is_krx_etf_symbol, is_non_company_symbol
 
 
-def _get_tick_size(price: float) -> int:
+def _get_tick_size(price: float, *, is_etf: bool = False) -> int:
     """
     KRX 호가 단위 (원).
     가격대별: 2천원미만 1원, 5천원미만 5원, 2만원미만 10원, 5만원미만 50원,
@@ -21,6 +21,9 @@ def _get_tick_size(price: float) -> int:
     """
     if price <= 0:
         return 1
+    # KRX ETF: 2천원 미만 1원, 그 이상 5원. 고가 ETF에도 주식 호가표를 쓰지 않는다.
+    if is_etf:
+        return 1 if price < 2000 else 5
     if price < 2000:
         return 1
     if price < 5000:
@@ -1035,7 +1038,7 @@ class RiskManager:
         dynamic = costs.get("dynamic_slippage", {})
         slippage_rate_fixed = costs.get("slippage", 0.0005)
         slippage_ticks = costs.get("slippage_ticks", 2)
-        tick = _get_tick_size(price)
+        tick = _get_tick_size(price, is_etf=is_krx_etf_symbol(symbol, self.risk_params))
         participation_rate = 0.0
         slippage_multiplier = 1.0
 

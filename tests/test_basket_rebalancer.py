@@ -742,6 +742,7 @@ class TestUnfillableSlotWarning:
                           "min_trade_amount": 200000, "max_turnover_ratio": 1.0},
         }
         rb.basket = rb.basket_cfg          # 리스크 정책 조회원(재진입 차단 등)
+        rb._risk_params = {"diversification": {"min_cash_ratio": 0.0}}
         rb.rebalance_cfg = rb.basket_cfg["rebalance"]
         rb.account_key = "t"
         rb.execution_strategy = "t"

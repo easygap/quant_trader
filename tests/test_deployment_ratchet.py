@@ -148,6 +148,156 @@ def test_deployment_gap_sign(wired):
     assert rb._deployment_gap({"A": 100_000}) == pytest.approx(-0.10, abs=1e-9)
 
 
+def test_topup_counts_buys_already_in_the_plan(wired):
+    """일반 매수와 보충 매수가 같은 부족분을 두 번 채우면 안 된다."""
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.25, "C": 0.25},
+        target_stock_weight=0.60, min_trade=100_000,
+        positions=[_pos("B", 100_000, 1), _pos("C", 100_000, 1)],
+        drift_threshold=0.10,
+    )
+    wired(rb, 1_000_000)
+    orders = rb.plan_rebalance({"A": 100_000, "B": 100_000, "C": 100_000})
+
+    bought = sum(o.quantity * o.price for o in orders if o.action == "BUY")
+    assert bought == 400_000  # A 30만원 + 보충 10만원. 50만원이면 중복 매수다.
+    assert 200_000 + bought == 600_000
+
+
+def test_regular_buys_restore_band_without_extra_topups(wired):
+    """일반 주문으로 허용 범위에 돌아왔다면 작은 보충 주문은 붙이지 않는다."""
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.25, "C": 0.25},
+        target_stock_weight=0.60, min_trade=100_000,
+        positions=[_pos("B", 50_000, 29), _pos("C", 50_000, 29)],
+    )
+    wired(rb, 10_000_000)
+    orders = rb.plan_rebalance({"A": 100_000, "B": 50_000, "C": 50_000})
+
+    assert [(o.symbol, o.action, o.quantity) for o in orders] == [("A", "BUY", 30)]
+
+
+def test_topups_stop_once_deployment_returns_to_band(wired):
+    holdings = {f"A{i}": 1 / 9 for i in range(9)}
+    positions = [_pos(s, 100_000, 6) for s in holdings]
+    rb = _rebalancer(
+        holdings=holdings, target_stock_weight=0.60,
+        min_trade=200_000, positions=positions,
+    )
+    wired(rb, 10_000_000)
+    orders = rb.plan_rebalance({s: 100_000 for s in holdings})
+
+    bought = sum(o.quantity * o.price for o in orders)
+    assert bought == 400_000  # 54% → 58%. 57~63% 안에 들어왔으므로 여기서 멈춘다.
+
+
+def test_topup_accounts_for_planned_sell_proceeds(wired):
+    """과다 보유 종목을 줄인 뒤 생기는 부족분도 같은 계획에서 계산한다."""
+    holdings = {f"A{i}": 0.1 for i in range(10)}
+    positions = [_pos("A0", 100_000, 15)] + [
+        _pos(f"A{i}", 100_000, 5) for i in range(1, 10)
+    ]
+    rb = _rebalancer(
+        holdings=holdings, target_stock_weight=0.60,
+        min_trade=200_000, positions=positions,
+    )
+    wired(rb, 10_000_000)
+    orders = rb.plan_rebalance({s: 100_000 for s in holdings})
+
+    assert orders[0].action == "SELL"
+    projected = 6_000_000 + sum(
+        (1 if o.action == "BUY" else -1) * o.quantity * o.price for o in orders
+    )
+    assert 5_700_000 <= projected <= 6_300_000
+
+
+@pytest.mark.parametrize("held", [6, 9], ids=["buy", "sell"])
+def test_minimum_trade_uses_rounded_share_quantity(wired, held):
+    """차액 6만원이어도 1주 4만원 주문이면 최소 거래금액 5만원 미만이다."""
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.5}, target_stock_weight=0.60,
+        min_trade=50_000, deployment_band=0.10,
+        positions=[_pos("A", 40_000, held), _pos("B", 50_000, 6)],
+    )
+    wired(rb, 1_000_000)
+
+    assert rb.plan_rebalance({"A": 40_000, "B": 50_000}) == []
+
+
+@pytest.mark.parametrize("turnover", [0.25, 0.35, 0.45])
+def test_regular_and_topup_orders_share_one_turnover_budget(wired, turnover):
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.25, "C": 0.25},
+        target_stock_weight=0.60, min_trade=100_000, turnover=turnover,
+        positions=[_pos("B", 100_000, 1), _pos("C", 100_000, 1)],
+        drift_threshold=0.10,
+    )
+    wired(rb, 1_000_000)
+    orders = rb.plan_rebalance({"A": 100_000, "B": 100_000, "C": 100_000})
+
+    assert orders
+    assert all(o.quantity * o.price >= 100_000 for o in orders)
+    assert sum(o.quantity * o.price for o in orders) <= 1_000_000 * turnover
+    assert len({o.symbol for o in orders}) == len(orders)
+
+
+def test_plan_leaves_cash_reserve_after_buy_costs(wired):
+    """현금 5%를 딱 남기는 주문에 비용을 더해 두 번째 매수가 전부 거절되는 경우."""
+    from core.risk_manager import RiskManager
+
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.5}, target_stock_weight=0.95,
+        min_trade=50_000, positions=[],
+    )
+    rb.basket["min_cash_ratio"] = 0.05
+    wired(rb, 1_000_000)
+    orders = rb.plan_rebalance({"A": 25_000, "B": 25_000})
+
+    assert [o.quantity for o in orders] == [19, 18]
+    rm = RiskManager(SimpleNamespace(risk_params=rb._risk_params))
+    spent = 0
+    for o in orders:
+        costs = rm.calculate_transaction_costs(o.price, o.quantity, "BUY", symbol=o.symbol)
+        spent += costs["execution_price"] * o.quantity + costs["commission"]
+    assert 1_000_000 - spent >= 50_000
+
+
+def test_cash_reduction_keeps_minimum_trade(wired):
+    rb = _rebalancer(
+        holdings={"A": 1.0}, target_stock_weight=0.60,
+        min_trade=50_000, positions=[],
+    )
+    wired(rb, 100_000)
+    rb.portfolio_mgr.get_portfolio_summary.return_value["cash"] = 49_000
+    assert rb.plan_rebalance({"A": 30_000}) == []
+
+
+def test_cash_budget_uses_net_sell_proceeds(wired):
+    from core.risk_manager import RiskManager
+
+    rb = _rebalancer(
+        holdings={"A": 0.5, "B": 0.5}, target_stock_weight=0.60,
+        min_trade=50_000, positions=[_pos("A", 25_000, 40)],
+    )
+    rb.basket["min_cash_ratio"] = 0.40
+    rb._risk_params["transaction_costs"] = {
+        "commission_rate": 0.01, "tax_rate": 0.02, "slippage": 0.01, "slippage_ticks": 0,
+    }
+    wired(rb, 1_000_000)
+    orders = rb.plan_rebalance({"A": 25_000, "B": 25_000})
+
+    assert [o.action for o in orders] == ["SELL", "BUY"]
+    assert orders[-1].quantity < 12  # 매도 대금 70만원 전액을 쓸 수 없다.
+    rm = RiskManager(SimpleNamespace(risk_params=rb._risk_params))
+    cash = 0
+    for o in orders:
+        costs = rm.calculate_transaction_costs(o.price, o.quantity, o.action, symbol=o.symbol)
+        amount = costs["execution_price"] * o.quantity
+        cash += amount if o.action == "SELL" else -amount
+        cash -= costs["commission"] + costs["tax"]
+    assert cash >= 400_000
+
+
 # --------------------------------------------------- 결측 경보 중복 억제
 
 class _FakeQuery:

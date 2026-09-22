@@ -38,3 +38,12 @@ def is_non_company_symbol(symbol: str, risk_params: dict[str, Any] | None) -> bo
     if not symbol:
         return False
     return str(symbol).strip() in non_company_symbols(risk_params)
+
+
+def is_krx_etf_symbol(symbol: str | None, risk_params: dict[str, Any] | None) -> bool:
+    """국내 ETF로 명시한 종목인지 확인한다. 비과세·기업 필터 면제와는 별개다."""
+    classes = (risk_params or {}).get("instrument_classes") or {}
+    raw = classes.get("krx_etf_symbols") or []
+    if not symbol or not isinstance(raw, (list, tuple, set)):
+        return False
+    return str(symbol).strip() in {str(value).strip() for value in raw}

@@ -106,6 +106,60 @@ def test_tick_size():
     assert _get_tick_size(0) == 1
 
 
+@pytest.mark.parametrize("price,tick", [(1999, 1), (2000, 5), (50000, 5), (1000000, 5)])
+def test_registered_krx_etf_uses_etf_tick_rule(price, tick):
+    rm = RiskManager(SimpleNamespace(risk_params={
+        "instrument_classes": {"krx_etf_symbols": ["069500", "357870"]},
+        "transaction_costs": {"slippage": 0, "slippage_ticks": 2},
+    }))
+    result = rm.calculate_transaction_costs(price, 3, "BUY", symbol="069500")
+    assert result["slippage_per_share"] == 2 * tick
+    assert result["execution_price"] == price + 2 * tick
+
+
+def test_etf_fixed_slippage_floor_and_volume_multiplier_still_apply():
+    rm = RiskManager(SimpleNamespace(risk_params={
+        "instrument_classes": {"krx_etf_symbols": ["069500"]},
+        "transaction_costs": {
+            "slippage": 0.0005, "slippage_ticks": 1,
+            "dynamic_slippage": {"enabled": True},
+        },
+    }))
+    normal = rm.calculate_transaction_costs(100_000, 1, "BUY", symbol="069500")
+    large = rm.calculate_transaction_costs(
+        100_000, 4, "SELL", symbol="069500", avg_daily_volume=100,
+    )
+    assert normal["slippage_per_share"] == 50
+    assert large["slippage_per_share"] == 200
+
+
+@pytest.mark.parametrize("classes", [
+    {}, {"non_company_symbols": ["005930"]}, {"krx_etf_symbols": "005930"},
+])
+def test_non_etf_or_malformed_etf_list_keeps_stock_ticks(classes):
+    rm = RiskManager(SimpleNamespace(risk_params={
+        "instrument_classes": classes,
+        "transaction_costs": {"slippage": 0, "slippage_ticks": 1,
+                              "tax_exempt_symbols": ["005930"]},
+    }))
+    assert rm.calculate_transaction_costs(
+        100_000, 1, "BUY", symbol="005930",
+    )["slippage_per_share"] == 100
+
+
+def test_configured_pocket_etfs_have_correct_tick_costs():
+    from pathlib import Path
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "config/risk_params.yaml"
+    risk_params = yaml.safe_load(path.read_text(encoding="utf-8"))
+    rm = RiskManager(SimpleNamespace(risk_params=risk_params))
+    for symbol in ("069500", "357870"):
+        assert rm.calculate_transaction_costs(
+            100_000, 1, "BUY", symbol=symbol,
+        )["slippage_per_share"] == 50
+
+
 def test_diversification_blocks_when_remaining_cash_too_low(risk_manager):
     """주문 후 남는 현금 비중이 설정값보다 낮으면 차단 (단일 종목 비중은 20% 이하로 두어 해당 검사 통과)"""
     result = risk_manager.check_diversification(
