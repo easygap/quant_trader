@@ -562,12 +562,13 @@ def collect_basket_paper_evaluation(
     # 주문 경로에서만 쌓인다. 그래서 paper 트랙의 주문·사이클 오류 이벤트를 따로 세어
     # 보여 준다. 해결 표시가 없는 기록이라 판정에는 넣지 않는다(한 번의 일시 오류가 끝난
     # 트랙을 영영 떨어뜨리지 않게) — 운영자가 보고 판단할 참고 지표다.
+    paper_order_errors = None
     try:
         from database.models import OperationEvent
 
         session = get_session()
         try:
-            result["metrics"]["paper_order_errors"] = (
+            paper_order_errors = (
                 session.query(OperationEvent)
                 .filter(
                     OperationEvent.strategy == basket_key,
@@ -581,7 +582,9 @@ def collect_basket_paper_evaluation(
             session.close()
     except Exception as exc:
         logger.warning("paper 주문 오류 집계 실패: {}", exc)
-        result["metrics"]["paper_order_errors"] = None
+    # 평가 결과에 metrics가 없을 수도 있다(판정 함수를 바꿔 끼운 경우 등) — 집계 실패가
+    # 평가 전체를 깨뜨리지 않게 setdefault로 넣는다.
+    result.setdefault("metrics", {})["paper_order_errors"] = paper_order_errors
 
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
