@@ -30,6 +30,25 @@ class BlackSwanDetector:
     - recovery_minutes 동안 recovery 기간 진입 (기본 120분)
     - recovery 기간 중 포지션 사이징을 recovery_scale(기본 0.5)로 축소
     - recovery 종료 후 정상 복귀
+
+    ⚠️ 백테스트와 paper/live의 차이 (2026-09 감사 기록, 배선은 하지 않음):
+    - paper/live에서 실제로 호출되는 것은 check_stock()뿐이다(scheduler 포지션 감시).
+      check_portfolio()는 처음 만들어진 뒤로 호출하는 곳이 없다. 즉 '포트폴리오 일간
+      -3%'와 '연속 하락' 규칙은 paper/live에서 한 번도 작동한 적이 없다.
+    - 반면 두 백테스터(backtest/backtester.py, backtest/portfolio_backtester.py)는
+      같은 risk_params.blackswan 값으로 포트폴리오 -3% 하락일에 보유 종목 전체를
+      BLACKSWAN 청산하고 쿨다운 동안 신규 매수를 막으며, 연속 하락은 포트폴리오가
+      아니라 '종목별' 3일 연속 하락으로 판정한다.
+    - 그래서 신호형 전략의 백테스트 낙폭·꼬리 성과에는 paper/live가 하지 않는 보호
+      청산이 들어 있어 paper보다 좋게 나온다. backtest↔paper 차이를 다른 원인으로
+      돌리기 전에 이 차이를 먼저 감안할 것.
+    - 나중에 배선한다면: check_portfolio()는 호출할 때마다 _daily_returns에 한 건을
+      쌓으므로 거래일당 한 번만 불러야 한다(감시 틱마다 부르면 하루 안에서 '연속
+      하락'이 거짓 발동한다). 연속 규칙은 백테스트(종목별)와 이 메서드(포트폴리오)의
+      단위가 달라 어느 한쪽을 맞춰야 한다. scheduler와 OrderExecutor의 감지기는 서로
+      다른 인스턴스라 한쪽 쿨다운이 다른 쪽 매수를 막지 않는다. 바스켓 트랙 계좌에는
+      배선하지 말 것 — kr_diversified_hold의 설계 위험 정책은 -25% 손절이라
+      -3% 하락일 전량 청산은 그 설계를 깨뜨린다.
     """
 
     def __init__(self, config: Config = None):
@@ -127,6 +146,10 @@ class BlackSwanDetector:
     def check_portfolio(self, current_value: float, prev_value: float) -> dict:
         """
         포트폴리오 전체 급락 감지
+
+        현재 paper/live 경로에서 호출하는 곳이 없다(백테스터만 같은 규칙을 모델링).
+        호출 시 _daily_returns에 한 건씩 쌓이므로 거래일당 한 번만 불러야 한다.
+        자세한 차이는 클래스 docstring 참고.
 
         Args:
             current_value: 현재 포트폴리오 평가금
