@@ -21,7 +21,6 @@ from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
 from core.notifier import Notifier
 from core.strategy_diagnostics import diagnose_live_post_market
-from core.live_readiness import check_live_readiness_gate
 
 try:
     from monitoring.paper_monitor import log_event as _log_op
@@ -527,7 +526,7 @@ class Scheduler:
                 for w in source_warnings:
                     logger.warning(w)
 
-            self._run_basket_rebalance_check()
+            self._log_basket_execution_owner()
 
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
@@ -1640,95 +1639,33 @@ class Scheduler:
             except Exception as e:
                 logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
 
-    def _run_basket_rebalance_check(self):
-        """장전 단계에서 enabled 바스켓의 리밸런싱 필요 여부를 체크하고 실행."""
+    def _log_basket_execution_owner(self):
+        """바스켓은 스케줄러가 거래하지 않는다 — 실행 경로가 일일 CLI 하나뿐임을 남긴다.
+
+        예전에는 장전 단계(08:50~09:00)에서 바스켓 리밸런싱을 실행했다. 그 시각엔
+        live 주문이 거래 시간 가드에 전부 거부되고(가드는 의도된 안전장치라 완화하지
+        않는다), paper는 전일 종가로 체결됐다. CLI 사이클의 안전 단계(-25% 손절·
+        재매수 쿨다운, 하루 1회 거래 가드, 스냅샷 보충, CYCLE_/SNAPSHOT_ 이벤트)도
+        빠져 있었고, 신호 전략용 live 게이트 통과만으로 모든 바스켓을 live 거래할 수
+        있었다. 스케줄러를 CLI와 함께 돌리면 10:07 CLI가 '오늘 이미 체결 있음'으로
+        건너뛰어, 문서화된 사이클이 조용히 거래를 멈췄다.
+        """
         try:
-            from core.basket_rebalancer import (
-                BasketRebalancer,
-                check_basket_account_isolation,
-                rebalance_live_strategy_id,
-            )
+            from core.basket_rebalancer import BasketRebalancer
 
             enabled = BasketRebalancer.get_enabled_baskets()
-            if not enabled:
-                return
-
-            # 여러 바스켓이 같은 계좌(자본 풀)를 공유하면 각자 목표 비중을 독립 배분해
-            # 과배분되고 트랙레코드가 섞인다 — fail-closed로 이번 사이클을 중단한다.
-            isolation_issues = check_basket_account_isolation(enabled, self.config, self._mode)
-            if isolation_issues:
-                msg = "바스켓 리밸런싱 중단 — 계좌 격리 실패: " + "; ".join(isolation_issues)
-                logger.error(msg)
-                self.discord.send_message(msg, critical=True)
-                return
-
-            logger.info("🔄 바스켓 리밸런싱 체크: {}", enabled)
-            for name in enabled:
-                try:
-                    is_live = self._mode == "live"
-                    live_strategy_name = rebalance_live_strategy_id(name)
-                    if is_live:
-                        gate_issues = check_live_readiness_gate(
-                            self.config,
-                            live_strategy_name,
-                        )
-                        if gate_issues:
-                            msg = (
-                                f"바스켓 '{name}' live 리밸런싱 검증 실패: "
-                                + "; ".join(gate_issues)
-                            )
-                            logger.error(msg)
-                            self.discord.send_message(msg, critical=True)
-                            continue
-
-                    # 계정·귀속 키는 paper/live·CLI/스케줄러 공통(basket_rebalance:<name>)
-                    # — 트랙레코드가 바스켓별 한 곳에 쌓인다.
-                    rebalancer = BasketRebalancer(
-                        basket_name=name, config=self.config,
-                        account_key=live_strategy_name,
-                        execution_strategy=live_strategy_name,
-                    )
-                    if is_live:
-                        sync_result = rebalancer.portfolio_mgr.sync_with_broker()
-                        if not sync_result.get("ok"):
-                            msg = (
-                                f"바스켓 '{name}' live 리밸런싱 전 포지션 동기화 실패: "
-                                f"{sync_result.get('message', 'sync failed')}"
-                            )
-                            logger.error(msg)
-                            self.discord.send_message(msg, critical=True)
-                            continue
-
-                    should, reason = rebalancer.should_rebalance()
-                    if should:
-                        orders = rebalancer.plan_rebalance()
-                        if orders:
-                            result = rebalancer.execute(
-                                orders,
-                                live_confirmed=(
-                                    is_live and self._live_gate_validated
-                                ),
-                            )
-                            summary = (
-                                f"🔄 바스켓 '{name}' 리밸런싱 완료: "
-                                f"실행 {result['executed']}건, 실패 {result['failed']}건"
-                            )
-                            logger.info(summary)
-                            self.discord.send_message(summary)
-                    else:
-                        logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
-
-                    # 트랙레코드: 스케줄러 단독 운영(상시 구동)에서도 바스켓 계정의
-                    # 일일 NAV 스냅샷이 쌓이도록 거래 여부와 무관하게 저장(멱등 upsert).
-                    rebalancer.save_daily_nav_snapshot()
-
-                except Exception as e:
-                    logger.error("바스켓 '{}' 리밸런싱 오류: {}", name, e)
-
-        except ImportError:
-            pass
         except Exception as e:
-            logger.error("바스켓 리밸런싱 체크 실패: {}", e)
+            logger.warning(
+                "enabled 바스켓 목록 확인 실패 — 스케줄러는 어차피 바스켓을 거래하지 않음: {}", e,
+            )
+            return
+        if not enabled:
+            return
+        logger.warning(
+            "바스켓 {}은(는) 스케줄러가 거래하지 않습니다 — 바스켓 리밸런싱·NAV 스냅샷은 "
+            "일일 CLI `python main.py --mode rebalance`(평일 10:07 자동화)가 유일한 실행 경로입니다.",
+            enabled,
+        )
 
     def _log_rate_limit_preflight(self, est_requests: int, n_symbols: int, phase: str):
         """API 요청 사전 예측: 예상 건수와 소요 시간을 로그하고, 분당 한도 초과 시 경고."""
