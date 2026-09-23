@@ -745,7 +745,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 
 ### 5.7 MDD 제한
 
-- **설정**: `drawdown.max_portfolio_mdd`, `max_daily_loss`, `recovery_scale`
+- **설정**: `drawdown.max_portfolio_mdd`, `max_daily_loss` (회복 사이징 `recovery_scale`은 구현되지 않아 2026-09-23 삭제)
 
 ### 5.8 전략 성과 열화 감지
 

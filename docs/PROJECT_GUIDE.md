@@ -446,7 +446,7 @@ quant_trader/
 | **liquidity_filter** | enabled(true), min_avg_trading_value_20d_krw(5e9), strict(true), check_on_entry(true) | 유동성 필터 (20일 평균 거래대금) |
 | **diversification** | max_position_ratio(0.20), max_investment_ratio(0.70), max_positions(10), min_cash_ratio, max_sector_ratio(0.40) | 분산 투자·업종 비중 제한 |
 | **position_limits** | max_holding_days(30), min_holding_days(5) | 최대/최소 보유 기간. 손절·갭다운·블랙스완·수동 긴급 청산은 최소 보유 기간 예외 |
-| **drawdown** | max_portfolio_mdd(0.15), max_daily_loss(0.03), recovery_scale | MDD 제한 |
+| **drawdown** | max_portfolio_mdd(0.15), max_daily_loss(0.03) | MDD 제한(회복은 한도 절반까지 히스테리시스). 목표 비중 바스켓 주문은 바스켓 낙폭 정책에 위임 |
 | **performance_degradation** | enabled, recent_trades(20), min_win_rate(0.35) | 성과 열화 감지 |
 | **paper_backtest_compare** | live_readiness(min_direction_agreement_pct, max_return_diff_pct, min_trading_days, min_trades) | 실전 전환 기준 |
 | **transaction_costs** | commission_rate(0.00015), tax_rate(0.0020), slippage(0.0005), dynamic_slippage, capital_gains_tax | 거래 비용 |

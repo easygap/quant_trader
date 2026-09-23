@@ -23,6 +23,12 @@ _KST = ZoneInfo("Asia/Seoul")
 # 추세 필터 지수 → 그 지수를 추종하는 ETF(지수 자료가 멈췄을 때의 대용)
 _INDEX_PROXY = {"KS200": "069500"}
 
+
+def _is_protective_exit(reason: str) -> bool:
+    """손실 방어 청산(손절·트레일링)인가. 익절은 여기에 들지 않는다."""
+    text = str(reason or "").upper()
+    return "RISK_EXIT" in text and ("STOP_LOSS" in text or "TRAILING_STOP" in text)
+
 from config.config_loader import Config
 from core.basket_risk import (
     RISK_EXIT_TAG,
@@ -619,7 +625,22 @@ class BasketRebalancer:
         if trigger == "drift":
             threshold = self.rebalance_cfg.get("drift_threshold", 0.05)
             drifts = self.calculate_drift(prices)
-            max_drift = max(abs(d["drift"]) for d in drifts.values()) if drifts else 0
+            # 재매수 차단(손절 쿨다운) 종목은 트리거에서 뺀다. 못 사는 빈 슬롯이
+            # 드리프트 11%로 매일 트리거를 켜 두면, 전체 교정이 매일 돌며 보충으로 산
+            # 종목을 다음 날 '비중 초과'로 되파는 왕복매매가 난다(2026-09-22 035720
+            # 6주 매수 → 9-23 같은 6주 매도, 012330 손절 쿨다운 중). 집계 배치율
+            # 트리거는 그대로 둔다.
+            try:
+                blocked = symbols_in_reentry_cooldown(
+                    self.basket, self.account_key, self._ledger_mode(),
+                ) or {}
+            except Exception as exc:
+                logger.warning("재매수 차단 종목 조회 실패 — 트리거에 전 종목 반영: {}", exc)
+                blocked = {}
+            max_drift = max(
+                (abs(d["drift"]) for s, d in drifts.items() if s not in blocked),
+                default=0,
+            )
             if max_drift >= threshold:
                 return True, f"최대 드리프트 {max_drift:.1%} >= 임계값 {threshold:.1%}"
             # 종목별 드리프트가 전부 임계값 아래여도, 그 얇은 미달분의 합이 설계 배치율에서
@@ -1109,6 +1130,12 @@ class BasketRebalancer:
             )
             # 유동성 체크용 20일 평균 거래량 — plan 단계 캐시 재사용, 없으면 새로 조회.
             snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
+        # 주문 단계의 노출 상한·낙폭 가드도 계획과 같은 시가로 잰다(평균단가로 재면
+        # 하락장에서 계획한 보충 매수가 '투자 비중 초과'로 거부된다).
+        mark_prices = {
+            s: float(v["price"]) for s, v in (snapshot or {}).items()
+            if isinstance(v, dict) and v.get("price")
+        }
 
         for order in orders:
             if dry_run:
@@ -1121,7 +1148,13 @@ class BasketRebalancer:
             try:
                 if order.action == "BUY":
                     available_cash = self.portfolio_mgr.get_available_cash()
-                    total_value = self.portfolio_mgr.get_current_capital()
+                    if self._is_live() or not mark_prices:
+                        # live는 증권사 잔고(시가)가 이미 총자산이다
+                        total_value = self.portfolio_mgr.get_current_capital()
+                    else:
+                        total_value = self.portfolio_mgr.get_portfolio_summary(
+                            current_prices=mark_prices,
+                        ).get("total_value")
                     res = executor.execute_buy_quantity(
                         symbol=order.symbol,
                         price=order.price,
@@ -1139,11 +1172,14 @@ class BasketRebalancer:
                         risk_levels=basket_risk_levels(self.basket, order.price),
                         # 노출 상한도 이 바스켓이 선언한 비중에서 파생한다.
                         exposure_limits=self._policy_exposure_limits(order.symbol),
+                        mark_prices=mark_prices or None,
                     )
                 else:
                     res = executor.execute_sell(
                         symbol=order.symbol, price=order.price, quantity=order.quantity,
                         reason=f"리밸런싱: {order.reason}", strategy=self.execution_strategy,
+                        # 손절·트레일링 청산은 최소 보유 기간보다 우선한다(익절은 아님)
+                        emergency=_is_protective_exit(order.reason),
                     )
 
                 if res.get("success"):
@@ -1151,6 +1187,10 @@ class BasketRebalancer:
                     results["details"].append({"order": repr(order), "status": "success"})
                 else:
                     results["failed"] += 1
+                    logger.warning(
+                        "리밸런싱 주문 거부 {} {} {}주: {}",
+                        order.symbol, order.action, order.quantity, res.get("reason", "unknown"),
+                    )
                     results["details"].append({
                         "order": repr(order), "status": "failed",
                         "reason": res.get("reason", "unknown"),
