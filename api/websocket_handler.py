@@ -1,6 +1,8 @@
 """
 실시간 웹소켓 데이터 핸들러
 - KIS API 웹소켓을 통한 실시간 체결/호가 스트리밍
+- 주의: 현재 어떤 런타임(main.py 일일 CLI·스케줄러·대시보드)도 이 핸들러를 띄우지
+  않는다(테스트에서만 생성). 아래 갭 보충·BlackSwan 재점검은 연결했을 때의 동작이다.
 - asyncio 기반 비동기 처리
 - connect() 시 KISApi.get_approval_key()로 웹소켓 전용 승인키 발급 후 구독 메시지에 사용.
   KIS 공식 문서(웹소켓 인증) 변경 시 해당 로직 재검증 필요.
@@ -630,25 +632,54 @@ class WebSocketHandler:
             raw_data = parts[3]    # 실제 데이터
 
             if tr_id == "H0STCNT0":
-                # 체결 데이터
-                price_data = self._parse_price_data(raw_data)
-
-                # 실시간 데이터 정합성 검증
+                # 체결 데이터 — 한 프레임에 여러 건이 올 수 있다(data_count)
                 from core.data_validator import DataValidator
-                if price_data and DataValidator.validate_realtime_data(price_data):
-                    if not self._first_data_logged:
-                        self._first_data_logged = True
-                        logger.info(
-                            "웹소켓 첫 실시간 데이터 수신 (tr_id: {}, symbol: {}, price: {})",
-                            tr_id, price_data.get("symbol"), price_data.get("price"),
-                        )
-                    self._update_price_cache_from_ws(price_data)
-                    self._emit_price_update(price_data)
-                elif price_data:
-                    logger.warning("웹소켓 손상 데이터 드롭: {}", price_data)
+
+                for record in self._split_records(raw_data, data_count):
+                    price_data = self._parse_price_data(record)
+
+                    # 실시간 데이터 정합성 검증
+                    if price_data and DataValidator.validate_realtime_data(price_data):
+                        if not self._first_data_logged:
+                            self._first_data_logged = True
+                            logger.info(
+                                "웹소켓 첫 실시간 데이터 수신 (tr_id: {}, symbol: {}, price: {})",
+                                tr_id, price_data.get("symbol"), price_data.get("price"),
+                            )
+                        self._update_price_cache_from_ws(price_data)
+                        self._emit_price_update(price_data)
+                    elif price_data:
+                        logger.warning("웹소켓 손상 데이터 드롭: {}", price_data)
 
         except Exception as e:
             logger.error("메시지 처리 오류: {}", e)
+
+    @staticmethod
+    def _split_records(raw: str, data_count: str) -> List[str]:
+        """'^'로 이어 붙은 N건(data_count)의 체결 레코드를 레코드별 문자열로 나눈다.
+
+        KIS는 체결이 몰리면 한 프레임에 여러 건(예: '002')을 필드를 이어 붙여 보낸다.
+        예전 파서는 첫 레코드만 읽고 나머지를 버렸다. 필드 수가 건수로 나누어떨어지지
+        않으면 형식이 바뀐 것이므로 첫 레코드만 쓰고 경고를 남긴다.
+        """
+        try:
+            count = int(str(data_count).strip())
+        except (TypeError, ValueError):
+            logger.warning("[WebSocket] 데이터 건수 해석 실패({!r}) — 첫 레코드만 처리", data_count)
+            return [raw]
+        if count <= 1:
+            return [raw]
+        fields = raw.split("^")
+        if fields and fields[-1] == "":
+            fields = fields[:-1]
+        if len(fields) % count != 0:
+            logger.warning(
+                "[WebSocket] 다건 프레임 필드 수 {}가 건수 {}로 나누어떨어지지 않음 — 첫 레코드만 처리",
+                len(fields), count,
+            )
+            return [raw]
+        width = len(fields) // count
+        return ["^".join(fields[i * width:(i + 1) * width]) for i in range(count)]
 
     @staticmethod
     def _parse_price_data(raw: str) -> Optional[Dict[str, Any]]:

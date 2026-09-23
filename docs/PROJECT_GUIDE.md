@@ -159,7 +159,7 @@ quant_trader/
 ├── api/
 │   ├── __init__.py
 │   ├── kis_api.py               # KIS REST API: 토큰·시세·주문·잔고·일봉. 이중 Rate Limiter(초당+분당) + 지수 백오프+지터 + SSL/커넥션 에러 핸들러 + 토큰 쿨다운 + 사용량 모니터링 + Circuit Breaker(HALF_OPEN 단일 probe)
-│   ├── websocket_handler.py     # KIS 웹소켓 실시간 체결/호가 (asyncio, Heartbeat 45초, 자동 재연결, 갭 보충/대시보드 노출)
+│   ├── websocket_handler.py     # KIS 웹소켓 실시간 체결/호가 (asyncio, Heartbeat 45초, 자동 재연결, 갭 보충/대시보드 노출) — 현재 어떤 런타임에도 연결 안 됨
 │   └── circuit_breaker.py       # CLOSED → OPEN → HALF_OPEN, API 연속 5회 실패 시 60초 차단
 ├── backtest/
 │   ├── __init__.py
@@ -325,7 +325,7 @@ quant_trader/
 | 파일 | 역할 |
 |------|------|
 | **kis_api.py** | OAuth 토큰 발급·갱신, 시세·주문·잔고·일봉 조회. **이중 Rate Limiter**: Token Bucket(초당) + 슬라이딩 윈도우(분당). **지수 백오프+지터**: `_backoff_with_jitter()`로 thundering-herd 방지. **SSL/커넥션 에러 전용 핸들러**: ConnectionError, SSLError 등 별도 처리 + `_total_conn_errors` 추적. **토큰 쿨다운**: 인증 실패 시 60초간 요청 차단(`_token_error_until`). `get_rate_limit_stats()`: 사용량 모니터링(최근 60초 활용률, 429 누적, 커넥션 에러 누적, 쿨다운 상태). CircuitBreaker 연동. |
-| **websocket_handler.py** | KIS 웹소켓 실시간 체결/호가. asyncio 기반, Heartbeat 45초 타임아웃, 자동 재연결, 콜백으로 가격 전달. 재연결 갭은 대시보드 상태로 노출하고 1분↑ 분봉 보충·급변 보고, 2분↑ REST 현재가/일봉 캐시 갱신·BlackSwan 즉시 점검, 디스코드 경고를 수행한다. |
+| **websocket_handler.py** | KIS 웹소켓 실시간 체결/호가. asyncio 기반, Heartbeat 45초 타임아웃, 자동 재연결, 콜백으로 가격 전달. 한 프레임에 여러 건(`data_count`)이 오면 레코드별로 나눠 모두 전달한다. 재연결 갭은 대시보드 상태로 노출하고 1분↑ 분봉 보충·급변 보고, 2분↑ REST 현재가/일봉 캐시 갱신·BlackSwan 즉시 점검, 디스코드 경고를 수행한다. **단, 현재 어떤 런타임(일일 CLI `main.py`·스케줄러·웹 대시보드)도 이 핸들러를 시작하지 않는다 — 생성하는 곳은 테스트뿐이다.** 따라서 위 갭 보충·BlackSwan 재점검은 어떤 모드에서도 실제로 돌지 않으며, 대시보드 `ws_gap` 패널은 '정보 없음'이 정상이다. |
 | **circuit_breaker.py** | API 연속 5회 실패 시 CLOSED → OPEN(60초 차단) → HALF_OPEN. 요청 차단으로 계정 제재 방지. Notifier 알림. |
 
 ### 3.6 backtest/
@@ -809,7 +809,7 @@ full paper 신규 BUY는 preflight status artifact와 runtime state가 모두 �
 | ✅ **target-weight rank-risk 보강 검증 완료** | exp75 계열에 `rankrisk90_dd75`, `rankrisk120`을 추가하고 tol4+pdd10/floor40 guard와 결합했다. top-200 후보 16개 재검증에서는 `rankrisk120_tol4`가 return +84.41%, raw excess +52.52%p, MDD -19.30%, turnover/year 919.4%, `rankrisk90_dd75_tol4`가 return +82.56%, raw excess +50.67%p, MDD -19.54%, turnover/year 896.0%로 기존 tol4보다 개선됐다. canonical에서는 두 후보 모두 turnover는 통과했지만 benchmark excess -23.70%p/-23.40%p와 MDD -20.74%/-20.76%로 `paper_only`다 |
 | ✅ **포트폴리오 백테스트 이벤트 guard 추가** | `backtest/portfolio_backtester.py`에 gap-up 신규 매수 차단, gap-down `GAP_DOWN` 청산, 어닝 윈도우 신규 매수 차단, BlackSwan 청산·쿨다운·recovery 사이징과 `gap_*`/`earnings_*`/`blackswan_*` 진단 카운터를 추가 |
 | ✅ **비용 전/후 성과 비교 리포트 추가** | `backtest.cost_impact`가 수수료·세금·슬리피지를 표준 집계해 비용 차감 전 추정 수익률, 비용 차감 후 수익률, 비용 드래그, 비용/순손익, cost impact status를 단일/포트폴리오 백테스트 metrics와 txt/html 리포트에 자동 노출한다 |
-| ✅ **WebSocket 갭 상태/보충 처리** | `api/websocket_handler.py`가 웹소켓 끊김·재연결 갭을 ring buffer와 대시보드 `ws_gap`에 기록한다. 재연결 시 REST 현재가/일봉 캐시 갱신, 분봉 보충 기반 급변 보고, BlackSwan 즉시 점검, 디스코드 경고를 수행하며, 연결 성공·명시 종료 상태도 대시보드 스냅샷에 즉시 반영한다 |
+| ⚠️ **WebSocket 갭 상태/보충 처리 — 코드만 있음, 런타임 미연결** | `api/websocket_handler.py`에 웹소켓 끊김·재연결 갭을 ring buffer와 대시보드 `ws_gap`에 기록하고, 재연결 시 REST 현재가/일봉 캐시 갱신, 분봉 보충 기반 급변 보고, BlackSwan 즉시 점검, 디스코드 경고를 수행하는 코드가 있다. 그러나 일일 CLI·스케줄러·대시보드 어디에서도 핸들러를 시작하지 않아 어떤 모드에서도 동작하지 않는다(2026-09 감사). 연결하려면 스케줄러 asyncio 태스크·가격 캐시 콜백을 새로 만들어야 하고, 재연결 루프가 스케줄러 프로세스의 새 장애 지점이 되는 점을 함께 검토해야 한다 |
 | ✅ **pilot entry fail-closed audit 추가** | `check_pilot_entry()`의 모든 blocked/allowed 결과를 `pilot_audit.jsonl`에 기록하고, runtime/evidence/notifier/order-count/position-count/gross-exposure guard 예외는 pilot entry 차단으로 처리. 기존 pilot auth가 있더라도 entry 직전에 전략 상태와 artifact eligibility를 다시 확인해 승인 이후 강등된 전략은 차단한다. gross exposure cap은 현재 노출이 아직 한도 미만이어도 이번 주문 후 예상 노출이 한도를 넘으면 차단한다 |
 | ✅ **generic paper entry guard 추가** | `main.py --mode paper`, scheduler auto-entry, `execute_buy_quantity()` 모두 preflight/runtime 확인 실패 시 BUY를 fail-closed 차단. blocked runtime의 pilot override는 `check_pilot_entry()` 재검증을 통과해야 하며 SELL은 exit-safe 유지 |
 | ✅ **canonical 평가 입력 snapshot 추가** | `tools/evaluate_and_promote.py --canonical`이 선정 종목의 유동성 데이터 범위, 벤치마크 데이터 범위, 데이터 수집 오류, `data_snapshot_hash`를 `run_metadata.json`에 기록한다. 평가 예외는 단순 0% 성과와 구분해 `evaluation_status=failed`로 남긴다 |
@@ -858,7 +858,7 @@ full paper 신규 BUY는 preflight status artifact와 runtime state가 모두 �
 | DART·어닝 필터 고도화 | 기본 연동 완료(`dart_loader`+`earnings_filter`). 공시 키워드·커버리지·폴백 정책 확대 | 중기 (3~6개월) |
 | 펀더멘털 신호 고도화 | `fundamental_factor`·앙상블 구성 반영됨. 지표·해외 종목·공시 연계 강화 | 중기 |
 | 웹 대시보드 강화 | 전략별 신호, 주문 목록, API 사용량 표시 | 중기 |
-| WebSocket 갭 처리 고도화 | 기본 갭 보충·급변 감지는 완료. 향후 종목별 체결 공백 재구성, 브로커 체결 이벤트와의 교차 검증, 운영 알림 SLA를 확장 | 중기 |
+| WebSocket 런타임 연결·갭 처리 고도화 | 갭 보충·급변 감지 코드는 있으나 어떤 런타임에도 연결되지 않았다. 먼저 스케줄러에 연결(공유 KIS 토큰 사용)한 뒤 종목별 체결 공백 재구성, 브로커 체결 이벤트와의 교차 검증, 운영 알림 SLA를 확장 | 중기 |
 
 ### 다음 연구 방향 — 2026-04-29 기준
 
