@@ -158,6 +158,27 @@ def test_backfill_not_called_on_dry_run(cycle, monkeypatch):
     assert "backfill" not in calls
 
 
+def test_backfill_not_called_in_live_mode(cycle, monkeypatch):
+    """live 기록은 증권사 잔고를 따라야 한다 — 로컬 원장·중간값 추정으로 채우지 않는다."""
+    import main
+    from config.config_loader import Config
+
+    fake_rb, _, calls = cycle
+    fake_rb.portfolio_mgr.sync_with_broker.return_value = {"ok": True}
+    config = Config.get()
+    monkeypatch.setitem(config.trading, "mode", "live")
+    monkeypatch.setattr(main, "_market_closed_today", lambda config, now: False)
+    monkeypatch.setattr(main, "_require_live_operator_confirmation", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_check_live_readiness_gate", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "core.basket_rebalancer.check_basket_account_isolation", lambda *a, **k: [],
+    )
+
+    main.run_rebalance(_args())
+
+    assert "backfill" not in calls
+
+
 # ------------------------------------------------------------------ 보충 범위·입금 경계
 
 def _add_trade(key, day, symbol="069500", qty=1, price=100_000.0):

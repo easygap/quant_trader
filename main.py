@@ -848,7 +848,10 @@ def _run_rebalance_impl(args):
             # 자본은 리밸런서가 이미 해석한 값(baskets.yaml initial_capital → 전역)을 쓴다.
             # 2026-08-27 도입 때 이 자리에 정의되지 않은 이름(baskets_cfg)을 써서
             # NameError가 매 사이클 났고, 경고 로그로만 남아 한 달간 아무도 몰랐다.
-            if not dry_run:
+            #
+            # paper에서만 한다. live 기록은 증권사 잔고를 따라야 하는데, 복원분은 로컬
+            # 원장과 시가·종가 중간값으로 만든 추정치라 live 트랙에 섞으면 안 된다.
+            if not dry_run and mode == "paper":
                 try:
                     from core.snapshot_backfill import backfill_account
 
