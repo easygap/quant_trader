@@ -140,6 +140,9 @@ scoring:
 # Z-Score < -2 는 "기술적 과매도"와 "악화 기업"을 구분하지 못하며, ADX < adx_filter 도 하락 추세 구간에서 낮게 나와 필터가 불완전함.
 # 실전 권장: exclude_52w_low_near 사용 + 유동성/퀄리티·손절 필수. 코스피200 대형주만 적용 시 상대적으로 안전.
 # fundamental_filter: Z-Score 매수 조건 충족 시 PER·부채비율 정상 범위 확인 (yfinance 기반, 한국 종목은 업데이트 느림·누락 많음 → pykrx/KRX 공시 병행 검토).
+# 백테스트 반영 범위: 52주 필터(exclude_52w_low_near)는 백테스트·paper 공통 적용.
+#   fundamental_filter·restrict_to_kospi200은 '현재' 재무·구성 종목만 조회되므로 백테스트에는 반영하지 않는다
+#   (과거 봉에 적용하면 미래 정보·생존 편향). 백테스트 성과는 이 두 필터가 없는 전략의 성과다.
 mean_reversion:
   z_score_buy: -2.0           # 매수 Z-Score 기준
   z_score_sell: 2.0          # 매도 Z-Score 기준

@@ -45,8 +45,38 @@ class MeanReversionStrategy(BaseStrategy):
         self.params = self.config.strategies.get("mean_reversion", {})
         logger.info("MeanReversionStrategy 초기화 완료")
 
+    def unmodelled_backtest_filters(self) -> list[str]:
+        """설정에서 켜져 있지만 analyze()(백테스트 경로)가 반영하지 않는 필터 이름.
+
+        pykrx·yfinance는 '현재' 재무와 '현재' 코스피200 구성만 주므로, 과거 봉에
+        적용하면 미래 정보와 생존 편향이 섞인다. 이 필터들은 generate_signal()
+        (paper 판단)에서만 적용된다.
+        """
+        enabled = []
+        if self.params.get("restrict_to_kospi200", False):
+            enabled.append("restrict_to_kospi200")
+        if (self.params.get("fundamental_filter") or {}).get("enabled", False):
+            enabled.append("fundamental_filter")
+        return enabled
+
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
-        """지표 계산 + Z-Score + 전략 signal 컬럼 추가"""
+        """지표 계산 + Z-Score + 전략 signal 컬럼 추가.
+
+        52주 고점 급락·52주 저점 근방 매수 제외는 여기서 벡터로 적용한다(롤링 창이라
+        미래 정보 없음). 백테스트와 paper가 같은 매수 규칙을 보게 하려는 것이다.
+        펀더멘털 필터와 코스피200 제한은 과거 시점 데이터가 없어 반영하지 않는다
+        (unmodelled_backtest_filters 참고).
+        """
+        unmodelled = self.unmodelled_backtest_filters()
+        if unmodelled and not getattr(self, "_unmodelled_warned", False):
+            logger.warning(
+                "평균회귀 analyze(백테스트 경로)는 {} 필터를 반영하지 않습니다 — "
+                "과거 시점 데이터가 없어 적용하면 미래 정보가 섞입니다. "
+                "백테스트 결과는 이 필터가 없는 전략의 성과입니다.",
+                ", ".join(unmodelled),
+            )
+            self._unmodelled_warned = True
+
         analyzed = self.indicator_engine.calculate_all(df.copy())
         if analyzed.empty:
             return analyzed
@@ -86,6 +116,23 @@ class MeanReversionStrategy(BaseStrategy):
 
         # 거래량 급변 시 평균회귀 매수는 차단
         buy_signal = buy_signal & ~((volume_ratio > volume_spike_filter).fillna(False))
+
+        # 52주 필터 (예전에는 generate_signal에서만 적용돼 백테스트가 paper와 다른
+        # 전략을 평가했다 — 백테스트 BUY의 약 절반이 paper에서는 걸러지는 매수였다)
+        #  - 52주 고점 대비 max_drawdown_from_52w_high 이상 하락 → 매수 제외
+        #  - 52주 저점 대비 near_52w_low_pct 이내 → 신저가 근방이라 매수 제외
+        exclude_52w = self.params.get("exclude_52w_low_near", True)
+        max_drawdown_52w = self.params.get("max_drawdown_from_52w_high", 0.30)
+        near_low_threshold = self.params.get("near_52w_low_pct", 0.05)
+        veto_drawdown = pd.Series(False, index=analyzed.index)
+        veto_near_low = pd.Series(False, index=analyzed.index)
+        if exclude_52w:
+            raw_buy = buy_signal.fillna(False).astype(bool)
+            veto_drawdown = raw_buy & (analyzed["drawdown_from_52w_high"] >= max_drawdown_52w)
+            veto_near_low = raw_buy & (analyzed["pct_above_52w_low"] <= near_low_threshold)
+            buy_signal = raw_buy & ~veto_drawdown & ~veto_near_low
+        analyzed["buy_veto_52w_drawdown"] = veto_drawdown
+        analyzed["buy_veto_52w_near_low"] = veto_near_low
 
         analyzed["signal"] = self.HOLD
         analyzed.loc[buy_signal.fillna(False), "signal"] = self.BUY
@@ -136,30 +183,26 @@ class MeanReversionStrategy(BaseStrategy):
         drawdown_52w = last.get("drawdown_from_52w_high")
         pct_above_52w = last.get("pct_above_52w_low")
 
+        # 52주 필터는 analyze()에서 이미 적용됐다(백테스트와 같은 규칙). 여기서는 사유만 남긴다.
         # 52주 고점 대비 하락률 필터: 고점에서 N% 이상 하락한 종목은 실적 악화·장기 하락 가능성 → 매수 제외
-        exclude_52w = self.params.get("exclude_52w_low_near", True)
         max_drawdown_52w = self.params.get("max_drawdown_from_52w_high", 0.30)
-        if signal == self.BUY and exclude_52w and drawdown_52w is not None:
-            if drawdown_52w >= max_drawdown_52w:
-                signal = self.HOLD
-                logger.info(
-                    "평균회귀 매수 보류(52주 고점 대비 급락): {} — 52주고점 대비 -{:.1f}% (한도 -{:.0f}%)",
-                    symbol or "?",
-                    float(drawdown_52w) * 100,
-                    max_drawdown_52w * 100,
-                )
+        if bool(last.get("buy_veto_52w_drawdown", False)):
+            logger.info(
+                "평균회귀 매수 보류(52주 고점 대비 급락): {} — 52주고점 대비 -{:.1f}% (한도 -{:.0f}%)",
+                symbol or "?",
+                float(drawdown_52w) * 100,
+                max_drawdown_52w * 100,
+            )
 
         # 52주 저점 근방 필터: 현재가가 저점 대비 N% 이내이면 신저가 구간 → 매수 제외
         near_low_threshold = self.params.get("near_52w_low_pct", 0.05)
-        if signal == self.BUY and exclude_52w and pct_above_52w is not None:
-            if pct_above_52w <= near_low_threshold:
-                signal = self.HOLD
-                logger.info(
-                    "평균회귀 매수 보류(52주 신저가 근방): {} — 52주저점 대비 +{:.1f}% (한도 +{:.0f}%)",
-                    symbol or "?",
-                    float(pct_above_52w) * 100,
-                    near_low_threshold * 100,
-                )
+        if bool(last.get("buy_veto_52w_near_low", False)):
+            logger.info(
+                "평균회귀 매수 보류(52주 신저가 근방): {} — 52주저점 대비 +{:.1f}% (한도 +{:.0f}%)",
+                symbol or "?",
+                float(pct_above_52w) * 100,
+                near_low_threshold * 100,
+            )
 
         details = {
             "Z-Score": round(z_score, 2),
