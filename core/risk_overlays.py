@@ -72,6 +72,9 @@ class OverlayDecision:
     realized_vol: float | None = None
     evaluated_at: str = ""
     source_dates: dict[str, str | None] = field(default_factory=dict)
+    # 판단에 쓸 자료가 없어 직전보다 비중을 늘리지 못하게 막았는지. data_issues에는
+    # '지수 대신 069500 종가를 썼다' 같은 참고 사항도 들어가므로 둘을 구분해 둔다.
+    held_back: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -300,6 +303,7 @@ def compute_decision(
             + ([cfg.volatility.min_scale] if cfg.volatility.enabled else [])
         ))
         scale = min(scale, previous_scale)
+        decision.held_back = True
     decision.scale = round(min(1.0, max(0.0, scale)), 4)
     return decision
 
@@ -312,8 +316,12 @@ def describe_decision(decision: OverlayDecision | dict[str, Any] | None, cfg: Ov
     scale = float(d.get("scale", 1.0))
     parts = list(d.get("reasons") or [])
     issues = list(d.get("data_issues") or [])
+    # 예전 상태 파일에는 held_back이 없다 — 그때는 자료 문제가 있으면 보류로 본다.
+    held_back = d.get("held_back")
+    if held_back is None:
+        held_back = bool(issues)
     if not parts:
-        text = "자료 확인 전 비중 확대 보류" if issues else "기본 투자 비중 유지"
+        text = "자료 확인 전 비중 확대 보류" if held_back else "기본 투자 비중 유지"
     else:
         text = " · ".join(parts)
     if issues:

@@ -193,6 +193,27 @@ def test_overlay_message_names_the_real_cause():
     assert any("200일치 부족" in i for i in short.data_issues)
 
 
+def test_proxy_note_does_not_claim_the_weight_was_held_back():
+    """069500으로 대신 판단해 비중을 제대로 정했는데 화면에 '비중 확대 보류'라고 쓰면
+    실제와 반대로 알린다(리뷰 지적). 참고 사항과 실제 보류를 구분한다."""
+    from core.risk_overlays import compute_decision, describe_decision, parse_overlay_config
+
+    cfg = parse_overlay_config({"overlays": {"trend_filter": {"enabled": True, "ma_days": 200}}})
+    ok = compute_decision(cfg, index_closes=[100.0] * 260, prev_state={"trend_below": False})
+    ok.data_issues.append("KS200 지수 자료가 늦어 069500 종가로 추세를 봤음")
+    assert ok.held_back is False
+    text = describe_decision(ok)
+    assert "보류" not in text and "069500" in text
+
+    missing = compute_decision(cfg, index_closes=None, prev_state={"trend_below": False})
+    assert missing.held_back is True
+    assert "자료 확인 전 비중 확대 보류" in describe_decision(missing)
+
+    # held_back이 없는 예전 상태 파일은 자료 문제가 있으면 보류로 읽는다
+    legacy = {"scale": 1.0, "reasons": [], "data_issues": ["지수 종가: 최근 기록 없음"]}
+    assert "자료 확인 전 비중 확대 보류" in describe_decision(legacy)
+
+
 def test_health_lists_overlay_data_issues():
     from core.operator_health import summarize_basket_operation
 
