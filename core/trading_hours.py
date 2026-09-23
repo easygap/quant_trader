@@ -24,6 +24,18 @@ from core.holidays_updater import FALLBACK_BY_YEAR as _FALLBACK_BY_YEAR
 
 KR_HOLIDAYS_FALLBACK = set().union(*_FALLBACK_BY_YEAR.values())
 
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def _now_kst() -> datetime:
+    """현재 한국 시각(naive).
+
+    인자 없는 datetime.now()는 호스트 TZ를 따른다. 문서화된 리눅스 배포처럼 TZ가 UTC면
+    거래일이 09:00 KST에 넘어가고 장 시간 판정이 9시간 밀린다. 반환값은 naive로
+    유지한다 — 호출부가 DB의 naive 시각과 비교한다.
+    """
+    return datetime.now(_KST).replace(tzinfo=None)
+
 
 def _load_holidays() -> set:
     """
@@ -56,7 +68,7 @@ def _load_holidays() -> set:
     # 2) pykrx (거래일 제외 = 휴장일)
     try:
         from pykrx import stock
-        now = datetime.now()
+        now = _now_kst()
         start = f"{now.year}0101"
         end = f"{now.year + 1}1231"
         trading = stock.get_market_trading_date_by_date(start, end)
@@ -153,7 +165,7 @@ class TradingHours:
         Returns:
             거래일이면 True
         """
-        dt = date or datetime.now()
+        dt = date or _now_kst()
 
         # 주말 체크 (토=5, 일=6)
         if dt.weekday() >= 5:
@@ -173,7 +185,7 @@ class TradingHours:
         Returns:
             True: 현재 거래 가능
         """
-        dt = dt or datetime.now()
+        dt = dt or _now_kst()
 
         if not self.is_trading_day(dt):
             return False
@@ -183,7 +195,7 @@ class TradingHours:
 
     def is_pre_market(self, dt: datetime = None) -> bool:
         """장전 준비 시간인지 확인"""
-        dt = dt or datetime.now()
+        dt = dt or _now_kst()
 
         if not self.is_trading_day(dt):
             return False
@@ -198,7 +210,7 @@ class TradingHours:
         Returns:
             {"allowed": True/False, "reason": 사유}
         """
-        dt = dt or datetime.now()
+        dt = dt or _now_kst()
 
         if not self.is_trading_day(dt):
             weekday = dt.strftime("%A")
@@ -216,7 +228,7 @@ class TradingHours:
 
     def time_until_market_open(self) -> timedelta:
         """장 시작까지 남은 시간"""
-        now = datetime.now()
+        now = _now_kst()
         today_open = datetime.combine(now.date(), self.market_open)
 
         if now < today_open:
@@ -232,7 +244,7 @@ class TradingHours:
 
     def time_until_market_close(self) -> timedelta:
         """장 종료까지 남은 시간"""
-        now = datetime.now()
+        now = _now_kst()
         today_close = datetime.combine(now.date(), self.market_close)
 
         if now < today_close:
@@ -244,7 +256,7 @@ class TradingHours:
 
     def to_us_eastern(self, dt: datetime = None) -> datetime:
         """주어진 시각을 미국 동부(뉴욕) 타임존으로 변환."""
-        d = dt or datetime.now()
+        d = dt or _now_kst()
         if d.tzinfo is None:
             d = d.replace(tzinfo=ZoneInfo("Asia/Seoul"))
         return d.astimezone(self._ny_tz)

@@ -12,6 +12,7 @@ import math
 import os
 import time as time_mod
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from loguru import logger
 
 from config.config_loader import Config
@@ -1087,8 +1088,49 @@ class OrderExecutor:
         )
         return self.mode == "live" and not confirmed_mock
 
-    def _drawdown_pre_order_check(self, action: str = "BUY") -> dict:
-        """MDD/일일 손실 한도 도달 시 신규 BUY만 차단한다."""
+    # 목표 비중 주문이면 바스켓 규칙을 대신 따르는 낙폭 가드 판정(정책 판단). 설정 오류·
+    # 평가 불가 같은 인프라 실패는 넘기지 않는다 — 판단 근거가 없으면 여전히 막는다.
+    _DELEGABLE_DRAWDOWN_TYPES = frozenset({"mdd", "mdd_hysteresis", "daily_loss"})
+
+    def _drawdown_pre_order_check(
+        self,
+        action: str = "BUY",
+        *,
+        mark_prices: dict | None = None,
+        delegated: bool = False,
+    ) -> dict:
+        """MDD/일일 손실 한도 도달 시 신규 BUY만 차단한다.
+
+        mark_prices: 보유 종목 현재가. 주어지면 평가금액을 시가로 잰다. 없으면 기존처럼
+            평균단가로 잰다 — paper에서는 시장이 움직여도 값이 변하지 않아, 하락장에선
+            낙폭을 작게 보고(9/22 kr_diversified_hold 9.7%, 실제로는 12.9%) 평가익이
+            쌓이면 가짜 '일일 손실'로 매수를 막는다(6/15 원장 재현 -5.5%).
+        delegated: 자기 낙폭 규칙(overlays.drawdown_guard — 리밸런서가 배수로 적용)을
+            켜 둔 바스켓의 목표 비중 주문. 계좌 단위 MDD·일일 손실 가드는 재량 매매용
+            안전판이라, 이런 주문은 그 바스켓 규칙을 따른다. 상관 거부권(#456)·노출
+            상한(#457)과 같은 원칙이다. 규칙을 꺼 둔 바스켓(kr_diversified_hold)은
+            넘기지 않는다 — 넘기면 계좌 가드를 아무도 적용하지 않게 된다. 판정은 계속
+            계산해 로그로 남긴다.
+        """
+        decision = self._drawdown_guard_decision(action, mark_prices=mark_prices)
+        if (
+            delegated
+            and not decision.get("allowed", True)
+            and decision.get("drawdown_guard_type") in self._DELEGABLE_DRAWDOWN_TYPES
+        ):
+            logger.info(
+                "목표 비중 주문이라 계좌 낙폭 가드 대신 바스켓 규칙을 따름: {}",
+                decision.get("reason"),
+            )
+            return {
+                "allowed": True,
+                "reason": "",
+                "drawdown_guard_delegated": decision.get("reason"),
+            }
+        return decision
+
+    def _drawdown_guard_decision(self, action: str = "BUY", *, mark_prices: dict | None = None) -> dict:
+        """계좌 MDD/일일 손실 가드의 판정(목표 비중 주문 여부와 상관없이 계산한 원래 결과)."""
         if str(action).upper() != "BUY":
             return {"allowed": True, "reason": ""}
 
@@ -1123,10 +1165,11 @@ class OrderExecutor:
         try:
             from core.portfolio_manager import PortfolioManager
 
-            summary = PortfolioManager(
-                self.config,
-                account_key=self.account_key,
-            ).get_portfolio_summary()
+            guard_pm = PortfolioManager(self.config, account_key=self.account_key)
+            summary = (
+                guard_pm.get_portfolio_summary(current_prices=mark_prices)
+                if mark_prices else guard_pm.get_portfolio_summary()
+            )
             if self.mode == "live" and summary.get("broker_balance_ok") is False:
                 reason = (
                     "손실 한도 확인 실패: KIS 잔고 조회가 확인되지 않아 "
@@ -1442,6 +1485,24 @@ class OrderExecutor:
         if not positive and amount < 0:
             return None
         return amount
+
+    def _marked_position_value(self, position, mark_prices: dict | None) -> float:
+        """보유 평가액. 현재가가 주어지면 시가, 없으면 투자원금(기존 기준).
+
+        자본(capital)을 시가 총자산으로 넘기는 호출부는 보유분도 시가로 재야 비율이
+        맞는다 — 분자는 원가, 분모는 시가면 하락장에서 비중이 부풀어 보인다.
+        """
+        if mark_prices:
+            symbol = str(getattr(position, "symbol", ""))
+            try:
+                mark = float(mark_prices.get(symbol) or 0)
+                qty = float(getattr(position, "quantity", 0) or 0)
+            except (TypeError, ValueError):
+                mark, qty = 0.0, 0.0
+            if math.isfinite(mark) and mark > 0 and math.isfinite(qty):
+                return mark * qty
+            logger.warning("종목 {} 현재가 없음 — 노출 판단에 투자원금 사용", symbol)
+        return self._position_invested_value(position)
 
     @staticmethod
     def _position_invested_value(position) -> float:
@@ -1954,6 +2015,8 @@ class OrderExecutor:
         weight_policy_managed: bool = False,
         risk_levels: dict = None,
         exposure_limits: dict = None,
+        mark_prices: dict = None,
+        basket_drawdown_rule: bool = False,
     ) -> dict:
         """Execute a fixed-quantity buy (paper or live).
 
@@ -1969,9 +2032,17 @@ class OrderExecutor:
         risk_levels: {"stop_loss_price", "take_profit_price", "trailing_stop_price"}로
             진입 시 리스크 레벨을 명시 지정한다(None인 키는 미설정). 미전달 시 전역
             risk_params 기준으로 계산한다.
+        mark_prices: 보유 종목 현재가. 주어지면 노출 상한·낙폭 가드를 시가로 잰다.
+            호출부(리밸런서)는 시가로 주문을 계획하는데 주문 단계가 평균단가로 재면
+            하락장에서 계획한 보충 매수가 '투자 비중 초과'로 거부된다(재현: 시장 -15%에서
+            시가 60.0% 주문이 원가 62.1%로 계산돼 거부).
+        basket_drawdown_rule: 호출한 바스켓이 자기 낙폭 규칙(overlays.drawdown_guard)을
+            켜 두었는지. 켜 둔 바스켓의 목표 비중 주문만 계좌 MDD·일일 손실 가드를 그
+            규칙에 맡긴다. 규칙이 없는 바스켓까지 넘기면 계좌 가드가 계산만 되고 아무도
+            적용하지 않는다(live에서는 원래 작동하던 안전판이 사라진다).
         """
         with PositionLock():
-            return self._execute_buy_quantity_impl(
+            result = self._execute_buy_quantity_impl(
                 symbol=symbol,
                 price=price,
                 quantity=quantity,
@@ -1986,7 +2057,33 @@ class OrderExecutor:
                 weight_policy_managed=weight_policy_managed,
                 risk_levels=risk_levels,
                 exposure_limits=exposure_limits,
+                mark_prices=mark_prices,
+                basket_drawdown_rule=basket_drawdown_rule,
             )
+        if not result.get("success"):
+            self._report_buy_rejection(symbol, strategy, result)
+        return result
+
+    def _report_buy_rejection(self, symbol: str, strategy: str, result: dict) -> None:
+        """매수 거부 사유를 남긴다 — 그동안 요약의 '실패 N건'만 보여 보호 동작과
+        계획·실행 불일치를 구분할 수 없었다(kr_pocket 같은 주문이 3주간 7회 거부됐는데
+        사유가 어디에도 없었다). 같은 날 같은 사유는 이벤트를 한 번만 남긴다."""
+        reason = str(result.get("reason") or "사유 미상")
+        logger.warning("매수 거부 {} ({}): {}", symbol, strategy or "-", reason)
+        try:
+            from core.cycle_observability import record_event_once_per_day
+
+            record_event_once_per_day(
+                "ORDER_REJECTED",
+                f"매수 거부 {symbol}: {reason}",
+                severity="warning",
+                strategy=strategy or None,
+                mode=self.mode,
+                symbol=str(symbol),
+                dedupe_key=reason[:300],
+            )
+        except Exception as exc:
+            logger.warning("매수 거부 이벤트 기록 실패: {}", exc)
 
     def _execute_buy_quantity_impl(
         self,
@@ -2004,6 +2101,8 @@ class OrderExecutor:
         weight_policy_managed: bool = False,
         risk_levels: dict = None,
         exposure_limits: dict = None,
+        mark_prices: dict = None,
+        basket_drawdown_rule: bool = False,
     ) -> dict:
         # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
         # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
@@ -2082,6 +2181,9 @@ class OrderExecutor:
             candidate_notional=fill_price * quantity,
             price=price,
             avg_daily_volume=avg_daily_volume,
+            mark_prices=mark_prices,
+            weight_policy_managed=weight_policy_managed,
+            drawdown_delegable=weight_policy_managed and bool(basket_drawdown_rule),
         )
         if not pre_check["allowed"]:
             result = {"success": False, **pre_check}
@@ -2094,7 +2196,8 @@ class OrderExecutor:
                 mode=self.mode,
             )
             invested_values = [
-                self._position_invested_value(position) for position in positions
+                self._marked_position_value(position, mark_prices)
+                for position in positions
             ]
         except Exception as exc:
             return {
@@ -2133,7 +2236,18 @@ class OrderExecutor:
             current_invested=sum(invested_values),
             symbol=symbol,
             sector_map=sector_map,
-            positions=positions if need_sector_map else None,
+            # 업종 비중도 같은 기준으로 잰다 — 총자산을 시가로 넘기면서 업종 보유분만
+            # 원가로 두면 손실 구간에서 업종 비중이 부풀어 보인다.
+            positions=(
+                None if not need_sector_map
+                else [
+                    SimpleNamespace(
+                        symbol=getattr(p, "symbol", ""), total_invested=value,
+                        quantity=getattr(p, "quantity", 0), avg_price=getattr(p, "avg_price", 0),
+                    )
+                    for p, value in zip(positions, invested_values)
+                ] if mark_prices else positions
+            ),
             existing_position_value=existing_position_value,
             is_new_position=not any(
                 str(getattr(position, "symbol", "")) == str(symbol)
@@ -2534,6 +2648,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         execution_session_id: str = "",
+        emergency: bool = False,
     ) -> dict:
         """
         매도 주문 실행
@@ -2546,12 +2661,18 @@ class OrderExecutor:
             reason: 매매 사유
             strategy: 전략명
             avg_daily_volume: 일평균 거래량 (제공 시 거래량 기반 동적 슬리피지 적용)
+            emergency: 손실 방어 청산(손절·트레일링)임을 호출부가 명시한다. 사유 문자열
+                판정은 정확히 'STOP_LOSS' 같은 값만 알아봐서, 바스켓의 'RISK_EXIT
+                STOP_LOSS: ...' 사유는 최소 보유 기간에 막히고 live에서는 지정가로 나갔다.
 
         Returns:
             주문 결과 딕셔너리
         """
         with PositionLock():
-            return self._execute_sell_impl(symbol, price, quantity, signal_score, reason, strategy, avg_daily_volume, execution_session_id)
+            return self._execute_sell_impl(
+                symbol, price, quantity, signal_score, reason, strategy,
+                avg_daily_volume, execution_session_id, emergency=emergency,
+            )
 
     def _execute_sell_impl(
         self,
@@ -2563,6 +2684,7 @@ class OrderExecutor:
         strategy: str = "",
         avg_daily_volume: float = None,
         execution_session_id: str = "",
+        emergency: bool = False,
     ) -> dict:
         """매도 주문 실제 로직 (Lock 내부에서 호출)."""
         position = get_position(symbol, account_key=self.account_key, mode=self.mode)
@@ -2573,7 +2695,7 @@ class OrderExecutor:
         # 손실 방어 청산은 지정가가 현재가를 뒤쫓지 못해 미체결되는 위험보다
         # 체결 확률을 우선한다. 현재가가 끊겨도 실전 시장가 주문은 평균단가를
         # 손익 추정 기준으로 삼아 계속 진행한다.
-        is_emergency = self._is_emergency_sell_reason(reason)
+        is_emergency = bool(emergency) or self._is_emergency_sell_reason(reason)
         order_price = self._positive_order_price(price)
         if order_price is None:
             fallback_price = self._positive_order_price(
@@ -3415,6 +3537,9 @@ class OrderExecutor:
         candidate_notional: float | None = None,
         price: float | None = None,
         avg_daily_volume: float | None = None,
+        mark_prices: dict | None = None,
+        weight_policy_managed: bool = False,
+        drawdown_delegable: bool = False,
     ) -> dict:
         """
         주문 전 안전 체크 (거래 시간 + 블랙스완)
@@ -3439,7 +3564,12 @@ class OrderExecutor:
         if not monthly_cap["allowed"]:
             return monthly_cap
 
-        drawdown_check = self._drawdown_pre_order_check(action)
+        if mark_prices or drawdown_delegable:
+            drawdown_check = self._drawdown_pre_order_check(
+                action, mark_prices=mark_prices, delegated=drawdown_delegable,
+            )
+        else:
+            drawdown_check = self._drawdown_pre_order_check(action)
         if not drawdown_check["allowed"]:
             return drawdown_check
 

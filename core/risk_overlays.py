@@ -72,6 +72,9 @@ class OverlayDecision:
     realized_vol: float | None = None
     evaluated_at: str = ""
     source_dates: dict[str, str | None] = field(default_factory=dict)
+    # 판단에 쓸 자료가 없어 직전보다 비중을 늘리지 못하게 막았는지. data_issues에는
+    # '지수 대신 069500 종가를 썼다' 같은 참고 사항도 들어가므로 둘을 구분해 둔다.
+    held_back: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -156,11 +159,18 @@ def trend_below_ma(
     return bool(prev_below), rel
 
 
-def drawdown_from_cumulative_returns(cumulative_returns_pct: Sequence[float]) -> float | None:
-    """시간가중 누적수익률(%) 시계열 → 현재 고점 대비 낙폭(음수 비율). 고점은 시작 자본(지수 1.0)부터."""
+def drawdown_from_cumulative_returns(
+    cumulative_returns_pct: Sequence[float],
+    peak_eligible: Sequence[bool] | None = None,
+) -> float | None:
+    """시간가중 누적수익률(%) 시계열 → 현재 고점 대비 낙폭(음수 비율). 고점은 시작 자본(지수 1.0)부터.
+
+    peak_eligible이 주어지면 False인 날(나중에 채운 추정 기록)은 고점 후보에서 뺀다.
+    추정치가 고점이 되면 그 뒤 낙폭이 계속 부풀어 규칙이 일찍 발동한다.
+    """
     peak = 1.0
     last = None
-    for cr in cumulative_returns_pct:
+    for i, cr in enumerate(cumulative_returns_pct):
         if cr is None:
             return None
         try:
@@ -169,11 +179,12 @@ def drawdown_from_cumulative_returns(cumulative_returns_pct: Sequence[float]) ->
             return None
         if not math.isfinite(idx) or idx <= 0:
             return None
-        peak = max(peak, idx)
+        if peak_eligible is None or i >= len(peak_eligible) or peak_eligible[i]:
+            peak = max(peak, idx)
         last = idx
     if last is None:
         return None
-    return last / peak - 1.0
+    return min(0.0, last / peak - 1.0)
 
 
 def drawdown_guard_active(drawdown: float | None, cfg: DrawdownGuardConfig, prev_active: bool | None) -> bool | None:
@@ -229,8 +240,12 @@ def compute_decision(
     daily_returns: Sequence[float] | None = None,
     prev_state: dict[str, Any] | None = None,
     now: datetime | None = None,
+    peak_eligible: Sequence[bool] | None = None,
 ) -> OverlayDecision:
-    """설정한 결합 방식에 따라 하나의 위험 배수를 계산한다."""
+    """설정한 결합 방식에 따라 하나의 위험 배수를 계산한다.
+
+    peak_eligible: cumulative_returns_pct와 같은 길이. False인 날은 낙폭 고점에서 뺀다.
+    """
     prev = prev_state or {}
     decision = OverlayDecision(evaluated_at=(now or datetime.now()).isoformat(timespec="seconds"))
     scale = 1.0
@@ -240,8 +255,14 @@ def compute_decision(
         below, rel = trend_below_ma(index_closes or [], cfg.trend, prev.get("trend_below"))
         decision.trend_rel_to_ma = None if rel is None else round(rel, 4)
         if rel is None:
+            # 원인을 구분해 적는다. 자료가 오래돼 입력이 비었는데 '200일치 부족'이라고
+            # 쓰면 운영자가 엉뚱한 곳(기간 설정)을 보게 된다(2026-09-17 이후 실제 사례).
+            cause = (
+                f"종가 {cfg.trend.ma_days}일치 부족" if index_closes
+                else "종가를 쓸 수 없음(조회 실패 또는 오래된 자료)"
+            )
             decision.data_issues.append(
-                f"추세 필터: {cfg.trend.index_symbol} 종가 {cfg.trend.ma_days}일치 부족 — 직전 상태 유지"
+                f"추세 필터: {cfg.trend.index_symbol} {cause} — 직전 상태 유지"
             )
         decision.trend_below = below
         if below:
@@ -254,7 +275,7 @@ def compute_decision(
             )
 
     if cfg.drawdown.enabled:
-        dd = drawdown_from_cumulative_returns(cumulative_returns_pct or [])
+        dd = drawdown_from_cumulative_returns(cumulative_returns_pct or [], peak_eligible)
         active = drawdown_guard_active(dd, cfg.drawdown, prev.get("drawdown_active"))
         decision.drawdown = None if dd is None else round(dd, 4)
         if dd is None:
@@ -294,6 +315,7 @@ def compute_decision(
             + ([cfg.volatility.min_scale] if cfg.volatility.enabled else [])
         ))
         scale = min(scale, previous_scale)
+        decision.held_back = True
     decision.scale = round(min(1.0, max(0.0, scale)), 4)
     return decision
 
@@ -306,8 +328,12 @@ def describe_decision(decision: OverlayDecision | dict[str, Any] | None, cfg: Ov
     scale = float(d.get("scale", 1.0))
     parts = list(d.get("reasons") or [])
     issues = list(d.get("data_issues") or [])
+    # 예전 상태 파일에는 held_back이 없다 — 그때는 자료 문제가 있으면 보류로 본다.
+    held_back = d.get("held_back")
+    if held_back is None:
+        held_back = bool(issues)
     if not parts:
-        text = "자료 확인 전 비중 확대 보류" if issues else "기본 투자 비중 유지"
+        text = "자료 확인 전 비중 확대 보류" if held_back else "기본 투자 비중 유지"
     else:
         text = " · ".join(parts)
     if issues:
@@ -409,6 +435,30 @@ def save_overlay_state(
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, path)
     return path
+
+
+def invested_fraction(
+    weights: dict[str, float],
+    design_fraction: float,
+    state: dict[str, Any] | None,
+    defensive_symbol: str | None = None,
+) -> float:
+    """리밸런서가 실제로 맞추는 투자 비중(방어 자산 포함) — BasketRebalancer._stock_fraction과 같은 규칙.
+
+    방어 자산(CD ETF)이 있으면 오버레이가 주식을 줄인 만큼 방어 자산을 사므로 투자
+    비중은 설계 그대로다. 헬스가 applied_stock_fraction(설계 × 배수)으로 감시하면
+    오버레이가 켜진 날 기준이 절반으로 내려가, 방어 자산 매수가 실패해 현금이 쌓여도
+    '정상'으로 읽힌다. 방어 자산이 없으면 두 값은 같다.
+    """
+    scale = 1.0
+    if state:
+        try:
+            scale = min(1.0, max(0.0, float(state.get("scale", 1.0))))
+        except (TypeError, ValueError):
+            scale = 1.0
+    if not weights:
+        return float(design_fraction) * scale
+    return sum(overlay_target_weights(weights, float(design_fraction), scale, defensive_symbol).values())
 
 
 def applied_stock_fraction(design_fraction: float, state: dict[str, Any] | None) -> float:

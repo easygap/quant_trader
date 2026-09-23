@@ -198,3 +198,74 @@ def record_cycle_event(
     except Exception as e:  # 관측 실패가 운영을 막으면 안 된다
         logger.debug("사이클 이벤트 기록 실패(무시): {} {} — {}", event_type, message, e)
         return False
+
+
+def record_event_once_per_day(
+    event_type: str,
+    message: str,
+    *,
+    severity: str = "warning",
+    strategy: str | None = None,
+    mode: str = "paper",
+    symbol: str | None = None,
+    dedupe_key: str | None = None,
+    now: Any = None,
+) -> bool:
+    """같은 날 같은 원인의 이벤트가 이미 있으면 다시 남기지 않는다.
+
+    같은 원인(같은 결측 보충 실패, 같은 주문 거부 사유)이 매 사이클·매 주문마다
+    쌓이면 진짜 새 신호를 덮는다(운영 원칙 5 — 경보는 끄지 말고 울리는 조건을
+    정확하게). 같은 날의 기준은 (event_type, mode, strategy, symbol, dedupe_key).
+    dedupe_key는 detail 칸에 남는다. 중복 판정에 실패하면 남기는 쪽을 택한다.
+
+    반환: 새로 기록했으면 True, 중복이라 건너뛰었거나 기록 실패면 False.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now = now or datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        from database.models import OperationEvent, get_session
+
+        session = get_session()
+        try:
+            q = session.query(OperationEvent.id).filter(
+                OperationEvent.event_type == event_type,
+                OperationEvent.mode == mode,
+                OperationEvent.created_at >= day_start,
+            )
+            for col, val in (
+                (OperationEvent.strategy, strategy),
+                (OperationEvent.symbol, symbol),
+                (OperationEvent.detail, dedupe_key),
+            ):
+                q = q.filter(col.is_(None)) if val is None else q.filter(col == val)
+            if q.first() is not None:
+                return False
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning("이벤트 중복 판정 실패 — 그대로 기록: {} {}", event_type, e)
+
+    try:
+        from database.models import OperationEvent, get_session
+
+        session = get_session()
+        try:
+            session.add(OperationEvent(
+                event_type=event_type,
+                severity=severity,
+                strategy=strategy,
+                symbol=symbol,
+                message=message,
+                detail=dedupe_key,
+                mode=mode,
+            ))
+            session.commit()
+        finally:
+            session.close()
+        return True
+    except Exception as e:
+        logger.warning("이벤트 기록 실패: {} {} — {}", event_type, message, e)
+        return False

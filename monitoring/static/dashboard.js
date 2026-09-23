@@ -38,12 +38,6 @@
     if (!Number.isFinite(n) || Math.abs(n) < 1e-9) return "flat";
     return n > 0 ? "up" : "down";
   }
-  function sinceCopy(minutes) {
-    if (minutes == null) return "";
-    if (minutes < 60) return `${Math.max(1, Math.round(minutes))}분째`;
-    if (minutes < 1440) return `${Math.round(minutes / 60)}시간째`;
-    return `${Math.round(minutes / 1440)}일째`;
-  }
   function parseDate(value) {
     if (!value) return null;
     if (value instanceof Date)
@@ -134,6 +128,8 @@
     mode: "unknown",
     baskets: null,
     evaluations: null,
+    // 검증 결과 조회 상태. 처음 불러오는 동안을 '실패'로 보이지 않게 따로 둔다.
+    evaluationsStatus: "loading",
     runtime: null,
     legacy: null,
     flows: new Map(),
@@ -532,14 +528,18 @@
     $("overviewDate").dateTime = snap?.date || "";
     $("overviewTotal").textContent = won(snap?.total_value);
     $("overviewCash").textContent = `현금 ${won(snap?.cash)}`;
-    const pnl = snap ? Number(snap.total_value) - Number(b.principal) : null;
+    // 평가액은 스냅샷을 찍은 때의 값이라 원금도 그때 기준으로 비교한다. 방금 기록한
+    // 적립금까지 원금에 넣으면 다음 실행 전까지 손실이 난 것처럼 보인다.
+    const basePrincipal = Number(b?.principal_at_snapshot ?? b?.principal);
+    const pending = Number(b?.pending_deposits || 0);
+    const pnl = snap ? Number(snap.total_value) - basePrincipal : null;
     $("overviewPnl").textContent = snap
-      ? `원금 대비 ${signedWon(pnl)} (${pct(b.principal > 0 ? (pnl / b.principal) * 100 : null)})`
+      ? `원금 대비 ${signedWon(pnl)} (${pct(basePrincipal > 0 ? (pnl / basePrincipal) * 100 : null)})`
       : "모의투자를 실행하면 자산 기록이 표시됩니다.";
     $("overviewPnl").className = tone(pnl);
     $("overviewPrincipal").textContent = won(b?.principal);
     $("overviewDeposits").textContent = b?.deposits_total
-      ? `적립금 ${won(b.deposits_total)} 포함`
+      ? `적립금 ${won(b.deposits_total)} 포함${pending > 0 ? ` · 최근 적립한 ${won(pending)}은 다음 자동매매 때 반영됩니다` : ""}`
       : "초기 투자금";
     $("overviewReturn").textContent = pct(snap?.cumulative_return);
     $("overviewReturn").className = tone(snap?.cumulative_return);
@@ -646,11 +646,14 @@
     const baskets = state.baskets;
     const halt = state.runtime && state.runtime.trading_halt;
     const latest = latestSnapshotDate();
-    const ageDays = calendarAgeDays(latest);
     const primary = selectedBasket();
-    const issues = (state.evaluations || [])
-      .filter((item) => item.basket === primary?.basket)
-      .flatMap((item) => item.issues || []);
+    const evaluation = (state.evaluations || []).find(
+      (item) => item.basket === primary?.basket,
+    );
+    // 검증 중 상시 안내(review_note)는 '확인할 항목'과 섞지 않는다 — 섞여 있으면
+    // 이번 달 적립금 미기록 같은 실제 할 일이 가려진다.
+    const reviewNote = evaluation?.review_note || null;
+    const issues = (evaluation?.issues || []).filter((item) => item !== reviewNote);
     const contribution = currentMonthContributionState(primary);
     el.decisionMeta.textContent = `${modeLabel()}${latest ? ` · 마지막 자산 기록 ${fmtLong(latest)}` : " · 자산 기록 없음"}`;
 
@@ -712,46 +715,36 @@
       });
       return;
     }
-    if (ageDays != null && ageDays > 4) {
+    // 기록이 빠졌는지는 거래일 기준으로 센다(서버에서 계산). 그냥 날짜로 세면 연휴 뒤에는
+    // 잘못된 경보가 뜨고, 평일에 이틀 빠져도 '정상'으로 나온다.
+    const stalled = (baskets || []).filter(
+      (b) => Number(b.missed_trading_days || 0) >= 1,
+    );
+    if (stalled.length) {
+      const worst = stalled.reduce((a, b) =>
+        Number(b.missed_trading_days) > Number(a.missed_trading_days) ? b : a,
+      );
       setDecision({
-        title: `자산 기록이 ${ageDays}일째 멈춰 있습니다`,
-        description: `마지막 기록은 ${fmtLong(latest)}입니다. 자동매매가 멈췄을 수 있으니 운영 상태부터 확인하세요.`,
+        title: `자산 기록이 ${worst.missed_trading_days}거래일 빠졌습니다`,
+        description: `${worst.display_name || worst.basket}의 마지막 기록은 ${fmtLong(worst.snapshot?.date)}입니다. 자동매매가 제대로 실행됐는지 운영 상태부터 확인하세요.`,
         action: "operations",
         actionLabel: "운영 상태 보기",
       });
       return;
     }
-    const loopMetrics = state.runtime && state.runtime.loop_metrics;
-    const loopLastAt =
-      parseDate(loopMetrics && loopMetrics.last_success) ||
-      parseDate(state.runtime && state.runtime.runtime_file_updated_at);
-    const runtimeAge = loopLastAt
-      ? Math.max(0, Math.round((Date.now() - loopLastAt.getTime()) / 60_000))
-      : null;
-    if (runtimeAge == null || runtimeAge > 720) {
+    if (state.runtime && state.runtime.scheduler_stale) {
       setDecision({
-        title:
-          runtimeAge == null
-            ? "자동매매 실행 기록이 없습니다"
-            : `자동매매가 ${sinceCopy(runtimeAge)} 실행되지 않았습니다`,
+        title: "장이 열려 있는데 자동매매가 멈춰 있습니다",
         description:
-          runtimeAge == null
-            ? "스케줄러 기록이 보이지 않습니다. 오늘 사이클이 돌았는지 먼저 확인하세요."
-            : `마지막 실행은 ${fmtDT(loopLastAt)}입니다. 적립보다 스케줄러 상태를 먼저 확인하세요.`,
+          "스케줄러가 한 시간 넘게 실행되지 않았습니다. 운영 상태를 확인하세요.",
         action: "operations",
         actionLabel: "운영 상태 보기",
       });
       return;
     }
     if (issues.length) {
-      const paperOnly = (state.evaluations || []).find(
-        (item) => item.basket === primary?.basket,
-      )?.paper_only;
       setDecision({
-        title:
-          paperOnly && issues.length === 1
-            ? "새 운용 규칙을 검증하고 있습니다"
-            : `확인이 필요한 항목이 ${issues.length}건 있습니다`,
+        title: `확인이 필요한 항목이 ${issues.length}건 있습니다`,
         description: issues[0],
         action: "review",
         actionLabel: "검토 항목 보기",
@@ -775,6 +768,30 @@
         description: `${planned > 0 ? `매월 ${compactWon(planned)}을 적립하는 계좌입니다. ` : ""}${state.mode === "live" ? "입금을 마쳤다면 같은 금액을 기록해 주세요." : "추가할 모의투자금을 기록해 주세요."}`,
         action: "deposit",
         actionLabel: "적립금 기록",
+      });
+      return;
+    }
+    if (state.evaluationsStatus === "error") {
+      setDecision({
+        title: "검증 결과를 불러오지 못했습니다",
+        description:
+          "계좌 기록은 정상입니다. 모의투자 검증 결과만 불러오지 못했으니 잠시 후 다시 확인하세요.",
+      });
+      return;
+    }
+    if (state.evaluationsStatus !== "ready") {
+      setDecision({
+        title: "검증 결과를 확인하고 있습니다",
+        description: "계좌 기록은 정상입니다. 모의투자 검증 결과를 불러오는 중입니다.",
+      });
+      return;
+    }
+    if (reviewNote) {
+      setDecision({
+        title: "새 운용 규칙을 검증하고 있습니다",
+        description: reviewNote,
+        action: "review",
+        actionLabel: "검토 항목 보기",
       });
       return;
     }
@@ -878,7 +895,7 @@
       .map((b) => {
         const snap = b.snapshot;
         const total = snap ? Number(snap.total_value) : null;
-        const principal = Number(b.principal || 0);
+        const principal = Number(b.principal_at_snapshot ?? b.principal ?? 0);
         const profit = total == null ? null : total - principal;
         const cr = snap ? Number(snap.cumulative_return) : null;
         const cashRatio =
@@ -1648,6 +1665,7 @@
   function renderEvaluations(evaluations) {
     const items = Array.isArray(evaluations) ? evaluations : [];
     state.evaluations = items;
+    state.evaluationsStatus = "ready";
     el.basketEval.setAttribute("aria-busy", "false");
     if (!items.length) {
       el.basketEval.innerHTML =
@@ -1672,13 +1690,33 @@
           item.snapshot_coverage == null
             ? null
             : Math.round(Number(item.snapshot_coverage) * 100);
+        if (item.error) {
+          return `<div class="review-item">
+        <p class="review-name">${escapeHtml(name)}${basket?.is_primary ? " · 주력" : ""}</p>
+        <p class="verdict warn">확인 불가</p>
+        <ul class="review-issues"><li>${escapeHtml(item.error)}</li></ul>
+      </div>`;
+        }
         const [copy, cls] = verdictCopy[item.verdict] || ["관찰 중", "warn"];
         const issues = (item.issues || []).slice(0, 3);
+        const restored = Number(item.reconstructed_days || 0);
+        const measured =
+          item.measured_coverage == null
+            ? null
+            : Math.round(Number(item.measured_coverage) * 100);
+        const coverageText =
+          coverage == null
+            ? "기록 누락 확인 중"
+            : coverage >= 100
+              ? restored
+                ? `기록 누락 없음 (나중에 채운 ${restored}일 포함, 제때 기록 ${measured}%)`
+                : "기록 누락 없음"
+              : `기록 누락 ${Math.max(0, 100 - coverage)}%`;
         return `<div class="review-item">
         <p class="review-name">${escapeHtml(name)}${basket?.is_primary ? " · 주력" : ""}</p>
         <div class="review-progress">
           <div class="bar" role="progressbar" aria-label="${escapeHtml(name)} 검증 진행" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><i style="width:${progress}%"></i></div>
-          <p><span>${item.paper_only ? `전체 운영 ${days}거래일` : `${days} / ${minimum} 거래일`}</span><span>${coverage == null ? "기록 누락 확인 중" : coverage >= 100 ? "기록 누락 없음" : `기록 누락 ${Math.max(0, 100 - coverage)}%`}</span></p>
+          <p><span>${item.paper_only ? `전체 운영 ${days}거래일` : `${days} / ${minimum} 거래일`}</span><span>${coverageText}</span></p>
         </div>
         <p class="verdict ${cls}">${copy}</p>
         ${issues.length ? `<ul class="review-issues">${issues.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : ""}
@@ -1700,6 +1738,7 @@
     if (v === "bearish")
       return ["하락 추세", "시장 추세 기준 매수 제한", "warning"];
     if (v === "caution") return ["주의", "포지션 축소 구간", "warning"];
+    if (v === "disabled") return ["사용 안 함", "시장 추세 판단을 꺼 두었습니다", "info"];
     return ["확인 불가", "시장 상태 데이터 없음", "warning"];
   }
   const strategyCopy = (s) =>
@@ -1791,16 +1830,22 @@
     const loopAge = loopLast
       ? Math.max(0, Math.round((Date.now() - loopLast.getTime()) / 60_000))
       : null;
-    const loopFresh = loopAge != null && loopAge <= 720;
-    const autoValue = loopElapsed
-      ? loopFresh
-        ? "정상"
-        : `${formatAge(loopAge)} 실행`
-      : "기록 없음";
-    const autoDetail = loopElapsed
-      ? `마지막 실행 ${fmtDT(loopLast)} · 루프 ${loopElapsed}`
-      : "스케줄러 기록 없음";
-    const autoState = loop && loopFresh ? "ok" : "warning";
+    // 멈춤 판정은 서버가 장 운영 시간 기준으로 한다(밤·주말·휴장일은 멈춘 게 아니다).
+    const schedulerUnused = runtime.scheduler_in_use === false;
+    const loopFresh = !runtime.scheduler_stale && loopAge != null;
+    const autoValue = schedulerUnused
+      ? "사용 안 함"
+      : loopElapsed
+        ? loopFresh
+          ? "정상"
+          : `${formatAge(loopAge)} 실행`
+        : "기록 없음";
+    const autoDetail = schedulerUnused
+      ? "매매는 평일 오전 10시쯤 한 번 실행됩니다"
+      : loopElapsed
+        ? `마지막 실행 ${fmtDT(loopLast)} · 루프 ${loopElapsed}`
+        : "스케줄러 기록 없음";
+    const autoState = schedulerUnused ? "info" : loop && loopFresh ? "ok" : "warning";
     const kisValue =
       kis && kis.minute_utilization_pct != null
         ? `${Number(kis.minute_utilization_pct).toFixed(1)}% 사용`
@@ -1939,6 +1984,14 @@
 
   function renderLegacy(portfolio) {
     state.legacy = portfolio || null;
+    const legacyEmpty = Boolean(portfolio && portfolio.empty);
+    $("legacyHeading").hidden = legacyEmpty;
+    $("summary").hidden = legacyEmpty;
+    if (legacyEmpty) {
+      $("positionsWrap").hidden = true;
+      $("noPositions").hidden = true;
+      return;
+    }
     if (!portfolio) {
       $("summary").innerHTML = statusRowItem(
         "이전 계좌",
@@ -2199,9 +2252,13 @@
     })
       .then((data) => renderEvaluations((data && data.evaluations) || []))
       .catch(() => {
+        // 이전에 성공한 결과로 계속 판단하지 않는다(그 사이 생긴 문제를 못 본다)
+        state.evaluations = null;
+        state.evaluationsStatus = "error";
         el.basketEval.setAttribute("aria-busy", "false");
         el.basketEval.innerHTML =
           '<p class="loading">검증 상태를 불러오지 못했습니다. 잠시 후 다시 확인하세요.</p>';
+        renderDecision();
       });
     const runtimeTask = fetchJson("/api/runtime", {
       timeout: 30_000,

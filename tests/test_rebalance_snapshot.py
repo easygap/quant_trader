@@ -38,6 +38,9 @@ def patched_rebalance(monkeypatch):
         "core.basket_rebalancer.BasketRebalancer", MagicMock(return_value=fake_rb)
     )
     monkeypatch.setattr("core.notifier.Notifier", MagicMock())
+    # 휴장일에는 사이클이 매매를 건너뛴다 — 테스트가 실행되는 날(주말·공휴일)에
+    # 결과가 달라지지 않게 거래일로 고정한다. 휴장일 경로는 test_audit_cycle.py.
+    monkeypatch.setattr("main._market_closed_today", lambda config, now: False)
     return fake_rb
 
 

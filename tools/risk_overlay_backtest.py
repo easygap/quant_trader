@@ -24,6 +24,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+# 2026-09-17 표를 만든 10종목(000660 포함). 운영 트랙은 8/07부터 000660을 뺀 9종목이다 —
+# 1주가 자본 대비 커서 보유가 불가능했기 때문. 비교용으로만 남긴다.
 BASKET_SYMBOLS = [
     "005930",
     "000660",
@@ -36,6 +38,16 @@ BASKET_SYMBOLS = [
     "012330",
     "105560",
 ]
+
+
+def configured_basket_symbols(name: str = "kr_diversified_hold") -> list[str]:
+    """baskets.yaml에 실제로 설정된 보유 종목. 연구 결론은 운영 트랙이 들고 있는
+    종목으로 내야 한다 — 하이닉스가 든 10종목 표로 9종목 트랙의 정책을 정하면 안 된다."""
+    import yaml
+
+    with open(_ROOT / "config" / "baskets.yaml", encoding="utf-8") as f:
+        cfg = (yaml.safe_load(f) or {}).get("baskets", {}).get(name) or {}
+    return [str(s) for s in (cfg.get("holdings") or {})]
 COMMISSION = 0.00015
 SLIPPAGE = 0.0005
 STOCK_TAX = 0.0020
@@ -325,14 +337,16 @@ def simulate(
     }
 
 
-def metrics(frame, extra, years_hint=None):
+def metrics(frame, extra, years_hint=None, rf_annual=RF_ANNUAL):
+    """rf_annual: 샤프의 무위험수익률. 현금이 이자를 받지 않는 트랙(바스켓 paper)은 0으로
+    잰다 — 시뮬레이션은 현금 0%인데 샤프만 3%를 빼면 같은 흐름이 부당하게 낮아 보인다."""
 
     twr = frame["twr"]
     daily = frame["daily_return"]
     n_years = (frame.index[-1] - frame.index[0]).days / 365.25
     cagr = twr.iloc[-1] ** (1 / n_years) - 1 if n_years > 0 else 0.0
     vol = daily.std() * math.sqrt(TRADING_DAYS)
-    sharpe = (daily.mean() * TRADING_DAYS - RF_ANNUAL) / vol if vol > 0 else 0.0
+    sharpe = (daily.mean() * TRADING_DAYS - rf_annual) / vol if vol > 0 else 0.0
     mdd = frame["drawdown"].min()
     calmar = cagr / abs(mdd) if mdd < 0 else float("nan")
     yearly = twr.resample("YE").last().pct_change()
@@ -395,37 +409,107 @@ def run_pocket(start="2002-01-01", use_etf=False):
     }, frames
 
 
-def run_basket(start="2021-12-01"):
-    """트랙 2: 대형주 10종목 동일비중을 하나의 위험자산(EW 지수)으로 묶고, 주식 비중 60%."""
+def rebalanced_ew_index(panel, drift_threshold=0.08, cost_rate=None):
+    """동일비중 주식 부분의 지수. 어느 종목이든 목표 비중에서 drift_threshold를 넘게 벗어나면
+    그날 종가로 동일비중으로 되돌리고, 그 회전에 거래비용을 뺀다(운영 트랙과 같은 규칙).
+
+    첫날 매수 후 계속 들고만 가면 오른 종목(2023~25의 하이닉스 같은)이 슬리브를 점점
+    차지해서, 운영 트랙(8%p 벗어나면 되돌림)과 다른 포트폴리오를 재게 된다.
+    """
+    import numpy as np
     import pandas as pd
 
-    panel = pd.DataFrame({s: _fdr(s, start) for s in BASKET_SYMBOLS}).dropna(how="any")
-    ew = (panel / panel.iloc[0]).mean(
-        axis=1
-    )  # 동일비중 지수 (일별 리밸런싱 근사 없음: 첫날 동일비중 보유)
-    # 첫날 동일비중 매수 후 보유한 가치가 정확히 위 식이다 (수량 고정, 가격만 변동).
+    if cost_rate is None:
+        cost_rate = COMMISSION + SLIPPAGE + STOCK_TAX / 2  # 회전의 절반이 매도
+    rets = panel.pct_change().fillna(0.0).to_numpy()
+    n = panel.shape[1]
+    target = np.full(n, 1.0 / n)
+    weights = target.copy()
+    value = 1.0
+    out = [value]
+    for r in rets[1:]:
+        grown = weights * (1 + r)
+        step = grown.sum()
+        value *= step
+        weights = grown / step
+        if np.abs(weights - target).max() > drift_threshold:
+            turnover = np.abs(weights - target).sum()
+            value *= 1 - turnover * cost_rate
+            weights = target.copy()
+        out.append(value)
+    return pd.Series(out, index=panel.index)
+
+
+def run_basket(start="2021-12-01", symbols=None, rf_annual=0.0, target_stock=0.6,
+               policies=None, label="EW"):
+    """트랙 2: 대형주 동일비중(8%p 벗어나면 되돌림) + 이자 없는 현금, 주식 비중 60%.
+
+    symbols 미지정 시 baskets.yaml의 kr_diversified_hold 보유 종목(현재 9종목)을 쓴다.
+    rf_annual=0: 바스켓 paper 계좌의 현금은 이자를 받지 않는다.
+    """
+    import pandas as pd
+
+    symbols = list(symbols or configured_basket_symbols())
+    panel = pd.DataFrame({s: _fdr(s, start) for s in symbols}).dropna(how="any")
+    ew = rebalanced_ew_index(panel)
     index = _fdr("KS200", start)
     results = {}
     frames = {}
-    for policy in POLICIES:
+    for policy in (policies or POLICIES):
         frame, extra = simulate(
             ew,
             policy,
             index_closes=index,
-            target_stock=0.6,
+            target_stock=target_stock,
             initial=10_000_000,
             monthly=0.0,
             tax_rate=STOCK_TAX,
+            rf_annual=rf_annual,
         )
-        results[policy.name] = {"label": policy.label, **metrics(frame, extra)}
+        results[policy.name] = {
+            "label": policy.label, **metrics(frame, extra, rf_annual=rf_annual),
+        }
         frames[policy.name] = frame
     return {
-        "symbol": "EW10",
-        "symbols": BASKET_SYMBOLS,
+        "symbol": f"{label}{len(symbols)}",
+        "symbols": symbols,
+        "rf_annual": rf_annual,
         "start": str(ew.index[0].date()),
         "end": str(ew.index[-1].date()),
         "results": results,
     }, frames
+
+
+def run_exposure_review(start="2021-12-01", fractions=(0.6, 0.7, 0.8)):
+    """P3 주식 비중 비교: 같은 9종목을 주식 60/70/80%로 들 때 오를 때·내릴 때 얼마나 따라가는지.
+
+    국면 분해는 주간 리포트와 같은 정의(core.performance_lens.split_by_regime —
+    KS200 일간 수익률의 부호로 상승일·하락일을 나눔)를 쓴다.
+    """
+    from core.performance_lens import split_by_regime
+
+    static = [p for p in POLICIES if p.name == "static"]
+    index = _fdr("KS200", start)
+    bench_daily = index.pct_change() * 100
+    rows = {}
+    for frac in fractions:
+        summary, frames = run_basket(start, target_stock=frac, policies=static)
+        frame = frames["static"]
+        mine = frame["daily_return"] * 100
+        pairs = [
+            (float(mine.loc[d]), float(bench_daily.loc[d]))
+            for d in mine.index
+            if d in bench_daily.index and bench_daily.loc[d] == bench_daily.loc[d]
+        ]
+        regime = split_by_regime(pairs)
+        rows[f"{int(frac * 100)}%"] = {
+            **summary["results"]["static"],
+            "up_capture": regime["up"].get("capture"),
+            "down_capture": regime["down"].get("capture"),
+            "up_days": regime["up"].get("days"),
+            "down_days": regime["down"].get("days"),
+        }
+    return {"start": start, "symbols": configured_basket_symbols(), "fractions": rows}
 
 
 def _plot(track_name, summary, frames, out_png, title):
@@ -521,7 +605,9 @@ def main():
         "--as-of", default=AS_OF, help="이 날짜 미만의 확정 일봉만 사용 (YYYY-MM-DD)"
     )
     parser.add_argument(
-        "--track", choices=["all", "pocket", "pocket_etf", "basket"], default="all"
+        "--track",
+        choices=["all", "pocket", "pocket_etf", "basket", "exposure"],
+        default="all",
     )
     parser.add_argument("--out-dir", default=str(_ROOT / "reports" / "research"))
     parser.add_argument("--image-dir", default=str(_ROOT / "docs" / "images"))
@@ -560,14 +646,35 @@ def main():
     if args.track in ("all", "basket"):
         summary, frames = run_basket("2021-12-01")
         report["basket"] = summary
+        n = len(summary["symbols"])
         _plot(
             "basket",
             summary,
             frames,
             image_dir / "overlay-basket.png",
-            "관찰 트랙 · 대형주 10종목 동일비중 60% + 현금 40% · 2022년 약세장 포함",
+            f"관찰 트랙 · 대형주 {n}종목 동일비중 60% + 현금 40%(이자 없음) · 2022년 약세장 포함",
         )
-        md += [_markdown("관찰 트랙 (대형주 10종목, 2021-12~)", summary), ""]
+        md += [_markdown(f"관찰 트랙 (지금 들고 있는 {n}종목, 이자 없는 현금, 2021-12~)", summary), ""]
+        # 비교: 2026-09-17 표의 조건(000660 포함 10종목, 현금 연 3%)
+        legacy, _ = run_basket("2021-12-01", symbols=BASKET_SYMBOLS, rf_annual=RF_ANNUAL)
+        report["basket_legacy10"] = legacy
+        md += [_markdown("참고 · 예전 표 조건 (000660 포함 10종목, 현금 연 3%)", legacy), ""]
+    if args.track in ("all", "exposure"):
+        exposure = run_exposure_review("2021-12-01")
+        report["exposure_review"] = exposure
+        md += [
+            "### 주식 비중별 비교 (지금 들고 있는 종목, 고정 비중, 이자 없는 현금, 2021-12~)",
+            "",
+            "| 주식 비중 | 연수익률 | 최대낙폭 | 샤프(금리 0%) | 상승 포착 | 하락 포착 |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for key, r in exposure["fractions"].items():
+            up = f"{r['up_capture'] * 100:.0f}%" if r.get("up_capture") is not None else "—"
+            down = f"{r['down_capture'] * 100:.0f}%" if r.get("down_capture") is not None else "—"
+            md.append(
+                f"| {key} | {r['cagr_pct']:+.2f}% | {r['mdd_pct']:.1f}% | {r['sharpe']:.2f} | {up} | {down} |"
+            )
+        md.append("")
     (out_dir / "risk_overlay_backtest.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8"
     )

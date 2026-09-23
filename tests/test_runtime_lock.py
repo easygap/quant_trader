@@ -65,8 +65,11 @@ def test_process_runtime_lock_fails_closed_when_lock_file_unavailable(tmp_path):
         assert acquired is False
 
 
-def test_live_runtime_lock_uses_one_global_path(tmp_path):
+def test_live_runtime_lock_uses_one_global_path(tmp_path, monkeypatch):
     from core.runtime_lock import LIVE_RUNTIME_LOCK_FILENAME, live_runtime_lock
+
+    # conftest가 테스트 전체의 락 위치를 임시 폴더로 돌린다 — 이 테스트는 기본 경로 규칙을 본다
+    monkeypatch.delenv("QUANT_RUNTIME_LOCK_DIR", raising=False)
 
     with live_runtime_lock(tmp_path) as first:
         assert first is True

@@ -17,7 +17,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from backtest.backtester import Backtester
+from backtest.backtester import (
+    BACKTEST_RISK_FREE_ANNUAL,
+    BACKTEST_RISK_FREE_LABEL,
+    Backtester,
+)
 from config.config_loader import Config
 from core.data_collector import DataCollector
 from core.notifier import Notifier
@@ -103,7 +107,7 @@ def _portfolio_metrics_from_equity(equity: pd.Series, initial_capital: float) ->
     if len(daily_returns) > 0 and daily_returns.std() > 0:
         annual_return = daily_returns.mean() * 252
         annual_std = daily_returns.std() * np.sqrt(252)
-        sharpe = (annual_return - 0.03) / annual_std
+        sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
     else:
         sharpe = 0.0
     peak = equity.cummax()
@@ -127,7 +131,13 @@ def _build_equal_weight_panel(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    """동일 비중 벤치용: (date index, columns=symbol) close 패널. 공통 일자만 join='inner'."""
+    """동일 비중 벤치용: (date index, columns=symbol) close 패널.
+
+    모든 종목의 일자를 합친다(outer). 예전 inner 조인은 한 종목만 늦게 상장하거나 일찍 끝나도
+    패널 전체 기간이 그 종목 기준으로 잘려, 벤치마크가 전략과 다른(짧은) 기간을 쟀다.
+    상장 전·데이터 종료 후는 NaN으로 두고, 첫 관측과 마지막 관측 사이의 빈칸(거래정지 등)만
+    직전 종가로 채운다.
+    """
     if not symbols:
         return pd.DataFrame()
     closes_list = []
@@ -141,9 +151,61 @@ def _build_equal_weight_panel(
     if not closes_list:
         return pd.DataFrame()
     try:
-        return pd.concat(closes_list, axis=1, join="inner")
+        panel = pd.concat(closes_list, axis=1, join="outer").sort_index()
     except Exception:
         return pd.DataFrame()
+    return panel.ffill().where(panel.bfill().notna())
+
+
+def _staggered_equal_weight_equity(panel: pd.DataFrame, initial_capital: float) -> pd.Series:
+    """동일 비중 매수·보유 자산 곡선 — 가격이 늦게 시작하는 종목은 첫 가격일에 편입한다.
+
+    첫날 가격이 있는 종목들을 같은 금액씩 사서 그대로 보유한다(매일 재조정 없음). 늦게 상장한
+    종목은 첫 가격일에 '그 시점 평가액 ÷ 편입 후 종목 수'만큼 사고, 기존 보유 종목들은 서로의
+    비중을 유지한 채 같은 비율로 줄여 자금을 마련한다. 데이터가 끝난 종목은 마지막 가격으로
+    평가한다(그 가격에 현금화된 것으로 본다).
+    """
+    if panel is None or panel.empty:
+        return pd.Series(dtype=float)
+    prices = panel.sort_index().ffill()
+    px = prices.to_numpy(dtype=float)
+    n_rows, n_cols = px.shape
+    shares = np.zeros(n_cols)
+    entered = np.zeros(n_cols, dtype=bool)
+    equity = np.empty(n_rows)
+    for i in range(n_rows):
+        row = px[i]
+        value = float(shares[entered] @ row[entered]) if entered.any() else float(initial_capital)
+        entrants = ~entered & ~np.isnan(row)
+        if entrants.any():
+            n_before = int(entered.sum())
+            n_after = n_before + int(entrants.sum())
+            shares[entered] *= n_before / n_after
+            shares[entrants] = (value / n_after) / row[entrants]
+            entered |= entrants
+        equity[i] = value
+    return pd.Series(equity, index=prices.index)
+
+
+def _equal_weight_panel_coverage(panel: pd.DataFrame, n_requested: int) -> dict:
+    """벤치마크 패널의 종목 편입 범위 (시작일 보유 종목 수, 늦은 편입·중도 종료 종목)."""
+    start, end = panel.index.min(), panel.index.max()
+    late_entries = {}
+    ended_early = {}
+    for sym in panel.columns:
+        first = panel[sym].first_valid_index()
+        last = panel[sym].last_valid_index()
+        if first is not None and first > start:
+            late_entries[str(sym)] = str(pd.Timestamp(first).date())
+        if last is not None and last < end:
+            ended_early[str(sym)] = str(pd.Timestamp(last).date())
+    return {
+        "requested": int(n_requested),
+        "with_data": int(panel.shape[1]),
+        "at_start": int(panel.iloc[0].notna().sum()),
+        "late_entries": late_entries,
+        "ended_early": ended_early,
+    }
 
 
 def _equal_weight_buy_and_hold_metrics(
@@ -157,7 +219,7 @@ def _equal_weight_buy_and_hold_metrics(
     panel = _build_equal_weight_panel(collector, symbols, start_date, end_date)
     if panel.empty or len(panel) < 2:
         return {}
-    equity = (panel / panel.iloc[0]).mean(axis=1) * initial_capital
+    equity = _staggered_equal_weight_equity(panel, initial_capital)
     return _portfolio_metrics_from_equity(equity, initial_capital)
 
 
@@ -223,10 +285,14 @@ class StrategyValidator:
             strategy_name=strategy_name,
             strict_lookahead=True,
         )
+        # OOS는 인샘플 구간을 지표 워밍업으로 함께 넣고 거래·지표는 OOS 구간만 잰다.
+        # OOS만 잘라 넣으면 60~200일 지표가 구간 앞부분에서 꺼져 있어 전략이 아니라
+        # 워밍업을 평가하게 된다.
         out_sample_result = self.backtester.run(
-            strategy_df.iloc[split_idx:].copy(),
+            strategy_df.copy(),
             strategy_name=strategy_name,
             strict_lookahead=True,
+            trade_start_date=strategy_df.index[split_idx],
         )
 
         benchmark = {
@@ -250,20 +316,31 @@ class StrategyValidator:
                 s0, s1 = str(strategy_df.index[0].date()), str(strategy_df.index[-1].date())
                 panel = _build_equal_weight_panel(self.collector, symbols_top50, s0, s1)
                 if not panel.empty and len(panel) >= 2:
+                    coverage = _equal_weight_panel_coverage(panel, len(symbols_top50))
+                    benchmark_top50["coverage"] = coverage
+                    if coverage["at_start"] < 0.8 * coverage["requested"]:
+                        logger.warning(
+                            "Top50 벤치마크: 시작일에 가격이 있는 종목 {}/{}개 — 나머지는 첫 가격일부터 "
+                            "동일비중으로 편입합니다(늦은 편입 {}개, 중도 데이터 종료 {}개).",
+                            coverage["at_start"], coverage["requested"],
+                            len(coverage["late_entries"]), len(coverage["ended_early"]),
+                        )
+                    # 각 구간 벤치마크는 전략과 같은 기간을 잰다. 늦게 상장한 종목은 첫 가격일에
+                    # 편입하고(매수·보유), 패널 전체를 그 종목 상장일로 자르지 않는다.
                     cap_full = full_result["initial_capital"]
-                    equity_full = (panel / panel.iloc[0]).mean(axis=1) * cap_full
+                    equity_full = _staggered_equal_weight_equity(panel, cap_full)
                     benchmark_top50["full"] = _portfolio_metrics_from_equity(equity_full, cap_full)
-                    panel_is = panel.loc[strategy_df.index[0] : strategy_df.index[split_idx - 1]].dropna(how="any")
-                    if not panel_is.empty and len(panel_is) >= 2:
+                    panel_is = panel.loc[strategy_df.index[0] : strategy_df.index[split_idx - 1]]
+                    if len(panel_is) >= 2:
                         cap_is = in_sample_result["initial_capital"]
-                        equity_is = (panel_is / panel_is.iloc[0]).mean(axis=1) * cap_is
+                        equity_is = _staggered_equal_weight_equity(panel_is, cap_is)
                         benchmark_top50["in_sample"] = _portfolio_metrics_from_equity(equity_is, cap_is)
                     else:
                         benchmark_top50["in_sample"] = {}
-                    panel_oos = panel.loc[strategy_df.index[split_idx] : strategy_df.index[-1]].dropna(how="any")
-                    if not panel_oos.empty and len(panel_oos) >= 2:
+                    panel_oos = panel.loc[strategy_df.index[split_idx] : strategy_df.index[-1]]
+                    if len(panel_oos) >= 2:
                         cap_oos = out_sample_result["initial_capital"]
-                        equity_oos = (panel_oos / panel_oos.iloc[0]).mean(axis=1) * cap_oos
+                        equity_oos = _staggered_equal_weight_equity(panel_oos, cap_oos)
                         benchmark_top50["out_sample"] = _portfolio_metrics_from_equity(equity_oos, cap_oos)
                     else:
                         benchmark_top50["out_sample"] = {}
@@ -335,8 +412,11 @@ class StrategyValidator:
     ) -> dict:
         """
         워크포워드(슬라이딩 윈도우) 검증.
-        train_days 기간 훈련 구간 다음 test_days 기간을 테스트로 사용하고, step_days만큼 슬라이드해 반복.
-        예: train_days=504(2년), test_days=252(1년), step_days=252 → 2019~2020 훈련→2021 테스트, 2020~2021→2022 테스트, ...
+        train_days 구간 다음 test_days 구간을 테스트로 사용하고, step_days만큼 슬라이드해 반복.
+        예: train_days=504(2년), test_days=252(1년), step_days=252 → 2019~2020 워밍업→2021 테스트, ...
+
+        train_days 구간은 파라미터를 학습하지 않고 지표 워밍업으로만 쓴다(결과의 warmup_period).
+        각 창은 워밍업+테스트 구간을 함께 넣고 거래·지표는 테스트 구간만 잰다.
         """
         if validation_years < 3:
             logger.warning("검증 연수는 최소 3년 권장. {}년 → 3년으로 적용합니다.", validation_years)
@@ -364,18 +444,23 @@ class StrategyValidator:
             test_end = test_start + test_days
             if test_end > len(strategy_df):
                 break
-            test_df = strategy_df.iloc[test_start:test_end].copy()
+            # 평가 구간(벤치마크 슬라이스도 이 구간 기준)
+            test_df = strategy_df.iloc[test_start:test_end]
+            # 창 직전 train_days 구간을 지표 워밍업으로 함께 넣는다. 테스트 구간만 잘라 넣으면
+            # 60~200일 지표를 쓰는 전략이 창 앞부분 내내 신호를 못 내 통과율이 워밍업을 잰다.
+            window_df = strategy_df.iloc[train_start:test_end].copy()
             try:
                 test_result = self.backtester.run(
-                    test_df,
+                    window_df,
                     strategy_name=strategy_name,
                     strict_lookahead=True,
+                    trade_start_date=strategy_df.index[test_start],
                 )
             except Exception as e:
                 logger.warning("워크포워드 창 {} 백테스트 실패: {}", i + 1, e)
                 windows.append({
                     "window": i + 1,
-                    "train_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
+                    "warmup_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
                     "test_period": f"{strategy_df.index[test_start].date()} ~ {strategy_df.index[test_end - 1].date()}",
                     "metrics": None,
                     "passed": False,
@@ -391,7 +476,7 @@ class StrategyValidator:
                     bench = self._buy_and_hold_metrics(bench_slice, test_result["initial_capital"])
             windows.append({
                 "window": i + 1,
-                "train_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
+                "warmup_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
                 "test_period": f"{strategy_df.index[test_start].date()} ~ {strategy_df.index[test_end - 1].date()}",
                 "metrics": metrics,
                 "benchmark": bench,
@@ -476,7 +561,7 @@ class StrategyValidator:
         verdict = "통과" if result.get("wf_passed") else "실패"
         body = (
             f"[전략 검증] {strat} 전략 워크포워드 결과: {npass}/{ntot} 통과\n"
-            f"OOS 평균 샤프: {avg_s} | OOS 평균 MDD: {avg_m}%\n"
+            f"OOS 평균 샤프({BACKTEST_RISK_FREE_LABEL}): {avg_s} | OOS 평균 MDD: {avg_m}%\n"
             f"판정: {verdict}"
         )
         try:
@@ -510,11 +595,12 @@ class StrategyValidator:
             "=" * 70,
             f"워크포워드 검증 리포트 | {result['strategy']} | {result['symbol']}",
             f"기간: {result['period']}",
-            f"train_days={result['train_days']} test_days={result['test_days']} step_days={result['step_days']}",
-            f"기준: 샤프 ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
+            f"워밍업(train_days)={result['train_days']} test_days={result['test_days']} step_days={result['step_days']} "
+            "— 워밍업 구간은 지표 예열에만 쓰고 파라미터 학습은 하지 않는다",
+            f"기준: 샤프({BACKTEST_RISK_FREE_LABEL}) ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
             f"창별 통과: {result['n_passed']}/{result['n_total']} | 기준 미달 창: {result.get('n_failed', 0)}",
             f"통과율: {result.get('pass_rate', 0) * 100:.1f}% | 80% 이상 워크포워드 통과: {result.get('wf_passed', False)}",
-            f"OOS 평균 샤프: {result.get('avg_oos_sharpe', 0)} | OOS 평균 MDD: {result.get('avg_oos_mdd', 0)}%",
+            f"OOS 평균 샤프({BACKTEST_RISK_FREE_LABEL}): {result.get('avg_oos_sharpe', 0)} | OOS 평균 MDD: {result.get('avg_oos_mdd', 0)}%",
             f"전체 창 통과: {result['all_passed']}",
             "=" * 70,
             "",
@@ -572,9 +658,18 @@ class StrategyValidator:
         ]
         top50 = result.get("benchmark_top50") or {}
         if top50:
+            coverage = top50.get("coverage") or {}
+            coverage_line = (
+                f"편입 범위: 시작일 {coverage.get('at_start', 0)}/{coverage.get('requested', 0)}종목 보유 | "
+                f"늦은 상장 {len(coverage.get('late_entries') or {})}종목은 첫 가격일에 동일비중 편입 | "
+                f"중도 데이터 종료 {len(coverage.get('ended_early') or {})}종목"
+                if coverage
+                else "편입 범위: 정보 없음"
+            )
             lines.extend([
                 "",
-                "벤치마크(코스피 상위 50종목 동일비중)",
+                "벤치마크(코스피 상위 50종목 동일비중, 매수·보유)",
+                coverage_line,
                 self._format_section("FULL", result["full"]["metrics"], top50.get("full", {})),
                 self._format_section("IN_SAMPLE", result["in_sample"]["metrics"], top50.get("in_sample", {})),
                 self._format_section("OUT_OF_SAMPLE", result["out_sample"]["metrics"], top50.get("out_sample", {})),
@@ -589,7 +684,7 @@ class StrategyValidator:
         lines.extend([
             "-" * 70,
             f"손익비(Profit Factor): FULL {validation.get('full_profit_factor', 0):.2f} | OOS {validation.get('oos_profit_factor', 0):.2f}",
-            f"샤프 기준({validation['min_sharpe']:.2f}) 충족: {validation['full_passed']}",
+            f"샤프({BACKTEST_RISK_FREE_LABEL}) 기준({validation['min_sharpe']:.2f}) 충족: {validation['full_passed']}",
             f"Out-of-sample 기준 통과: {validation['out_sample_passed']}",
         ])
         if validation.get("warnings"):
@@ -689,7 +784,7 @@ class StrategyValidator:
         if len(daily_returns) > 0 and daily_returns.std() > 0:
             annual_return = daily_returns.mean() * 252
             annual_std = daily_returns.std() * np.sqrt(252)
-            sharpe = (annual_return - 0.03) / annual_std
+            sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
         else:
             sharpe = 0
 
@@ -719,12 +814,13 @@ class StrategyValidator:
         turnover = metrics.get("annual_turnover_pct", 0)
         ev = metrics.get("ev_per_trade", 0)
         cost_drag = metrics.get("cost_drag_pct", 0)
+        rf = BACKTEST_RISK_FREE_LABEL
         return "\n".join([
             f"[{title}]",
-            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | CAGR {cagr:>6.2f}% | 샤프 {metrics.get('sharpe_ratio', 0):>5.2f} | 소르티노 {sortino:>5.2f}",
+            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | CAGR {cagr:>6.2f}% | 샤프({rf}) {metrics.get('sharpe_ratio', 0):>5.2f} | 소르티노 {sortino:>5.2f}",
             f"MDD {metrics.get('max_drawdown', 0):>6.2f}% | 칼마 {calmar:>5.2f} | 턴오버 {turnover:>6.1f}%/y | 비용 드래그 {cost_drag:>5.2f}%",
             f"승률 {metrics.get('win_rate', 0):>5.1f}% | EV/거래 {ev:>8,.0f}원 | 거래 {metrics.get('total_trades', 0)}건",
-            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프 {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}% | 초과수익 {metrics.get('total_return', 0) - benchmark_return:>+.2f}%",
+            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프({rf}) {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}% | 초과수익 {metrics.get('total_return', 0) - benchmark_return:>+.2f}%",
         ])
 
     # ═══════════════════════════════════════════════════════════
@@ -760,13 +856,19 @@ class StrategyValidator:
 
         split_idx = max(60, int(len(df) * 0.7))
         split_idx = min(split_idx, len(df) - 30)
-        oos_df = df.iloc[split_idx:].copy()
+        oos_start = df.index[split_idx]
 
         results = {}
         for strat in strategies:
             try:
                 full = self.backtester.run(df.copy(), strategy_name=strat, strict_lookahead=True)
-                oos = self.backtester.run(oos_df.copy(), strategy_name=strat, strict_lookahead=True)
+                # OOS도 앞 구간을 지표 워밍업으로 넣고 거래·지표는 OOS 구간만 잰다 (run()과 같은 규약).
+                oos = self.backtester.run(
+                    df.copy(),
+                    strategy_name=strat,
+                    strict_lookahead=True,
+                    trade_start_date=oos_start,
+                )
                 results[strat] = {
                     "full": full["metrics"],
                     "oos": oos["metrics"],
@@ -843,7 +945,7 @@ class StrategyValidator:
         lines = [
             "=" * 70,
             f"Strategy Ablation Report | {result['symbol']}",
-            f"기간: {result['period']} | OOS 분할: {result['split_date']}~",
+            f"기간: {result['period']} | OOS 분할: {result['split_date']}~ | 샤프는 {BACKTEST_RISK_FREE_LABEL} 기준",
             "=" * 70,
             "",
             f"{'전략':<25} | {'FULL Sharpe':>12} | {'OOS Sharpe':>11} | {'FULL 수익률':>12} | {'OOS 수익률':>11} | {'OOS EV/거래':>12}",

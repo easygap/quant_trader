@@ -102,8 +102,26 @@ class PromotionResult:
 
 # ── 승격 규칙 테이블 ──
 
+def _invalid_metrics(m: StrategyMetrics, fields: tuple[str, ...]) -> list[str]:
+    """값이 없거나 NaN/Inf인 지표 이름. NaN은 모든 비교에서 False라, 그대로 두면
+    '수익 ≤ 0'·'MDD < -20%' 같은 탈락 조건을 전부 통과해 승격으로 새어 나간다."""
+    bad = []
+    for name in fields:
+        value = getattr(m, name, None)
+        try:
+            ok = value is not None and math.isfinite(float(value))
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            bad.append(name)
+    return bad
+
+
 def _check_paper_only(m: StrategyMetrics) -> tuple[bool, str]:
     """paper_only 조건: 절대수익>0, PF≥1.0, WF positive≥50%."""
+    bad = _invalid_metrics(m, ("total_return", "profit_factor", "wf_positive_rate"))
+    if bad:
+        return False, "paper_only 미달: 지표 값이 유효하지 않음(" + ", ".join(bad) + ")"
     fails = []
     if m.total_return <= 0:
         fails.append(f"return {m.total_return}% ≤ 0")
@@ -121,6 +139,9 @@ def _check_provisional_candidate(m: StrategyMetrics) -> tuple[bool, str]:
     ok, reason = _check_paper_only(m)
     if not ok:
         return False, reason
+    bad = _invalid_metrics(m, ("sharpe", "mdd", "wf_sharpe_positive_rate"))
+    if bad:
+        return False, "provisional 미달: 지표 값이 유효하지 않음(" + ", ".join(bad) + ")"
 
     fails = []
     if m.sharpe < MIN_PROVISIONAL_SHARPE:

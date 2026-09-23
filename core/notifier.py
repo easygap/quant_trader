@@ -250,13 +250,22 @@ class Notifier:
     # ------------------------------------------------------------------
     # 공개 API
     # ------------------------------------------------------------------
+    def _report_lost_alert(self, title: str, text: str) -> None:
+        """디스코드도 이메일도 전달하지 못한 경보. 로그 말고는 흔적이 남지 않으므로
+        CRITICAL로 남긴다 — 이메일이 죽어 있는 동안 디스코드까지 막히면 경보가 전부
+        사라지는데, 예전엔 이미 알려진 이메일 실패 로그와 구분되지 않았다."""
+        logger.critical("[ALERT_LOST] 모든 경보 채널 전달 실패 — {}: {}", title, str(text)[:300])
+
     def send_message(self, text: str, critical: bool = False) -> None:
         level = "CRITICAL" if critical else "INFO"
         discord_ok = self._discord_send_message(text)
+        email_ok = None
         if critical:
-            self._send_email_tracked("알림", level, body_text=text)
+            email_ok = self._send_email_tracked("알림", level, body_text=text)
         elif not discord_ok:
-            self._send_email_tracked("알림", "WARNING", body_text=text)
+            email_ok = self._send_email_tracked("알림", "WARNING", body_text=text)
+        if not discord_ok and email_ok is False and self._discord_deliverable():
+            self._report_lost_alert("알림", text)
 
     send = send_message
 
@@ -272,10 +281,13 @@ class Notifier:
         plain = self._embed_to_plain(title, description, fields)
         rows = self._embed_to_table_rows(title, description, fields)
         discord_ok = self._discord_send_embed(title, description, color, fields)
+        email_ok = None
         if critical:
-            self._send_email_tracked(title, level, body_text=plain, table_rows=rows)
+            email_ok = self._send_email_tracked(title, level, body_text=plain, table_rows=rows)
         elif not discord_ok:
-            self._send_email_tracked(title, "WARNING", body_text=plain, table_rows=rows)
+            email_ok = self._send_email_tracked(title, "WARNING", body_text=plain, table_rows=rows)
+        if not discord_ok and email_ok is False and self._discord_deliverable():
+            self._report_lost_alert(title, plain)
 
     def send_trade_alert(self, trade_info: dict) -> None:
         action = trade_info.get("action", "")
@@ -308,7 +320,10 @@ class Notifier:
         fields = [
             {"name": "💰 총 평가금", "value": f"{report.get('total_value', 0):,.0f}원", "inline": True},
             {"name": "💵 현금", "value": f"{report.get('cash', 0):,.0f}원", "inline": True},
-            {"name": "📈 일일 수익률", "value": f"{report.get('daily_return', 0):.2f}%", "inline": True},
+            # 계산하지 못한 날(첫 기록·입금 조회 실패)은 0.00%가 아니라 '—'로 둔다.
+            {"name": "📈 일일 수익률", "value": (
+                "—" if report.get("daily_return") is None else f"{report['daily_return']:.2f}%"
+            ), "inline": True},
             {"name": "📊 누적 수익률", "value": f"{report.get('cumulative_return', 0):.2f}%", "inline": True},
             {"name": "📉 MDD", "value": f"{report.get('mdd', 0):.2f}%", "inline": True},
             {"name": "📋 보유 종목", "value": f"{report.get('position_count', 0)}개", "inline": True},
@@ -329,6 +344,7 @@ class Notifier:
             ("deployment", "🎯 주식 배치율", False),
             ("progress", "📅 진행률", False),
             ("cost", "💸 누적 비용", True),
+            ("risk", "📉 리스크", False),
             ("slot_warning", "⚠️ 미체결 슬롯", False),
         ):
             val = report.get(key)

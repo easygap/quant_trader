@@ -13,20 +13,21 @@
 active_strategy: "scoring"
 
 # --- 시장 국면별 전략 파라미터 자동 조정 ---
-# bullish/caution/bearish 국면에 따라 매수 임계값, 손절 배수, 익절 목표를 동적으로 변경.
-# 하락장에서는 진입 조건을 엄격하게, 손절을 타이트하게, 익절을 빨리 가져가서 리스크를 줄인다.
+# 국면(bullish/caution/bearish)에 따라 손절 배수와 익절 목표를 바꾼다.
+# 하락장에서는 손절을 타이트하게, 익절을 빨리 가져가서 리스크를 줄인다.
+# 매수 진입 임계값은 국면에 따라 바뀌지 않는다. 국면별 매수 억제는 시장 국면 필터
+# (settings.trading.market_regime_filter)의 allow_buys·position_scale이 맡는다.
+# (예전 buy_threshold_offset 키는 어디서도 읽지 않아 지웠다 — 진입이 엄격해지는 줄 알기 쉬웠다)
+# market_regime_filter가 꺼져 있으면 국면은 늘 bullish로 잡혀 배수는 1.0(변화 없음)이다.
 regime_adaptive:
   enabled: true
   bullish:
-    buy_threshold_offset: 0       # 기본 buy_threshold에 더할 값 (0 = 변경 없음)
     stop_loss_multiplier: 1.0     # 기본 손절 비율에 곱할 배수 (1.0 = 변경 없음)
     take_profit_multiplier: 1.0
   caution:
-    buy_threshold_offset: 1       # 매수 조건을 +1 엄격하게
     stop_loss_multiplier: 0.7     # 손절을 30% 타이트하게
     take_profit_multiplier: 0.8   # 익절 목표를 20% 낮춰 빨리 실현
   bearish:
-    buy_threshold_offset: 2       # 매수 조건을 +2 매우 엄격하게 (사실상 진입 차단 수준)
     stop_loss_multiplier: 0.5     # 손절을 50% 타이트하게
     take_profit_multiplier: 0.6   # 익절 목표를 40% 낮춰 빠른 실현
 
@@ -140,6 +141,9 @@ scoring:
 # Z-Score < -2 는 "기술적 과매도"와 "악화 기업"을 구분하지 못하며, ADX < adx_filter 도 하락 추세 구간에서 낮게 나와 필터가 불완전함.
 # 실전 권장: exclude_52w_low_near 사용 + 유동성/퀄리티·손절 필수. 코스피200 대형주만 적용 시 상대적으로 안전.
 # fundamental_filter: Z-Score 매수 조건 충족 시 PER·부채비율 정상 범위 확인 (yfinance 기반, 한국 종목은 업데이트 느림·누락 많음 → pykrx/KRX 공시 병행 검토).
+# 백테스트 반영 범위: 52주 필터(exclude_52w_low_near)는 백테스트·paper 공통 적용.
+#   fundamental_filter·restrict_to_kospi200은 '현재' 재무·구성 종목만 조회되므로 백테스트에는 반영하지 않는다
+#   (과거 봉에 적용하면 미래 정보·생존 편향). 백테스트 성과는 이 두 필터가 없는 전략의 성과다.
 mean_reversion:
   z_score_buy: -2.0           # 매수 Z-Score 기준
   z_score_sell: 2.0          # 매도 Z-Score 기준
@@ -170,7 +174,8 @@ trend_pullback:
 
 # --- 거래량 동반 돌파 전략 (Breakout + Volume, C-4) ---
 # 전고점 돌파 + 거래량 급증 + ADX 추세 확인. edge-trigger 진입.
-# Exit: close < breakout_ref (최소 실패 신호). 나머지는 ATR 2.5 trailing stop 위임.
+# Exit: close < entry_level (진입 봉에서 돌파한 breakout_ref, 다음 진입까지 고정) — 최소 실패 신호.
+#   레벨 아래에 있는 동안 매 봉 SELL(최소 보유일에 막혀도 다음 봉에 다시 나옴). 나머지는 ATR 2.5 trailing stop 위임.
 breakout_volume:
   breakout_period: 10           # 돌파 기준 기간 (rolling max window) — C-4 OOS best
   surge_ratio: 1.5              # 거래량 급증 배수 (volume > avg_vol * surge_ratio) — C-4 OOS best
@@ -193,9 +198,9 @@ relative_strength_rotation:
 # 한국 시장: 코스피/코스닥은 박스권·추세 단명 특성으로 미국(나스닥) 대비 추세 추종 실증 근거가 약함. 종목·기간별 검증 권장.
 trend_following:
   adx_threshold: 25           # 추세 존재 확인 ADX 기준
-  trend_ma_period: 200        # 추세 판단 이동평균 기간
-  atr_stop_multiplier: 2.0    # ATR 기반 손절 배수
-  trailing_atr_multiplier: 3.0  # ATR 기반 트레일링 스탑 배수
+  trend_ma_period: 200        # 추세 판단 이동평균 기간 (전략이 직접 계산)
+  # 손절·트레일링 배수는 risk_params.yaml의 stop_loss.atr_multiplier / trailing_stop.atr_multiplier를 따른다.
+  # (예전 atr_stop_multiplier·trailing_atr_multiplier 키는 어디서도 읽지 않아 지웠다)
 
 # --- 펀더멘털 팩터 전략 (가격 OHLC와 독립, pykrx 우선 → yfinance 폴백) ---
 fundamental_factor:
@@ -231,6 +236,7 @@ ensemble:
   mode: "majority_vote"       # majority_vote | weighted_sum | conservative
   auto_downgrade: true        # true면 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
   independence_threshold: 0.6 # 전략 신호 상관계수 |r| >= 이 값이면 고상관 판단 → 다수결 의미 퇴색 경고
+  independence_window: 60     # 상관 판정 기간: 날짜마다 그날까지의 N행 신호만 본다 (미래 신호는 안 봄)
   components:                 # enabled/weight 로 구성 전략 켜고 끄기 (weighted_sum 시 weight 사용)
     - name: technical
       enabled: true

@@ -652,6 +652,7 @@ class TestMarketSnapshotLiquidity:
         rebalancer.portfolio_mgr = SimpleNamespace(
             get_available_cash=MagicMock(return_value=5_000_000),
             get_current_capital=MagicMock(return_value=100_000_000),
+            get_portfolio_summary=MagicMock(return_value={"total_value": 95_000_000}),
         )
         rebalancer._market_snapshot = {
             "005930": {"price": 70_000.0, "avg_volume": 123_456.0},
@@ -669,6 +670,80 @@ class TestMarketSnapshotLiquidity:
         assert result["executed"] == 1
         kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
         assert kwargs["avg_daily_volume"] == pytest.approx(123_456.0)
+
+    def test_execute_sizes_exposure_at_market_prices(self, rebalancer, monkeypatch):
+        """계획은 시가로 하는데 주문 단계가 원가로 재면 하락장 보충 매수가 '투자 비중
+        초과'로 거부된다(2026-09-23 점검). 가격 스냅샷이 있으면 총자산과 보유 노출을
+        같은 시가로 넘긴다."""
+        from core.basket_rebalancer import RebalanceOrder
+
+        summary = MagicMock(return_value={"total_value": 95_000_000})
+        rebalancer.portfolio_mgr = SimpleNamespace(
+            get_available_cash=MagicMock(return_value=5_000_000),
+            get_current_capital=MagicMock(return_value=100_000_000),
+            get_portfolio_summary=summary,
+        )
+        rebalancer._market_snapshot = {"005930": {"price": 70_000.0, "avg_volume": 1.0}}
+        fake_executor = MagicMock()
+        fake_executor.execute_buy_quantity.return_value = {"success": True}
+        monkeypatch.setattr(
+            "core.order_executor.OrderExecutor", MagicMock(return_value=fake_executor)
+        )
+
+        rebalancer.execute([RebalanceOrder("005930", "BUY", 10, 70_000, "테스트")])
+
+        kwargs = fake_executor.execute_buy_quantity.call_args.kwargs
+        assert kwargs["capital"] == 95_000_000          # 원가 총자산(1억)이 아니라 시가
+        assert kwargs["mark_prices"] == {"005930": 70_000.0}
+        assert summary.call_args.kwargs["current_prices"] == {"005930": 70_000.0}
+        rebalancer.portfolio_mgr.get_current_capital.assert_not_called()
+
+    def test_failed_order_reason_is_logged_and_returned(self, rebalancer, monkeypatch):
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.portfolio_mgr = SimpleNamespace(
+            get_available_cash=MagicMock(return_value=5_000_000),
+            get_current_capital=MagicMock(return_value=100_000_000),
+            get_portfolio_summary=MagicMock(return_value={"total_value": 100_000_000}),
+        )
+        rebalancer._market_snapshot = {"005930": {"price": 70_000.0, "avg_volume": 1.0}}
+        fake_executor = MagicMock()
+        fake_executor.execute_buy_quantity.return_value = {
+            "success": False, "reason": "전체 투자 비중 63% 초과",
+        }
+        monkeypatch.setattr(
+            "core.order_executor.OrderExecutor", MagicMock(return_value=fake_executor)
+        )
+
+        result = rebalancer.execute([RebalanceOrder("005930", "BUY", 10, 70_000, "테스트")])
+
+        assert result["failed"] == 1
+        assert result["details"][0]["reason"] == "전체 투자 비중 63% 초과"
+
+    def test_stop_loss_exit_is_sent_as_emergency_but_take_profit_is_not(
+        self, rebalancer, monkeypatch,
+    ):
+        from core.basket_rebalancer import RebalanceOrder
+
+        rebalancer.portfolio_mgr = SimpleNamespace(
+            get_available_cash=MagicMock(return_value=0),
+            get_current_capital=MagicMock(return_value=100_000_000),
+        )
+        rebalancer._market_snapshot = {}
+        fake_executor = MagicMock()
+        fake_executor.execute_sell.return_value = {"success": True}
+        monkeypatch.setattr(
+            "core.order_executor.OrderExecutor", MagicMock(return_value=fake_executor)
+        )
+
+        rebalancer.execute([
+            RebalanceOrder("005930", "SELL", 1, 70_000, "RISK_EXIT STOP_LOSS: 손절"),
+            RebalanceOrder("000660", "SELL", 1, 70_000, "RISK_EXIT TAKE_PROFIT: 익절"),
+            RebalanceOrder("035720", "SELL", 1, 70_000, "비중 초과 (14.9% → 11.1%)"),
+        ])
+
+        flags = [c.kwargs["emergency"] for c in fake_executor.execute_sell.call_args_list]
+        assert flags == [True, False, False]
 
 
 class TestBasketAccountIsolation:

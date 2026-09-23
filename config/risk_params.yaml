@@ -88,7 +88,9 @@ position_limits:
 drawdown:
   max_portfolio_mdd: 0.15     # 전체 포트폴리오 MDD 한도 (15%)
   max_daily_loss: 0.03        # 일일 최대 손실 한도 (3%)
-  recovery_scale: 0.5         # MDD 회복 후 복귀 시 축소 비율 (50%)
+  # MDD 한도 도달 후에는 한도의 절반 아래로 회복할 때까지 신규 매수를 막는다(히스테리시스).
+  # 예전의 recovery_scale(회복 후 50% 사이징)은 어떤 코드도 읽지 않아 삭제했다(2026-09-23).
+  # 목표 비중 바스켓 주문은 이 한도 대신 바스켓의 overlays.drawdown_guard를 따른다.
 
 # --- 블랙스완(급락) 감지 ---
 # 개별 종목·포트폴리오·연속 하락 세 가지 경로로 급락을 감지.

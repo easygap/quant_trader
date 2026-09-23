@@ -158,6 +158,53 @@ _USD_KRW_CACHE: tuple[float, float] = (0.0, 0.0)
 _USD_KRW_TTL_SEC = 300.0
 
 
+_YF_INDEX_TICKERS = {"KS11": "^KS11", "KS200": "^KS200", "KQ11": "^KQ11"}
+_CALENDAR = None
+
+
+def _exclusive_end(end_date) -> str:
+    """yfinance의 end는 그날을 포함하지 않는다 — 종료일 봉까지 받으려면 하루 뒤로."""
+    return (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _yf_download_flat(ticker: str, start, end) -> pd.DataFrame:
+    """단일 티커 일봉. yfinance 1.x는 기본으로 (필드, 티커) 2단 열을 돌려준다 — 1단으로 편다."""
+    df = yf.download(
+        ticker, start=start, end=end, progress=False, auto_adjust=True,
+        multi_level_index=False,
+    )
+    if df is not None and isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def _freshness_target(end_date):
+    """자료의 마지막 봉이 최소 이 날짜여야 하는 기준 거래일. 최근 요청이 아니면 None.
+
+    오늘 봉은 장중이면 아직 없을 수 있으므로 요구하지 않는다 — 기준은 end_date와
+    어제 중 이른 날 이하의 마지막 거래일이다. end_date가 1주일보다 오래전이면
+    (백테스트·과거 구간) 검사하지 않는다.
+    """
+    global _CALENDAR
+    try:
+        from core.trading_hours import TradingHours, _now_kst
+
+        today = _now_kst().date()
+        end = pd.Timestamp(end_date).date()
+        if end < today - timedelta(days=7):
+            return None
+        if _CALENDAR is None:
+            _CALENDAR = TradingHours()
+        day = min(end, today - timedelta(days=1))
+        for _ in range(20):
+            if _CALENDAR.is_trading_day(datetime(day.year, day.month, day.day)):
+                return day
+            day -= timedelta(days=1)
+    except Exception as e:
+        logger.warning("최신 자료 기준일 계산 실패 — 확인 생략: {}", e)
+    return None
+
+
 class DataCollector:
     """
     주가 데이터 수집기
@@ -172,6 +219,7 @@ class DataCollector:
     SOURCE_ADJUSTED_MAP = {
         "FinanceDataReader": True,
         "yfinance": True,       # auto_adjust=True
+        "FinanceDataReader+yfinance": True,  # FDR이 늦어 최근 봉만 yfinance로 보충
         "KIS": False,           # 비수정(원시) 반환 가능
     }
 
@@ -220,36 +268,53 @@ class DataCollector:
         Returns:
             누적 수익률(%) 또는 None
         """
-        try:
-            if HAS_FDR:
-                import FinanceDataReader as _fdr
-                df = _fdr.DataReader(symbol, start_date, end_date)
-            elif HAS_YF:
-                import yfinance as _yf
-                ticker = f"^{symbol}" if not symbol.startswith("^") else symbol
-                df = _yf.download(ticker, start=start_date, end=end_date, progress=False)
-            else:
-                logger.warning("벤치마크 fetch 불가: FDR/yfinance 미설치")
-                return None
-
-            if df is None or df.empty or len(df) < 2:
-                logger.warning("벤치마크 {} 데이터 부족: {}~{}", symbol, start_date, end_date)
-                return None
-
-            close_col = "Close" if "Close" in df.columns else "close"
-            if close_col not in df.columns:
-                logger.warning("벤치마크 {} Close 컬럼 없음", symbol)
-                return None
-
-            first_close = float(df[close_col].iloc[0])
-            last_close = float(df[close_col].iloc[-1])
-            if first_close <= 0:
-                return None
-
-            return (last_close / first_close - 1) * 100
-        except Exception as e:
-            logger.warning("벤치마크 {} 수익률 계산 실패: {}", symbol, e)
+        # 마지막 봉이 기준 거래일보다 오래됐으면 그 값으로 계산하지 않는다. FDR 지수
+        # 자료가 며칠씩 멈추는 일이 실제로 있었고(2026-09-17 이후 KS11·KS200), 그때
+        # 수익률을 그대로 내면 'NAV vs 시장' 비교가 경고 없이 몇 %p씩 틀어진다.
+        expected = _freshness_target(end_date)
+        candidates = []
+        if HAS_FDR:
+            candidates.append("fdr")
+        if HAS_YF:
+            candidates.append("yfinance")
+        if not candidates:
+            logger.warning("벤치마크 fetch 불가: FDR/yfinance 미설치")
             return None
+        for source in candidates:
+            try:
+                if source == "fdr":
+                    import FinanceDataReader as _fdr
+                    df = _fdr.DataReader(symbol, start_date, end_date)
+                else:
+                    df = _yf_download_flat(
+                        _YF_INDEX_TICKERS.get(str(symbol).upper(),
+                                              symbol if str(symbol).startswith("^") else f"^{symbol}"),
+                        start_date, _exclusive_end(end_date),
+                    )
+                if df is None or df.empty or len(df) < 2:
+                    logger.warning("벤치마크 {} 데이터 부족({}): {}~{}", symbol, source, start_date, end_date)
+                    continue
+                close_col = "Close" if "Close" in df.columns else "close"
+                if close_col not in df.columns:
+                    logger.warning("벤치마크 {} Close 컬럼 없음({})", symbol, source)
+                    continue
+                # 값이 빈 봉(yfinance가 가끔 돌려준다)은 날짜 판정과 계산에서 뺀다
+                closes = pd.to_numeric(df[close_col], errors="coerce").dropna()
+                closes = closes[closes > 0]
+                if len(closes) < 2:
+                    logger.warning("벤치마크 {} 쓸 수 있는 종가 부족({})", symbol, source)
+                    continue
+                last_day = pd.Timestamp(closes.index.max()).date()
+                if expected is not None and last_day < expected:
+                    logger.warning(
+                        "벤치마크 {} 자료가 {}에 멈춤(기준 거래일 {}, 소스 {}) — 이 값으로 계산하지 않는다",
+                        symbol, last_day, expected, source,
+                    )
+                    continue
+                return (float(closes.iloc[-1]) / float(closes.iloc[0]) - 1) * 100
+            except Exception as e:
+                logger.warning("벤치마크 {} 수익률 계산 실패({}): {}", symbol, source, e)
+        return None
 
     def clear_krx_ohlcv_range_cache(self) -> None:
         """한국 주가 구간 캐시 비우기."""
@@ -430,9 +495,10 @@ class DataCollector:
         if HAS_FDR and self._preferred_source in ("auto", "fdr"):
             df = self._try_fdr(symbol, start_date, end_date)
             if df is not None and not df.empty:
-                self._record_source(symbol, "FinanceDataReader")
+                df, source = self._fill_stale_tail(symbol, df, end_date)
+                self._record_source(symbol, source)
                 if not self.quiet_ohlcv_log:
-                    self._log_source_usage(symbol, "FinanceDataReader")
+                    self._log_source_usage(symbol, source)
                 return df
 
         # 2) yfinance
@@ -463,6 +529,50 @@ class DataCollector:
             if not self.quiet_ohlcv_log:
                 self._log_source_usage(symbol, "KIS")
         return df
+
+    def _fill_stale_tail(
+        self, symbol: str, df: pd.DataFrame, end_date: str,
+    ) -> tuple[pd.DataFrame, str]:
+        """FDR 자료의 마지막 봉이 기준 거래일보다 오래됐으면 이후 구간을 yfinance로 채운다.
+
+        비어 있지 않으면 성공으로 보던 탓에, FDR 지수 자료가 2026-09-17에서 멈췄을 때
+        폴백이 한 번도 시도되지 않았다(kr_pocket 추세 필터가 그대로 동결). 최근 요청에만
+        적용한다 — 과거 구간 백테스트나 거래정지 종목에 매번 네트워크를 쓰지 않도록.
+        이후 날짜의 봉만 덧붙이고 기존 봉은 바꾸지 않는다.
+        """
+        expected = _freshness_target(end_date)
+        if expected is None or not HAS_YF:
+            return df, "FinanceDataReader"
+        try:
+            last = pd.Timestamp(df.index.max()).date()
+        except Exception:
+            return df, "FinanceDataReader"
+        if last >= expected:
+            return df, "FinanceDataReader"
+        logger.warning(
+            "종목 {} FDR 최근 봉 {} — 기준 거래일 {}보다 오래됨. yfinance로 이후 구간 보충 시도",
+            symbol, last, expected,
+        )
+        extra = self._fetch_korean_stock_via_yfinance(
+            symbol, (last - timedelta(days=14)).isoformat(), end_date,
+        )
+        if extra is None or extra.empty:
+            logger.warning("종목 {} yfinance도 자료 없음 — {} 봉까지로 진행", symbol, last)
+            return df, "FinanceDataReader"
+        tail = extra[extra.index > pd.Timestamp(last)]
+        tail = tail[[c for c in df.columns if c in tail.columns]]
+        if "close" in tail.columns:
+            tail = tail[pd.to_numeric(tail["close"], errors="coerce").fillna(0) > 0]
+        if tail.empty:
+            logger.warning("종목 {} yfinance에도 {} 이후 봉 없음", symbol, last)
+            return df, "FinanceDataReader"
+        merged = pd.concat([df, tail]).sort_index()
+        merged = merged[~merged.index.duplicated(keep="first")]
+        logger.warning(
+            "종목 {} FDR 자료에 yfinance 봉 {}개 보충 ({} ~ {})",
+            symbol, len(tail), tail.index.min().date(), tail.index.max().date(),
+        )
+        return merged, "FinanceDataReader+yfinance"
 
     def _try_fdr(
         self, symbol: str, start_date: str, end_date: str,
@@ -1039,23 +1149,36 @@ class DataCollector:
             start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
-        ticker = "^KS11" if symbol.upper() == "KS11" else f"{symbol}.KS"
-        logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
-        try:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-            if df.empty or len(df) < 2:
-                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-            df = self._normalize_dataframe(df)
-            from core.data_validator import DataValidator
-            df = DataValidator.clean_dataframe(df, symbol)
+        # 지수는 ^ 티커, 종목은 코스피(.KS) → 코스닥(.KQ) 순으로 시도한다.
+        # yfinance의 end는 그날을 포함하지 않으므로 하루 뒤로 넘긴다(종료일 봉 누락 방지).
+        sym = str(symbol).strip().upper()
+        tickers = (
+            [_YF_INDEX_TICKERS[sym]] if sym in _YF_INDEX_TICKERS
+            else [f"{symbol}.KS", f"{symbol}.KQ"]
+        )
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        for ticker in tickers:
+            logger.info("한국 주식 데이터 수집 (yfinance): {} ({} ~ {})", ticker, start_date, end_date)
+            try:
+                df = _yf_download_flat(ticker, start_date, _exclusive_end(end_date))
+            except Exception as e:
+                logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
+                continue
+            if df is None or df.empty or len(df) < 2:
+                continue
+            try:
+                df = self._normalize_dataframe(df)
+                from core.data_validator import DataValidator
+                df = DataValidator.clean_dataframe(df, symbol)
+            except Exception as e:
+                logger.warning("yfinance 한국 주식 정규화 실패 ({}): {}", ticker, e)
+                continue
             logger.info(
-                "종목 {} 데이터 수집 완료 (소스=yfinance, 수정주가=auto_adjust=True): {}건",
-                symbol, len(df),
+                "종목 {} 데이터 수집 완료 (소스=yfinance {}, 수정주가=auto_adjust=True): {}건",
+                symbol, ticker, len(df),
             )
             return df
-        except Exception as e:
-            logger.warning("yfinance 한국 주식 수집 실패 ({}): {}", ticker, e)
-            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return empty
 
     def fetch_korean_stock_via_kis(self, symbol: str) -> pd.DataFrame:
         """

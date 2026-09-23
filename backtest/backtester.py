@@ -18,16 +18,41 @@ from backtest.cost_impact import (
 from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
+# 보유 종목의 데이터가 백테스트 도중 끝나면(상장폐지·합병·종목 캐시 조기 종료) 마지막 관측
+# 종가로 강제 청산했다는 기록용 액션. 포트폴리오 엔진이 쓰며, 지표·리포트에서 빠지지 않게
+# 전량 청산 목록에 함께 둔다.
+DATA_END_EXIT_ACTION = "DATA_END"
 _FULL_EXIT_SELL_ACTIONS = frozenset(
-    ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD", "GAP_DOWN", "BLACKSWAN")
+    (
+        "SELL",
+        "STOP_LOSS",
+        "TAKE_PROFIT",
+        "TRAILING_STOP",
+        "MAX_HOLD",
+        "GAP_DOWN",
+        "BLACKSWAN",
+        DATA_END_EXIT_ACTION,
+    )
 )
 _PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
+# 실현 손익이 생기는 모든 매도 액션(전량 청산 + 부분 익절). 승률·손익비·거래 수 같은 지표와
+# 리포트 거래표가 모두 이 한 목록만 쓴다. 목록이 여러 벌이면 한쪽에서 빠진 청산 사유의
+# 거래가 통계에서 조용히 사라진다(MAX_HOLD가 지표에서, GAP_DOWN·BLACKSWAN이 리포트에서
+# 빠져 있던 사례). 청산 사유를 새로 만들면 위 목록에만 추가한다.
+PNL_EXIT_ACTIONS = _FULL_EXIT_SELL_ACTIONS | frozenset((_PARTIAL_EXIT_ACTION,))
 
 EXECUTION_MODEL_NEXT_OPEN = "next_open"
 EXECUTION_MODEL_LEGACY_SAME_CLOSE = "legacy_same_close"
 _SUPPORTED_EXECUTION_MODELS = frozenset(
     (EXECUTION_MODEL_NEXT_OPEN, EXECUTION_MODEL_LEGACY_SAME_CLOSE)
 )
+
+# 백테스트 샤프·소르티노에 쓰는 연 무위험수익률. 운영 성과 렌즈(core/performance_lens.py)는
+# rf=0이라 같은 '샤프'라도 약 0.03/연변동성만큼 정의가 다르다 — 운영 샤프와 비교할 때 감안한다.
+# 값을 바꾸면 min_sharpe·OOS 샤프 게이트·후보 순위처럼 이 기준에 맞춰 둔 문턱이 함께
+# 움직이므로 반드시 재기준화와 같이 바꾼다. 리포트는 샤프 옆에 BACKTEST_RISK_FREE_LABEL을 표기한다.
+BACKTEST_RISK_FREE_ANNUAL = 0.03
+BACKTEST_RISK_FREE_LABEL = f"금리 {BACKTEST_RISK_FREE_ANNUAL * 100:g}%"
 
 
 def _validate_execution_model(execution_model: str) -> str:
@@ -38,6 +63,13 @@ def _validate_execution_model(execution_model: str) -> str:
             f"지원하지 않는 execution_model={execution_model!r}. 지원값: {supported}"
         )
     return execution_model
+
+
+def _trade_start_position(index: pd.Index, trade_start_date) -> int:
+    """trade_start_date 이상인 첫 행의 위치. None이면 0 (워밍업 없음)."""
+    if trade_start_date is None:
+        return 0
+    return int(index.searchsorted(pd.Timestamp(trade_start_date), side="left"))
 
 
 def _count_roundtrips(trades: list) -> int:
@@ -121,6 +153,7 @@ class Backtester:
         notify_overtrading: bool = False,
         symbol: str = None,
         execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
+        trade_start_date=None,
     ) -> dict:
         """
         백테스팅 실행
@@ -137,6 +170,10 @@ class Backtester:
             execution_model: 전략 신호 체결 모델. 기본값 ``next_open``은 T일 종가로
                 확정된 BUY/SELL 신호를 다음 거래일 시가에 체결한다.
                 과거 결과 재현이 필요할 때만 ``legacy_same_close``를 사용한다.
+            trade_start_date: 데이터 워밍업과 별도로 실제 거래·평가를 시작할 날짜
+                (PortfolioBacktester.run과 같은 규약). 이전 행은 지표 계산에만 쓰고, 거래·자본
+                곡선·성과 지표는 이 날짜부터 잰다. 직전 행의 신호는 next_open에서 첫날 시가에
+                체결될 수 있다. None이면 첫 행부터 거래한다.
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -147,14 +184,27 @@ class Backtester:
             ).get("initial_capital", 10000000)
 
         execution_model = _validate_execution_model(execution_model)
+        start_pos = _trade_start_position(df.index, trade_start_date)
+        if trade_start_date is not None and start_pos >= len(df):
+            raise ValueError(
+                f"trade_start_date={trade_start_date} 이후 거래할 데이터가 없습니다 "
+                f"(마지막 행 {df.index[-1] if len(df) else 'N/A'})."
+            )
 
         self._param_overrides = param_overrides
         strategy = self._get_strategy(strategy_name)
         if strict_lookahead:
             # Look-Ahead Bias 방어: 시점 T에서는 T 이전(및 T) 데이터만 사용
             logger.info("strict_lookahead=True: 시점별 슬라이싱 분석 실행 중...")
+            # 워밍업 행 중 신호가 쓰이지 않는 행(거래 시작 전날보다 앞)은 분석을 건너뛴다.
+            # 쓰이는 행의 신호는 여전히 그 시점까지의 데이터(df[:i+1])로만 계산하므로
+            # 지표는 워밍업 구간 전체로 예열된 상태다.
+            first_needed = max(0, start_pos - 1)
             rows = []
             for i in range(len(df)):
+                if i < first_needed:
+                    rows.append({"signal": "HOLD", "close": df.iloc[i]["close"]})
+                    continue
                 chunk = strategy.analyze(df.iloc[: i + 1].copy())
                 if not chunk.empty and "signal" in chunk.columns:
                     rows.append(chunk.iloc[-1].to_dict())
@@ -163,6 +213,13 @@ class Backtester:
             df_analyzed = pd.DataFrame(rows, index=df.index)
             if "close" not in df_analyzed.columns:
                 df_analyzed["close"] = df["close"].values
+            if first_needed > 0:
+                # 분석을 건너뛴 워밍업 행은 원본 값으로 채운다 (거래량 이동평균·전일 종가 계산용).
+                for col in df.columns:
+                    if col in df_analyzed.columns and col != "signal":
+                        df_analyzed.iloc[:first_needed, df_analyzed.columns.get_loc(col)] = (
+                            df[col].iloc[:first_needed].to_numpy()
+                        )
         else:
             df_analyzed = strategy.analyze(df.copy())
 
@@ -204,6 +261,7 @@ class Backtester:
             regime_series=regime_series,
             symbol=symbol,
             execution_model=execution_model,
+            trade_start_date=trade_start_date,
         )
         result["look_ahead_bias_verified"] = (
             "STRICT" if strict_lookahead else "DISABLED_WITH_WARNING"
@@ -213,8 +271,9 @@ class Backtester:
         metrics = self._calculate_metrics(result, initial_capital)
 
         logger.info(
-            "백테스팅 완료 | 수익률: {:.2f}% | 샤프: {:.2f} | MDD: {:.2f}% | 승률: {:.1f}%",
+            "백테스팅 완료 | 수익률: {:.2f}% | 샤프({}): {:.2f} | MDD: {:.2f}% | 승률: {:.1f}%",
             metrics["total_return"],
+            BACKTEST_RISK_FREE_LABEL,
             metrics["sharpe_ratio"],
             metrics["max_drawdown"],
             metrics["win_rate"],
@@ -231,7 +290,9 @@ class Backtester:
             "trades": result["trades"],
             "equity_curve": result["equity_curve"],
             "strategy": strategy_name,
-            "period": f"{df.index[0]} ~ {df.index[-1]}",
+            # 평가(거래) 구간. 워밍업 행은 기간에 넣지 않는다.
+            "period": f"{df.index[start_pos]} ~ {df.index[-1]}",
+            "warmup_rows": start_pos,
             "initial_capital": initial_capital,
             "execution_model": execution_model,
             "look_ahead_bias_verified": result.get("look_ahead_bias_verified", "PASS"),
@@ -371,17 +432,20 @@ class Backtester:
         regime_series: pd.Series = None,
         symbol: str = None,
         execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
+        trade_start_date=None,
     ) -> dict:
         """
         거래 시뮬레이션 실행.
         방어: 날짜 순으로 순회하며 미래 행을 참조하지 않는다. 기본 ``next_open``은
         T일 종가로 확정된 전략 신호를 T+1일 시가에 체결한다.
         설정에 따라 ATR 손절, 1% 룰 포지션 사이징, 부분 익절을 반영한다.
+        trade_start_date 이전 행(워밍업)은 건너뛰고, 거래·자본 곡선은 그 날짜부터 기록한다.
         """
         execution_model = _validate_execution_model(execution_model)
         assert df.index.is_monotonic_increasing or len(df) <= 1, (
             "시뮬레이션은 시간 순서대로만 순회해야 하며, 미래 데이터를 참조하지 않습니다."
         )
+        start_pos = _trade_start_position(df.index, trade_start_date)
         cash = initial_capital
         position = 0
         avg_price = 0
@@ -798,6 +862,9 @@ class Backtester:
                 sold_today = True
 
         for i, (date, row) in enumerate(df.iterrows()):
+            if i < start_pos:
+                # 워밍업 구간: 지표 예열에만 쓰고 거래·자본 곡선은 기록하지 않는다.
+                continue
             close = row["close"]
             raw_open = row.get("open")
             valid_open = (
@@ -847,6 +914,11 @@ class Backtester:
             if regime_enabled and date in regime_series.index:
                 regime_at_t = regime_series.loc[date]
 
+            # 갭다운 청산은 전일 종가를 넘겨 보유한 포지션에만 적용한다. 아래 next_open
+            # 시가 주문으로 방금 산 주식을 같은 시가에 갭다운으로 되팔면 비용만 내는 가짜
+            # 왕복이 생긴다(실전 갭다운 청산도 장 시작 시점 보유 종목만 대상).
+            carried_position = position > 0
+
             # next_open은 당일 시가 전략 주문이 먼저, 이후 갭/블랙스완/종가 위험
             # 청산이 발생하는 실제 시간 순서를 따른다. 시가 결측 주문은 종가로
             # 대체하지 않고 명시적으로 스킵한다.
@@ -873,7 +945,7 @@ class Backtester:
                         bs_daily_returns = bs_daily_returns[-bs_consecutive_days:]
 
             if position > 0 and previous_close is not None and previous_close > 0:
-                if gap_enabled and open_price is not None:
+                if gap_enabled and open_price is not None and carried_position:
                     gap_pct = (open_price - previous_close) / previous_close
                     if gap_pct <= gap_down_threshold:
                         if _execute_full_exit(
@@ -909,9 +981,19 @@ class Backtester:
                 stop_loss_price = _stop_loss_price(row_atr)
                 take_profit_price = avg_price * (1 + tp_rate)
                 holding_days = (date - buy_date).days if buy_date is not None else 0
+                # 실전(order_executor)은 최소 보유 기간 동안 손실 방어 청산(STOP_LOSS·
+                # TRAILING_STOP·GAP_DOWN·BLACKSWAN)만 허용하고 익절·부분 익절·보유기간 만료
+                # 매도는 거부한다. 백테스트도 같은 규칙을 따라야 1~4일차 익절로 승률이 부풀지
+                # 않는다. legacy_same_close는 과거 결과 재현 경로라 기존 규칙을 그대로 둔다.
+                in_min_hold = (
+                    execution_model == EXECUTION_MODEL_NEXT_OPEN
+                    and min_holding_days > 0
+                    and buy_date is not None
+                    and holding_days < min_holding_days
+                )
 
                 # 최대 보유 기간 초과 시 강제 청산
-                if max_holding_days > 0 and holding_days >= max_holding_days:
+                if max_holding_days > 0 and holding_days >= max_holding_days and not in_min_hold:
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, position, "SELL", avg_daily_volume=row_volume,
                         avg_price=avg_price, symbol=symbol,
@@ -965,7 +1047,12 @@ class Backtester:
                     sold_today = True
 
                 # 부분 익절 (1차 목표 도달)
-                elif partial_exit and not partial_exit_done and close >= avg_price * (1 + partial_target):
+                elif (
+                    partial_exit
+                    and not partial_exit_done
+                    and not in_min_hold
+                    and close >= avg_price * (1 + partial_target)
+                ):
                     sell_qty = max(1, int(position * partial_ratio))
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, sell_qty, "SELL", avg_daily_volume=row_volume,
@@ -995,7 +1082,7 @@ class Backtester:
                         sold_today = True
 
                 # 전량 익절
-                elif close >= take_profit_price:
+                elif not in_min_hold and close >= take_profit_price:
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, position, "SELL", avg_daily_volume=row_volume,
                         avg_price=avg_price, symbol=symbol,
@@ -1116,11 +1203,11 @@ class Backtester:
             ) - 1.0
         daily_returns = equity["daily_return"].dropna()
 
-        # 샤프 지수 (연율화, 무위험수익률 3%)
+        # 샤프 지수 (연율화, 무위험수익률 BACKTEST_RISK_FREE_ANNUAL)
         if len(daily_returns) > 0 and daily_returns.std() > 0:
             annual_return = daily_returns.mean() * 252
             annual_std = daily_returns.std() * np.sqrt(252)
-            sharpe = (annual_return - 0.03) / annual_std
+            sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
         else:
             sharpe = 0
 
@@ -1128,24 +1215,12 @@ class Backtester:
         downside_returns = daily_returns[daily_returns < 0]
         if len(downside_returns) > 0 and downside_returns.std() > 0:
             downside_std = downside_returns.std() * np.sqrt(252)
-            sortino = (daily_returns.mean() * 252 - 0.03) / downside_std
+            sortino = (daily_returns.mean() * 252 - BACKTEST_RISK_FREE_ANNUAL) / downside_std
         else:
             sortino = sharpe
 
-        # 매매 기준 성과
-        sell_trades = [
-            t
-            for t in trades
-            if t["action"] in (
-                "SELL",
-                "STOP_LOSS",
-                "TAKE_PROFIT",
-                "TAKE_PROFIT_PARTIAL",
-                "TRAILING_STOP",
-                "GAP_DOWN",
-                "BLACKSWAN",
-            )
-        ]
+        # 매매 기준 성과 (보유기간 만료 MAX_HOLD 포함 — 실현 손익이 있는 매도 전부)
+        sell_trades = [t for t in trades if t["action"] in PNL_EXIT_ACTIONS]
 
         # 꼬리 리스크: VaR 95%, CVaR 95% (일일 기준)
         if len(daily_returns) >= 20:
@@ -1204,10 +1279,9 @@ class Backtester:
         gross_loss = abs(sum(t["pnl"] for t in losing))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
-        # 칼마 비율
+        # 연간 수익률(산술: 총수익률 ÷ 연수). 복리 기준은 아래 CAGR이며 칼마도 CAGR로 계산한다.
         years = len(equity) / 252 if len(equity) > 0 else 1
         annual_return_pct = total_return / years
-        calmar = abs(annual_return_pct / max_drawdown) if max_drawdown != 0 else 0
 
         # 과매매 분석: 총 수수료·세금·슬리피지(종가 대비 체결 불리분), 평균 보유 기간(일)
         total_commission = sum(t.get("commission", 0) for t in trades)
@@ -1224,13 +1298,14 @@ class Backtester:
         for t in trades:
             if t["action"] == "BUY":
                 position_open_date = t["date"]
-            elif t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN") and position_open_date is not None:
+            elif t["action"] in PNL_EXIT_ACTIONS and position_open_date is not None:
                 try:
                     delta = t["date"] - position_open_date
                     holding_days_list.append(delta.days if hasattr(delta, "days") else 0)
                 except (TypeError, ValueError):
                     pass
-                if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN"):
+                # 부분 익절은 포지션이 남아 있으므로 전량 청산일 때만 보유 시작일을 지운다.
+                if t["action"] in _FULL_EXIT_SELL_ACTIONS:
                     position_open_date = None
         avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0.0
 
@@ -1257,6 +1332,10 @@ class Backtester:
         cagr = 0.0
         if initial_capital > 0 and final_value > 0 and years_bt > 0:
             cagr = ((final_value / initial_capital) ** (1 / years_bt) - 1) * 100
+
+        # 칼마 비율 = CAGR / |MDD|. 부호를 유지해야 꾸준히 잃는 전략이 양(+)의 칼마로
+        # '우수'해 보이지 않는다(예전 abs(산술 연수익 / MDD)는 손실 전략도 양수였다).
+        calmar = (cagr / abs(max_drawdown)) if max_drawdown < 0 else 0.0
 
         # 2) Turnover: 연간 총 거래대금 / 평균 자산 (100% = 전 자산 1회 회전)
         total_buy_amount = sum(t["price"] * t["quantity"] for t in trades if t["action"] == "BUY")
@@ -1393,10 +1472,11 @@ class Backtester:
         print(f"  초기 자본     : {m['initial_capital']:>14,.0f}원")
         print(f"  최종 자본     : {m['final_value']:>14,.0f}원")
         print(f"  총 수익률     : {m['total_return']:>13.2f}%")
-        print(f"  연간 수익률   : {m['annual_return']:>13.2f}%")
+        print(f"  연간 수익률   : {m['annual_return']:>13.2f}%  (산술)")
+        print(f"  CAGR          : {m.get('cagr', 0):>13.2f}%  (복리, 칼마 기준)")
         print("-" * 60)
-        print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}")
-        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}")
+        print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
+        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
         print(f"  최대 낙폭     : {m['max_drawdown']:>13.2f}%")
         print(f"  MDD 회복 기간 : {m.get('mdd_recovery_days', 0):>13d}일")
         print(f"  칼마 비율     : {m['calmar_ratio']:>13.2f}")

@@ -437,7 +437,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 ### 4.3 추세 추종 전략 (중급 ⭐⭐)
 
 - **구현**: `strategies/trend_following.py`
-- **설정**: `trend_following` (adx_threshold, trend_ma_period, atr_stop_multiplier, trailing_atr_multiplier)
+- **설정**: `trend_following` (adx_threshold, trend_ma_period). 손절·트레일링 배수는 `risk_params.yaml`의 `stop_loss.atr_multiplier` / `trailing_stop.atr_multiplier`를 따른다
 - **이용(가정)하는 시장 비효율성**: **모멘텀 효과(Momentum)** — "좋은 주식이 일정 기간 계속 좋다"는 현상. 상대적으로 강한 추세가 지속되는 구간에서 추세를 따라가는 방식으로, 미국(나스닥) 등에서 **모멘텀 팩터**로 실증된 비효율성에 기반합니다. 한국 시장에서는 추세 지속성이 약해 해당 비효율성이 weaker할 수 있습니다(아래 "한국 시장 추세 지속성" 참고).
 
 **로직**: ADX > adx_threshold, 가격 > trend_ma(200일), MACD 골든크로스(히스토그램 양수 전환) 시 매수. ATR 기반 손절·트레일링 스탑.
@@ -745,7 +745,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 
 ### 5.7 MDD 제한
 
-- **설정**: `drawdown.max_portfolio_mdd`, `max_daily_loss`, `recovery_scale`
+- **설정**: `drawdown.max_portfolio_mdd`, `max_daily_loss` (회복 사이징 `recovery_scale`은 구현되지 않아 2026-09-23 삭제)
 
 ### 5.8 전략 성과 열화 감지
 
@@ -863,7 +863,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 ### 5.16 시장 국면 적응형 전략 파라미터 (`regime_adaptive`) — v3.0
 
 - **목적**: `check_market_regime()` 결과(bullish / caution / bearish)에 따라 **손절·익절 배수**를 바꿔 하락장에서 손실 속도를 줄이고 익절을 빨리 가져감.
-- **설정**: `config/strategies.yaml` → `regime_adaptive` (`enabled`, `bullish` / `caution` / `bearish` 각각 `buy_threshold_offset`, `stop_loss_multiplier`, `take_profit_multiplier`)
+- **설정**: `config/strategies.yaml` → `regime_adaptive` (`enabled`, `bullish` / `caution` / `bearish` 각각 `stop_loss_multiplier`, `take_profit_multiplier`). 매수 진입 기준은 국면에 따라 바뀌지 않는다 — 국면별 매수 억제는 `market_regime_filter`의 `allow_buys`·`position_scale`이 맡는다
 - **구현**: `core/market_regime.py` → `get_regime_adjusted_params(config, collector)`  
   **OrderExecutor**가 매수 시 `calculate_stop_loss` / `calculate_take_profit`에 국면 배수 전달.
 
@@ -933,8 +933,8 @@ quant_trader/
 │   ├── risk_manager.py          # 포지션 사이징(1% 룰·신호 강도 스케일), check_diversification(업종), **check_correlation_risk**, check_recent_performance, 손절/익절/트레일링(국면 배수), 거래비용
 │   ├── order_executor.py        # 매수/매도. 국면 손절·익절, 상관 축소, **갭업 매수 차단**, 유동성·어닝·분산, Dead-letter
 │   ├── portfolio_manager.py     # 보유 포지션·잔고·수익률. sync_with_broker(KIS 잔고↔DB 크로스체크), save_daily_snapshot()
-│   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
-│   ├── scheduler.py             # 장전/장중(10분)/장마감. **갭다운 즉시 청산**, 동적 손절 갱신, auto_entry 시 장중 재스캔, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전 전환 평가
+│   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드. 실행은 일일 CLI(--mode rebalance)에서만
+│   ├── scheduler.py             # 장전/장중(10분)/장마감. **갭다운 즉시 청산**, 동적 손절 갱신, auto_entry 시 장중 재스캔, 블랙스완 recovery, paper 실전 전환 평가 (바스켓은 거래하지 않음)
 │   ├── runtime_lock.py        # `data/.scheduler.lock` — schedule 모드 단일 인스턴스(중복 실행 방지)
 │   ├── trading_hours.py         # 한국 장·휴장일(holidays.yaml → pykrx → fallback). 미국: us_holidays.yaml + 동부 09:30~16:00 (`is_us_trading_day` 등)
 │   ├── holidays_updater.py      # 휴장일 YAML 자동 갱신 (pykrx 또는 fallback)
@@ -1353,7 +1353,7 @@ quant_trader/
 - [x] KIS 호출 제어 강화 — 지수 백오프+지터, SSL/커넥션 에러 전용 핸들러, 토큰 오류 쿨다운 (§9.1)
 - [x] 주문 실패 Dead-letter 큐 — FailedOrder 테이블에 실패 주문 영구 저장, 재처리 지원 (§9.1)
 - [x] 전략 등록 레지스트리(플러그인형) — `strategies/__init__.py`에서 `create_strategy(name)` 호출로 전략 동적 로딩 (§4.5)
-- [x] 바스켓 포트폴리오 리밸런싱 — `BasketRebalancer`로 종목별 목표 비중 관리, 드리프트/주기 기반 리밸런싱, 신호 가중 모드 지원. `--mode rebalance --basket <name>` CLI 및 스케줄러 장전 단계 자동 통합 (§10)
+- [x] 바스켓 포트폴리오 리밸런싱 — `BasketRebalancer`로 종목별 목표 비중 관리, 드리프트/주기 기반 리밸런싱, 신호 가중 모드 지원. `--mode rebalance --basket <name>` 일일 CLI로 실행 (§10). 스케줄러 장전 경로는 2026-09에 제거
 - [x] **`--mode schedule`** — 모의 매매 전용 무한 스케줄 루프, `core/runtime_lock.py`로 단일 인스턴스 락
 - [x] **미국 티커·장시간** — `DataCollector.fetch_stock` 미국 분기, `config/us_holidays.yaml`, `TradingHours` NYSE 구간
 - [x] **DART(선택)** — `dart_loader` + `earnings_filter` 폴백, `DART_API_KEY` / `settings.dart`

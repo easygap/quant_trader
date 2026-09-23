@@ -121,7 +121,9 @@ class TestTrendFilter:
         with _patch_snapshots(rb):
             decision = rb.overlay_decision()
         assert decision.scale == pytest.approx(0.5)
-        assert decision.data_issues and "부족" in decision.data_issues[0]
+        # 자료가 아예 없으면 '기간 부족'이 아니라 '쓸 수 없음'으로 적는다 — 오래된 자료로
+        # 입력이 비었는데 '200일치 부족'이라고 쓰면 원인을 엉뚱한 데서 찾게 된다(2026-09-23).
+        assert decision.data_issues and "쓸 수 없음" in decision.data_issues[0]
 
     def test_missing_last_close_cannot_look_like_a_trend_recovery(self):
         save_overlay_state("t", OverlayDecision(scale=0.5, trend_below=True))

@@ -40,7 +40,10 @@ def build_track_record(basket_name, start, end, capital=10_000_000):
     # 이걸 무시하면 '주식50/현금50' 바스켓이 주식 100%로 시뮬레이션돼
     # 수익·MDD가 과대 보고된다(트랙레코드는 운영과 같은 조건이어야 정직하다).
     rb = BasketRebalancer(basket_name=basket_name)
-    stock_fraction = rb._stock_fraction()
+    # 설계 비중(오버레이 적용 전)을 쓴다. _stock_fraction은 오늘의 오버레이 판단을
+    # 계산해 운영 상태 파일에 저장하므로, 연구용 과거 시뮬레이션이 운영 상태를 바꾸고
+    # 오늘의 배수를 과거 전 구간에 적용하게 된다.
+    stock_fraction = rb.base_stock_fraction()
 
     dc = DataCollector()
     closes = {}

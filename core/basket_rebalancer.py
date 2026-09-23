@@ -20,6 +20,14 @@ import yaml
 from loguru import logger
 
 _KST = ZoneInfo("Asia/Seoul")
+# 추세 필터 지수 → 그 지수를 따라가는 ETF(지수 자료가 멈췄을 때 대신 쓴다)
+_INDEX_PROXY = {"KS200": "069500"}
+
+
+def _is_protective_exit(reason: str) -> bool:
+    """손실 방어 청산(손절·트레일링)인가. 익절은 여기에 들지 않는다."""
+    text = str(reason or "").upper()
+    return "RISK_EXIT" in text and ("STOP_LOSS" in text or "TRAILING_STOP" in text)
 
 from config.config_loader import Config
 from core.basket_risk import (
@@ -177,6 +185,15 @@ class BasketRebalancer:
             (self.basket.get("overlays") or {}).get("defensive_symbol"),
         ).values())
 
+    def _has_drawdown_rule(self) -> bool:
+        """이 바스켓이 자기 낙폭 규칙(overlays.drawdown_guard)을 켜 두었는지."""
+        cfg = getattr(self, "_overlay_cfg", None)
+        if cfg is None:
+            from core.risk_overlays import parse_overlay_config
+
+            cfg = parse_overlay_config(getattr(self, "basket", None) or {})
+        return bool(cfg.drawdown.enabled)
+
     def _overlay_scale(self) -> float:
         decision = self.overlay_decision()
         return float(decision.scale) if decision is not None else 1.0
@@ -212,6 +229,7 @@ class BasketRebalancer:
             )
         cumulative = None
         daily = None
+        self._overlay_peak_eligible = None
         if self._overlay_cfg.drawdown.enabled or self._overlay_cfg.volatility.enabled:
             cumulative, daily = self._nav_series_for_overlay()
         decision = compute_decision(
@@ -220,6 +238,7 @@ class BasketRebalancer:
             cumulative_returns_pct=cumulative,
             daily_returns=daily,
             prev_state=prev,
+            peak_eligible=getattr(self, "_overlay_peak_eligible", None),
         )
         decision.data_issues.extend(self._overlay_input_issues)
         decision.source_dates = dict(self._overlay_source_dates)
@@ -229,6 +248,21 @@ class BasketRebalancer:
             logger.warning("바스켓 '{}' 오버레이 상태 저장 실패: {}", self.basket_name, exc)
         if decision.data_issues:
             logger.warning("바스켓 '{}' 오버레이 데이터 문제: {}", self.basket_name, "; ".join(decision.data_issues))
+            # 로그만으로는 헬스·주간 리포트가 못 센다(9/17 이후 추세 필터 동결이 로그에만
+            # 남아 있었다). 같은 날 같은 내용은 한 번만 남긴다.
+            try:
+                from core.cycle_observability import record_event_once_per_day
+
+                record_event_once_per_day(
+                    "OVERLAY_DATA_ISSUE",
+                    f"바스켓 '{self.basket_name}' 위험 관리에 쓸 자료 문제: " + "; ".join(decision.data_issues),
+                    severity="warning",
+                    strategy=getattr(self, "account_key", None) or None,
+                    mode=self._ledger_mode(),
+                    dedupe_key="; ".join(decision.data_issues)[:500],
+                )
+            except Exception as exc:
+                logger.warning("오버레이 데이터 문제 이벤트 기록 실패: {}", exc)
         if decision.reasons:
             logger.info("바스켓 '{}' 리스크 오버레이 발동: {} (배수 {})", self.basket_name, " · ".join(decision.reasons), decision.scale)
         else:
@@ -297,9 +331,11 @@ class BasketRebalancer:
         except Exception as exc:
             logger.warning("오버레이 지수 조회 실패 {}: {}", symbol, exc)
             return None
-        if df is None or df.empty or "close" not in df.columns:
-            return None
-        frame = self._overlay_dated_frame(df, "지수 종가")
+        frame = None
+        if df is not None and not df.empty and "close" in df.columns:
+            frame = self._overlay_dated_frame(df, "지수 종가")
+        if frame is None:
+            frame = self._index_proxy_frame(symbol, start, end)
         if frame is None:
             return None
         # 누락 봉을 삭제하면 이동평균 창이 과거로 밀려 잘못 복귀할 수 있다.
@@ -308,6 +344,40 @@ class BasketRebalancer:
         except (TypeError, ValueError):
             return None
         return closes or None
+
+    def _index_proxy_frame(self, symbol: str, start, end):
+        """지수 자료가 없거나 늦을 때 그 지수를 추종하는 ETF 종가로 대신 판단한다.
+
+        2026-09-17 이후 FDR의 KS200 자료가 멈춰 kr_pocket 추세 필터가 '직전 상태
+        유지'로 동결됐다. 추종 ETF(069500)는 같은 날에도 정상이었다. ETF 가격은 분배락
+        날 조금 내려가 이동평균 대비 위치가 약간 보수적으로(아래쪽으로) 잡힐 수 있다.
+        ETF로 대신 봤다는 사실은 data_issues와 source_dates에 남긴다 — 지수 자료가 다시
+        들어오는지는 따로 확인할 것.
+        """
+        proxy = _INDEX_PROXY.get(str(symbol).upper())
+        if not proxy:
+            return None
+        try:
+            pdf = self.data_collector.fetch_korean_stock(proxy, start, end)
+        except Exception as exc:
+            logger.warning("지수 대신 쓸 {} 조회 실패: {}", proxy, exc)
+            return None
+        if pdf is None or pdf.empty or "close" not in pdf.columns:
+            return None
+        issues_before = len(getattr(self, "_overlay_input_issues", []) or [])
+        frame = self._overlay_dated_frame(pdf, f"{proxy} 종가(지수 대신)")
+        if frame is None:
+            return None
+        # ETF로 판단할 수 있게 됐으니 '비중 확대 보류' 문구는 빼고 대신 썼다는 사실만 남긴다
+        issues = getattr(self, "_overlay_input_issues", []) or []
+        self._overlay_input_issues = [
+            i for i in issues[:issues_before] if not i.startswith("지수 종가:")
+        ]
+        self._overlay_data_issue(
+            f"{symbol} 지수 자료가 늦어 {proxy} 종가로 추세를 봤음 — 지수 자료가 다시 들어오는지 확인 필요"
+        )
+        logger.warning("바스켓 '{}' 추세 필터: {} 대신 {} 종가 사용", self.basket_name, symbol, proxy)
+        return frame
 
     def _nav_series_for_overlay(self) -> tuple[list[float] | None, list[float] | None]:
         """이 바스켓 계정의 시간가중 누적수익률(%)과 일간 수익률."""
@@ -328,6 +398,9 @@ class BasketRebalancer:
             cumulative = [float(v) if v is not None else float("nan") for v in snaps["cumulative_return"].tolist()]
         except (TypeError, ValueError):
             return None, None
+        # 나중에 채운 추정 기록은 낙폭 고점 후보에서 뺀다(값 자체는 흐름을 잇는 데 쓴다).
+        if "reconstructed" in snaps.columns:
+            self._overlay_peak_eligible = [not bool(v) for v in snaps["reconstructed"].tolist()]
         index = [1.0 + c / 100.0 for c in cumulative]
         daily = [index[i] / index[i - 1] - 1.0 if index[i - 1] > 0 else float("nan") for i in range(1, len(index))]
         return cumulative, daily
@@ -567,7 +640,22 @@ class BasketRebalancer:
         if trigger == "drift":
             threshold = self.rebalance_cfg.get("drift_threshold", 0.05)
             drifts = self.calculate_drift(prices)
-            max_drift = max(abs(d["drift"]) for d in drifts.values()) if drifts else 0
+            # 재매수 차단(손절 쿨다운) 종목은 트리거에서 뺀다. 못 사는 빈 슬롯이
+            # 드리프트 11%로 매일 트리거를 켜 두면, 전체 비중 조정이 매일 돌면서 보충으로 산
+            # 종목을 다음 날 '비중 초과'로 되파는 왕복매매가 난다(2026-09-22 035720
+            # 6주 매수 → 9-23 같은 6주 매도, 012330 손절 쿨다운 중). 집계 배치율
+            # 트리거는 그대로 둔다.
+            try:
+                blocked = symbols_in_reentry_cooldown(
+                    self.basket, self.account_key, self._ledger_mode(),
+                ) or {}
+            except Exception as exc:
+                logger.warning("재매수 차단 종목 조회 실패 — 트리거에 전 종목 반영: {}", exc)
+                blocked = {}
+            max_drift = max(
+                (abs(d["drift"]) for s, d in drifts.items() if s not in blocked),
+                default=0,
+            )
             if max_drift >= threshold:
                 return True, f"최대 드리프트 {max_drift:.1%} >= 임계값 {threshold:.1%}"
             # 종목별 드리프트가 전부 임계값 아래여도, 그 얇은 미달분의 합이 설계 배치율에서
@@ -653,9 +741,16 @@ class BasketRebalancer:
         except (TypeError, ValueError):
             min_cash = float(div_cfg.get("min_cash_ratio", 0.20))
 
+        # 슬리브 내 비중 상한을 총자산 기준으로 환산
+        position_cap = (float(target_w) + drift) * stock_fraction
+        if symbol == (self.basket.get("overlays") or {}).get("defensive_symbol"):
+            # 방어 자산(CD 파킹 ETF)은 사실상 현금이다. 오버레이가 주식을 전부 줄이면 투자분
+            # 전체가 이 자산이 되는 설계라 종목 상한 대신 투자 비중 상한만 건다 — 계획의
+            # 배치율 보충이 파킹 ETF로 유휴 현금을 옮길 때 주문 단계가 막지 않도록
+            # 같은 기준을 쓴다(2026-09-23).
+            position_cap = stock_fraction
         return {
-            # 슬리브 내 비중 상한을 총자산 기준으로 환산
-            "max_position_ratio": min(1.0, (float(target_w) + drift) * stock_fraction),
+            "max_position_ratio": min(1.0, position_cap),
             "max_investment_ratio": min(1.0, stock_fraction + band),
             "min_cash_ratio": min_cash,
         }
@@ -856,6 +951,7 @@ class BasketRebalancer:
             )
             remaining = shortfall
             drift_limit = float(self.rebalance_cfg.get("drift_threshold", 0.05))
+            defensive = (self.basket.get("overlays") or {}).get("defensive_symbol")
             topups: list[tuple[float, float, str, int, float]] = []
             for symbol, target_w in targets.items():
                 if symbol in already or symbol in cooldown:
@@ -881,11 +977,19 @@ class BasketRebalancer:
                     if investable > 0 else 1.0
                 )
                 if projected_w > target_w + drift_limit:
-                    logger.debug(
-                        "종목 {} 보충 보류: 매수 후 비중 {:.1%} > 목표 {:.1%} + 허용 {:.1%}",
-                        symbol, projected_w, target_w, drift_limit,
-                    )
-                    continue
+                    # 방어 자산(CD 파킹 ETF)은 사실상 현금이다 — 설계가 '이자 없는 현금 대신
+                    # 파킹 ETF'인데 종목 상한에 막히면 소액 계좌에서 현금이 그대로 논다
+                    # (2026-09-23 kr_pocket: 설계 95%인데 실제 73%, 놀고 있는 현금 10.4만 원이
+                    # 두 종목 모두 1주가 상한을 넘어 한 달째 그대로). 다음 사이클의 매도
+                    # 규칙이 되팔지 않는 범위(초과분 < max(min_trade, 1주))에서는 허용한다.
+                    # 주식 종목에는 적용하지 않는다 — 주식 비중이 설계를 넘게 된다.
+                    over_value = investable * (projected_w - target_w)
+                    if not (symbol == defensive and over_value < max(min_trade, price)):
+                        logger.info(
+                            "종목 {} 보충 보류: 매수 후 비중 {:.1%} > 목표 {:.1%} + 허용 {:.1%}",
+                            symbol, projected_w, target_w, drift_limit,
+                        )
+                        continue
                 topups.append((residual, notional, symbol, qty, price))
             # 잔여 격차를 가장 많이 줄이는 순서로 집행한다(1주 단가가 낮을수록 정밀).
             topups.sort()
@@ -1041,6 +1145,12 @@ class BasketRebalancer:
             )
             # 유동성 체크용 20일 평균 거래량 — plan 단계 캐시 재사용, 없으면 새로 조회.
             snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
+        # 주문 단계의 노출 상한·낙폭 가드도 계획과 같은 시가로 잰다(평균단가로 재면
+        # 하락장에서 계획한 보충 매수가 '투자 비중 초과'로 거부된다).
+        mark_prices = {
+            s: float(v["price"]) for s, v in (snapshot or {}).items()
+            if isinstance(v, dict) and v.get("price")
+        }
 
         for order in orders:
             if dry_run:
@@ -1053,7 +1163,13 @@ class BasketRebalancer:
             try:
                 if order.action == "BUY":
                     available_cash = self.portfolio_mgr.get_available_cash()
-                    total_value = self.portfolio_mgr.get_current_capital()
+                    if self._is_live() or not mark_prices:
+                        # live는 증권사 잔고(시가)가 이미 총자산이다
+                        total_value = self.portfolio_mgr.get_current_capital()
+                    else:
+                        total_value = self.portfolio_mgr.get_portfolio_summary(
+                            current_prices=mark_prices,
+                        ).get("total_value")
                     res = executor.execute_buy_quantity(
                         symbol=order.symbol,
                         price=order.price,
@@ -1071,11 +1187,16 @@ class BasketRebalancer:
                         risk_levels=basket_risk_levels(self.basket, order.price),
                         # 노출 상한도 이 바스켓이 선언한 비중에서 파생한다.
                         exposure_limits=self._policy_exposure_limits(order.symbol),
+                        mark_prices=mark_prices or None,
+                        # 계좌 낙폭 가드는 이 바스켓이 자기 낙폭 규칙을 켜 둔 경우에만 넘긴다.
+                        basket_drawdown_rule=self._has_drawdown_rule(),
                     )
                 else:
                     res = executor.execute_sell(
                         symbol=order.symbol, price=order.price, quantity=order.quantity,
                         reason=f"리밸런싱: {order.reason}", strategy=self.execution_strategy,
+                        # 손절·트레일링 청산은 최소 보유 기간보다 우선한다(익절은 아님)
+                        emergency=_is_protective_exit(order.reason),
                     )
 
                 if res.get("success"):
@@ -1083,6 +1204,10 @@ class BasketRebalancer:
                     results["details"].append({"order": repr(order), "status": "success"})
                 else:
                     results["failed"] += 1
+                    logger.warning(
+                        "리밸런싱 주문 거부 {} {} {}주: {}",
+                        order.symbol, order.action, order.quantity, res.get("reason", "unknown"),
+                    )
                     results["details"].append({
                         "order": repr(order), "status": "failed",
                         "reason": res.get("reason", "unknown"),

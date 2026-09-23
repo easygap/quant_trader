@@ -80,8 +80,25 @@ class CircuitBreaker:
             self._half_open_probe_in_flight = False
             self._half_open_probe_started_at = 0.0
 
+    def release_probe(self):
+        """HALF_OPEN probe가 확정적 응답(400/401/403/429 등)을 받았을 때 호출.
+
+        서버가 응답했으니 장애는 아니지만 요청이 성공한 것도 아니다. 상태는
+        HALF_OPEN으로 두고(닫지 않는다) probe 점유만 풀어, 다음 호출이
+        recovery_timeout(60초)을 기다리지 않고 곧바로 다시 probe하게 한다.
+        풀지 않으면 그동안 손절 SELL을 포함한 모든 KIS 요청이 이유 없이 막힌다.
+        """
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN and self._half_open_probe_in_flight:
+                self._half_open_probe_in_flight = False
+                self._half_open_probe_started_at = 0.0
+                logger.info(
+                    "Circuit Breaker HALF_OPEN probe 해제 — 서버가 확정 응답, 상태는 HALF_OPEN 유지"
+                )
+
     def on_failure(self):
         """요청 실패(50x, 타임아웃 등) 시 호출"""
+        alert_failure_count = None
         with self._lock:
             self.last_failure_time = time.monotonic()
             self._half_open_probe_in_flight = False
@@ -91,24 +108,29 @@ class CircuitBreaker:
                 # HALF_OPEN 상태에서 또 실패하면 다시 OPEN으로 회귀
                 self.state = CircuitState.OPEN
                 logger.warning("Circuit Breaker 복구 실패: 다시 OPEN 상태로 전환")
-                
+
             elif self.state == CircuitState.CLOSED:
                 self.failure_count += 1
                 if self.failure_count >= self.failure_threshold:
                     self.state = CircuitState.OPEN
                     logger.error("🚨 Circuit Breaker 발동! 상태 전환: CLOSED -> OPEN ({}회 연속 실패)", self.failure_count)
-                    
-                    # 여기서 디스코드나 긴급 알림 연결 가능 (외부에서 구독)
-                    self._trigger_alert()
+                    alert_failure_count = self.failure_count
 
-    def _trigger_alert(self):
+        # 알림은 Discord·SMTP 네트워크 I/O(수 초 이상)라 락을 놓은 뒤 보낸다. 락 안에서
+        # 보내면 그동안 can_request/on_success를 부르는 모든 스레드(주문 제출·손절
+        # SELL 포함)가 알림 전송이 끝날 때까지 멈춘다. 발동 판정은 위 락 안에서 끝났다.
+        if alert_failure_count is not None:
+            self._trigger_alert(alert_failure_count)
+
+    def _trigger_alert(self, failure_count: int | None = None):
         """서킷 브레이커 오픈 시 알림 — 치명적 이벤트이므로 모든 채널 동시 발송."""
+        count = self.failure_count if failure_count is None else failure_count
         try:
             from core.notifier import Notifier
             notifier = Notifier()
             notifier.send_message(
                 f"🚨 **서킷 브레이커 발동 (API 차단)**\n"
-                f"연속 {self.failure_count}회 API 요청 실패로 인해 모든 통신을 {self.recovery_timeout}초간 차단합니다.\n"
+                f"연속 {count}회 API 요청 실패로 인해 모든 통신을 {self.recovery_timeout}초간 차단합니다.\n"
                 f"서버 다운 또는 장애가 의심됩니다.",
                 critical=True,
             )

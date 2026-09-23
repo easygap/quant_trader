@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import and_, text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.exc import IntegrityError
 from loguru import logger
 
@@ -785,11 +785,14 @@ def save_portfolio_snapshot(
     snapshot_date: datetime = None,
     mode: str = "paper",
     reconstructed: bool = False,
+    measured_at: datetime = None,
 ):
     """일일 포트폴리오 스냅샷 저장 (mode+account_key 장부별 격리).
 
     snapshot_date: 스냅샷 귀속 날짜(자정으로 정규화). 미지정 시 오늘.
     비거래일 보충 실행에서 NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
+    measured_at: 이 값을 찍은 시각(created_at). 안 주면 지금. 나중에 채운 행은
+    복원한 날의 끝을 넘긴다 — TWR 체인의 입금 경계가 이 시각을 쓰기 때문이다.
     """
     session = get_session()
     try:
@@ -813,6 +816,8 @@ def save_portfolio_snapshot(
             position_count=position_count,
             reconstructed=bool(reconstructed),
         )
+        if measured_at is not None:
+            snapshot.created_at = measured_at
         # merge by (mode, account_key, date)
         existing = session.query(PortfolioSnapshot).filter(
             PortfolioSnapshot.mode == md,
@@ -835,7 +840,7 @@ def save_portfolio_snapshot(
             # created_at은 '이 값이 마지막으로 측정된 시각'이다 — TWR 체인의 유입 경계가
             # 이 시각을 쓰므로, 같은 날 재실행(upsert) 때 갱신하지 않으면 재실행 전에
             # 반영된 입금이 다음 날 구간에 이중 산입돼 수익률이 영구 왜곡된다(적대적 리뷰 HIGH).
-            existing.created_at = datetime.now()
+            existing.created_at = measured_at or datetime.now()
         else:
             session.add(snapshot)
         session.commit()
@@ -1001,21 +1006,25 @@ def get_cash_flows(account_key: str = "", mode: str = "paper") -> list:
 
 @with_retry
 def get_recent_cash_flows(
-    account_key: str = "", limit: int = 12, mode: str = "paper"
+    account_key: str = "", limit: Optional[int] = 12, mode: str = "paper"
 ) -> list:
-    """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용."""
+    """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용.
+
+    limit=None이면 전체. 차트·CSV의 누적 원금은 전체 기록이 있어야 맞는다.
+    """
     session = get_session()
     try:
-        rows = (
+        query = (
             session.query(CashFlow)
             .filter(
                 CashFlow.mode == _ledger_mode(mode),
                 CashFlow.account_key == (account_key or ""),
             )
             .order_by(CashFlow.occurred_at.desc())
-            .limit(int(limit))
-            .all()
         )
+        if limit is not None:
+            query = query.limit(int(limit))
+        rows = query.all()
         return [
             {
                 "occurred_at": str(r.occurred_at)[:16],
@@ -1147,7 +1156,11 @@ def get_snapshot_before(
 def get_max_cumulative_return(
     account_key: str = "", mode: str = "paper"
 ) -> Optional[float]:
-    """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용."""
+    """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용.
+
+    나중에 채운 기록(reconstructed)은 뺀다. 시가·종가 중간값으로 만든 추정치라 최대
+    2%가량 틀릴 수 있는데, 그 값이 고점이 되면 이후 낙폭이 계속 부풀어 보인다.
+    """
     session = get_session()
     try:
         row = (
@@ -1156,6 +1169,10 @@ def get_max_cumulative_return(
                 PortfolioSnapshot.mode == _ledger_mode(mode),
                 PortfolioSnapshot.account_key == (account_key or ""),
                 PortfolioSnapshot.cumulative_return.isnot(None),
+                or_(
+                    PortfolioSnapshot.reconstructed.is_(None),
+                    PortfolioSnapshot.reconstructed.is_(False),
+                ),
             )
             .order_by(PortfolioSnapshot.cumulative_return.desc())
             .first()
@@ -1196,6 +1213,7 @@ def get_portfolio_snapshots(
             "cumulative_return": r.cumulative_return,
             "mdd": r.mdd,
             "position_count": r.position_count,
+            "reconstructed": bool(r.reconstructed),   # 나중에 채운 추정 기록
         } for r in results]
 
         return pd.DataFrame(data)

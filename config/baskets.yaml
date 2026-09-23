@@ -6,7 +6,9 @@
 #   - 리밸런싱 = 실제 비중 vs 목표 비중 드리프트 감지 → 주문 생성
 #
 # 여러 바스켓을 정의할 수 있으며, enabled: true인 바스켓만 실행됩니다.
-# --mode rebalance 또는 스케줄러 장전 단계에서 실행됩니다.
+# 실행 경로는 일일 CLI `python main.py --mode rebalance`(평일 10:07 자동화) 하나뿐입니다.
+# 스케줄러(--mode schedule/live)는 바스켓을 거래하지 않습니다 — 장전 시각에는 live 주문이
+# 거래 시간 가드에 막히고 paper는 전일 종가로 체결되던 결함 때문에 제거했습니다.
 # =============================================================
 
 baskets:
@@ -38,6 +40,10 @@ baskets:
     enabled: true
     primary: false
     purpose: "장기 관찰용"
+    promotion:
+      # 지금 설계(주식 60%, 9종목)로 바꾼 날. 실행·구성 격차는 이날부터 잰다 —
+      # 6/10~8/06은 80%·10종목 설계였다.
+      design_effective_from: "2026-08-07"
     target_stock_weight: 0.60      # 주식 60% / 현금 40% — 낙폭 완충을 설계로 고정
     risk:
       # buy&hold 트랙의 손절은 '추세가 꺾였다'가 아니라 '한 종목이 포트폴리오를
@@ -160,6 +166,8 @@ baskets:
       # 이전 규칙으로 쌓은 운영 일수만으로 새 규칙을 실전에 적용하지 않는다.
       paper_only: true
       review_note: "9월 17일 변경한 위험 관리 규칙을 모의투자로 검증하고 있습니다."
+      # 새 규칙의 검증 기간은 이날부터 따로 센다(평가 결과의 rules_window, 카드의 '새 규칙 N/60일').
+      rules_effective_from: "2026-09-17"
     contribution_plan:
       enabled: true
       cadence: "monthly"

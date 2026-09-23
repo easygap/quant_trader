@@ -27,6 +27,7 @@ import numpy as np
 from loguru import logger
 
 from strategies.base_strategy import BaseStrategy
+from strategies.index_cache import IndexCloseCache
 from core.indicator_engine import IndicatorEngine
 from config.config_loader import Config
 
@@ -46,40 +47,65 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         self.config = config or Config.get()
         self.indicator_engine = IndicatorEngine(self.config)
         self.params = self.config.strategies.get("relative_strength_rotation", {})
-        self._mf_series = None  # KS11 > SMA200 market filter cache
-        self._benchmark_composite_cache = {}
+        # KS11 > SMA 시장 필터: 날짜별 통과 여부(T-1 기준). NA = 판단 불가(데이터·SMA 없음)
+        self._mf_series = None
+        self._mf_cache: IndexCloseCache | None = None
+        self._mf_cache_period = None
+        self._mf_series_key = None
+        # 시장 필터 상태 — 조회 실패 시 ok=False. 연구 리포트가 '필터 미적용' 실행을 걸러낼 수 있게 남긴다.
+        self.market_filter_status: dict = {"ok": None, "reason": None}
+        # 벤치마크 지수 캐시: (지수, 워밍업 일수) → IndexCloseCache
+        self._benchmark_index_caches: dict[tuple[str, int], IndexCloseCache] = {}
+        # 파생 복합 모멘텀 캐시: (지수, short, long, weight) → (캐시 version, 시리즈)
+        self._benchmark_composite_cache: dict[tuple, tuple[int, pd.Series]] = {}
         logger.info("RelativeStrengthRotationStrategy 초기화 완료")
 
     def _ensure_market_filter(self, dates_index):
-        """KS11 > SMA(200) 시장 필터 사전 계산 (lazy cache, 인스턴스당 1회)."""
-        if self._mf_series is not None:
-            return
-        try:
-            from core.data_collector import DataCollector
+        """KS11 > SMA(N) 시장 필터 계산 (지수는 인스턴스당 넓게 한 번 받아 캐시).
 
-            mf_period = self.params.get("market_filter_ma_period", 200)
-            collector = DataCollector()
-            first = dates_index.min()
-            last = dates_index.max()
-            margin = mf_period + 100
-            start = (first - pd.Timedelta(days=margin)).strftime("%Y-%m-%d")
-            end = last.strftime("%Y-%m-%d")
-            ks11 = collector.fetch_korean_stock(
-                "KS11", start_date=start, end_date=end
+        예전에는 첫 analyze 호출의 날짜 범위로 한 번만 받아 캐시했다. strict 백테스트의
+        첫 호출은 df.iloc[:1]이라 1일치 상태가 전 기간에 ffill되어 필터가 한 번도
+        작동하지 않았다. 이제 넓은 구간을 받아 두고 필터 시리즈를 그 전체로 한 번
+        계산한 뒤, analyze()가 요청 끝 날짜 이하로 잘라 쓴다. 값은 전일 종가·전일 SMA로만
+        정해지므로(T-1) 넓게 계산해도 각 날짜의 값은 그날 이전 데이터만 반영한다.
+        """
+        if len(dates_index) == 0:
+            return
+        mf_period = int(self.params.get("market_filter_ma_period", 200))
+        if self._mf_cache is None or self._mf_cache_period != mf_period:
+            # 거래일 mf_period개를 확보하려면 달력일로 약 1.7배 + 여유가 필요하다.
+            self._mf_cache = IndexCloseCache(
+                "KS11", warmup_days=int(mf_period * 1.7) + 30, label="market_filter",
             )
-            if ks11 is None or ks11.empty or len(ks11) < mf_period:
-                logger.warning(
-                    "market_filter: KS11 데이터 부족({}/{}) — 필터 비활성화 fallback",
-                    len(ks11) if ks11 is not None else 0,
-                    mf_period,
-                )
-                return
-            close_ks = ks11["close"].astype(float)
-            sma = close_ks.rolling(mf_period, min_periods=mf_period).mean()
-            # T-1 기준: 전일 종가 > 전일 SMA200 → 당일 신규 진입 허용
-            self._mf_series = (close_ks > sma).shift(1, fill_value=True).astype(bool)
-        except Exception as e:
-            logger.warning("market_filter: KS11 로드 실패 — 필터 비활성화: {}", e)
+            self._mf_cache_period = mf_period
+            self._mf_series_key = None
+
+        closes = self._mf_cache.ensure(dates_index.min(), dates_index.max())
+        key = (mf_period, self._mf_cache.version)
+        if key == self._mf_series_key:
+            return
+        self._mf_series_key = key
+
+        if closes is None or len(closes) < mf_period:
+            self._mf_series = None
+            reason = self._mf_cache.last_error or (
+                f"KS11 데이터 부족({0 if closes is None else len(closes)}/{mf_period})"
+            )
+            self.market_filter_status = {"ok": False, "reason": reason}
+            logger.warning(
+                "market_filter: {} — 필터가 적용되지 않습니다 "
+                "(market_filter_active=False로 기록, 이 실행은 필터 없는 결과)",
+                reason,
+            )
+            return
+
+        sma = closes.rolling(mf_period, min_periods=mf_period).mean()
+        # SMA가 아직 없는 날은 '아래'가 아니라 '판단 불가'(NA)로 둔다.
+        above = (closes > sma).astype("boolean")
+        above[sma.isna()] = pd.NA
+        # T-1 기준: 전일 종가 > 전일 SMA → 당일 신규 진입 허용
+        self._mf_series = above.shift(1)
+        self.market_filter_status = {"ok": True, "reason": None}
 
     def _benchmark_composite(
         self,
@@ -89,54 +115,41 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
         short_w: float,
         benchmark_symbol: str,
     ) -> pd.Series:
-        """Return benchmark composite momentum aligned to the input index."""
+        """Return benchmark composite momentum aligned to the input index.
+
+        예전에는 (시작, 끝) 날짜를 캐시 키로 써서 strict 백테스트가 봉마다 지수를 새로
+        받았다. 이제 지수를 인스턴스당 넓게 한 번 받아 복합 모멘텀을 한 번 계산하고,
+        호출의 끝 날짜 이하로 잘라 맞춘다. 조회 실패는 IndexCloseCache가 사유와 함께
+        경고하고, 여기서는 NaN(진입 차단)을 준다.
+        """
         if len(index) == 0:
             return pd.Series(dtype=float, index=index)
 
-        try:
-            from core.data_collector import DataCollector
-
-            dates = pd.to_datetime(index)
-            margin_days = max(long_lb * 3, 180)
-            start = (dates.min() - pd.Timedelta(days=margin_days)).strftime("%Y-%m-%d")
-            end = dates.max().strftime("%Y-%m-%d")
-            cache_key = (
-                benchmark_symbol,
-                int(short_lb),
-                int(long_lb),
-                float(short_w),
-                start,
-                end,
+        dates = pd.to_datetime(index)
+        margin_days = max(int(long_lb) * 3, 180)
+        index_key = (benchmark_symbol, margin_days)
+        cache = self._benchmark_index_caches.get(index_key)
+        if cache is None:
+            cache = IndexCloseCache(
+                benchmark_symbol, warmup_days=margin_days, label="benchmark-aware rotation",
             )
-            if cache_key in self._benchmark_composite_cache:
-                cached = self._benchmark_composite_cache[cache_key]
-                aligned = cached.reindex(dates, method="ffill")
-                return pd.Series(aligned.to_numpy(), index=index)
+            self._benchmark_index_caches[index_key] = cache
 
-            collector = DataCollector()
-            collector.quiet_ohlcv_log = True
-            benchmark = collector.fetch_korean_stock(
-                benchmark_symbol,
-                start_date=start,
-                end_date=end,
-            )
-            if benchmark is None or benchmark.empty:
-                logger.warning("benchmark-aware rotation: benchmark data unavailable")
-                return pd.Series(np.nan, index=index)
-
-            if "date" in benchmark.columns:
-                benchmark = benchmark.set_index("date")
-            benchmark.index = pd.to_datetime(benchmark.index)
-            close = benchmark["close"].astype(float)
-            ret_short = close.pct_change(short_lb)
-            ret_long = close.pct_change(long_lb)
-            benchmark_composite = short_w * ret_short + (1.0 - short_w) * ret_long
-            self._benchmark_composite_cache[cache_key] = benchmark_composite
-            aligned = benchmark_composite.reindex(dates, method="ffill")
-            return pd.Series(aligned.to_numpy(), index=index)
-        except Exception as e:
-            logger.warning("benchmark-aware rotation disabled: {}", e)
+        closes = cache.ensure(dates.min(), dates.max())
+        if closes is None or closes.empty:
             return pd.Series(np.nan, index=index)
+
+        cache_key = (benchmark_symbol, int(short_lb), int(long_lb), float(short_w))
+        cached = self._benchmark_composite_cache.get(cache_key)
+        if cached is None or cached[0] != cache.version:
+            ret_short = closes.pct_change(short_lb)
+            ret_long = closes.pct_change(long_lb)
+            benchmark_composite = short_w * ret_short + (1.0 - short_w) * ret_long
+            cached = (cache.version, benchmark_composite)
+            self._benchmark_composite_cache[cache_key] = cached
+        # 호출 끝 날짜 이후 봉은 잘라 낸다 (strict 백테스트에서 벤치마크 미래 정보 차단)
+        aligned = cached[1].loc[: dates.max()].reindex(dates, method="ffill")
+        return pd.Series(aligned.to_numpy(), index=index)
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """모멘텀 지표 계산 + 월간 리밸런싱 signal 생성."""
@@ -236,15 +249,22 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
             analyzed["abs_mom_pass"] = abs_pass
 
         # ── 시장 필터: KS11 > SMA200 (T-1 기준) ──
+        # 판단 불가(지수 조회 실패·SMA 미형성) 날은 진입을 막지도, 청산을 강제하지도 않고
+        # market_filter_active=False로 기록한다 — 필터가 켜진 설정인데 실제로는 적용되지
+        # 않은 실행을 연구 리포트가 걸러낼 수 있게.
         if self.params.get("market_filter_sma200", False):
             self._ensure_market_filter(analyzed.index)
+            market_filter_active = pd.Series(False, index=analyzed.index)
             if self._mf_series is not None:
-                mf_aligned = self._mf_series.reindex(analyzed.index, method="ffill")
-                market_filter_pass = mf_aligned.astype("boolean").fillna(True).astype(bool)
+                mf = self._mf_series.loc[: analyzed.index.max()]
+                mf_aligned = mf.reindex(analyzed.index, method="ffill").astype("boolean")
+                market_filter_active = mf_aligned.notna().astype(bool)
+                market_filter_pass = mf_aligned.fillna(True).astype(bool)
                 entry_cond = entry_cond & market_filter_pass
                 analyzed["market_filter_pass"] = market_filter_pass
             else:
                 analyzed["market_filter_pass"] = True
+            analyzed["market_filter_active"] = market_filter_active
         market_filter_exit = (
             self.params.get("market_filter_sma200", False)
             and self.params.get("market_filter_exit", False)
@@ -340,6 +360,7 @@ class RelativeStrengthRotationStrategy(BaseStrategy):
                 "rebalance_day": bool(last.get("rebalance_day", False)),
                 "above_trend": bool(last.get("above_trend", False)),
                 "market_filter_pass": bool(last.get("market_filter_pass", True)),
+                "market_filter_active": bool(last.get("market_filter_active", False)),
                 "market_filter_exit": bool(last.get("market_filter_exit", False)),
             },
             "date": last.name if hasattr(last, "name") else None,

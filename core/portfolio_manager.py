@@ -205,6 +205,11 @@ class PortfolioManager:
             "invested": invested,
             "current_value": current_value,
             "position_count": len(positions),
+            # 보유 종목이 전부 현재가로 평가됐는가(없으면 평균단가로 대체됨)
+            "market_priced": all(
+                str(getattr(p, "symbol", "") or "").strip() in current_prices
+                for p in positions
+            ),
         }
 
     def _get_db_financials(self, invested: float, current_value: float, mode: str) -> dict:
@@ -324,13 +329,22 @@ class PortfolioManager:
             mode=self._ledger_mode,
         )
 
+        # 피크는 시가로 평가된 값으로만 올린다. 가격 없이(평균단가로) 부른 요약이 피크를
+        # 올리면, 손실 구간의 원가 총액이 피크로 굳어 다음 스냅샷이 그 값을 저장하고
+        # 이후 MDD가 가짜로 커진다(주문 가드·자본 조회가 가격 없이 이 함수를 부른다).
+        market_priced = bool(state.get("market_priced", True)) or broker_balance_ok is True
+
         if not account_has_flows:
             # 무입금 계정: 기존 산식 그대로 (하위 호환 — 결과 불변)
             total_return = ((total_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0
 
-            if total_value > self._peak_value:
+            if market_priced and total_value > self._peak_value:
                 self._peak_value = total_value
-            mdd = ((self._peak_value - total_value) / self._peak_value) * 100 if self._peak_value > 0 else 0
+            # 가격 없이 잰 총액이 피크보다 크면 피크는 그대로 두되, 낙폭은 그 총액 기준으로
+            # 잰다. 옛 피크로 재면 음수 MDD가 나오고 주문 가드가 abs()로 받아 가짜 한도 도달로
+            # 매수를 막는다(피크 10.0M, 원가 총액 10.6M → -6%).
+            peak_for_mdd = max(self._peak_value, total_value)
+            mdd = ((peak_for_mdd - total_value) / peak_for_mdd) * 100 if peak_for_mdd > 0 else 0
         else:
             # 적립식 계정: 시간가중수익률(TWR) — 입금은 수익이 아니다.
             # 직전 스냅샷과 이번 측정 사이 유입(flow)을 분모에 더해 중화하고,
@@ -375,7 +389,7 @@ class PortfolioManager:
             peak_index = max(1.0, index_now, 1 + hist_max / 100)
             mdd = ((peak_index - index_now) / peak_index) * 100 if peak_index > 0 else 0
             # 원화 피크(peak_value 컬럼)는 스냅샷 연속성 위해 기존대로 계속 기록
-            if total_value > self._peak_value:
+            if market_priced and total_value > self._peak_value:
                 self._peak_value = total_value
 
         calculated = {

@@ -52,14 +52,14 @@ def test_wait_still_surfaces_integrity_issues():
     """기간 전이라도 커버리지 붕괴·실패주문은 이슈로 보여준다(판정은 WAIT 유지)."""
     out = _eval(trading_days_total=10, snapshot_days=5, pending_failed_orders=2)
     assert out["verdict"] == "WAIT"
-    assert any("커버리지" in i for i in out["issues"])
+    assert any("제때 남긴 스냅샷" in i for i in out["issues"])
     assert any("실패 주문" in i for i in out["issues"])
 
 
 def test_low_snapshot_coverage_fails_after_period():
     out = _eval(snapshot_days=50)  # 50/60 = 83% < 95%
     assert out["verdict"] == "FAIL_REVIEW"
-    assert any("커버리지" in i for i in out["issues"])
+    assert any("제때 남긴 스냅샷" in i for i in out["issues"])
 
 
 def test_pending_failed_orders_fail_after_period():

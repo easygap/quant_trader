@@ -145,7 +145,7 @@ class TestReconstructedDisclosure:
             pending_failed_orders=0, total_costs=0, initial_capital=1_000_000,
         )
         text = format_evaluation_report(r, "t")
-        assert "사후 복원" in text and "실측" in text
+        assert "나중에 채운" in text and "제때 기록" in text
 
     def test_measured_row_wins_over_reconstructed_on_upsert(self):
         """나중에 실측이 들어오면 보정 표시를 걷어낸다."""

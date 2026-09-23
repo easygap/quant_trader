@@ -11,7 +11,8 @@ import math
 import time as time_mod
 import shutil
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
 from loguru import logger
 
 from config.config_loader import Config
@@ -21,7 +22,6 @@ from core.blackswan_detector import BlackSwanDetector
 from core.portfolio_manager import PortfolioManager
 from core.notifier import Notifier
 from core.strategy_diagnostics import diagnose_live_post_market
-from core.live_readiness import check_live_readiness_gate
 
 try:
     from monitoring.paper_monitor import log_event as _log_op
@@ -35,6 +35,28 @@ from database.repositories import (
     save_daily_report,
 )
 from core.position_lock import PositionLock
+
+# 직전 거래일 탐색 상한(달력 오류로 무한 루프가 되지 않게). KRX 최장 연휴보다 넉넉히.
+_TRADING_DAY_LOOKBACK_DAYS = 31
+# 장마감 처리 시작 시각(장 종료 15:30 + 체결·종가 확정 여유 5분)
+_POST_MARKET_START = dtime(15, 35)
+# 휴장일 파일은 실행 위치(CWD)와 무관하게 프로젝트 루트 기준으로 찾는다.
+_HOLIDAYS_PATH = Path(__file__).resolve().parent.parent / "config" / "holidays.yaml"
+
+
+def _pykrx_holiday_source_available() -> tuple[bool, str]:
+    """holidays_updater가 쓰는 pykrx 거래일 API를 쓸 수 있는지(네트워크 호출 없음).
+
+    설치돼 있어도 버전에 따라 API가 없을 수 있다(현재 환경: pykrx 1.0.51에
+    get_market_trading_date_by_date 없음) — 그때 갱신기는 대체 목록으로 떨어진다.
+    """
+    try:
+        from pykrx import stock
+    except Exception as exc:  # ImportError 외에 pykrx 내부 초기화 오류도 같은 의미
+        return False, f"pykrx import 실패: {type(exc).__name__}: {exc}"
+    if not hasattr(stock, "get_market_trading_date_by_date"):
+        return False, "pykrx.stock.get_market_trading_date_by_date 없음(설치된 pykrx 버전 불일치)"
+    return True, ""
 
 
 class LoopMetrics:
@@ -379,16 +401,7 @@ class Scheduler:
                     # 장전 헬스체크 (10분 주기)
                     self._maybe_run_healthcheck()
 
-                    if self.trading_hours.is_pre_market() and not self._pre_market_done:
-                        self._run_pre_market()
-                        self._pre_market_done = True
-                    elif self.trading_hours.is_market_open():
-                        if self._should_monitor():
-                            self._run_monitoring()
-                            self._last_monitor_time = now
-                    elif now.hour == 15 and now.minute >= 35 and not self._post_market_done:
-                        self._run_post_market()
-                        self._post_market_done = True
+                    self._run_trading_day_phase(now)
 
                 except Exception as loop_exc:
                     logger.exception(
@@ -408,32 +421,32 @@ class Scheduler:
             logger.info("⏹️ 스케줄러 종료 (Ctrl+C)")
             self.discord.send_message("⏹️ 퀀트 트레이더 스케줄러 종료")
 
+    def _run_trading_day_phase(self, now: datetime) -> None:
+        """거래일 루프 1회분: 장전(1회) → 장중 모니터링 → 장마감(15:35 이후 1회)."""
+        if self.trading_hours.is_pre_market(now) and not self._pre_market_done:
+            self._run_pre_market()
+            self._pre_market_done = True
+        elif self.trading_hours.is_market_open(now):
+            if self._should_monitor():
+                self._run_monitoring()
+                self._last_monitor_time = now
+        elif now.time() >= _POST_MARKET_START and not self._post_market_done:
+            # 15:35 '이후'면 시각과 무관하게 그날 한 번 실행한다. 예전엔 hour==15만 봐서
+            # 16시 이후 시작·재시작하거나 루프가 15:59를 넘겨 멈추면 그날 스냅샷·
+            # 리포트·evidence·DB 백업이 조용히 사라졌다. 저녁에 켜도 그날 장마감을
+            # 따라잡는다. _post_market_done은 날짜가 바뀔 때만 초기화된다.
+            self._run_post_market()
+            self._post_market_done = True
+
     def _run_pre_market(self):
         """장전 준비: 데이터 수집 + 전략 분석."""
         logger.info("=" * 50)
         logger.info("📋 장전 준비 시작 ({})", datetime.now().strftime("%H:%M:%S"))
         logger.info("=" * 50)
 
-        # 전일 provisional evidence finalize (장전에 benchmark 종가 확정)
+        # 직전 거래일 provisional evidence finalize (장전에 benchmark 종가 확정)
         if self._is_paper_like_mode():
-            try:
-                from core.paper_evidence import finalize_daily_evidence
-                yesterday = datetime.now() - timedelta(days=1)
-                # 주말이면 금요일로
-                while yesterday.weekday() >= 5:
-                    yesterday -= timedelta(days=1)
-                watchlist = WatchlistManager(self.config).resolve()
-                result = finalize_daily_evidence(
-                    strategy=self.strategy_name,
-                    mode=self._mode,
-                    account_key=self.strategy_name,
-                    date=yesterday,
-                    watchlist_symbols=watchlist,
-                )
-                if result:
-                    logger.info("전일 evidence finalized: {} bench={}", yesterday.strftime("%Y-%m-%d"), result.benchmark_status)
-            except Exception as fin_err:
-                logger.warning("전일 evidence finalize 실패: {}", fin_err)
+            self._finalize_evidence_for(self._previous_trading_day())
 
         try:
             from core.data_collector import DataCollector
@@ -527,10 +540,117 @@ class Scheduler:
                 for w in source_warnings:
                     logger.warning(w)
 
-            self._run_basket_rebalance_check()
+            self._log_basket_execution_owner()
 
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
+
+    # =============================================================
+    # KRX 거래일 기준 evidence 기록
+    # =============================================================
+
+    def _previous_trading_day(self, now: datetime | None = None) -> datetime | None:
+        """now 직전의 KRX 거래일(주말·휴장일 제외). 달력 이상으로 못 찾으면 None.
+
+        주말만 건너뛰면 추석·설·대체공휴일 같은 평일 휴장일이 '전일'로 잡혀 그 날짜의
+        가짜 real_paper evidence가 만들어지고, 실제 직전 거래일은 영영 finalize되지 않는다.
+        거래일 판정은 TradingHours(config/holidays.yaml)를 따른다 — 달력이 틀리면 이
+        판정도 틀리므로 달력 수정은 tools/verify_trading_calendar.py로 검증한다.
+        """
+        day = (now or datetime.now()) - timedelta(days=1)
+        for _ in range(_TRADING_DAY_LOOKBACK_DAYS):
+            if self.trading_hours.is_trading_day(day):
+                return day
+            day -= timedelta(days=1)
+        logger.warning(
+            "최근 {}일 안에 KRX 거래일이 없습니다 — 거래일 달력(config/holidays.yaml) 확인 필요",
+            _TRADING_DAY_LOOKBACK_DAYS,
+        )
+        return None
+
+    def _is_evidence_trading_day(self, date: datetime | None, step: str) -> bool:
+        """evidence 기록 대상 날짜가 KRX 거래일인지 확인하고, 아니면 경고 후 False."""
+        if date is None:
+            logger.warning("{}: 대상 거래일을 정하지 못해 evidence를 기록하지 않습니다", step)
+            return False
+        if self.trading_hours.is_trading_day(date):
+            return True
+        logger.warning(
+            "{}: {}은 KRX 거래일이 아니어서 evidence를 기록하지 않습니다 "
+            "(휴장일 기록은 execution_backed 가짜 거래일로 일수·샤프·승률을 왜곡한다)",
+            step, date.strftime("%Y-%m-%d"),
+        )
+        return False
+
+    def _finalize_evidence_for(self, date: datetime | None):
+        """date(직전 거래일)의 provisional evidence를 final로 확정. 비거래일은 거부(None)."""
+        if not self._is_evidence_trading_day(date, "전일 evidence finalize"):
+            return None
+        try:
+            from core.paper_evidence import finalize_daily_evidence
+
+            watchlist = WatchlistManager(self.config).resolve()
+            result = finalize_daily_evidence(
+                strategy=self.strategy_name,
+                mode=self._mode,
+                account_key=self.strategy_name,
+                date=date,
+                watchlist_symbols=watchlist,
+            )
+            if result:
+                logger.info(
+                    "전일 evidence finalized: {} bench={}",
+                    date.strftime("%Y-%m-%d"), result.benchmark_status,
+                )
+            return result
+        except Exception as fin_err:
+            logger.warning("전일 evidence finalize 실패: {}", fin_err)
+            return None
+
+    def _collect_post_market_evidence(self, date: datetime):
+        """장마감 evidence 수집(DailyEvidence JSONL + anomaly). 비거래일은 거부(None).
+
+        pilot session이면 pilot provenance가 자동 전달된다.
+        """
+        if not self._is_evidence_trading_day(date, "장마감 evidence 수집"):
+            return None
+        try:
+            from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
+
+            watchlist = WatchlistManager(self.config).resolve()
+            ps = self._pilot_session
+            result = collect_daily_evidence(
+                strategy=self.strategy_name,
+                mode=self._mode,
+                account_key=self.strategy_name,
+                date=date,
+                watchlist_symbols=watchlist,
+                evidence_mode=ps.get("evidence_mode", "real_paper"),
+                pilot_authorized=ps.get("pilot_authorized", False),
+                pilot_caps_snapshot=ps.get("pilot_caps_snapshot"),
+            )
+            logger.info(
+                "Paper evidence 기록 완료 (전략: {}, session_mode: {})",
+                self.strategy_name, ps.get("session_mode", "normal_paper"),
+            )
+            # pilot session artifact 저장
+            if ps.get("active"):
+                try:
+                    from core.paper_pilot import save_pilot_session_artifact
+                    save_pilot_session_artifact(
+                        strategy=self.strategy_name,
+                        date=date.strftime("%Y-%m-%d"),
+                        pilot_session=ps,
+                    )
+                except Exception as artifact_err:
+                    logger.warning("pilot session artifact 저장 실패: {}", artifact_err)
+            # 금요일이면 evidence 기반 주간 요약도 생성
+            if date.weekday() == 4:
+                generate_weekly_summary(self.strategy_name)
+            return result
+        except Exception as ev_err:
+            logger.warning("Paper evidence 기록 실패: {}", ev_err)
+            return None
 
     def _get_kis_max_calls_per_sec(self) -> float:
         """KIS 설정 초당 호출 한도 (예상 소요 계산용). 실패 시 10."""
@@ -810,13 +930,20 @@ class Scheduler:
                             avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
                         signal_info["symbol"] = symbol
                         self._maybe_record_dashboard_signal(signal_info, "post_cooldown_rescan")
+                        # timestamp가 없으면 30분 경과 후보 폐기가 적용되지 않고(기본값
+                        # now), _signal_at이 없으면 신호→주문 지연이 기록되지 않는다.
+                        # 국면 스케일은 다른 후보들처럼 신호 시점 값(장전·2시간 재확인)을 쓴다.
+                        signal_time = datetime.now()
                         new_candidates.append({
                             "symbol": symbol,
                             "price": signal_info.get("close", 0),
                             "atr": signal_info.get("atr"),
                             "score": signal_info.get("score", 0),
+                            "_signal_at": signal_time,
                             "reason": "post-cooldown rescan",
                             "avg_daily_volume": avg_vol,
+                            "market_regime_scale": self._market_regime_scale,
+                            "timestamp": signal_time,
                         })
                 except Exception as e:
                     logger.debug("쿨다운 후 재스캔 {} 실패: {}", symbol, e)
@@ -1336,7 +1463,7 @@ class Scheduler:
             self.discord.send_daily_report({
                 "total_value": summary["total_value"],
                 "cash": summary["cash"],
-                "daily_return": 0,
+                "daily_return": self._report_daily_return(),
                 "cumulative_return": summary["total_return"],
                 "mdd": summary["mdd"],
                 "position_count": summary["position_count"],
@@ -1371,41 +1498,8 @@ class Scheduler:
                         logger.warning("주간 리포트 생성 실패: {}", wr_err)
 
                 # Paper evidence 수집 (DailyEvidence JSONL 누적 + anomaly 기록)
-                # pilot session이면 자동으로 pilot provenance가 전달됨
-                try:
-                    from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
-                    watchlist = WatchlistManager(self.config).resolve()
-                    ps = self._pilot_session
-                    collect_daily_evidence(
-                        strategy=self.strategy_name,
-                        mode=self._mode,
-                        account_key=self.strategy_name,
-                        date=datetime.now(),
-                        watchlist_symbols=watchlist,
-                        evidence_mode=ps.get("evidence_mode", "real_paper"),
-                        pilot_authorized=ps.get("pilot_authorized", False),
-                        pilot_caps_snapshot=ps.get("pilot_caps_snapshot"),
-                    )
-                    logger.info(
-                        "Paper evidence 기록 완료 (전략: {}, session_mode: {})",
-                        self.strategy_name, ps.get("session_mode", "normal_paper"),
-                    )
-                    # pilot session artifact 저장
-                    if ps.get("active"):
-                        try:
-                            from core.paper_pilot import save_pilot_session_artifact
-                            save_pilot_session_artifact(
-                                strategy=self.strategy_name,
-                                date=datetime.now().strftime("%Y-%m-%d"),
-                                pilot_session=ps,
-                            )
-                        except Exception:
-                            pass
-                    # 금요일이면 evidence 기반 주간 요약도 생성
-                    if datetime.now().weekday() == 4:
-                        generate_weekly_summary(self.strategy_name)
-                except Exception as ev_err:
-                    logger.warning("Paper evidence 기록 실패: {}", ev_err)
+                # pilot session이면 자동으로 pilot provenance가 전달됨. 비거래일은 거부.
+                self._collect_post_market_evidence(datetime.now())
 
                 # 당일 executor + pilot session 리셋 (다음 날 fresh)
                 self._order_executor = None
@@ -1431,6 +1525,48 @@ class Scheduler:
 
         except Exception as e:
             logger.error("장마감 리포트 실패: {}", e)
+
+    def _report_daily_return(self) -> float | None:
+        """직전 스냅샷 대비 일간 수익률(%) — 일일 CLI 리포트(main.py)와 같은 TWR 산식.
+
+        예전 스케줄러 리포트는 일간 수익률을 0으로 하드코딩해 매일 '일간 0.00%'였다.
+        입금·출금은 수익이 아니므로 직전 스냅샷의 실제 측정 시각(created_at) 이후
+        현금 흐름을 분모에 더해 중화한다(twr_period_return). 스냅샷이 2개 미만이거나
+        계산에 실패하면 None — 리포트에는 0.00%가 아니라 '—'로 나온다. 실패는 리포트
+        발송을 막지 않되 경고로 남긴다.
+        """
+        try:
+            import pandas as pd
+
+            from core.portfolio_manager import twr_period_return
+            from database.repositories import (
+                get_cash_flow_total_between,
+                get_portfolio_snapshots,
+            )
+
+            mode = self._resolved_ledger_mode()
+            snaps = get_portfolio_snapshots(days=7, account_key=self.strategy_name, mode=mode)
+            if snaps is None or len(snaps) < 2:
+                return None
+            ordered = snaps.sort_values("date")
+            prev_total = float(ordered["total_value"].iloc[-2])
+            last_total = float(ordered["total_value"].iloc[-1])
+            if prev_total <= 0:
+                return None
+            # 유입 경계는 자정 귀속(date)이 아니라 실제 측정 시각(created_at) — 직전
+            # 스냅샷 '이전'의 같은 날 입금을 이중으로 중화하지 않게.
+            boundary = ordered["created_at"].iloc[-2] if "created_at" in ordered.columns else None
+            if boundary is None or pd.isna(boundary):
+                boundary = ordered["date"].iloc[-2]
+            if hasattr(boundary, "to_pydatetime"):
+                boundary = boundary.to_pydatetime()
+            flow = get_cash_flow_total_between(
+                self.strategy_name, boundary, datetime.now(), mode=mode,
+            )
+            return twr_period_return(prev_total, last_total, flow) * 100
+        except Exception as exc:
+            logger.warning("일간 수익률 계산 실패 — 리포트에는 '—'로 표기: {}", exc)
+            return None
 
     def _check_live_readiness(self):
         """paper 모드 장마감 시 실전 전환 준비 자동 평가."""
@@ -1531,11 +1667,15 @@ class Scheduler:
         issues = []
 
         # 1) DB 연결 검사
+        # SQLAlchemy 2.0은 문자열 SQL을 그대로 실행하지 않고(text() 필요), get_session()이
+        # 돌려주는 Session에는 remove()가 없다(scoped_session 레지스트리의 메서드).
+        # 예전 코드는 그래서 정상 DB에서도 10분마다 'DB 연결 실패' critical 알림을 냈다.
         try:
-            from database.models import get_session
-            session = get_session()
-            session.execute("SELECT 1")
-            session.remove()
+            from sqlalchemy import text
+            from database.models import db_session
+
+            with db_session() as session:
+                session.execute(text("SELECT 1"))
         except Exception as e:
             issues.append(f"DB 연결 실패: {e}")
 
@@ -1551,13 +1691,7 @@ class Scheduler:
 
         # 3) KIS API 인증 상태 (live 모드)
         if self.config.trading.get("mode") == "live":
-            try:
-                from api.kis_api import KISApi
-                kis = KISApi()
-                if not getattr(kis, "_access_token", None):
-                    issues.append("KIS API 토큰 없음 — 재인증 필요")
-            except Exception as e:
-                issues.append(f"KIS API 초기화 실패: {e}")
+            issues.extend(self._kis_token_health_issues())
 
         # 4) 메모리 사용량 검사
         try:
@@ -1574,6 +1708,34 @@ class Scheduler:
             logger.debug("헬스체크 정상")
         return issues
 
+    def _kis_token_health_issues(self) -> list[str]:
+        """live KIS 인증 상태 — 프로세스 공유 토큰 캐시만 본다(새로 발급하지 않는다).
+
+        새 KISApi 인스턴스의 토큰은 발급 전이라 늘 비어 있어, 예전 검사는 매번
+        '토큰 없음'을 보고했다. 그렇다고 10분마다 발급을 시도하면 그 자체가 1분 1회
+        발급 한도를 소모한다. 첫 요청 전이라 토큰이 없는 것은 정상(첫 요청 때
+        발급)이고, 직전 발급이 실패한 상태만 이상으로 본다.
+        """
+        try:
+            from api.kis_api import KISApi
+
+            status = KISApi().token_status()
+        except Exception as e:
+            return [f"KIS API 상태 확인 실패: {e}"]
+
+        if status.get("valid"):
+            return []
+        last_error = str(status.get("last_error") or "")
+        if last_error:
+            remaining = float(status.get("cooldown_remaining") or 0.0)
+            suffix = f" (재발급 억제 {remaining:.0f}초 남음)" if remaining > 0 else ""
+            return [f"KIS API 토큰 발급 실패 상태 — {last_error}{suffix}"]
+        logger.debug(
+            "KIS 토큰 {} — 다음 요청 때 발급/갱신 예정",
+            "만료" if status.get("has_token") else "아직 발급 전",
+        )
+        return []
+
     # =============================================================
     # 휴장일 자동 갱신
     # =============================================================
@@ -1582,9 +1744,13 @@ class Scheduler:
         """
         새해 또는 holidays.yaml이 오래된 경우 자동 갱신.
         연초(1/1~1/7) 또는 파일 수정일이 90일 이상 지난 경우 트리거.
+
+        경로는 실행 위치(CWD)가 아니라 프로젝트 루트 기준이다 — 다른 폴더에서 띄우면
+        파일이 '없다'고 보고 매일 갱신을 시도했다. pykrx 휴장일 조회를 쓸 수 없으면
+        갱신하지 않는다: 그때 갱신기는 대체 목록(FALLBACK)을 쓰는데, 검증된 달력을
+        틀린 날짜로 되돌릴 수 있다(2026-08-27 달력 교정분 유실 위험).
         """
-        from pathlib import Path
-        holidays_path = Path("config/holidays.yaml")
+        holidays_path = _HOLIDAYS_PATH
 
         needs_update = False
         now = datetime.now()
@@ -1605,104 +1771,58 @@ class Scheduler:
             except Exception:
                 needs_update = True
 
-        if needs_update:
-            try:
-                from core.holidays_updater import update_holidays_yaml
-                result_path = update_holidays_yaml()
-                logger.info("휴장일 자동 갱신 완료: {}", result_path)
-                self.trading_hours = TradingHours(self.config)
-            except Exception as e:
-                logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
+        if not needs_update:
+            return
 
-    def _run_basket_rebalance_check(self):
-        """장전 단계에서 enabled 바스켓의 리밸런싱 필요 여부를 체크하고 실행."""
-        try:
-            from core.basket_rebalancer import (
-                BasketRebalancer,
-                check_basket_account_isolation,
-                rebalance_live_strategy_id,
+        available, reason = _pykrx_holiday_source_available()
+        if not available:
+            logger.warning(
+                "휴장일 자동 갱신 생략 — pykrx 휴장일 조회 불가({}). 대체 목록으로 덮어쓰면 "
+                "검증된 달력이 틀린 날짜로 되돌아갈 수 있어 기존 {}을 유지합니다. "
+                "새 연도 달력은 KRX 휴장일 공지로 직접 갱신한 뒤 "
+                "tools/verify_trading_calendar.py로 검증하세요.",
+                reason, holidays_path,
             )
+            return
+
+        try:
+            from core.holidays_updater import update_holidays_yaml
+            result_path = update_holidays_yaml(path=holidays_path)
+            logger.info(
+                "휴장일 자동 갱신 완료: {} — tools/verify_trading_calendar.py로 검증 권장",
+                result_path,
+            )
+            self.trading_hours = TradingHours(self.config)
+        except Exception as e:
+            logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
+
+    def _log_basket_execution_owner(self):
+        """바스켓은 스케줄러가 거래하지 않는다 — 실행 경로가 일일 CLI 하나뿐임을 남긴다.
+
+        예전에는 장전 단계(08:50~09:00)에서 바스켓 리밸런싱을 실행했다. 그 시각엔
+        live 주문이 거래 시간 가드에 전부 거부되고(가드는 의도된 안전장치라 완화하지
+        않는다), paper는 전일 종가로 체결됐다. CLI 사이클의 안전 단계(-25% 손절·
+        재매수 쿨다운, 하루 1회 거래 가드, 스냅샷 보충, CYCLE_/SNAPSHOT_ 이벤트)도
+        빠져 있었고, 신호 전략용 live 게이트 통과만으로 모든 바스켓을 live 거래할 수
+        있었다. 스케줄러를 CLI와 함께 돌리면 10:07 CLI가 '오늘 이미 체결 있음'으로
+        건너뛰어, 문서화된 사이클이 조용히 거래를 멈췄다.
+        """
+        try:
+            from core.basket_rebalancer import BasketRebalancer
 
             enabled = BasketRebalancer.get_enabled_baskets()
-            if not enabled:
-                return
-
-            # 여러 바스켓이 같은 계좌(자본 풀)를 공유하면 각자 목표 비중을 독립 배분해
-            # 과배분되고 트랙레코드가 섞인다 — fail-closed로 이번 사이클을 중단한다.
-            isolation_issues = check_basket_account_isolation(enabled, self.config, self._mode)
-            if isolation_issues:
-                msg = "바스켓 리밸런싱 중단 — 계좌 격리 실패: " + "; ".join(isolation_issues)
-                logger.error(msg)
-                self.discord.send_message(msg, critical=True)
-                return
-
-            logger.info("🔄 바스켓 리밸런싱 체크: {}", enabled)
-            for name in enabled:
-                try:
-                    is_live = self._mode == "live"
-                    live_strategy_name = rebalance_live_strategy_id(name)
-                    if is_live:
-                        gate_issues = check_live_readiness_gate(
-                            self.config,
-                            live_strategy_name,
-                        )
-                        if gate_issues:
-                            msg = (
-                                f"바스켓 '{name}' live 리밸런싱 검증 실패: "
-                                + "; ".join(gate_issues)
-                            )
-                            logger.error(msg)
-                            self.discord.send_message(msg, critical=True)
-                            continue
-
-                    # 계정·귀속 키는 paper/live·CLI/스케줄러 공통(basket_rebalance:<name>)
-                    # — 트랙레코드가 바스켓별 한 곳에 쌓인다.
-                    rebalancer = BasketRebalancer(
-                        basket_name=name, config=self.config,
-                        account_key=live_strategy_name,
-                        execution_strategy=live_strategy_name,
-                    )
-                    if is_live:
-                        sync_result = rebalancer.portfolio_mgr.sync_with_broker()
-                        if not sync_result.get("ok"):
-                            msg = (
-                                f"바스켓 '{name}' live 리밸런싱 전 포지션 동기화 실패: "
-                                f"{sync_result.get('message', 'sync failed')}"
-                            )
-                            logger.error(msg)
-                            self.discord.send_message(msg, critical=True)
-                            continue
-
-                    should, reason = rebalancer.should_rebalance()
-                    if should:
-                        orders = rebalancer.plan_rebalance()
-                        if orders:
-                            result = rebalancer.execute(
-                                orders,
-                                live_confirmed=(
-                                    is_live and self._live_gate_validated
-                                ),
-                            )
-                            summary = (
-                                f"🔄 바스켓 '{name}' 리밸런싱 완료: "
-                                f"실행 {result['executed']}건, 실패 {result['failed']}건"
-                            )
-                            logger.info(summary)
-                            self.discord.send_message(summary)
-                    else:
-                        logger.info("바스켓 '{}' 리밸런싱 불필요: {}", name, reason)
-
-                    # 트랙레코드: 스케줄러 단독 운영(상시 구동)에서도 바스켓 계정의
-                    # 일일 NAV 스냅샷이 쌓이도록 거래 여부와 무관하게 저장(멱등 upsert).
-                    rebalancer.save_daily_nav_snapshot()
-
-                except Exception as e:
-                    logger.error("바스켓 '{}' 리밸런싱 오류: {}", name, e)
-
-        except ImportError:
-            pass
         except Exception as e:
-            logger.error("바스켓 리밸런싱 체크 실패: {}", e)
+            logger.warning(
+                "enabled 바스켓 목록 확인 실패 — 스케줄러는 어차피 바스켓을 거래하지 않음: {}", e,
+            )
+            return
+        if not enabled:
+            return
+        logger.warning(
+            "바스켓 {}은(는) 스케줄러가 거래하지 않습니다 — 바스켓 리밸런싱·NAV 스냅샷은 "
+            "일일 CLI `python main.py --mode rebalance`(평일 10:07 자동화)가 유일한 실행 경로입니다.",
+            enabled,
+        )
 
     def _log_rate_limit_preflight(self, est_requests: int, n_symbols: int, phase: str):
         """API 요청 사전 예측: 예상 건수와 소요 시간을 로그하고, 분당 한도 초과 시 경고."""
@@ -1881,14 +2001,18 @@ class Scheduler:
                     if "volume" in df.columns and not df["volume"].empty:
                         avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
 
+                    # timestamp/_signal_at: 30분 경과 후보 폐기와 신호→주문 지연 기록용.
+                    signal_time = datetime.now()
                     self._entry_candidates.append({
                         "symbol": symbol,
                         "price": signal_info.get("close", 0),
                         "atr": signal_info.get("atr"),
                         "score": signal_info.get("score", 0),
+                        "_signal_at": signal_time,
                         "reason": "intraday rescan",
                         "avg_daily_volume": avg_vol,
                         "market_regime_scale": regime["position_scale"],
+                        "timestamp": signal_time,
                     })
                     logger.info("장중 재스캔: {} 매수 신호 감지 (score={})", symbol, signal_info.get("score", 0))
                 except Exception:

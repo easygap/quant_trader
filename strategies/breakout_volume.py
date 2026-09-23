@@ -12,11 +12,20 @@ Entry (edge-trigger, long only):
   → 전일 조건 미충족, 당일 충족 시에만 BUY (edge-trigger)
 
 Exit:
-  전략 레벨 최소 실패 신호만 사용: close < breakout_ref
+  전략 레벨 최소 실패 신호만 사용: close < entry_level
+  entry_level = 가장 최근 BUY 봉에서 돌파한 breakout_ref (다음 BUY까지 고정).
+  종가가 이 레벨 아래에 있는 봉마다 SELL (level-trigger). 최소 보유일 규칙에 막힌
+  SELL도 다음 봉에서 다시 나오므로 청산이 사라지지 않는다. 보유하지 않은 종목의
+  SELL은 백테스터가 무시한다.
   나머지 손절/트레일링은 기존 backtester risk layer (ATR 2.5) 위임.
+
+  (예전에는 매 봉의 breakout_ref와 비교했는데, T+1의 breakout_ref는 돌파봉 T의
+   고가까지 포함하므로 "돌파 레벨 재이탈"이 아니라 "close[T+1] < high[T]"를
+   검사하게 되어 진입 다음 봉에 SELL이 나는 1일 왕복 전략이 됐다.)
 
 Look-ahead 방지:
   breakout_ref, avg_vol_ref 모두 .shift(1) 적용 → 현재 봉의 high/volume 제외.
+  entry_level은 과거 BUY 봉의 breakout_ref를 앞으로만 채운다(ffill).
 """
 
 import pandas as pd
@@ -79,10 +88,14 @@ class BreakoutVolumeStrategy(BaseStrategy):
         entry_prev = entry_cond.shift(1, fill_value=False)
         entry_edge = entry_cond & (~entry_prev)
 
-        # ── Exit: 최소 실패 신호 (close < breakout_ref) ──
-        exit_cond = breakout_ref.notna() & (close < breakout_ref)
-        exit_prev = exit_cond.shift(1, fill_value=False)
-        exit_edge = exit_cond & (~exit_prev)
+        # ── Exit: 최소 실패 신호 (close < 진입 때 돌파한 레벨) ──
+        # 매 봉의 breakout_ref는 돌파봉 자신의 고가까지 올라가므로 청산 기준으로 쓰면
+        # 진입 다음 봉에 대부분 SELL이 났다. 진입 봉의 breakout_ref를 다음 진입까지 고정한다.
+        entry_level = breakout_ref.where(entry_edge).ffill()
+        exit_cond = entry_level.notna() & (close < entry_level)
+        # level-trigger: 레벨 아래에 있는 동안 매 봉 SELL. 최소 보유일에 막힌 청산이
+        # 다음 봉에서 다시 나오게 한다 (edge-trigger면 한 번 막히면 영영 사라진다).
+        exit_trigger = exit_cond
 
         # ── 디버그 컬럼 ──
         volume_surge_ratio = pd.Series(np.nan, index=analyzed.index)
@@ -90,12 +103,13 @@ class BreakoutVolumeStrategy(BaseStrategy):
         volume_surge_ratio[valid_vol] = volume[valid_vol] / avg_vol_ref[valid_vol]
 
         analyzed["breakout_ref"] = breakout_ref
+        analyzed["entry_level"] = entry_level
         analyzed["avg_vol_ref"] = avg_vol_ref
         analyzed["volume_surge_ratio"] = volume_surge_ratio
         analyzed["entry_condition"] = entry_cond
         analyzed["exit_condition"] = exit_cond
         analyzed["entry_trigger"] = entry_edge
-        analyzed["exit_trigger"] = exit_edge
+        analyzed["exit_trigger"] = exit_trigger
 
         # ── strategy_score: 연속 ranking 점수 (동시 BUY 후보 정렬용) ──
         # 돌파 강도 + 거래량 급증도 + 추세 강도의 도메인 고정 스케일링 가중합.
@@ -134,7 +148,7 @@ class BreakoutVolumeStrategy(BaseStrategy):
         # ── signal 생성 ──
         analyzed["signal"] = self.HOLD
         analyzed.loc[entry_edge.fillna(False), "signal"] = self.BUY
-        analyzed.loc[exit_edge.fillna(False), "signal"] = self.SELL
+        analyzed.loc[exit_trigger.fillna(False), "signal"] = self.SELL
         analyzed.loc[analyzed["signal"] == self.SELL, "total_score"] *= -1
         analyzed.loc[analyzed["signal"] == self.SELL, "strategy_score"] *= -1
 
@@ -162,6 +176,7 @@ class BreakoutVolumeStrategy(BaseStrategy):
             "details": {
                 "ADX": round(last.get("adx", 0), 2) if pd.notna(last.get("adx")) else 0,
                 "breakout_ref": round(last.get("breakout_ref", 0), 0) if pd.notna(last.get("breakout_ref")) else 0,
+                "entry_level": round(last.get("entry_level", 0), 0) if pd.notna(last.get("entry_level")) else 0,
                 "avg_vol_ref": round(last.get("avg_vol_ref", 0), 0) if pd.notna(last.get("avg_vol_ref")) else 0,
                 "volume_surge_ratio": round(last.get("volume_surge_ratio", 0), 2) if pd.notna(last.get("volume_surge_ratio")) else 0,
                 "close": last.get("close", 0),

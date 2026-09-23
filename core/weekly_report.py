@@ -24,6 +24,8 @@ def build_weekly_summary(
     cycle_errors: int = 0,
     regime: dict[str, Any] | None = None,
     risk: dict[str, Any] | None = None,
+    reconstructed_days: int = 0,
+    regime_note: str | None = None,
 ) -> dict[str, Any]:
     """주간 다이제스트를 만든다(순수 함수).
 
@@ -31,6 +33,9 @@ def build_weekly_summary(
       원시 카운트가 아니다(P0-1이 미복구 결측을 매 사이클 재경보하므로 이벤트 수는
       하루 결측을 여러 건으로 부풀린다 → 고유 일수로 집계해야 정확).
     cycle_errors: 이번 주 CYCLE_ERROR 발생 건수.
+    reconstructed_days: 이번 주 스냅샷 중 나중에 채운 날 수. 채운 기록은 빈칸을
+      잇는 것이지 사이클이 돈 증거가 아니므로 '무사고'로 세지 않는다.
+    regime_note: 국면 분해의 한계(지수 자료 지연, 기록 시각 차이 등) 한 줄.
 
     반환: {"title": str, "fields": [{"name","value","inline"}...], "text": str}
       - fields: notifier.send_embed용
@@ -76,9 +81,12 @@ def build_weekly_summary(
     #      실측(2026-08): 전체 +7.81%p 초과성과가 반등 구간 -8.97%p 미스를 덮고 있었다.
     if regime:
         from core.performance_lens import format_regime_line
+        value = format_regime_line(regime)
+        if regime_note:
+            value += f" ({regime_note})"
         fields.append({
             "name": "🌗 국면 분해",
-            "value": format_regime_line(regime),
+            "value": value,
             "inline": False,
         })
 
@@ -107,8 +115,11 @@ def build_weekly_summary(
     # 4) 주간 운영 이벤트 — 결측은 '고유 일수'(이벤트 재경보로 부풀지 않게), 오류는 건수.
     md = int(missing_days or 0)
     ce = int(cycle_errors or 0)
+    rd = int(reconstructed_days or 0)
     ev_line = f"결측 {md}일 · 사이클 오류 {ce}건"
-    if md == 0 and ce == 0:
+    if rd:
+        ev_line += f" · 나중에 채운 기록 {rd}일(그날은 자동매매가 돌지 않았음)"
+    if md == 0 and ce == 0 and rd == 0:
         ev_line += " (무사고)"
     fields.append({"name": "🛠 주간 이벤트", "value": ev_line, "inline": False})
 

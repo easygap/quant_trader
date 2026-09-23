@@ -130,6 +130,37 @@ def historical_mark(symbol: str, day: date, collector: Any = None) -> float | No
         return None
 
 
+def first_activity_date(account_key: str, mode: str = "paper") -> date | None:
+    """이 계정의 첫 활동일(첫 체결·첫 입출금·첫 스냅샷 중 가장 이른 날). 없으면 None.
+
+    보충은 '돌았어야 했는데 빠진 날'만 채워야 한다. 계정이 생기기 전 날을 채우면
+    거래 기록이 없으니 초기자본 그대로 계산돼 수익률 0%의 가짜 운영일이 생기고, 평가의
+    운영 시작일(60영업일 시계)과 벤치마크 구간이 앞당겨진다. 트랙을 재시작한 직후
+    첫 10일이 정확히 이 경우다(2026-07-07 kr_pocket 재시작 이력).
+    """
+    from sqlalchemy import func
+
+    from database.models import CashFlow, PortfolioSnapshot, TradeHistory, get_session
+
+    session = get_session()
+    try:
+        firsts = [
+            session.query(func.min(TradeHistory.executed_at)).filter(
+                TradeHistory.mode == mode, TradeHistory.account_key == account_key,
+            ).scalar(),
+            session.query(func.min(CashFlow.occurred_at)).filter(
+                CashFlow.mode == mode, CashFlow.account_key == account_key,
+            ).scalar(),
+            session.query(func.min(PortfolioSnapshot.date)).filter(
+                PortfolioSnapshot.mode == mode, PortfolioSnapshot.account_key == account_key,
+            ).scalar(),
+        ]
+    finally:
+        session.close()
+    days = [_as_date(v) for v in firsts if v is not None]
+    return min(days) if days else None
+
+
 def find_missing_trading_days(
     config: Any,
     account_key: str,
@@ -177,6 +208,8 @@ def reconstruct_snapshot(
 
     반환: save_portfolio_snapshot에 넘길 수 있는 dict.
     """
+    from sqlalchemy import func
+
     from core.portfolio_manager import twr_period_return
     from database.models import CashFlow, PortfolioSnapshot, get_session
 
@@ -214,6 +247,31 @@ def reconstruct_snapshot(
         prev_cum = float(prev.cumulative_return or 0.0) if prev else None
         prev_peak = float(prev.peak_value or 0.0) if prev else 0.0
         prev_date = _as_date(prev.date) if prev else None
+        # 입금을 어느 구간에 넣을지는 직전 스냅샷을 '실제로 찍은 시각'(created_at)으로 가른다.
+        # 날짜 끝(자정 직전)을 쓰면 직전 스냅샷(10:07 측정) 이후 같은 날 들어온 입금이
+        # 어느 구간에도 안 잡혀, 그 입금이 복원일의 수익(+25~33%)으로 영구 기록된다.
+        prev_measured = getattr(prev, "created_at", None) if prev else None
+        if prev_date is not None and (
+            prev_measured is None or _as_date(prev_measured) < prev_date
+        ):
+            prev_measured = datetime.combine(prev_date, datetime.max.time())
+        # 예전 복원 행은 created_at이 '저장한 날'(다음 사이클)이다. 복원하려는 날보다
+        # 늦은 시각에 찍혔을 리는 없으므로 그날 0시로 자른다.
+        if prev_measured is not None:
+            prev_measured = min(
+                prev_measured, datetime.combine(_as_date(day), datetime.min.time()),
+            )
+        # 이 날 이전의 최대 누적수익률 — 흐름 계정의 MDD를 TWR 지수로 재기 위한 피크.
+        # 복원일 이후의 스냅샷은 보지 않는다(미래 정보로 과거 낙폭을 재면 안 된다).
+        hist_max_cum = (
+            session.query(func.max(PortfolioSnapshot.cumulative_return))
+            .filter(
+                PortfolioSnapshot.mode == mode,
+                PortfolioSnapshot.account_key == account_key,
+                PortfolioSnapshot.date < datetime.combine(_as_date(day), datetime.min.time()),
+            )
+            .scalar()
+        )
         flows_before = sum(
             float(f.amount or 0)
             for f in session.query(CashFlow).filter(
@@ -223,13 +281,13 @@ def reconstruct_snapshot(
             ).all()
         )
         flow_between = 0.0
-        if prev_date is not None:
+        if prev_measured is not None:
             flow_between = sum(
                 float(f.amount or 0)
                 for f in session.query(CashFlow).filter(
                     CashFlow.mode == mode,
                     CashFlow.account_key == account_key,
-                    CashFlow.occurred_at > datetime.combine(prev_date, datetime.max.time()),
+                    CashFlow.occurred_at > prev_measured,
                     CashFlow.occurred_at <= boundary,
                 ).all()
             )
@@ -252,8 +310,16 @@ def reconstruct_snapshot(
         if denom > 0:
             daily_return = (total_value / denom - 1) * 100
 
+    # 원화 피크(peak_value 컬럼)는 스냅샷 연속성을 위해 기존대로 기록한다.
     peak = max(prev_peak, total_value, float(initial_capital))
-    mdd = ((peak - total_value) / peak) * 100 if peak > 0 else 0.0
+    if flows_before == 0:
+        mdd = ((peak - total_value) / peak) * 100 if peak > 0 else 0.0
+    else:
+        # 입출금이 있는 계정은 원화 피크로 재면 입금이 낙폭을 가짜로 회복시킨다 —
+        # PortfolioManager와 같은 TWR 지수 기준으로 잰다.
+        index_now = 1 + cumulative / 100
+        peak_index = max(1.0, index_now, 1 + float(hist_max_cum or 0.0) / 100)
+        mdd = ((peak_index - index_now) / peak_index) * 100 if peak_index > 0 else 0.0
 
     return {
         "total_value": round(total_value, 0),
@@ -280,6 +346,13 @@ def backfill_account(
     """결측 영업일을 찾아 복원한다. 반환: 채운(또는 채울) 날의 요약 목록."""
     from database.repositories import save_portfolio_snapshot
 
+    first = first_activity_date(account_key, mode=mode)
+    if first is None:
+        return []  # 활동이 전혀 없는 계정 — 채울 '빠진 날'도 없다
+    since = max(_as_date(since), first)
+    if since > _as_date(until):
+        return []
+
     missing = find_missing_trading_days(config, account_key, since, until, mode=mode)
     if not missing:
         return []
@@ -290,8 +363,12 @@ def backfill_account(
         if snap is None:
             continue
         if not dry_run:
+            # 찍은 시각은 복원한 날의 끝으로 남긴다. 저장한 시각(다음 날 실행)으로 두면
+            # 다음 구간의 입금 경계가 하루 밀려, 그 사이 입금이 수익으로 잡힌다.
             ok = save_portfolio_snapshot(
-                account_key=account_key, mode=mode, reconstructed=True, **snap,
+                account_key=account_key, mode=mode, reconstructed=True,
+                measured_at=datetime.combine(_as_date(day), datetime.max.time()),
+                **snap,
             )
             if not ok:
                 logger.warning("복원 스냅샷 저장 실패 {} {}", account_key, day)
