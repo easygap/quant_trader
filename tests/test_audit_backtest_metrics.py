@@ -210,7 +210,7 @@ def test_backtest_risk_free_constant_keeps_three_percent():
 
     # 값을 바꾸면 min_sharpe·OOS 게이트 등 이 기준에 맞춘 문턱을 재기준화해야 한다.
     assert BACKTEST_RISK_FREE_ANNUAL == 0.03
-    assert BACKTEST_RISK_FREE_LABEL == "rf 3%"
+    assert BACKTEST_RISK_FREE_LABEL == "금리 3%"
 
 
 def test_both_engines_compute_sharpe_with_the_shared_risk_free_rate():
@@ -256,10 +256,10 @@ def test_report_labels_show_backtest_risk_free_rate(tmp_path):
 
     text = rg.generate_text_report(result)
     sharpe_line = next(line for line in text.splitlines() if "샤프 지수" in line)
-    assert "rf 3%" in sharpe_line
+    assert "금리 3%" in sharpe_line
 
     html = Path(rg.generate_html_report(result, filename="rf_label.html")).read_text(encoding="utf-8")
-    assert "샤프 지수 (rf 3%)" in html
+    assert "샤프 지수 (금리 3%)" in html
 
     section = StrategyValidator._format_section("OUT_OF_SAMPLE", metrics, {"sharpe_ratio": 0.1})
-    assert section.count("샤프(rf 3%)") == 2
+    assert section.count("샤프(금리 3%)") == 2

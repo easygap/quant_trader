@@ -266,8 +266,8 @@ def format_risk_line(metrics: dict[str, Any]) -> str:
         return f"표본 {n}일 — 변동성 산출 불가"
     parts = [f"연변동성 {metrics['vol_annual_pct']:.1f}%"]
     if metrics.get("sharpe_annual") is not None:
-        # 무위험수익률 0% 기준이다. 백테스트·연구 리포트의 샤프는 rf 3%라 같은 수익
-        # 흐름에서도 0.1~0.3 높게 나온다 — 기준을 적어 둬야 비교 착오가 없다.
+        # 무위험수익률 0% 기준이다. 백테스트 리포트의 샤프는 금리 3%를 빼고 계산하므로
+        # 같은 수익 흐름이면 이 값보다 0.1~0.3 낮게 나온다 — 기준을 적어 둬야 비교 착오가 없다.
         parts.append(f"샤프(금리 0% 기준) {metrics['sharpe_annual']:+.2f}")
     if metrics.get("down_day_ratio") is not None:
         parts.append(f"하락일 {metrics['down_day_ratio'] * 100:.0f}%")

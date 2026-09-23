@@ -52,7 +52,7 @@ _SUPPORTED_EXECUTION_MODELS = frozenset(
 # 값을 바꾸면 min_sharpe·OOS 샤프 게이트·후보 순위처럼 이 기준에 맞춰 둔 문턱이 함께
 # 움직이므로 반드시 재기준화와 같이 바꾼다. 리포트는 샤프 옆에 BACKTEST_RISK_FREE_LABEL을 표기한다.
 BACKTEST_RISK_FREE_ANNUAL = 0.03
-BACKTEST_RISK_FREE_LABEL = f"rf {BACKTEST_RISK_FREE_ANNUAL * 100:g}%"
+BACKTEST_RISK_FREE_LABEL = f"금리 {BACKTEST_RISK_FREE_ANNUAL * 100:g}%"
 
 
 def _validate_execution_model(execution_model: str) -> str:
