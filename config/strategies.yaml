@@ -236,6 +236,7 @@ ensemble:
   mode: "majority_vote"       # majority_vote | weighted_sum | conservative
   auto_downgrade: true        # true면 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
   independence_threshold: 0.6 # 전략 신호 상관계수 |r| >= 이 값이면 고상관 판단 → 다수결 의미 퇴색 경고
+  independence_window: 60     # 고상관 판정 창: 행마다 직전 N행(당일 포함) 신호만 사용 (미래 신호 미참조)
   components:                 # enabled/weight 로 구성 전략 켜고 끄기 (weighted_sum 시 weight 사용)
     - name: technical
       enabled: true

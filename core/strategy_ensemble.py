@@ -63,7 +63,11 @@ class StrategyEnsemble:
     fundamental_factor는 데이터 부재 시 ensemble_skip=True 로 집계에서 제외.
 
     모드: majority_vote | weighted_sum | conservative
-    auto_downgrade: 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
+    auto_downgrade: 행마다 직전 independence_window행(당일 포함)의 구성 신호 상관이
+      |r| >= independence_threshold이면 그 행만 conservative로 판정한다.
+      (예전에는 첫 analyze 호출의 신호 전체로 인스턴스 모드를 한 번 바꿨다 —
+       포트폴리오 백테스트에서는 첫 종목의 전 기간(미래 신호 포함)이 모든 날짜·종목의
+       모드를 정해 결과가 종목 순서에 따라 달라졌다.)
     """
 
     def __init__(self, config: Config = None, skip_independence_check: bool = False):
@@ -72,11 +76,14 @@ class StrategyEnsemble:
         ensemble_cfg = self.strategies_config.get("ensemble", {})
         self._ensemble_cfg = ensemble_cfg
         self._configured_mode = ensemble_cfg.get("mode", "majority_vote")
+        # self.mode는 설정 모드 그대로 둔다. 행별 전환은 analyze()의 ensemble_mode 컬럼에 남는다.
         self.mode = self._configured_mode
         self.auto_downgrade = ensemble_cfg.get("auto_downgrade", True)
         self.confidence_weights = ensemble_cfg.get("confidence_weight", {})
-        self._independence_checked = False
-        self._downgraded = False
+        self._independence_window = max(2, int(ensemble_cfg.get("independence_window", 60)))
+        self._independence_threshold = float(ensemble_cfg.get("independence_threshold", 0.6))
+        self._downgraded = False            # 한 행이라도 conservative로 전환된 적 있음 (진단용)
+        self._check_error_logged = False
         self._strategies: list[tuple[str, object, float]] = []
         self._load_strategies()
         self._skip_independence_check = skip_independence_check
@@ -155,15 +162,19 @@ class StrategyEnsemble:
             if col not in base_df.columns:
                 base_df[col] = False
 
-        # 첫 analyze 호출 시 독립성 검사 → 고상관이면 conservative로 자동 다운그레이드
-        if not self._independence_checked and not self._skip_independence_check and len(base_df) >= 60:
-            self._run_independence_check(base_df)
+        # 고상관 자동 전환: 행마다 그 행까지의 직전 window행 신호만 본다 (미래 신호·종목 순서 무관)
+        row_modes = self._row_modes(base_df)
+        base_df["ensemble_mode"] = row_modes
 
         skip_cols = [f"ensemble_skip_{n}" for n, _, _ in self._strategies]
         meta = base_df[skip_cols] if skip_cols else pd.DataFrame(index=base_df.index)
 
         base_df["signal"] = [
-            self._resolve_row_signal(signal_frame.iloc[i], meta.iloc[i] if len(meta.columns) else None)
+            self._resolve_row_signal(
+                signal_frame.iloc[i],
+                meta.iloc[i] if len(meta.columns) else None,
+                row_modes.iloc[i],
+            )
             for i in range(len(signal_frame))
         ]
         base_df["strategy_score"] = [
@@ -189,60 +200,69 @@ class StrategyEnsemble:
                 vals.append(0.0)
         return float(sum(vals) / len(vals)) if vals else 0.0
 
-    def _run_independence_check(self, analyzed_df: pd.DataFrame):
-        """첫 analyze 호출 시 전략 신호 독립성을 검사하고, 필요 시 모드를 다운그레이드한다."""
-        self._independence_checked = True
+    def _row_modes(self, base_df: pd.DataFrame) -> pd.Series:
+        """행별 판정 모드. auto_downgrade 조건을 만족하는 행만 conservative."""
+        modes = pd.Series(self.mode, index=base_df.index, dtype=object)
+        if (
+            self._skip_independence_check
+            or not self.auto_downgrade
+            or self.mode not in ("majority_vote", "weighted_sum")
+        ):
+            return modes
         try:
-            from core.ensemble_correlation import SIGNAL_TO_NUM, ENSEMBLE_SIGNAL_COLS, ENSEMBLE_LABELS
-
-            cols = [c for c in ENSEMBLE_SIGNAL_COLS if c in analyzed_df.columns]
-            if len(cols) < 2:
-                return
-
-            numeric = pd.DataFrame(index=analyzed_df.index)
-            for c in cols:
-                numeric[c] = analyzed_df[c].map(lambda s: SIGNAL_TO_NUM.get(str(s).strip().upper(), 0))
-
-            corr = numeric[cols].corr()
-            threshold = self.strategies_config.get("ensemble", {}).get("independence_threshold", 0.6)
-            high_pairs = []
-            for i, c1 in enumerate(cols):
-                for j, c2 in enumerate(cols):
-                    if i >= j:
-                        continue
-                    r = corr.loc[c1, c2]
-                    if pd.notna(r) and abs(r) >= threshold:
-                        high_pairs.append((c1, c2, float(r)))
-
-            if not high_pairs:
-                logger.info("앙상블 독립성 검사 통과: 모든 전략 쌍 |r| < {:.1f}", threshold)
-                return
-
-            for c1, c2, r in high_pairs:
-                l1 = ENSEMBLE_LABELS.get(c1, c1)
-                l2 = ENSEMBLE_LABELS.get(c2, c2)
+            high = self._trailing_high_correlation(base_df)
+        except Exception as e:  # 진단 실패로 분석 전체를 멈추지 않되, 조용히 넘기지 않는다
+            if not self._check_error_logged:
                 logger.warning(
-                    "⚠️ 앙상블 독립성 위반: {}–{} 신호 상관계수 {:.2f} (>= {:.1f}). "
-                    "다수결 의미 퇴색 위험.",
-                    l1,
-                    l2,
-                    r,
-                    threshold,
+                    "앙상블 독립성 검사 실패 — 설정 모드({})로 판정합니다 (auto_downgrade 미적용): {}",
+                    self.mode, e,
                 )
-
-            if self.auto_downgrade and self.mode in ("majority_vote", "weighted_sum"):
-                old_mode = self.mode
-                self.mode = "conservative"
-                self._downgraded = True
+                self._check_error_logged = True
+            return modes
+        if high.any():
+            modes[high] = "conservative"
+            if not self._downgraded:
                 logger.warning(
-                    "앙상블 모드 자동 전환: {} → conservative (고상관 쌍 {}개 감지). "
-                    "참여 전략이 모두 동의할 때만 BUY/SELL. 전략 구성 재검토 권장. "
-                    "auto_downgrade: false로 비활성화 가능.",
-                    old_mode,
-                    len(high_pairs),
+                    "앙상블 모드 자동 전환: 직전 {}행 구성 신호 상관 |r| >= {:.2f}인 {}개 행을 "
+                    "{} 대신 conservative로 판정 (참여 전략이 모두 동의할 때만 BUY/SELL). "
+                    "전략 구성 재검토 권장. auto_downgrade: false로 비활성화 가능.",
+                    self._independence_window,
+                    self._independence_threshold,
+                    int(high.sum()),
+                    self.mode,
                 )
-        except Exception as e:
-            logger.debug("앙상블 독립성 검사 중 오류 (무시): {}", e)
+            self._downgraded = True
+        return modes
+
+    def _trailing_high_correlation(self, base_df: pd.DataFrame) -> pd.Series:
+        """행마다 직전 window행(당일 포함) 신호 상관이 임계 이상인 구성 쌍이 있는지.
+
+        롤링 창이라 각 행의 판정은 그 행까지의 신호만 쓴다. 창 안에서 한쪽 신호가
+        변하지 않으면(예: 데이터 없는 펀더멘털 HOLD) 상관을 정의할 수 없어 제외한다.
+        """
+        from core.ensemble_correlation import SIGNAL_TO_NUM, ENSEMBLE_SIGNAL_COLS
+
+        high = pd.Series(False, index=base_df.index)
+        cols = [c for c in ENSEMBLE_SIGNAL_COLS if c in base_df.columns]
+        if len(cols) < 2:
+            return high
+
+        window = self._independence_window
+        numeric = {
+            c: base_df[c].map(lambda s: SIGNAL_TO_NUM.get(str(s).strip().upper(), 0)).astype(float)
+            for c in cols
+        }
+        # 신호값이 -1/0/1이라 한 번이라도 바뀐 창의 표준편차는 0.1 이상이다. 부동소수
+        # 잔차(1e-17 수준)를 '변동'으로 읽어 엉뚱한 상관이 나오지 않게 문턱을 둔다.
+        varies = {
+            c: numeric[c].rolling(window, min_periods=window).std() > 1e-9 for c in cols
+        }
+        for i, c1 in enumerate(cols):
+            for c2 in cols[i + 1:]:
+                r = numeric[c1].rolling(window, min_periods=window).corr(numeric[c2])
+                valid = varies[c1] & varies[c2] & r.notna()
+                high = high | (valid & (r.abs() >= self._independence_threshold))
+        return high
 
     def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """각 전략 신호를 수집 후 앙상블 모드에 따라 통합 신호 반환"""
@@ -254,7 +274,7 @@ class StrategyEnsemble:
             return {"signal": "HOLD", "score": 0, "details": {"ensemble": "분석 결과 없음"}}
 
         last = analyzed.iloc[-1]
-        details = {}
+        details = {"ensemble_mode": last.get("ensemble_mode", self.mode)}
         for name, _, _ in self._strategies:
             details[name] = last.get(f"signal_{name}", "ERR")
             sk = last.get(f"ensemble_skip_{name}", False)
@@ -281,13 +301,19 @@ class StrategyEnsemble:
             out.append((name, sig, weight))
         return out
 
-    def _resolve_row_signal(self, signal_row: pd.Series, skip_row: pd.Series | None) -> str:
+    def _resolve_row_signal(
+        self,
+        signal_row: pd.Series,
+        skip_row: pd.Series | None,
+        mode: str | None = None,
+    ) -> str:
         parts = self._participating(signal_row, skip_row)
         if not parts:
             return "HOLD"
-        if self.mode == "conservative":
+        mode = mode or self.mode
+        if mode == "conservative":
             return self._resolve_conservative(parts)
-        if self.mode == "weighted_sum":
+        if mode == "weighted_sum":
             return self._resolve_weighted_sum(parts)
         return self._resolve_majority_vote(parts)
 
