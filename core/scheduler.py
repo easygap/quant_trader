@@ -1531,11 +1531,15 @@ class Scheduler:
         issues = []
 
         # 1) DB 연결 검사
+        # SQLAlchemy 2.0은 문자열 SQL을 그대로 실행하지 않고(text() 필요), get_session()이
+        # 돌려주는 Session에는 remove()가 없다(scoped_session 레지스트리의 메서드).
+        # 예전 코드는 그래서 정상 DB에서도 10분마다 'DB 연결 실패' critical 알림을 냈다.
         try:
-            from database.models import get_session
-            session = get_session()
-            session.execute("SELECT 1")
-            session.remove()
+            from sqlalchemy import text
+            from database.models import db_session
+
+            with db_session() as session:
+                session.execute(text("SELECT 1"))
         except Exception as e:
             issues.append(f"DB 연결 실패: {e}")
 
@@ -1551,13 +1555,7 @@ class Scheduler:
 
         # 3) KIS API 인증 상태 (live 모드)
         if self.config.trading.get("mode") == "live":
-            try:
-                from api.kis_api import KISApi
-                kis = KISApi()
-                if not getattr(kis, "_access_token", None):
-                    issues.append("KIS API 토큰 없음 — 재인증 필요")
-            except Exception as e:
-                issues.append(f"KIS API 초기화 실패: {e}")
+            issues.extend(self._kis_token_health_issues())
 
         # 4) 메모리 사용량 검사
         try:
@@ -1573,6 +1571,34 @@ class Scheduler:
         if not issues:
             logger.debug("헬스체크 정상")
         return issues
+
+    def _kis_token_health_issues(self) -> list[str]:
+        """live KIS 인증 상태 — 프로세스 공유 토큰 캐시만 본다(새로 발급하지 않는다).
+
+        새 KISApi 인스턴스의 토큰은 발급 전이라 늘 비어 있어, 예전 검사는 매번
+        '토큰 없음'을 보고했다. 그렇다고 10분마다 발급을 시도하면 그 자체가 1분 1회
+        발급 한도를 소모한다. 첫 요청 전이라 토큰이 없는 것은 정상(첫 요청 때
+        발급)이고, 직전 발급이 실패한 상태만 이상으로 본다.
+        """
+        try:
+            from api.kis_api import KISApi
+
+            status = KISApi().token_status()
+        except Exception as e:
+            return [f"KIS API 상태 확인 실패: {e}"]
+
+        if status.get("valid"):
+            return []
+        last_error = str(status.get("last_error") or "")
+        if last_error:
+            remaining = float(status.get("cooldown_remaining") or 0.0)
+            suffix = f" (재발급 억제 {remaining:.0f}초 남음)" if remaining > 0 else ""
+            return [f"KIS API 토큰 발급 실패 상태 — {last_error}{suffix}"]
+        logger.debug(
+            "KIS 토큰 {} — 다음 요청 때 발급/갱신 예정",
+            "만료" if status.get("has_token") else "아직 발급 전",
+        )
+        return []
 
     # =============================================================
     # 휴장일 자동 갱신
