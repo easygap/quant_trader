@@ -82,7 +82,7 @@ function dashboard({ now = "2026-10-01T00:15:00+09:00", fetch } = {}) {
     history: { replaceState() {} },
   });
   const exports =
-    "parseDate, fmtLong, fmtDT, calendarAgeDays, rowInstant, buildSeries, monthlyReturns, currentMonthContributionState, renderSignals, refreshCore, refreshSlow, refreshChart, updateChart, renderChartTable, moveHistoryTable, state, chart";
+    "parseDate, fmtLong, fmtDT, calendarAgeDays, rowInstant, buildSeries, monthlyReturns, currentMonthContributionState, renderSignals, refreshCore, refreshSlow, refreshChart, updateChart, renderChartTable, moveHistoryTable, renderDecision, renderEvaluations, state, chart";
   assert.match(source, /\n  main\(\);\s*\}\)\(\);\s*$/);
   vm.runInContext(
     source.replace(/\n  main\(\);/, `\n  globalThis.dashboard = {${exports}};`),
@@ -337,4 +337,32 @@ test("운영 상태 새로고침도 진행 중인 조회 결과를 함께 기다
   await Promise.all([d.refreshSlow(true), d.refreshSlow(true)]);
   assert.equal(calls.length, 2);
   assert.ok(calls.every((c) => !c.signal.aborted));
+});
+
+test("검증 결과를 처음 불러오는 동안에는 실패 안내를 띄우지 않음", () => {
+  const d = dashboard();
+  d.state.runtime = { trading_halt: null, scheduler_stale: false };
+  d.state.runtimeStatus = "ready";
+  d.state.baskets = [
+    {
+      basket: "kr_pocket",
+      account_key: "basket_rebalance:kr_pocket",
+      snapshot: { date: "2026-09-30" },
+      missed_trading_days: 0,
+      contribution_plan: { enabled: false },
+    },
+  ];
+  const title = () => d.element("decisionTitle").textContent;
+
+  d.renderDecision();
+  assert.equal(title(), "검증 결과를 확인하고 있습니다");
+
+  d.renderEvaluations([{ basket: "kr_pocket", issues: [] }]);
+  d.renderDecision();
+  assert.equal(title(), "현재 확인할 항목이 없습니다");
+
+  d.state.evaluations = null;
+  d.state.evaluationsStatus = "error";
+  d.renderDecision();
+  assert.equal(title(), "검증 결과를 불러오지 못했습니다");
 });
