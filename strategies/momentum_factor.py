@@ -6,9 +6,9 @@
 
 import pandas as pd
 import numpy as np
-from loguru import logger
 
 from strategies.base_strategy import BaseStrategy
+from strategies.index_cache import IndexCloseCache
 from config.config_loader import Config
 
 
@@ -32,7 +32,10 @@ class MomentumFactorStrategy(BaseStrategy):
         )
         self.config = config or Config.get()
         self.params = self.config.strategies.get("momentum_factor", {})
-        self._benchmark_return_cache: dict[tuple[str, int, str, str], pd.Series] = {}
+        # 지수 종가 캐시: (지수, 워밍업 일수) → IndexCloseCache
+        self._benchmark_index_caches: dict[tuple[str, int], IndexCloseCache] = {}
+        # 파생 수익률 캐시: (지수, lookback) → (캐시 version, 수익률 시리즈)
+        self._benchmark_return_cache: dict[tuple[str, int], tuple[int, pd.Series]] = {}
 
     def _benchmark_return(
         self,
@@ -40,45 +43,40 @@ class MomentumFactorStrategy(BaseStrategy):
         lookback: int,
         benchmark_symbol: str,
     ) -> pd.Series:
-        """Return benchmark N-day momentum aligned to the input index."""
+        """Return benchmark N-day momentum aligned to the input index.
+
+        예전에는 (시작, 끝) 날짜를 캐시 키로 써서 strict 백테스트(봉마다 df.iloc[:i+1])가
+        봉마다 지수를 새로 받았다(호출마다 새 DataCollector). 이제 지수를 인스턴스당
+        넓게 한 번 받아 수익률을 한 번 계산하고, 호출의 끝 날짜 이하로 잘라 맞춘다.
+        조회 실패는 IndexCloseCache가 사유와 함께 경고하고, 여기서는 NaN(매수 없음)을 준다.
+        """
         if len(index) == 0:
             return pd.Series(dtype=float, index=index)
 
-        try:
-            from core.data_collector import DataCollector
-
-            dates = pd.to_datetime(index)
-            margin_days = max(lookback * 3, 120)
-            start = (dates.min() - pd.Timedelta(days=margin_days)).strftime("%Y-%m-%d")
-            end = dates.max().strftime("%Y-%m-%d")
-            cache_key = (benchmark_symbol, lookback, start, end)
-            if cache_key in self._benchmark_return_cache:
-                benchmark_return = self._benchmark_return_cache[cache_key]
-                aligned = benchmark_return.reindex(dates, method="ffill")
-                return pd.Series(aligned.to_numpy(), index=index)
-
-            collector = DataCollector()
-            collector.quiet_ohlcv_log = True
-            benchmark = collector.fetch_korean_stock(
-                benchmark_symbol,
-                start_date=start,
-                end_date=end,
+        lookback = int(lookback)
+        dates = pd.to_datetime(index)
+        margin_days = max(lookback * 3, 120)
+        cache_key = (benchmark_symbol, margin_days)
+        cache = self._benchmark_index_caches.get(cache_key)
+        if cache is None:
+            cache = IndexCloseCache(
+                benchmark_symbol, warmup_days=margin_days, label="benchmark-relative momentum",
             )
-            if benchmark is None or benchmark.empty:
-                logger.warning("benchmark-relative momentum: benchmark data unavailable")
-                return pd.Series(np.nan, index=index)
+            self._benchmark_index_caches[cache_key] = cache
 
-            if "date" in benchmark.columns:
-                benchmark = benchmark.set_index("date")
-            benchmark.index = pd.to_datetime(benchmark.index)
-            close = benchmark["close"].astype(float)
-            benchmark_return = (close / close.shift(lookback) - 1) * 100
-            self._benchmark_return_cache[cache_key] = benchmark_return
-            aligned = benchmark_return.reindex(dates, method="ffill")
-            return pd.Series(aligned.to_numpy(), index=index)
-        except Exception as e:
-            logger.warning("benchmark-relative momentum disabled: {}", e)
+        closes = cache.ensure(dates.min(), dates.max())
+        if closes is None or closes.empty:
             return pd.Series(np.nan, index=index)
+
+        ret_key = (benchmark_symbol, lookback)
+        cached = self._benchmark_return_cache.get(ret_key)
+        if cached is None or cached[0] != cache.version:
+            benchmark_return = (closes / closes.shift(lookback) - 1) * 100
+            cached = (cache.version, benchmark_return)
+            self._benchmark_return_cache[ret_key] = cached
+        # 호출 끝 날짜 이후 봉은 잘라 낸다 (strict 백테스트에서 벤치마크 미래 정보 차단)
+        aligned = cached[1].loc[: dates.max()].reindex(dates, method="ffill")
+        return pd.Series(aligned.to_numpy(), index=index)
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """lookback 일 수익률 계산 후 신호 부여"""
