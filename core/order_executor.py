@@ -1105,11 +1105,12 @@ class OrderExecutor:
             평균단가로 잰다 — paper에서는 시장이 움직여도 값이 변하지 않아, 하락장에선
             낙폭을 작게 보고(9/22 kr_diversified_hold 9.7%, 실제로는 12.9%) 평가익이
             쌓이면 가짜 '일일 손실'로 매수를 막는다(6/15 원장 재현 -5.5%).
-        delegated: 사전 승인된 목표 비중표로 집행하는 주문(바스켓 리밸런싱). 계좌 단위
-            MDD·일일 손실 가드는 재량 매매용 안전판이라, 목표 비중 주문은 그 바스켓이
-            정한 낙폭 규칙(overlays.drawdown_guard — 리밸런서가 배수로 적용)을 따른다.
-            상관 거부권(#456)·노출 상한(#457)과 같은 원칙이다. 판정은 계속 계산해
-            로그로 남긴다.
+        delegated: 자기 낙폭 규칙(overlays.drawdown_guard — 리밸런서가 배수로 적용)을
+            켜 둔 바스켓의 목표 비중 주문. 계좌 단위 MDD·일일 손실 가드는 재량 매매용
+            안전판이라, 이런 주문은 그 바스켓 규칙을 따른다. 상관 거부권(#456)·노출
+            상한(#457)과 같은 원칙이다. 규칙을 꺼 둔 바스켓(kr_diversified_hold)은
+            넘기지 않는다 — 넘기면 계좌 가드를 아무도 적용하지 않게 된다. 판정은 계속
+            계산해 로그로 남긴다.
         """
         decision = self._drawdown_guard_decision(action, mark_prices=mark_prices)
         if (
@@ -2015,6 +2016,7 @@ class OrderExecutor:
         risk_levels: dict = None,
         exposure_limits: dict = None,
         mark_prices: dict = None,
+        basket_drawdown_rule: bool = False,
     ) -> dict:
         """Execute a fixed-quantity buy (paper or live).
 
@@ -2034,6 +2036,10 @@ class OrderExecutor:
             호출부(리밸런서)는 시가로 주문을 계획하는데 주문 단계가 평균단가로 재면
             하락장에서 계획한 보충 매수가 '투자 비중 초과'로 거부된다(재현: 시장 -15%에서
             시가 60.0% 주문이 원가 62.1%로 계산돼 거부).
+        basket_drawdown_rule: 호출한 바스켓이 자기 낙폭 규칙(overlays.drawdown_guard)을
+            켜 두었는지. 켜 둔 바스켓의 목표 비중 주문만 계좌 MDD·일일 손실 가드를 그
+            규칙에 맡긴다. 규칙이 없는 바스켓까지 넘기면 계좌 가드가 계산만 되고 아무도
+            적용하지 않는다(live에서는 원래 작동하던 안전판이 사라진다).
         """
         with PositionLock():
             result = self._execute_buy_quantity_impl(
@@ -2052,6 +2058,7 @@ class OrderExecutor:
                 risk_levels=risk_levels,
                 exposure_limits=exposure_limits,
                 mark_prices=mark_prices,
+                basket_drawdown_rule=basket_drawdown_rule,
             )
         if not result.get("success"):
             self._report_buy_rejection(symbol, strategy, result)
@@ -2095,6 +2102,7 @@ class OrderExecutor:
         risk_levels: dict = None,
         exposure_limits: dict = None,
         mark_prices: dict = None,
+        basket_drawdown_rule: bool = False,
     ) -> dict:
         # live 고정수량 BUY도 일반 BUY와 동일하게 canonical live gate 통과 executor에서만 허용.
         # (기존 paper-only 차단을 제거하면서 이 게이트가 그 안전 역할을 승계한다.)
@@ -2175,6 +2183,7 @@ class OrderExecutor:
             avg_daily_volume=avg_daily_volume,
             mark_prices=mark_prices,
             weight_policy_managed=weight_policy_managed,
+            drawdown_delegable=weight_policy_managed and bool(basket_drawdown_rule),
         )
         if not pre_check["allowed"]:
             result = {"success": False, **pre_check}
@@ -3530,6 +3539,7 @@ class OrderExecutor:
         avg_daily_volume: float | None = None,
         mark_prices: dict | None = None,
         weight_policy_managed: bool = False,
+        drawdown_delegable: bool = False,
     ) -> dict:
         """
         주문 전 안전 체크 (거래 시간 + 블랙스완)
@@ -3554,9 +3564,9 @@ class OrderExecutor:
         if not monthly_cap["allowed"]:
             return monthly_cap
 
-        if mark_prices or weight_policy_managed:
+        if mark_prices or drawdown_delegable:
             drawdown_check = self._drawdown_pre_order_check(
-                action, mark_prices=mark_prices, delegated=weight_policy_managed,
+                action, mark_prices=mark_prices, delegated=drawdown_delegable,
             )
         else:
             drawdown_check = self._drawdown_pre_order_check(action)

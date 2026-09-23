@@ -185,6 +185,15 @@ class BasketRebalancer:
             (self.basket.get("overlays") or {}).get("defensive_symbol"),
         ).values())
 
+    def _has_drawdown_rule(self) -> bool:
+        """이 바스켓이 자기 낙폭 규칙(overlays.drawdown_guard)을 켜 두었는지."""
+        cfg = getattr(self, "_overlay_cfg", None)
+        if cfg is None:
+            from core.risk_overlays import parse_overlay_config
+
+            cfg = parse_overlay_config(getattr(self, "basket", None) or {})
+        return bool(cfg.drawdown.enabled)
+
     def _overlay_scale(self) -> float:
         decision = self.overlay_decision()
         return float(decision.scale) if decision is not None else 1.0
@@ -1174,6 +1183,8 @@ class BasketRebalancer:
                         # 노출 상한도 이 바스켓이 선언한 비중에서 파생한다.
                         exposure_limits=self._policy_exposure_limits(order.symbol),
                         mark_prices=mark_prices or None,
+                        # 계좌 낙폭 가드는 이 바스켓이 자기 낙폭 규칙을 켜 둔 경우에만 넘긴다.
+                        basket_drawdown_rule=self._has_drawdown_rule(),
                     )
                 else:
                     res = executor.execute_sell(

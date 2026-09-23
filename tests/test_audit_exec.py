@@ -68,6 +68,62 @@ def test_mdd_breach_is_delegated_for_weight_policy_orders(executor, monkeypatch)
     assert seen == [{"005930": 70_000.0}]   # 판정 자체는 시가로 계산
 
 
+def test_basket_without_drawdown_rule_keeps_account_guard(executor, monkeypatch):
+    """낙폭 규칙을 꺼 둔 바스켓(kr_diversified_hold)의 목표 비중 주문은 계좌 가드를 그대로
+    받는다. 넘기면 계좌 MDD 가드를 아무도 적용하지 않는다(리뷰 지적: live에서 사라짐)."""
+    monkeypatch.setattr("core.portfolio_manager.PortfolioManager",
+                        _fake_pm({"total_value": 8_500_000, "mdd": 16.0}))
+    monkeypatch.setattr(executor, "_daily_loss_baseline", lambda: None)
+    monkeypatch.setattr(executor, "_global_trading_halt_check", lambda *a, **k: {"allowed": True})
+    monkeypatch.setattr(executor, "_monthly_buy_cap_check", lambda *a, **k: {"allowed": True})
+
+    r = executor._pre_order_check(
+        symbol="005930", action="BUY", mark_prices={"005930": 70_000.0},
+        weight_policy_managed=True, drawdown_delegable=False,
+    )
+
+    assert r["allowed"] is False and r["drawdown_guard_type"] == "mdd"
+
+
+def test_buy_quantity_delegates_only_with_basket_drawdown_rule(executor, monkeypatch):
+    seen = []
+
+    def _capture(**kw):
+        seen.append(kw.get("drawdown_delegable"))
+        return {"allowed": False, "reason": "stop-here"}
+
+    monkeypatch.setattr(executor, "_pre_order_check", _capture)
+    monkeypatch.setattr(executor, "_report_buy_rejection", lambda *a, **k: None)
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
+    kwargs = dict(symbol="069500", price=40_000, quantity=1, capital=1_000_000,
+                  available_cash=500_000, weight_policy_managed=True)
+
+    executor.execute_buy_quantity(**kwargs)
+    executor.execute_buy_quantity(**kwargs, basket_drawdown_rule=True)
+    executor.execute_buy_quantity(**{**kwargs, "weight_policy_managed": False},
+                                  basket_drawdown_rule=True)
+
+    assert seen == [False, True, False]
+
+
+def test_rebalancer_reports_its_drawdown_rule():
+    from core.basket_rebalancer import BasketRebalancer
+
+    rb = BasketRebalancer.__new__(BasketRebalancer)
+    rb._overlay_cfg = None
+    rb.basket = {"overlays": {"drawdown_guard": {"enabled": True, "trigger": -0.1,
+                                                  "release": -0.05, "scale": 0.5}}}
+    assert rb._has_drawdown_rule() is True
+
+    rb._overlay_cfg = None
+    rb.basket = {"overlays": {"drawdown_guard": {"enabled": False}}}
+    assert rb._has_drawdown_rule() is False
+
+    rb._overlay_cfg = None
+    rb.basket = {}
+    assert rb._has_drawdown_rule() is False
+
+
 def test_infrastructure_failure_is_not_delegated(executor, monkeypatch):
     """평가 불가·설정 오류는 넘기지 않는다 — 판단 근거가 없으면 여전히 막는다."""
     executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = "x"
@@ -222,8 +278,10 @@ def test_peak_only_advances_on_market_priced_summary(monkeypatch):
     pm = PortfolioManager(account_key="audit_peak_test", initial_capital=1_000_000)
     start_peak = pm._peak_value
 
-    pm.get_portfolio_summary()                         # 원가 평가 — 총액 2,000,000
+    summary = pm.get_portfolio_summary()               # 원가 평가 — 총액 2,000,000
     assert pm._peak_value == pytest.approx(start_peak)
+    # 피크를 올리지 않아도 낙폭이 음수가 되면 안 된다(주문 가드가 abs()로 받아 100%로 읽는다)
+    assert summary["mdd"] == pytest.approx(0.0)
 
     pm.get_portfolio_summary(current_prices={"005930": 90_000.0})   # 시가 1,900,000
     assert pm._peak_value == pytest.approx(1_900_000)
