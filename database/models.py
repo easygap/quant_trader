@@ -1124,6 +1124,115 @@ def _migrate_position_unique_constraint(engine):
     )
 
 
+def _sqlite_index_map(conn, table_name):
+    """{(컬럼 튜플): unique 여부} — 물리 인덱스(자동 생성 UNIQUE 포함)."""
+    from sqlalchemy import text
+
+    out = {}
+    for row in conn.execute(text(f'PRAGMA index_list("{table_name}")')).fetchall():
+        name = str(row[1]).replace('"', '""')
+        cols = tuple(
+            str(r[2]) for r in conn.execute(text(f'PRAGMA index_info("{name}")')).fetchall()
+        )
+        if cols:
+            out[cols] = out.get(cols, False) or bool(row[2])
+    return out
+
+
+def _model_uniques(table):
+    """모델이 선언한 UNIQUE 컬럼 튜플(제약·unique 인덱스·unique 컬럼)."""
+    uniques = set()
+    for c in table.constraints:
+        if isinstance(c, UniqueConstraint):
+            uniques.add(tuple(col.name for col in c.columns))
+    for ix in table.indexes:
+        if ix.unique:
+            uniques.add(tuple(col.name for col in ix.columns))
+    for col in table.columns:
+        if col.unique:
+            uniques.add((col.name,))
+    return uniques
+
+
+def check_schema_drift(engine=None) -> list[str]:
+    """모델과 실제 SQLite 스키마가 어긋난 곳을 사람이 읽는 문장으로 돌려준다.
+
+    create_all은 이미 있는 테이블을 고치지 않는다. 그래서 모델에서 제약을 바꿔도 예전
+    DB에는 옛 제약이 남는다 — 2026-07-10 kr_pocket 가짜 낙폭(-41%)이 정확히 이 경우였다
+    (positions의 옛 UNIQUE(symbol)이 다른 장부의 같은 종목 포지션을 조용히 삼켰다).
+    시작할 때 비교해서 로그와 헬스에 드러낸다. SQLite가 아니면 빈 목록.
+    """
+    engine = engine or get_engine()
+    if "sqlite" not in engine.url.drivername:
+        return []
+    issues: list[str] = []
+    with engine.connect() as conn:
+        for table in Base.metadata.sorted_tables:
+            columns = _sqlite_table_columns(conn, table.name)
+            if not columns:
+                issues.append(f"{table.name}: 테이블 없음")
+                continue
+            missing_cols = [c.name for c in table.columns if c.name not in columns]
+            if missing_cols:
+                issues.append(f"{table.name}: 컬럼 없음 {missing_cols}")
+            physical = _sqlite_index_map(conn, table.name)
+            model_uniques = _model_uniques(table)
+            pk = tuple(c.name for c in table.primary_key.columns)
+            for cols in sorted(model_uniques):
+                if not physical.get(cols):
+                    issues.append(f"{table.name}: UNIQUE{cols} 없음(모델에는 있음)")
+            for cols, unique in sorted(physical.items()):
+                if unique and cols not in model_uniques and cols != pk:
+                    issues.append(f"{table.name}: 옛 UNIQUE{cols}가 남아 있음(모델에는 없음)")
+            for ix in table.indexes:
+                cols = tuple(col.name for col in ix.columns)
+                if not ix.unique and cols not in physical:
+                    issues.append(f"{table.name}: 인덱스 {ix.name}{cols} 없음")
+    return issues
+
+
+def _repair_schema_drift(engine) -> None:
+    """드리프트 중 되돌릴 수 없는 위험이 없는 것만 고친다.
+
+    - 모델의 일반 인덱스가 없으면 만든다(checkfirst — 데이터는 건드리지 않는다).
+    - daily_reports의 옛 UNIQUE(date): 계정별 리포트가 같은 날 두 번째부터 실패한다.
+      비어 있을 때만 테이블을 다시 만든다. 행이 있으면 로그만 남긴다(운영자 판단).
+    """
+    if "sqlite" not in engine.url.drivername:
+        return
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not _sqlite_table_columns(conn, table.name):
+                continue
+            physical = _sqlite_index_map(conn, table.name)
+            for ix in table.indexes:
+                cols = tuple(col.name for col in ix.columns)
+                if ix.unique or cols in physical:
+                    continue
+                try:
+                    ix.create(bind=engine, checkfirst=True)
+                    logger.warning("스키마 보정: 인덱스 생성 {} {}", table.name, cols)
+                except Exception as exc:
+                    logger.error("스키마 보정 실패: 인덱스 {} — {}", ix.name, exc)
+
+        daily = Base.metadata.tables.get("daily_reports")
+        if daily is not None and _sqlite_table_columns(conn, "daily_reports"):
+            physical = _sqlite_index_map(conn, "daily_reports")
+            if physical.get(("date",)) and ("date",) not in _model_uniques(daily):
+                rows = conn.execute(text('SELECT COUNT(*) FROM "daily_reports"')).scalar()
+                if rows == 0:
+                    conn.execute(text('DROP TABLE "daily_reports"'))
+                    conn.commit()
+                    daily.create(bind=engine, checkfirst=True)
+                    logger.warning("스키마 보정: 비어 있던 daily_reports를 계정별 UNIQUE로 다시 만듦")
+                else:
+                    logger.error(
+                        "daily_reports에 옛 UNIQUE(date)가 남아 있고 행이 {}개라 자동 보정하지 않음", rows,
+                    )
+
+
 def init_database():
     """
     데이터베이스 초기화
@@ -1165,6 +1274,13 @@ def init_database():
     # 포지션 mode 격리 재구축. partial_tp_done 컬럼 추가 이후에 실행해
     # 구버전 테이블을 완전히 복사한다. 신 스키마에서는 no-op.
     _migrate_position_unique_constraint(engine)
+    # 모델과 실제 스키마 대조 — 안전한 보정만 하고, 남은 어긋남은 ERROR로 남긴다.
+    try:
+        _repair_schema_drift(engine)
+        for issue in check_schema_drift(engine):
+            logger.error("스키마 드리프트: {}", issue)
+    except Exception as exc:
+        logger.error("스키마 대조 실패: {}", exc)
 
     if "sqlite" in engine.url.drivername:
         from sqlalchemy import text

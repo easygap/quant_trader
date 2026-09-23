@@ -2165,6 +2165,15 @@ def run_health_check() -> int:
                     )
         except Exception as ov_exc:
             logger.warning("위험 관리 입력 점검 실패: {}", ov_exc)
+        # 모델과 실제 DB 스키마가 어긋났는지 — 7/10 가짜 낙폭(옛 UNIQUE가 포지션을 삼킴)과
+        # 같은 부류는 오류 없이 숫자만 틀리게 만든다.
+        try:
+            from database.models import check_schema_drift
+
+            for issue in check_schema_drift():
+                data_notes.append(f"DB 스키마 드리프트: {issue}")
+        except Exception as sc_exc:
+            logger.warning("스키마 대조 실패: {}", sc_exc)
 
         basket_operation = {
             "enabled_baskets": enabled_baskets,
