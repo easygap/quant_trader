@@ -88,14 +88,15 @@ def test_report_daily_return_uses_twr_with_deposit_neutralized():
     assert _report_scheduler(account)._report_daily_return() == pytest.approx(expected)
 
 
-def test_report_daily_return_is_zero_with_single_snapshot():
+def test_report_daily_return_is_blank_with_single_snapshot():
     from database.repositories import save_portfolio_snapshot
 
     account = "audit_post_market_single"
     save_portfolio_snapshot(
         total_value=1_000_000, cash=1_000_000, invested=0, account_key=account, mode="paper",
     )
-    assert _report_scheduler(account)._report_daily_return() == 0.0
+    # 비교할 직전 기록이 없으면 0.00%가 아니라 비워 둔다('—')
+    assert _report_scheduler(account)._report_daily_return() is None
 
 
 def test_post_market_report_card_carries_the_twr_daily_return(monkeypatch):

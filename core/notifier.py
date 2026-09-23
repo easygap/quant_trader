@@ -320,7 +320,10 @@ class Notifier:
         fields = [
             {"name": "💰 총 평가금", "value": f"{report.get('total_value', 0):,.0f}원", "inline": True},
             {"name": "💵 현금", "value": f"{report.get('cash', 0):,.0f}원", "inline": True},
-            {"name": "📈 일일 수익률", "value": f"{report.get('daily_return', 0):.2f}%", "inline": True},
+            # 계산하지 못한 날(첫 기록·입금 조회 실패)은 0.00%가 아니라 '—'로 둔다.
+            {"name": "📈 일일 수익률", "value": (
+                "—" if report.get("daily_return") is None else f"{report['daily_return']:.2f}%"
+            ), "inline": True},
             {"name": "📊 누적 수익률", "value": f"{report.get('cumulative_return', 0):.2f}%", "inline": True},
             {"name": "📉 MDD", "value": f"{report.get('mdd', 0):.2f}%", "inline": True},
             {"name": "📋 보유 종목", "value": f"{report.get('position_count', 0)}개", "inline": True},

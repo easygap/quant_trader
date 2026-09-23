@@ -155,6 +155,18 @@ def test_daily_report_omits_absent_v2_fields(monkeypatch):
     assert "⚠️ 미체결 슬롯" not in names
 
 
+def test_daily_report_shows_dash_when_daily_return_unknown(monkeypatch):
+    """계산하지 못한 일간 수익률(None)은 가짜 0.00%가 아니라 '—'로 나온다."""
+    notifier, _ = _notifier_with_failing_discord(monkeypatch)
+    notifier.send_daily_report({
+        "total_value": 10_000_000, "cash": 2_000_000,
+        "daily_return": None, "cumulative_return": 1.2, "mdd": -3.0,
+        "position_count": 2, "total_trades": 0,
+    })
+    field = next(f for f in notifier.discord.embeds[0]["fields"] if f["name"] == "📈 일일 수익률")
+    assert field["value"] == "—"
+
+
 def test_signal_alert_uses_fallback_and_hold_is_silent(monkeypatch):
     notifier, emails = _notifier_with_failing_discord(monkeypatch)
 

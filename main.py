@@ -1063,8 +1063,9 @@ def _run_rebalance_impl(args):
                     )
                     # 일간 수익률: 직전 스냅샷 대비 (summary에는 누적치만 있다).
                     # 적립식 계정은 입금을 분모에 더해 중화한다 — 입금일에 +33% 같은
-                    # 가짜 일간 수익 방지(docs/POCKET_TRACK_PLAN.md §4).
-                    daily_ret = 0.0
+                    # 가짜 일간 수익 방지(docs/POCKET_TRACK_PLAN.md §4). 계산하지 못하면(첫
+                    # 기록·입금 조회 실패) None으로 둬 카드에 '—'로 나온다 — 0.00%는 틀린 값이다.
+                    daily_ret = None
                     try:
                         from database.repositories import (
                             get_portfolio_snapshots,

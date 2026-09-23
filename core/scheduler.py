@@ -1526,13 +1526,14 @@ class Scheduler:
         except Exception as e:
             logger.error("장마감 리포트 실패: {}", e)
 
-    def _report_daily_return(self) -> float:
+    def _report_daily_return(self) -> float | None:
         """직전 스냅샷 대비 일간 수익률(%) — 일일 CLI 리포트(main.py)와 같은 TWR 산식.
 
         예전 스케줄러 리포트는 일간 수익률을 0으로 하드코딩해 매일 '일간 0.00%'였다.
         입금·출금은 수익이 아니므로 직전 스냅샷의 실제 측정 시각(created_at) 이후
-        현금 흐름을 분모에 더해 중화한다(twr_period_return). 스냅샷이 2개 미만이면 0.
-        계산 실패는 리포트 발송을 막지 않되 경고로 남긴다.
+        현금 흐름을 분모에 더해 중화한다(twr_period_return). 스냅샷이 2개 미만이거나
+        계산에 실패하면 None — 리포트에는 0.00%가 아니라 '—'로 나온다. 실패는 리포트
+        발송을 막지 않되 경고로 남긴다.
         """
         try:
             import pandas as pd
@@ -1546,12 +1547,12 @@ class Scheduler:
             mode = self._resolved_ledger_mode()
             snaps = get_portfolio_snapshots(days=7, account_key=self.strategy_name, mode=mode)
             if snaps is None or len(snaps) < 2:
-                return 0.0
+                return None
             ordered = snaps.sort_values("date")
             prev_total = float(ordered["total_value"].iloc[-2])
             last_total = float(ordered["total_value"].iloc[-1])
             if prev_total <= 0:
-                return 0.0
+                return None
             # 유입 경계는 자정 귀속(date)이 아니라 실제 측정 시각(created_at) — 직전
             # 스냅샷 '이전'의 같은 날 입금을 이중으로 중화하지 않게.
             boundary = ordered["created_at"].iloc[-2] if "created_at" in ordered.columns else None
@@ -1564,8 +1565,8 @@ class Scheduler:
             )
             return twr_period_return(prev_total, last_total, flow) * 100
         except Exception as exc:
-            logger.warning("일간 수익률 계산 실패 — 리포트에는 0으로 표기: {}", exc)
-            return 0.0
+            logger.warning("일간 수익률 계산 실패 — 리포트에는 '—'로 표기: {}", exc)
+            return None
 
     def _check_live_readiness(self):
         """paper 모드 장마감 시 실전 전환 준비 자동 평가."""
