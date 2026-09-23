@@ -35,6 +35,9 @@ from database.repositories import (
 )
 from core.position_lock import PositionLock
 
+# 직전 거래일 탐색 상한(달력 오류로 무한 루프가 되지 않게). KRX 최장 연휴보다 넉넉히.
+_TRADING_DAY_LOOKBACK_DAYS = 31
+
 
 class LoopMetrics:
     """10분 루프 모니터링 지표 수집기."""
@@ -413,26 +416,9 @@ class Scheduler:
         logger.info("📋 장전 준비 시작 ({})", datetime.now().strftime("%H:%M:%S"))
         logger.info("=" * 50)
 
-        # 전일 provisional evidence finalize (장전에 benchmark 종가 확정)
+        # 직전 거래일 provisional evidence finalize (장전에 benchmark 종가 확정)
         if self._is_paper_like_mode():
-            try:
-                from core.paper_evidence import finalize_daily_evidence
-                yesterday = datetime.now() - timedelta(days=1)
-                # 주말이면 금요일로
-                while yesterday.weekday() >= 5:
-                    yesterday -= timedelta(days=1)
-                watchlist = WatchlistManager(self.config).resolve()
-                result = finalize_daily_evidence(
-                    strategy=self.strategy_name,
-                    mode=self._mode,
-                    account_key=self.strategy_name,
-                    date=yesterday,
-                    watchlist_symbols=watchlist,
-                )
-                if result:
-                    logger.info("전일 evidence finalized: {} bench={}", yesterday.strftime("%Y-%m-%d"), result.benchmark_status)
-            except Exception as fin_err:
-                logger.warning("전일 evidence finalize 실패: {}", fin_err)
+            self._finalize_evidence_for(self._previous_trading_day())
 
         try:
             from core.data_collector import DataCollector
@@ -530,6 +516,113 @@ class Scheduler:
 
         except Exception as e:
             logger.error("장전 준비 실패: {}", e)
+
+    # =============================================================
+    # KRX 거래일 기준 evidence 기록
+    # =============================================================
+
+    def _previous_trading_day(self, now: datetime | None = None) -> datetime | None:
+        """now 직전의 KRX 거래일(주말·휴장일 제외). 달력 이상으로 못 찾으면 None.
+
+        주말만 건너뛰면 추석·설·대체공휴일 같은 평일 휴장일이 '전일'로 잡혀 그 날짜의
+        가짜 real_paper evidence가 만들어지고, 실제 직전 거래일은 영영 finalize되지 않는다.
+        거래일 판정은 TradingHours(config/holidays.yaml)를 따른다 — 달력이 틀리면 이
+        판정도 틀리므로 달력 수정은 tools/verify_trading_calendar.py로 검증한다.
+        """
+        day = (now or datetime.now()) - timedelta(days=1)
+        for _ in range(_TRADING_DAY_LOOKBACK_DAYS):
+            if self.trading_hours.is_trading_day(day):
+                return day
+            day -= timedelta(days=1)
+        logger.warning(
+            "최근 {}일 안에 KRX 거래일이 없습니다 — 거래일 달력(config/holidays.yaml) 확인 필요",
+            _TRADING_DAY_LOOKBACK_DAYS,
+        )
+        return None
+
+    def _is_evidence_trading_day(self, date: datetime | None, step: str) -> bool:
+        """evidence 기록 대상 날짜가 KRX 거래일인지 확인하고, 아니면 경고 후 False."""
+        if date is None:
+            logger.warning("{}: 대상 거래일을 정하지 못해 evidence를 기록하지 않습니다", step)
+            return False
+        if self.trading_hours.is_trading_day(date):
+            return True
+        logger.warning(
+            "{}: {}은 KRX 거래일이 아니어서 evidence를 기록하지 않습니다 "
+            "(휴장일 기록은 execution_backed 가짜 거래일로 일수·샤프·승률을 왜곡한다)",
+            step, date.strftime("%Y-%m-%d"),
+        )
+        return False
+
+    def _finalize_evidence_for(self, date: datetime | None):
+        """date(직전 거래일)의 provisional evidence를 final로 확정. 비거래일은 거부(None)."""
+        if not self._is_evidence_trading_day(date, "전일 evidence finalize"):
+            return None
+        try:
+            from core.paper_evidence import finalize_daily_evidence
+
+            watchlist = WatchlistManager(self.config).resolve()
+            result = finalize_daily_evidence(
+                strategy=self.strategy_name,
+                mode=self._mode,
+                account_key=self.strategy_name,
+                date=date,
+                watchlist_symbols=watchlist,
+            )
+            if result:
+                logger.info(
+                    "전일 evidence finalized: {} bench={}",
+                    date.strftime("%Y-%m-%d"), result.benchmark_status,
+                )
+            return result
+        except Exception as fin_err:
+            logger.warning("전일 evidence finalize 실패: {}", fin_err)
+            return None
+
+    def _collect_post_market_evidence(self, date: datetime):
+        """장마감 evidence 수집(DailyEvidence JSONL + anomaly). 비거래일은 거부(None).
+
+        pilot session이면 pilot provenance가 자동 전달된다.
+        """
+        if not self._is_evidence_trading_day(date, "장마감 evidence 수집"):
+            return None
+        try:
+            from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
+
+            watchlist = WatchlistManager(self.config).resolve()
+            ps = self._pilot_session
+            result = collect_daily_evidence(
+                strategy=self.strategy_name,
+                mode=self._mode,
+                account_key=self.strategy_name,
+                date=date,
+                watchlist_symbols=watchlist,
+                evidence_mode=ps.get("evidence_mode", "real_paper"),
+                pilot_authorized=ps.get("pilot_authorized", False),
+                pilot_caps_snapshot=ps.get("pilot_caps_snapshot"),
+            )
+            logger.info(
+                "Paper evidence 기록 완료 (전략: {}, session_mode: {})",
+                self.strategy_name, ps.get("session_mode", "normal_paper"),
+            )
+            # pilot session artifact 저장
+            if ps.get("active"):
+                try:
+                    from core.paper_pilot import save_pilot_session_artifact
+                    save_pilot_session_artifact(
+                        strategy=self.strategy_name,
+                        date=date.strftime("%Y-%m-%d"),
+                        pilot_session=ps,
+                    )
+                except Exception as artifact_err:
+                    logger.warning("pilot session artifact 저장 실패: {}", artifact_err)
+            # 금요일이면 evidence 기반 주간 요약도 생성
+            if date.weekday() == 4:
+                generate_weekly_summary(self.strategy_name)
+            return result
+        except Exception as ev_err:
+            logger.warning("Paper evidence 기록 실패: {}", ev_err)
+            return None
 
     def _get_kis_max_calls_per_sec(self) -> float:
         """KIS 설정 초당 호출 한도 (예상 소요 계산용). 실패 시 10."""
@@ -1370,41 +1463,8 @@ class Scheduler:
                         logger.warning("주간 리포트 생성 실패: {}", wr_err)
 
                 # Paper evidence 수집 (DailyEvidence JSONL 누적 + anomaly 기록)
-                # pilot session이면 자동으로 pilot provenance가 전달됨
-                try:
-                    from core.paper_evidence import collect_daily_evidence, generate_weekly_summary
-                    watchlist = WatchlistManager(self.config).resolve()
-                    ps = self._pilot_session
-                    collect_daily_evidence(
-                        strategy=self.strategy_name,
-                        mode=self._mode,
-                        account_key=self.strategy_name,
-                        date=datetime.now(),
-                        watchlist_symbols=watchlist,
-                        evidence_mode=ps.get("evidence_mode", "real_paper"),
-                        pilot_authorized=ps.get("pilot_authorized", False),
-                        pilot_caps_snapshot=ps.get("pilot_caps_snapshot"),
-                    )
-                    logger.info(
-                        "Paper evidence 기록 완료 (전략: {}, session_mode: {})",
-                        self.strategy_name, ps.get("session_mode", "normal_paper"),
-                    )
-                    # pilot session artifact 저장
-                    if ps.get("active"):
-                        try:
-                            from core.paper_pilot import save_pilot_session_artifact
-                            save_pilot_session_artifact(
-                                strategy=self.strategy_name,
-                                date=datetime.now().strftime("%Y-%m-%d"),
-                                pilot_session=ps,
-                            )
-                        except Exception:
-                            pass
-                    # 금요일이면 evidence 기반 주간 요약도 생성
-                    if datetime.now().weekday() == 4:
-                        generate_weekly_summary(self.strategy_name)
-                except Exception as ev_err:
-                    logger.warning("Paper evidence 기록 실패: {}", ev_err)
+                # pilot session이면 자동으로 pilot provenance가 전달됨. 비거래일은 거부.
+                self._collect_post_market_evidence(datetime.now())
 
                 # 당일 executor + pilot session 리셋 (다음 날 fresh)
                 self._order_executor = None

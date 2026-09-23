@@ -75,24 +75,45 @@ def _coerce_date(value: str | datetime | None = None) -> datetime:
     return datetime.strptime(value, "%Y-%m-%d")
 
 
-def _business_days_between(start_date: str, end_date: str) -> int:
-    """start 다음 날부터 end까지의 한국장 영업일 수를 센다."""
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+def _as_calendar_date(value: str | datetime | Date) -> Date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, Date):
+        return value
+    return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+
+def _krx_trading_day_checker():
+    """KRX 거래일 판정 함수(core.trading_hours.TradingHours.is_trading_day)를 돌려준다.
+
+    거래일 달력을 읽지 못하면 주말만 빼는 판정으로 대체하되 경고를 남긴다 —
+    조용히 평일 수로 떨어지면 연휴 뒤 staleness가 부풀어도 원인이 보이지 않는다.
+    """
+    try:
+        from core.trading_hours import TradingHours
+
+        return TradingHours().is_trading_day
+    except Exception as exc:
+        logger.warning("KRX 거래일 달력 로드 실패 — 주말만 제외하고 셉니다(휴장일 미반영): {}", exc)
+        return lambda day: day.weekday() < 5
+
+
+def _business_days_between(start_date: str | datetime | Date, end_date: str | datetime | Date) -> int:
+    """start 다음 날부터 end까지의 KRX 거래일 수를 센다. 같은 날이면 0.
+
+    paper_runtime의 evidence staleness 판정도 이 함수를 쓴다 — 두 판정이 서로 다른
+    달력(평일 수 vs 거래일 수)으로 갈라지지 않게 한 곳에 둔다.
+    """
+    start = _as_calendar_date(start_date)
+    end = _as_calendar_date(end_date)
     if end <= start:
         return 0
-    try:
-        from core.trading_hours import _load_holidays
-
-        holidays = _load_holidays()
-    except Exception:
-        holidays = set()
+    is_trading_day = _krx_trading_day_checker()
 
     count = 0
     day = start + timedelta(days=1)
     while day <= end:
-        day_text = day.strftime("%Y-%m-%d")
-        if day.weekday() < 5 and day_text not in holidays:
+        if is_trading_day(datetime(day.year, day.month, day.day)):
             count += 1
         day += timedelta(days=1)
     return count
