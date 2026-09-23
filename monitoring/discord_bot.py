@@ -63,12 +63,7 @@ class DiscordBot:
             if self.avatar_url:
                 payload["avatar_url"] = self.avatar_url
 
-            response = req.post(
-                self.webhook_url,
-                json=payload,
-                timeout=10,
-            )
-            return response.status_code in (200, 204)
+            return self._post(payload)
         except Exception as e:
             logger.error("[ALERT_FAILED] 디스코드 발송 실패: {}", e)
             return False
@@ -107,15 +102,40 @@ class DiscordBot:
             if self.avatar_url:
                 payload["avatar_url"] = self.avatar_url
 
-            response = req.post(
-                self.webhook_url,
-                json=payload,
-                timeout=10,
-            )
-            return response.status_code in (200, 204)
+            return self._post(payload)
         except Exception as e:
-            logger.error("디스코드 Embed 발송 실패: {}", e)
+            logger.error("[ALERT_FAILED] 디스코드 Embed 발송 실패: {}", e)
             return False
+
+    def _post(self, payload: dict) -> bool:
+        """웹훅 전송. 2xx가 아니면 로그를 남기고, 429면 한 번만 짧게 기다려 다시 보낸다.
+
+        예전에는 거부 응답(토큰 폐기 404, 페이로드 오류 400, 속도 제한 429)을 아무 로그
+        없이 False로만 돌려줬다. 이메일이 죽어 있는 동안 디스코드가 유일한 경보 채널이라,
+        이게 막히면 모든 경보가 흔적 없이 사라진다. 웹훅 주소는 토큰이 들어 있어 남기지 않는다.
+        """
+        import time as _time
+
+        for attempt in range(2):
+            response = req.post(self.webhook_url, json=payload, timeout=10)
+            status = int(getattr(response, "status_code", 0) or 0)
+            if 200 <= status < 300:
+                return True
+            if status == 429 and attempt == 0:
+                try:
+                    wait = float((response.json() or {}).get("retry_after", 1))
+                except Exception:
+                    wait = 1.0
+                _time.sleep(max(0.0, min(wait, 5.0)))
+                continue
+            body = ""
+            try:
+                body = str(getattr(response, "text", "") or "")[:200]
+            except Exception:
+                pass
+            logger.error("[ALERT_FAILED] 디스코드 HTTP {} {}", status, body)
+            return False
+        return False
 
     def send_trade_alert(self, trade_info: dict):
         """매매 알림 발송"""

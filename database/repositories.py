@@ -1006,21 +1006,25 @@ def get_cash_flows(account_key: str = "", mode: str = "paper") -> list:
 
 @with_retry
 def get_recent_cash_flows(
-    account_key: str = "", limit: int = 12, mode: str = "paper"
+    account_key: str = "", limit: Optional[int] = 12, mode: str = "paper"
 ) -> list:
-    """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용."""
+    """최근 입금/출금 내역 [{occurred_at, amount, note}...] 최신순 — 대시보드 표시용.
+
+    limit=None이면 전체. 차트·CSV의 누적 원금은 전체 기록이 있어야 맞는다.
+    """
     session = get_session()
     try:
-        rows = (
+        query = (
             session.query(CashFlow)
             .filter(
                 CashFlow.mode == _ledger_mode(mode),
                 CashFlow.account_key == (account_key or ""),
             )
             .order_by(CashFlow.occurred_at.desc())
-            .limit(int(limit))
-            .all()
         )
+        if limit is not None:
+            query = query.limit(int(limit))
+        rows = query.all()
         return [
             {
                 "occurred_at": str(r.occurred_at)[:16],
