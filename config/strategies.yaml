@@ -13,12 +13,12 @@
 active_strategy: "scoring"
 
 # --- 시장 국면별 전략 파라미터 자동 조정 ---
-# bullish/caution/bearish 국면에 따라 손절 배수와 익절 목표를 동적으로 변경.
+# 국면(bullish/caution/bearish)에 따라 손절 배수와 익절 목표를 바꾼다.
 # 하락장에서는 손절을 타이트하게, 익절을 빨리 가져가서 리스크를 줄인다.
 # 매수 진입 임계값은 국면에 따라 바뀌지 않는다. 국면별 매수 억제는 시장 국면 필터
 # (settings.trading.market_regime_filter)의 allow_buys·position_scale이 맡는다.
-# (예전 buy_threshold_offset 키는 어디서도 읽히지 않아 삭제 — 진입이 엄격해진다는 오해 방지)
-# 국면 판정은 market_regime_filter가 꺼져 있으면 항상 bullish라 아래 배수는 1.0으로 동작한다.
+# (예전 buy_threshold_offset 키는 어디서도 읽지 않아 지웠다 — 진입이 엄격해지는 줄 알기 쉬웠다)
+# market_regime_filter가 꺼져 있으면 국면은 늘 bullish로 잡혀 배수는 1.0(변화 없음)이다.
 regime_adaptive:
   enabled: true
   bullish:
@@ -200,7 +200,7 @@ trend_following:
   adx_threshold: 25           # 추세 존재 확인 ADX 기준
   trend_ma_period: 200        # 추세 판단 이동평균 기간 (전략이 직접 계산)
   # 손절·트레일링 배수는 risk_params.yaml의 stop_loss.atr_multiplier / trailing_stop.atr_multiplier를 따른다.
-  # (예전 atr_stop_multiplier·trailing_atr_multiplier 키는 어디서도 읽지 않아 삭제)
+  # (예전 atr_stop_multiplier·trailing_atr_multiplier 키는 어디서도 읽지 않아 지웠다)
 
 # --- 펀더멘털 팩터 전략 (가격 OHLC와 독립, pykrx 우선 → yfinance 폴백) ---
 fundamental_factor:
@@ -236,7 +236,7 @@ ensemble:
   mode: "majority_vote"       # majority_vote | weighted_sum | conservative
   auto_downgrade: true        # true면 고상관 감지 시 majority_vote/weighted_sum → conservative 자동 전환
   independence_threshold: 0.6 # 전략 신호 상관계수 |r| >= 이 값이면 고상관 판단 → 다수결 의미 퇴색 경고
-  independence_window: 60     # 고상관 판정 창: 행마다 직전 N행(당일 포함) 신호만 사용 (미래 신호 미참조)
+  independence_window: 60     # 상관 판정 기간: 날짜마다 그날까지의 N행 신호만 본다 (미래 신호는 안 봄)
   components:                 # enabled/weight 로 구성 전략 켜고 끄기 (weighted_sum 시 weight 사용)
     - name: technical
       enabled: true

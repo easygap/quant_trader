@@ -428,7 +428,7 @@ quant_trader/
 | **indicators** | rsi(period, oversold, overbought), macd, bollinger, moving_average, stochastic, adx, atr, volume | 지표 파라미터 |
 | **scoring** | buy_threshold(3), sell_threshold(-3), collinearity_mode(representative_only), weights | 스코어링 가중치·임계값 |
 | **mean_reversion** | z_score_buy(-2), z_score_sell(2), lookback_period(20), adx_filter, exclude_52w_low_near, fundamental_filter(PER·부채비율), restrict_to_kospi200 | 평균 회귀 |
-| **trend_following** | adx_threshold, trend_ma_period, atr_stop_multiplier, trailing_atr_multiplier | 추세 추종 |
+| **trend_following** | adx_threshold, trend_ma_period(200) | 추세 추종 (손절·트레일링 배수는 risk_params.yaml) |
 | **momentum_factor** | lookback_days(20), buy_threshold_pct, sell_threshold_pct | 모멘텀 팩터 (앙상블용) |
 | **volatility_condition** | lookback_days(60), low_vol_max_pct, high_vol_min_pct | 변동성 조건 (앙상블용) |
 | **fundamental_factor** | per_sector_relative, roe_min, debt_ratio_max, earnings_growth_min, data_cache_hours 등 | 펀더멘털 단독 전략·앙상블 구성 공통 설정 |

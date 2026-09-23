@@ -437,7 +437,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 ### 4.3 추세 추종 전략 (중급 ⭐⭐)
 
 - **구현**: `strategies/trend_following.py`
-- **설정**: `trend_following` (adx_threshold, trend_ma_period, atr_stop_multiplier, trailing_atr_multiplier)
+- **설정**: `trend_following` (adx_threshold, trend_ma_period). 손절·트레일링 배수는 `risk_params.yaml`의 `stop_loss.atr_multiplier` / `trailing_stop.atr_multiplier`를 따른다
 - **이용(가정)하는 시장 비효율성**: **모멘텀 효과(Momentum)** — "좋은 주식이 일정 기간 계속 좋다"는 현상. 상대적으로 강한 추세가 지속되는 구간에서 추세를 따라가는 방식으로, 미국(나스닥) 등에서 **모멘텀 팩터**로 실증된 비효율성에 기반합니다. 한국 시장에서는 추세 지속성이 약해 해당 비효율성이 weaker할 수 있습니다(아래 "한국 시장 추세 지속성" 참고).
 
 **로직**: ADX > adx_threshold, 가격 > trend_ma(200일), MACD 골든크로스(히스토그램 양수 전환) 시 매수. ATR 기반 손절·트레일링 스탑.
@@ -863,7 +863,7 @@ STEP 2에서 찾은 가중치를 `strategies.yaml`에 반영한 뒤 실행합니
 ### 5.16 시장 국면 적응형 전략 파라미터 (`regime_adaptive`) — v3.0
 
 - **목적**: `check_market_regime()` 결과(bullish / caution / bearish)에 따라 **손절·익절 배수**를 바꿔 하락장에서 손실 속도를 줄이고 익절을 빨리 가져감.
-- **설정**: `config/strategies.yaml` → `regime_adaptive` (`enabled`, `bullish` / `caution` / `bearish` 각각 `buy_threshold_offset`, `stop_loss_multiplier`, `take_profit_multiplier`)
+- **설정**: `config/strategies.yaml` → `regime_adaptive` (`enabled`, `bullish` / `caution` / `bearish` 각각 `stop_loss_multiplier`, `take_profit_multiplier`). 매수 진입 기준은 국면에 따라 바뀌지 않는다 — 국면별 매수 억제는 `market_regime_filter`의 `allow_buys`·`position_scale`이 맡는다
 - **구현**: `core/market_regime.py` → `get_regime_adjusted_params(config, collector)`  
   **OrderExecutor**가 매수 시 `calculate_stop_loss` / `calculate_take_profit`에 국면 배수 전달.
 
