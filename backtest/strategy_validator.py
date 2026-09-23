@@ -131,7 +131,13 @@ def _build_equal_weight_panel(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
-    """동일 비중 벤치용: (date index, columns=symbol) close 패널. 공통 일자만 join='inner'."""
+    """동일 비중 벤치용: (date index, columns=symbol) close 패널.
+
+    모든 종목의 일자를 합친다(outer). 예전 inner 조인은 한 종목만 늦게 상장하거나 일찍 끝나도
+    패널 전체 기간이 그 종목 기준으로 잘려, 벤치마크가 전략과 다른(짧은) 기간을 쟀다.
+    상장 전·데이터 종료 후는 NaN으로 두고, 첫 관측과 마지막 관측 사이의 빈칸(거래정지 등)만
+    직전 종가로 채운다.
+    """
     if not symbols:
         return pd.DataFrame()
     closes_list = []
@@ -145,9 +151,61 @@ def _build_equal_weight_panel(
     if not closes_list:
         return pd.DataFrame()
     try:
-        return pd.concat(closes_list, axis=1, join="inner")
+        panel = pd.concat(closes_list, axis=1, join="outer").sort_index()
     except Exception:
         return pd.DataFrame()
+    return panel.ffill().where(panel.bfill().notna())
+
+
+def _staggered_equal_weight_equity(panel: pd.DataFrame, initial_capital: float) -> pd.Series:
+    """동일 비중 매수·보유 자산 곡선 — 가격이 늦게 시작하는 종목은 첫 가격일에 편입한다.
+
+    첫날 가격이 있는 종목들을 같은 금액씩 사서 그대로 보유한다(매일 재조정 없음). 늦게 상장한
+    종목은 첫 가격일에 '그 시점 평가액 ÷ 편입 후 종목 수'만큼 사고, 기존 보유 종목들은 서로의
+    비중을 유지한 채 같은 비율로 줄여 자금을 마련한다. 데이터가 끝난 종목은 마지막 가격으로
+    평가한다(그 가격에 현금화된 것으로 본다).
+    """
+    if panel is None or panel.empty:
+        return pd.Series(dtype=float)
+    prices = panel.sort_index().ffill()
+    px = prices.to_numpy(dtype=float)
+    n_rows, n_cols = px.shape
+    shares = np.zeros(n_cols)
+    entered = np.zeros(n_cols, dtype=bool)
+    equity = np.empty(n_rows)
+    for i in range(n_rows):
+        row = px[i]
+        value = float(shares[entered] @ row[entered]) if entered.any() else float(initial_capital)
+        entrants = ~entered & ~np.isnan(row)
+        if entrants.any():
+            n_before = int(entered.sum())
+            n_after = n_before + int(entrants.sum())
+            shares[entered] *= n_before / n_after
+            shares[entrants] = (value / n_after) / row[entrants]
+            entered |= entrants
+        equity[i] = value
+    return pd.Series(equity, index=prices.index)
+
+
+def _equal_weight_panel_coverage(panel: pd.DataFrame, n_requested: int) -> dict:
+    """벤치마크 패널의 종목 편입 범위 (시작일 보유 종목 수, 늦은 편입·중도 종료 종목)."""
+    start, end = panel.index.min(), panel.index.max()
+    late_entries = {}
+    ended_early = {}
+    for sym in panel.columns:
+        first = panel[sym].first_valid_index()
+        last = panel[sym].last_valid_index()
+        if first is not None and first > start:
+            late_entries[str(sym)] = str(pd.Timestamp(first).date())
+        if last is not None and last < end:
+            ended_early[str(sym)] = str(pd.Timestamp(last).date())
+    return {
+        "requested": int(n_requested),
+        "with_data": int(panel.shape[1]),
+        "at_start": int(panel.iloc[0].notna().sum()),
+        "late_entries": late_entries,
+        "ended_early": ended_early,
+    }
 
 
 def _equal_weight_buy_and_hold_metrics(
@@ -161,7 +219,7 @@ def _equal_weight_buy_and_hold_metrics(
     panel = _build_equal_weight_panel(collector, symbols, start_date, end_date)
     if panel.empty or len(panel) < 2:
         return {}
-    equity = (panel / panel.iloc[0]).mean(axis=1) * initial_capital
+    equity = _staggered_equal_weight_equity(panel, initial_capital)
     return _portfolio_metrics_from_equity(equity, initial_capital)
 
 
@@ -254,20 +312,31 @@ class StrategyValidator:
                 s0, s1 = str(strategy_df.index[0].date()), str(strategy_df.index[-1].date())
                 panel = _build_equal_weight_panel(self.collector, symbols_top50, s0, s1)
                 if not panel.empty and len(panel) >= 2:
+                    coverage = _equal_weight_panel_coverage(panel, len(symbols_top50))
+                    benchmark_top50["coverage"] = coverage
+                    if coverage["at_start"] < 0.8 * coverage["requested"]:
+                        logger.warning(
+                            "Top50 벤치마크: 시작일에 가격이 있는 종목 {}/{}개 — 나머지는 첫 가격일부터 "
+                            "동일비중으로 편입합니다(늦은 편입 {}개, 중도 데이터 종료 {}개).",
+                            coverage["at_start"], coverage["requested"],
+                            len(coverage["late_entries"]), len(coverage["ended_early"]),
+                        )
+                    # 각 구간 벤치마크는 전략과 같은 기간을 잰다. 늦게 상장한 종목은 첫 가격일에
+                    # 편입하고(매수·보유), 패널 전체를 그 종목 상장일로 자르지 않는다.
                     cap_full = full_result["initial_capital"]
-                    equity_full = (panel / panel.iloc[0]).mean(axis=1) * cap_full
+                    equity_full = _staggered_equal_weight_equity(panel, cap_full)
                     benchmark_top50["full"] = _portfolio_metrics_from_equity(equity_full, cap_full)
-                    panel_is = panel.loc[strategy_df.index[0] : strategy_df.index[split_idx - 1]].dropna(how="any")
-                    if not panel_is.empty and len(panel_is) >= 2:
+                    panel_is = panel.loc[strategy_df.index[0] : strategy_df.index[split_idx - 1]]
+                    if len(panel_is) >= 2:
                         cap_is = in_sample_result["initial_capital"]
-                        equity_is = (panel_is / panel_is.iloc[0]).mean(axis=1) * cap_is
+                        equity_is = _staggered_equal_weight_equity(panel_is, cap_is)
                         benchmark_top50["in_sample"] = _portfolio_metrics_from_equity(equity_is, cap_is)
                     else:
                         benchmark_top50["in_sample"] = {}
-                    panel_oos = panel.loc[strategy_df.index[split_idx] : strategy_df.index[-1]].dropna(how="any")
-                    if not panel_oos.empty and len(panel_oos) >= 2:
+                    panel_oos = panel.loc[strategy_df.index[split_idx] : strategy_df.index[-1]]
+                    if len(panel_oos) >= 2:
                         cap_oos = out_sample_result["initial_capital"]
-                        equity_oos = (panel_oos / panel_oos.iloc[0]).mean(axis=1) * cap_oos
+                        equity_oos = _staggered_equal_weight_equity(panel_oos, cap_oos)
                         benchmark_top50["out_sample"] = _portfolio_metrics_from_equity(equity_oos, cap_oos)
                     else:
                         benchmark_top50["out_sample"] = {}
@@ -576,9 +645,18 @@ class StrategyValidator:
         ]
         top50 = result.get("benchmark_top50") or {}
         if top50:
+            coverage = top50.get("coverage") or {}
+            coverage_line = (
+                f"편입 범위: 시작일 {coverage.get('at_start', 0)}/{coverage.get('requested', 0)}종목 보유 | "
+                f"늦은 상장 {len(coverage.get('late_entries') or {})}종목은 첫 가격일에 동일비중 편입 | "
+                f"중도 데이터 종료 {len(coverage.get('ended_early') or {})}종목"
+                if coverage
+                else "편입 범위: 정보 없음"
+            )
             lines.extend([
                 "",
-                "벤치마크(코스피 상위 50종목 동일비중)",
+                "벤치마크(코스피 상위 50종목 동일비중, 매수·보유)",
+                coverage_line,
                 self._format_section("FULL", result["full"]["metrics"], top50.get("full", {})),
                 self._format_section("IN_SAMPLE", result["in_sample"]["metrics"], top50.get("in_sample", {})),
                 self._format_section("OUT_OF_SAMPLE", result["out_sample"]["metrics"], top50.get("out_sample", {})),
