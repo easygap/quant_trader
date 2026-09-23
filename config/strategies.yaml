@@ -170,7 +170,8 @@ trend_pullback:
 
 # --- 거래량 동반 돌파 전략 (Breakout + Volume, C-4) ---
 # 전고점 돌파 + 거래량 급증 + ADX 추세 확인. edge-trigger 진입.
-# Exit: close < breakout_ref (최소 실패 신호). 나머지는 ATR 2.5 trailing stop 위임.
+# Exit: close < entry_level (진입 봉에서 돌파한 breakout_ref, 다음 진입까지 고정) — 최소 실패 신호.
+#   레벨 아래에 있는 동안 매 봉 SELL(최소 보유일에 막혀도 다음 봉에 다시 나옴). 나머지는 ATR 2.5 trailing stop 위임.
 breakout_volume:
   breakout_period: 10           # 돌파 기준 기간 (rolling max window) — C-4 OOS best
   surge_ratio: 1.5              # 거래량 급증 배수 (volume > avg_vol * surge_ratio) — C-4 OOS best
