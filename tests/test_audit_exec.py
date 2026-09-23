@@ -2,7 +2,7 @@
 
 - 노출 상한·낙폭 가드를 계획과 같은 시가로 잰다(원가로 재면 하락장 보충 매수가 거부되고,
   평가익이 쌓이면 가짜 '일일 손실'로 매수가 막힌다).
-- 목표 비중 주문은 계좌 낙폭 가드 판정을 바스켓 낙폭 정책에 위임한다.
+- 목표 비중 주문은 계좌 낙폭 가드 대신 바스켓 낙폭 규칙을 따른다.
 - 매수 거부 사유를 로그·이벤트로 남긴다(요약의 '실패 N건'만으로는 원인을 모른다).
 - 손절 청산은 최소 보유 기간보다 우선한다(호출부가 emergency로 명시).
 - 재매수 차단 종목의 빈 슬롯이 드리프트 트리거를 매일 켜 두지 않는다.
@@ -43,7 +43,7 @@ def _fake_pm(summary, seen=None):
     return FakePortfolioManager
 
 
-# ------------------------------------------------------------ 낙폭 가드 위임
+# ------------------------------------------------------------ 목표 비중 주문과 낙폭 가드
 
 def test_mdd_breach_blocks_discretionary_buy(executor, monkeypatch):
     monkeypatch.setattr("core.portfolio_manager.PortfolioManager",
@@ -69,7 +69,7 @@ def test_mdd_breach_is_delegated_for_weight_policy_orders(executor, monkeypatch)
 
 
 def test_infrastructure_failure_is_not_delegated(executor, monkeypatch):
-    """평가 불가·설정 오류는 위임하지 않는다 — 판단 근거가 없으면 여전히 막는다."""
+    """평가 불가·설정 오류는 넘기지 않는다 — 판단 근거가 없으면 여전히 막는다."""
     executor.config.risk_params["drawdown"]["max_portfolio_mdd"] = "x"
     r = executor._drawdown_pre_order_check("BUY", delegated=True)
     assert r["allowed"] is False and r["drawdown_guard_type"] == "invalid_config"

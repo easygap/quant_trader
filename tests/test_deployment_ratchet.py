@@ -432,7 +432,7 @@ def _pocket(wired, positions, total_value, cash):
 
 
 def test_idle_cash_goes_to_defensive_parking_etf(wired):
-    """kr_pocket 9/23 실측: 지수 1주·파킹 3주·현금 10.4만 원 — 두 종목 다 상한에 막혀
+    """kr_pocket 9/23 실제 상태: 지수 1주·파킹 3주·현금 10.4만 원 — 두 종목 다 상한에 막혀
     한 달째 현금이 놀았다. 파킹 ETF 1주는 다음 사이클 매도 규칙이 되팔지 않는 범위다."""
     prices = {"069500": 113_800, "357870": 57_900}
     positions = [_pos("069500", 122_345, 1), _pos("357870", 57_913, 3)]

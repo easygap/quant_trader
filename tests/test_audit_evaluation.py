@@ -2,7 +2,7 @@
 
 - 규칙을 바꾼 트랙은 새 규칙 적용일 이후를 따로 센다(rules_window). 예전 규칙의
   운영 일수로 진행률이 100%가 되면 새 규칙을 검토할 근거가 없다.
-- 설계를 바꾼 트랙의 성과 귀속은 설계 적용일부터 잰다(design_effective_from).
+- 설계를 바꾼 트랙의 실행·구성 격차는 설계를 바꾼 날부터 잰다(design_effective_from).
 """
 
 from datetime import date, datetime
@@ -153,4 +153,4 @@ def test_paper_order_errors_are_counted_but_not_gating():
 
     assert r["metrics"]["paper_order_errors"] == 1
     assert not any("오류" in i for i in r["issues"])          # 판정에는 넣지 않는다
-    assert "주문·사이클 오류 이벤트 1건" in format_evaluation_report(r, name)
+    assert "주문·실행 오류 1건" in format_evaluation_report(r, name)

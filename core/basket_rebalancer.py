@@ -20,7 +20,7 @@ import yaml
 from loguru import logger
 
 _KST = ZoneInfo("Asia/Seoul")
-# 추세 필터 지수 → 그 지수를 추종하는 ETF(지수 자료가 멈췄을 때의 대용)
+# 추세 필터 지수 → 그 지수를 따라가는 ETF(지수 자료가 멈췄을 때 대신 쓴다)
 _INDEX_PROXY = {"KS200": "069500"}
 
 
@@ -244,7 +244,7 @@ class BasketRebalancer:
 
                 record_event_once_per_day(
                     "OVERLAY_DATA_ISSUE",
-                    f"바스켓 '{self.basket_name}' 위험 관리 입력 문제: " + "; ".join(decision.data_issues),
+                    f"바스켓 '{self.basket_name}' 위험 관리에 쓸 자료 문제: " + "; ".join(decision.data_issues),
                     severity="warning",
                     strategy=getattr(self, "account_key", None) or None,
                     mode=self._ledger_mode(),
@@ -340,7 +340,8 @@ class BasketRebalancer:
         2026-09-17 이후 FDR의 KS200 자료가 멈춰 kr_pocket 추세 필터가 '직전 상태
         유지'로 동결됐다. 추종 ETF(069500)는 같은 날에도 정상이었다. ETF 가격은 분배락
         날 조금 내려가 이동평균 대비 위치가 약간 보수적으로(아래쪽으로) 잡힐 수 있다.
-        대용을 쓴 사실은 data_issues와 source_dates에 남긴다 — 원자료 복구는 따로 확인할 것.
+        ETF로 대신 봤다는 사실은 data_issues와 source_dates에 남긴다 — 지수 자료가 다시
+        들어오는지는 따로 확인할 것.
         """
         proxy = _INDEX_PROXY.get(str(symbol).upper())
         if not proxy:
@@ -348,21 +349,21 @@ class BasketRebalancer:
         try:
             pdf = self.data_collector.fetch_korean_stock(proxy, start, end)
         except Exception as exc:
-            logger.warning("오버레이 지수 대용 조회 실패 {}: {}", proxy, exc)
+            logger.warning("지수 대신 쓸 {} 조회 실패: {}", proxy, exc)
             return None
         if pdf is None or pdf.empty or "close" not in pdf.columns:
             return None
         issues_before = len(getattr(self, "_overlay_input_issues", []) or [])
-        frame = self._overlay_dated_frame(pdf, f"지수 대용({proxy}) 종가")
+        frame = self._overlay_dated_frame(pdf, f"{proxy} 종가(지수 대신)")
         if frame is None:
             return None
-        # 대용으로 판단이 가능해졌으니 '비중 확대 보류' 문구는 거두고 대용 사용 사실을 남긴다
+        # ETF로 판단할 수 있게 됐으니 '비중 확대 보류' 문구는 빼고 대신 썼다는 사실만 남긴다
         issues = getattr(self, "_overlay_input_issues", []) or []
         self._overlay_input_issues = [
             i for i in issues[:issues_before] if not i.startswith("지수 종가:")
         ]
         self._overlay_data_issue(
-            f"{symbol} 지수 자료가 늦어 추종 ETF {proxy} 종가로 추세를 판단함 — 원자료 복구 확인 필요"
+            f"{symbol} 지수 자료가 늦어 {proxy} 종가로 추세를 봤음 — 지수 자료가 다시 들어오는지 확인 필요"
         )
         logger.warning("바스켓 '{}' 추세 필터: {} 대신 {} 종가 사용", self.basket_name, symbol, proxy)
         return frame
@@ -626,7 +627,7 @@ class BasketRebalancer:
             threshold = self.rebalance_cfg.get("drift_threshold", 0.05)
             drifts = self.calculate_drift(prices)
             # 재매수 차단(손절 쿨다운) 종목은 트리거에서 뺀다. 못 사는 빈 슬롯이
-            # 드리프트 11%로 매일 트리거를 켜 두면, 전체 교정이 매일 돌며 보충으로 산
+            # 드리프트 11%로 매일 트리거를 켜 두면, 전체 비중 조정이 매일 돌면서 보충으로 산
             # 종목을 다음 날 '비중 초과'로 되파는 왕복매매가 난다(2026-09-22 035720
             # 6주 매수 → 9-23 같은 6주 매도, 012330 손절 쿨다운 중). 집계 배치율
             # 트리거는 그대로 둔다.
@@ -729,7 +730,7 @@ class BasketRebalancer:
         # 슬리브 내 비중 상한을 총자산 기준으로 환산
         position_cap = (float(target_w) + drift) * stock_fraction
         if symbol == (self.basket.get("overlays") or {}).get("defensive_symbol"):
-            # 방어 자산(CD 파킹 ETF)은 현금 대용이다. 오버레이가 주식을 전부 줄이면 투자분
+            # 방어 자산(CD 파킹 ETF)은 사실상 현금이다. 오버레이가 주식을 전부 줄이면 투자분
             # 전체가 이 자산이 되는 설계라 종목 상한 대신 투자 비중 상한만 건다 — 계획의
             # 배치율 보충이 파킹 ETF로 유휴 현금을 옮길 때 주문 단계가 막지 않도록
             # 같은 기준을 쓴다(2026-09-23).
@@ -962,9 +963,9 @@ class BasketRebalancer:
                     if investable > 0 else 1.0
                 )
                 if projected_w > target_w + drift_limit:
-                    # 방어 자산(CD 파킹 ETF)은 현금 대용이다 — 설계가 '무수익 현금 대신
+                    # 방어 자산(CD 파킹 ETF)은 사실상 현금이다 — 설계가 '이자 없는 현금 대신
                     # 파킹 ETF'인데 종목 상한에 막히면 소액 계좌에서 현금이 그대로 논다
-                    # (2026-09-23 kr_pocket 실측: 설계 95% vs 실제 73%, 유휴 현금 10.4만 원이
+                    # (2026-09-23 kr_pocket: 설계 95%인데 실제 73%, 놀고 있는 현금 10.4만 원이
                     # 두 종목 모두 1주가 상한을 넘어 한 달째 그대로). 다음 사이클의 매도
                     # 규칙이 되팔지 않는 범위(초과분 < max(min_trade, 1주))에서는 허용한다.
                     # 주식 종목에는 적용하지 않는다 — 주식 비중이 설계를 넘게 된다.

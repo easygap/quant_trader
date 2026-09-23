@@ -44,7 +44,7 @@ def test_2026_substitute_holidays_are_non_trading_days():
     (현충일 6/6(토)은 대체 미적용 — 6/8은 거래일이어야 함)
     (추석 9/24~26은 토요일과 겹칠 뿐이라 대체 없음 — 9/28은 거래일이어야 함.
      설·추석 대체공휴일은 일요일·다른 공휴일 겹침에만 생긴다. 예전에는 이 테스트가
-     9/28을 휴장으로 고정하고 있었다 — 2026-09-23 교정)
+     9/28을 휴장으로 고정하고 있었다 — 2026-09-23 수정)
     """
     from datetime import datetime
     from core.trading_hours import TradingHours

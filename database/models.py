@@ -1192,7 +1192,7 @@ def check_schema_drift(engine=None) -> list[str]:
 
 
 def _repair_schema_drift(engine) -> None:
-    """드리프트 중 되돌릴 수 없는 위험이 없는 것만 고친다.
+    """어긋난 것 중 데이터를 잃을 위험이 없는 것만 고친다.
 
     - 모델의 일반 인덱스가 없으면 만든다(checkfirst — 데이터는 건드리지 않는다).
     - daily_reports의 옛 UNIQUE(date): 계정별 리포트가 같은 날 두 번째부터 실패한다.
@@ -1213,9 +1213,9 @@ def _repair_schema_drift(engine) -> None:
                     continue
                 try:
                     ix.create(bind=engine, checkfirst=True)
-                    logger.warning("스키마 보정: 인덱스 생성 {} {}", table.name, cols)
+                    logger.warning("스키마 맞춤: 인덱스 생성 {} {}", table.name, cols)
                 except Exception as exc:
-                    logger.error("스키마 보정 실패: 인덱스 {} — {}", ix.name, exc)
+                    logger.error("스키마 맞춤 실패: 인덱스 {} — {}", ix.name, exc)
 
         daily = Base.metadata.tables.get("daily_reports")
         if daily is not None and _sqlite_table_columns(conn, "daily_reports"):
@@ -1226,10 +1226,10 @@ def _repair_schema_drift(engine) -> None:
                     conn.execute(text('DROP TABLE "daily_reports"'))
                     conn.commit()
                     daily.create(bind=engine, checkfirst=True)
-                    logger.warning("스키마 보정: 비어 있던 daily_reports를 계정별 UNIQUE로 다시 만듦")
+                    logger.warning("스키마 맞춤: 비어 있던 daily_reports를 계정별 UNIQUE로 다시 만듦")
                 else:
                     logger.error(
-                        "daily_reports에 옛 UNIQUE(date)가 남아 있고 행이 {}개라 자동 보정하지 않음", rows,
+                        "daily_reports에 옛 UNIQUE(date)가 남아 있지만 행이 {}개라 자동으로 고치지 않음", rows,
                     )
 
 
@@ -1274,11 +1274,11 @@ def init_database():
     # 포지션 mode 격리 재구축. partial_tp_done 컬럼 추가 이후에 실행해
     # 구버전 테이블을 완전히 복사한다. 신 스키마에서는 no-op.
     _migrate_position_unique_constraint(engine)
-    # 모델과 실제 스키마 대조 — 안전한 보정만 하고, 남은 어긋남은 ERROR로 남긴다.
+    # 모델과 실제 스키마 대조 — 안전한 것만 고치고, 남은 어긋남은 ERROR로 남긴다.
     try:
         _repair_schema_drift(engine)
         for issue in check_schema_drift(engine):
-            logger.error("스키마 드리프트: {}", issue)
+            logger.error("스키마가 코드와 다름: {}", issue)
     except Exception as exc:
         logger.error("스키마 대조 실패: {}", exc)
 

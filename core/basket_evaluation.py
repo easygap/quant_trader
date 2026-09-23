@@ -63,18 +63,18 @@ def evaluate_basket_paper_operation(
     issues: list[str] = []
 
     # A. 운영 무결성
-    # 게이트는 '실측' 커버리지로 판정한다. 이 게이트는 일일 사이클이 조용히 죽지
-    # 않았다는 증명인데, 사후 복원분까지 세면 결측 보충이 매번 100%로 메워 게이트가
-    # 목적을 잃는다(보충은 기록의 연속성을 위한 것이지 운영 증명이 아니다).
+    # 합격 기준은 '제때 남긴' 스냅샷 비율로 본다. 이 기준은 일일 실행이 조용히 멈추지
+    # 않았다는 증거인데, 나중에 채운 기록까지 세면 빠진 날을 매번 채워 100%가 되니
+    # 기준이 의미가 없어진다(채우는 건 기록을 잇기 위한 것이지 돌았다는 증거가 아니다).
     # 전체 커버리지(snapshot_coverage)는 표시용으로 그대로 둔다.
     coverage = (snapshot_days / trading_days_total) if trading_days_total > 0 else 0.0
     measured_coverage = (measured_days / trading_days_total) if trading_days_total > 0 else 0.0
     if trading_days_total > 0 and measured_coverage < min_snapshot_coverage:
         issues.append(
-            f"실측 스냅샷 커버리지 {measured_coverage:.0%} < {min_snapshot_coverage:.0%} "
+            f"제때 남긴 스냅샷 {measured_coverage:.0%} < {min_snapshot_coverage:.0%} "
             f"({measured_days}/{trading_days_total} 영업일"
-            + (f", 사후 복원 {reconstructed_days}일 제외" if reconstructed_days else "")
-            + ") — 일일 사이클 누락"
+            + (f", 나중에 채운 {reconstructed_days}일 제외" if reconstructed_days else "")
+            + ") — 일일 실행이 빠졌다"
         )
     if pending_failed_orders > 0:
         issues.append(f"미해결 실패 주문 {pending_failed_orders}건 (dead-letter)")
@@ -139,8 +139,8 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
         f"  운영 기간: {result['operation_start']} ~ {result['today']}",
         f"  스냅샷 커버리지: {result['snapshot_coverage']:.0%}"
         + (
-            f" (실측 {result['measured_days']}일 {result['measured_coverage']:.0%}"
-            f" + 사후 복원 {result['reconstructed_days']}일)"
+            f" (제때 기록 {result['measured_days']}일 {result['measured_coverage']:.0%}"
+            f" + 나중에 채운 {result['reconstructed_days']}일)"
             if result.get("reconstructed_days") else ""
         ),
         f"  비용 드래그: 누적 {result['cost_drag_cum']:.4%} | 연환산 {result['cost_drag_annualized']:.4%}"
@@ -168,18 +168,18 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
     errors = m.get("paper_order_errors")
     if errors:
         lines.append(
-            f"  참고: 운영 기간 주문·사이클 오류 이벤트 {errors}건 (판정 제외 — 원인 확인 권장)"
+            f"  참고: 운영 중 주문·실행 오류 {errors}건 (합격 판단에는 넣지 않음 — 원인 확인 필요)"
         )
     rw = result.get("rules_window")
     if rw:
         lines.append(
             f"  새 규칙({rw['since']}~): {rw['trading_days']}/{rw['min_trading_days']} 영업일"
-            f" · 실측 커버리지 {rw['measured_coverage']:.0%}"
+            f" · 제때 기록 {rw['measured_coverage']:.0%}"
         )
     if m.get("attribution_window"):
         lines.append(
             f"  귀속 분해 기간: {m['attribution_window'][0]} ~ {m['attribution_window'][1]}"
-            " (현재 설계 적용 이후)"
+            " (지금 설계로 바꾼 뒤)"
         )
     if result["issues"]:
         lines.append("  이슈:")
@@ -558,7 +558,7 @@ def collect_basket_paper_evaluation(
 
     promotion = basket_cfg.get("promotion") or {}
 
-    # A2(미해결 실패 주문 0건)는 paper에서 구조적으로 걸리지 않는다 — dead-letter는 증권사
+    # A2(미해결 실패 주문 0건)는 paper에서는 애초에 걸릴 수가 없다 — dead-letter는 증권사
     # 주문 경로에서만 쌓인다. 그래서 paper 트랙의 주문·사이클 오류 이벤트를 따로 세어
     # 보여 준다. 해결 표시가 없는 기록이라 판정에는 넣지 않는다(한 번의 일시 오류가 끝난
     # 트랙을 영영 떨어뜨리지 않게) — 운영자가 보고 판단할 참고 지표다.
@@ -586,7 +586,7 @@ def collect_basket_paper_evaluation(
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
     #
-    # promotion.design_effective_from이 있으면 그날부터만 귀속을 잰다. 지금의 설계
+    # promotion.design_effective_from이 있으면 그날부터만 격차를 잰다. 지금 설계
     # (비중·종목)를 운영 시작일부터 소급 적용하면, 설계를 바꾼 사실 자체가 '실행 격차
     # ≈ 0'으로 보이거나 엉뚱한 격차로 섞인다(kr_diversified_hold는 2026-08-07에 80% →
     # 60%, 10 → 9종목으로 바뀌었다). NAV·설계·벤치마크를 같은 창으로 다시 잰다.
@@ -612,7 +612,7 @@ def collect_basket_paper_evaluation(
                         str(design_from), str(nav_end), symbol="KS11",
                     )
                 except Exception as exc:
-                    logger.warning("귀속 창 벤치마크 조회 실패: {}", exc)
+                    logger.warning("격차 계산 기간의 벤치마크 조회 실패: {}", exc)
         design_return_pct = None
         if snaps and holdings:
             try:

@@ -1088,8 +1088,8 @@ class OrderExecutor:
         )
         return self.mode == "live" and not confirmed_mock
 
-    # 목표 비중 주문에 위임하는 낙폭 가드 판정(정책 판단). 설정 오류·평가 불가 같은
-    # 인프라 실패는 위임하지 않는다 — 판단 근거가 없으면 여전히 막는다.
+    # 목표 비중 주문이면 바스켓 규칙을 대신 따르는 낙폭 가드 판정(정책 판단). 설정 오류·
+    # 평가 불가 같은 인프라 실패는 넘기지 않는다 — 판단 근거가 없으면 여전히 막는다.
     _DELEGABLE_DRAWDOWN_TYPES = frozenset({"mdd", "mdd_hysteresis", "daily_loss"})
 
     def _drawdown_pre_order_check(
@@ -1103,12 +1103,12 @@ class OrderExecutor:
 
         mark_prices: 보유 종목 현재가. 주어지면 평가금액을 시가로 잰다. 없으면 기존처럼
             평균단가로 잰다 — paper에서는 시장이 움직여도 값이 변하지 않아, 하락장에선
-            낙폭을 작게 보고(9/22 실측 kr_diversified_hold 9.7% vs 실제 12.9%) 평가익이
+            낙폭을 작게 보고(9/22 kr_diversified_hold 9.7%, 실제로는 12.9%) 평가익이
             쌓이면 가짜 '일일 손실'로 매수를 막는다(6/15 원장 재현 -5.5%).
         delegated: 사전 승인된 목표 비중표로 집행하는 주문(바스켓 리밸런싱). 계좌 단위
-            MDD·일일 손실 가드는 재량 매매용 안전판이라, 목표 비중 주문에는 그 바스켓이
-            선언한 낙폭 정책(overlays.drawdown_guard — 리밸런서가 배수로 적용)에 위임한다.
-            상관 거부권(#456)·노출 상한(#457)과 같은 위임 원칙이다. 판정은 계속 계산해
+            MDD·일일 손실 가드는 재량 매매용 안전판이라, 목표 비중 주문은 그 바스켓이
+            정한 낙폭 규칙(overlays.drawdown_guard — 리밸런서가 배수로 적용)을 따른다.
+            상관 거부권(#456)·노출 상한(#457)과 같은 원칙이다. 판정은 계속 계산해
             로그로 남긴다.
         """
         decision = self._drawdown_guard_decision(action, mark_prices=mark_prices)
@@ -1118,7 +1118,7 @@ class OrderExecutor:
             and decision.get("drawdown_guard_type") in self._DELEGABLE_DRAWDOWN_TYPES
         ):
             logger.info(
-                "계좌 낙폭 가드 위임(목표 비중 주문 — 바스켓 낙폭 정책 적용): {}",
+                "목표 비중 주문이라 계좌 낙폭 가드 대신 바스켓 규칙을 따름: {}",
                 decision.get("reason"),
             )
             return {
@@ -1129,7 +1129,7 @@ class OrderExecutor:
         return decision
 
     def _drawdown_guard_decision(self, action: str = "BUY", *, mark_prices: dict | None = None) -> dict:
-        """계좌 MDD/일일 손실 가드의 판정(위임 여부와 무관한 원판정)."""
+        """계좌 MDD/일일 손실 가드의 판정(목표 비중 주문 여부와 상관없이 계산한 원래 결과)."""
         if str(action).upper() != "BUY":
             return {"allowed": True, "reason": ""}
 

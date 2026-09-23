@@ -33,9 +33,9 @@ def build_weekly_summary(
       원시 카운트가 아니다(P0-1이 미복구 결측을 매 사이클 재경보하므로 이벤트 수는
       하루 결측을 여러 건으로 부풀린다 → 고유 일수로 집계해야 정확).
     cycle_errors: 이번 주 CYCLE_ERROR 발생 건수.
-    reconstructed_days: 이번 주 스냅샷 중 사후 복원(결측 보충)된 날 수. 복원은 기록을
+    reconstructed_days: 이번 주 스냅샷 중 나중에 채운 날 수. 채운 기록은 빈칸을
       잇는 것이지 사이클이 돈 증거가 아니므로 '무사고'로 세지 않는다.
-    regime_note: 국면 분해의 한계(지수 자료 지연, 측정 시각 차이 등) 한 줄.
+    regime_note: 국면 분해의 한계(지수 자료 지연, 기록 시각 차이 등) 한 줄.
 
     반환: {"title": str, "fields": [{"name","value","inline"}...], "text": str}
       - fields: notifier.send_embed용
@@ -118,7 +118,7 @@ def build_weekly_summary(
     rd = int(reconstructed_days or 0)
     ev_line = f"결측 {md}일 · 사이클 오류 {ce}건"
     if rd:
-        ev_line += f" · 사후 복원 {rd}일(그날 사이클은 돌지 않았음)"
+        ev_line += f" · 나중에 채운 기록 {rd}일(그날은 자동매매가 돌지 않았음)"
     if md == 0 and ce == 0 and rd == 0:
         ev_line += " (무사고)"
     fields.append({"name": "🛠 주간 이벤트", "value": ev_line, "inline": False})

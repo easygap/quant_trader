@@ -1,4 +1,4 @@
-"""지수 자료 신선도 회귀 테스트 (2026-09-23 점검).
+"""지수 자료가 최신인지 확인하는 회귀 테스트 (2026-09-23 점검).
 
 FDR의 KS200·KS11 자료가 2026-09-17에서 멈췄다. 비어 있지 않은 표는 성공으로 보던
 탓에 폴백이 한 번도 시도되지 않았고, kr_pocket 추세 필터는 '직전 상태 유지'로 동결,
@@ -57,7 +57,7 @@ def test_fresh_fdr_is_left_alone(monkeypatch, fixed_target):
 
 
 def test_old_requests_are_not_checked(monkeypatch):
-    """백테스트처럼 과거 구간 요청은 신선도 검사(네트워크)를 하지 않는다."""
+    """백테스트처럼 과거 구간 요청은 최신 여부를 확인하지 않는다(네트워크를 안 쓴다)."""
     assert dc_mod._freshness_target("2020-01-31") is None
 
 
@@ -140,7 +140,7 @@ def test_flat_download_flattens_multiindex(monkeypatch):
     assert list(out.columns) == ["Close", "Open"]
 
 
-# ------------------------------------------------------------ 추세 필터 대용
+# ------------------------------------------------------------ 추세 필터를 ETF로 대신 판단
 
 def _rebalancer_for_proxy(monkeypatch, index_df, proxy_df):
     from core.basket_rebalancer import BasketRebalancer
@@ -169,9 +169,9 @@ def test_trend_filter_falls_back_to_tracking_etf_when_index_is_stale(monkeypatch
     assert closes is not None and len(closes) >= 200
     assert closes[-1] == pytest.approx(proxy["close"].iloc[-1])
     assert any("069500" in i for i in rb._overlay_input_issues)
-    # 대용으로 판단했으니 '비중 확대 보류' 문구는 남기지 않는다
+    # ETF로 판단했으니 '비중 확대 보류' 문구는 남기지 않는다
     assert not any(i.startswith("지수 종가:") for i in rb._overlay_input_issues)
-    assert rb._overlay_source_dates.get("지수 대용(069500) 종가") == "2026-09-22"
+    assert rb._overlay_source_dates.get("069500 종가(지수 대신)") == "2026-09-22"
 
 
 def test_trend_filter_keeps_issue_when_proxy_also_stale(monkeypatch):
@@ -198,10 +198,10 @@ def test_health_lists_overlay_data_issues():
 
     out = summarize_basket_operation(
         ["kr_pocket"], date(2026, 9, 23), 2, date(2026, 9, 23),
-        data_notes=["바스켓 'kr_pocket' 위험 관리 입력 문제: 지수 종가: 최근 기록 2026-09-17"],
+        data_notes=["바스켓 'kr_pocket' 위험 관리에 쓸 자료 문제: 지수 종가: 최근 기록 2026-09-17"],
     )
     assert out["verdict"] == "ATTENTION"
-    assert any("위험 관리 입력 문제" in n for n in out["notes"])
+    assert any("위험 관리에 쓸 자료 문제" in n for n in out["notes"])
 
 
 def test_benchmark_return_ignores_empty_close_rows(monkeypatch, fixed_target):

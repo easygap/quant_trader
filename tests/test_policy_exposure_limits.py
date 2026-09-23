@@ -244,7 +244,7 @@ def test_shipped_etf_baskets_are_actually_buyable():
 
 
 def test_defensive_parking_etf_is_capped_by_investment_ratio_only():
-    """방어 자산은 현금 대용 — 계획이 유휴 현금을 파킹 ETF로 옮길 때 주문 단계가
+    """방어 자산은 사실상 현금이다 — 계획이 놀고 있는 현금을 파킹 ETF로 옮길 때 주문 단계가
     종목 상한(목표+드리프트)으로 막으면 계획과 실행이 어긋난다(2026-09-23)."""
     basket = {
         "target_stock_weight": 0.95,

@@ -3,8 +3,8 @@
 - 휴장일 실행은 매매 없이 스냅샷만 남긴다(추석 평일에도 일일 태스크는 돈다).
 - 결측 보충은 실제로 호출돼야 한다 — 8/27 도입 이래 정의되지 않은 이름(baskets_cfg)
   때문에 매 사이클 실패했지만 경고 로그로만 남아 한 달간 아무도 몰랐다. 함수가 아니라
-  배선을 테스트한다.
-- 보충은 계정이 생기기 전 날을 채우지 않고, 입금 경계를 실제 측정 시각으로 잡는다.
+  연결을 테스트한다.
+- 보충은 계정이 생기기 전 날을 채우지 않고, 입금 경계를 스냅샷을 실제로 찍은 시각으로 잡는다.
 """
 
 from datetime import date, datetime, time
@@ -105,7 +105,7 @@ def test_market_closed_helper_uses_calendar():
     assert main._market_closed_today(cfg, datetime(2026, 9, 26, 10, 7)) is True   # 토요일
 
 
-# ------------------------------------------------------------------ 결측 보충 배선
+# ------------------------------------------------------------------ 결측 보충 연결
 
 def test_backfill_is_wired_with_resolved_capital_before_status(cycle, monkeypatch):
     import main
@@ -229,7 +229,7 @@ def test_deposit_after_previous_snapshot_is_not_booked_as_return():
 
 
 def test_reconstructed_row_is_measured_at_end_of_its_day():
-    """복원 행의 측정 시각이 저장 시각(다음 날)이면, 다음 날 아침 입금이 빠진다."""
+    """복원 행을 찍은 시각을 저장한 시각(다음 날)으로 두면, 다음 날 아침 입금이 빠진다."""
     import core.snapshot_backfill as sb
     from database.models import PortfolioSnapshot, get_session
     from database.repositories import (
@@ -262,7 +262,7 @@ def test_reconstructed_row_is_measured_at_end_of_its_day():
     finally:
         s.close()
     assert measured.date() == mon
-    # 화요일 사이클의 유입 구간(월 복원 행 측정 시각, 화 10:07]에 화 08:00 입금이 들어가야 한다
+    # 화요일 실행의 입금 구간(월 복원 행 시각, 화 10:07]에 화 08:00 입금이 들어가야 한다
     assert get_cash_flow_total_between(
         key, measured, datetime.combine(tue, time(10, 7)),
     ) == pytest.approx(100_000)
@@ -299,7 +299,7 @@ def test_coverage_gate_uses_measured_days_not_reconstructed():
     assert r["snapshot_coverage"] == pytest.approx(1.0)   # 표시용 전체 커버리지는 그대로
     assert r["measured_coverage"] == pytest.approx(0.9)
     assert r["verdict"] == "FAIL_REVIEW"
-    assert any("실측 스냅샷 커버리지" in i and "사후 복원 6일 제외" in i for i in r["issues"])
+    assert any("제때 남긴 스냅샷" in i and "나중에 채운 6일 제외" in i for i in r["issues"])
 
 
 def test_coverage_gate_passes_with_few_reconstructed_days():

@@ -15,7 +15,7 @@ import pytest
 from database.models import init_database
 
 
-# ------------------------------------------------------------ 기록 신선도
+# ------------------------------------------------------------ 기록 공백
 
 def test_freshness_counts_trading_days_only():
     from monitoring.web_dashboard import _snapshot_freshness

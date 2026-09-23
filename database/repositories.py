@@ -791,7 +791,7 @@ def save_portfolio_snapshot(
 
     snapshot_date: 스냅샷 귀속 날짜(자정으로 정규화). 미지정 시 오늘.
     비거래일 보충 실행에서 NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
-    measured_at: 이 값이 측정된 시각(created_at). 미지정 시 지금. 사후 복원 행은
+    measured_at: 이 값을 찍은 시각(created_at). 안 주면 지금. 나중에 채운 행은
     복원한 날의 끝을 넘긴다 — TWR 체인의 입금 경계가 이 시각을 쓰기 때문이다.
     """
     session = get_session()

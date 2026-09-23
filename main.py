@@ -787,7 +787,7 @@ def _run_rebalance_impl(args):
         )
     cycle_snapshots_saved = 0
 
-    # 휴장일 실행은 스냅샷(직전 거래일 귀속)과 결측 보충만 하고 매매는 하지 않는다.
+    # 휴장일 실행은 스냅샷(직전 거래일 날짜로 저장)과 빠진 날 채우기만 하고 매매는 하지 않는다.
     # 휴장일의 '현재가'는 직전 거래일 종가라, 그 가격으로 체결을 남기면 장이 닫힌
     # 날의 가짜 체결이 트랙레코드와 비용 통계에 섞인다. 평일 휴장(추석 등)에도
     # 일일 태스크(월~금 10시)는 돈다. 판정 실패 시 평소대로 진행한다(1일 1매매
@@ -947,7 +947,7 @@ def _run_rebalance_impl(args):
             if holiday_skip:
                 logger.info(
                     "바스켓 '{}' 휴장일 — 리밸런싱 매매 건너뜀 "
-                    "(스냅샷은 직전 거래일로 귀속, 우회: --force-rebalance)", name,
+                    "(스냅샷은 직전 거래일 날짜로 저장, 우회: --force-rebalance)", name,
                 )
             elif already_traded_today:
                 logger.info(
@@ -1087,8 +1087,8 @@ def _run_rebalance_impl(args):
                             else:
                                 prev_boundary = sdf["date"].iloc[-2]
                             if prev > 0:
-                                # 입금 조회에 실패하면 일간 수익률을 비워 둔다 — 중화 없이
-                                # 계산하면 입금일이 통째로 수익으로 보인다.
+                                # 입금 조회에 실패하면 일간 수익률을 비워 둔다 — 입금을 빼지 않고
+                                # 계산하면 입금한 날이 통째로 수익으로 보인다.
                                 flow = get_cash_flow_total_between(
                                     live_strategy_name, prev_boundary, datetime.now(),
                                     mode=ledger_mode,
@@ -1129,8 +1129,8 @@ def _run_rebalance_impl(args):
                     except Exception as e:
                         logger.warning("바스켓 '{}' 리포트 v2 부가필드 생략: {}", name, e)
                     # 리스크 한 줄(변동성·샤프·하락일) — 수익률 한 숫자만 보면 '방어의
-                    # 대가'가 안 보인다(운영 원칙 9). 입금은 흡수한 스냅샷 구간 기준으로
-                    # 중화한다(달력 날짜로 묶으면 입금일이 +25~36% 수익으로 잡힌다).
+                    # 대가'가 안 보인다(운영 원칙 9). 입금은 그 입금이 처음 반영된 스냅샷
+                    # 구간에서 뺀다(날짜로만 묶으면 입금한 날이 +25~36% 수익으로 잡힌다).
                     try:
                         from core.performance_lens import (
                             daily_returns_from_nav, format_risk_line, risk_metrics,
@@ -2009,7 +2009,7 @@ def run_health_check() -> int:
             """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산).
 
             리스크 오버레이가 켜진 바스켓은 마지막 실행이 남긴 배수를 반영한 '그날
-            실제로 유효한 목표'를 쓴다(선언한 숫자마다 감시가 붙는 원칙의 대상). 방어
+            실제로 쓰는 목표'를 쓴다(적어 둔 숫자마다 감시가 붙는다는 원칙). 방어
             자산(CD ETF)이 있으면 줄인 주식만큼 그 자산을 사므로 투자 비중은 설계
             그대로다 — 리밸런서와 같은 헬퍼(invested_fraction)로 계산해야 기준이 같다.
             상태 파일은 이 함수의 다른 조회와 같은 paper 장부 것을 읽는다(모드 없이
@@ -2160,7 +2160,7 @@ def run_health_check() -> int:
                 if issues:
                     more = f" 외 {len(issues) - 1}건" if len(issues) > 1 else ""
                     data_notes.append(
-                        f"바스켓 '{name}' 위험 관리 입력 문제({state.get('evaluated_at', '?')}): "
+                        f"바스켓 '{name}' 위험 관리에 쓸 자료 문제({state.get('evaluated_at', '?')}): "
                         f"{issues[0]}{more}"
                     )
         except Exception as ov_exc:
@@ -2171,7 +2171,7 @@ def run_health_check() -> int:
             from database.models import check_schema_drift
 
             for issue in check_schema_drift():
-                data_notes.append(f"DB 스키마 드리프트: {issue}")
+                data_notes.append(f"DB 구조가 코드와 다름: {issue}")
         except Exception as sc_exc:
             logger.warning("스키마 대조 실패: {}", sc_exc)
 
@@ -2240,7 +2240,7 @@ def account_flows_by_day(account_key: str, mode: str = "paper") -> dict:
 
 
 def account_flows_by_snapshot(account_key: str, snapshots, mode: str = "paper") -> dict:
-    """외부 현금흐름을 '그 흐름을 흡수한 스냅샷'의 날짜로 모은다.
+    """입출금을 '그 돈이 처음 반영된 스냅샷'의 날짜로 모은다.
 
     흐름은 발생 시각 이후 처음 측정된 스냅샷 구간에 속한다(created_at >= occurred_at)
     — PortfolioManager의 TWR 체인·일일 카드와 같은 경계다. 달력 날짜로 묶으면(예전
@@ -2266,7 +2266,7 @@ def account_flows_by_snapshot(account_key: str, snapshots, mode: str = "paper") 
             continue
         i = bisect_left(measured_at, occurred_at)
         if i >= len(points):
-            continue  # 다음 사이클이 흡수할 흐름 — 아직 어떤 구간에도 속하지 않는다
+            continue  # 다음 실행 때 반영될 입금 — 아직 어느 구간에도 들어가지 않는다
         day = points[i][1]
         out[day] = out.get(day, 0.0) + float(amount or 0)
     return out
@@ -2280,7 +2280,7 @@ def _fetch_benchmark_closes(start, end) -> dict:
     (core.performance_lens.aligned_returns 참고).
 
     NAV는 10:07 장중 마크라 지수 종가(15:30)와 비교하면 하루의 절반가량이 어긋나
-    포착률이 양쪽 다 0 쪽으로 쏠린다. 시가(09:00)가 측정 시각에 훨씬 가깝다 —
+    포착률이 양쪽 다 0 쪽으로 쏠린다. 시가(09:00)가 기록 시각에 훨씬 가깝다 —
     완전히 맞출 수는 없으니 결과는 근사로 표기한다. 시가가 없으면 종가를 쓴다.
     """
     from datetime import timedelta
@@ -2400,7 +2400,7 @@ def run_weekly_report() -> int:
                                 mode="paper",
                             )
                         except Exception as flow_exc:
-                            logger.warning("주간 변화 입금 중화 실패 — 주간 항 생략: {}", flow_exc)
+                            logger.warning("주간 변화 계산 중 입금 조회 실패 — 주간 항목 생략: {}", flow_exc)
                             ref_val = 0.0
                         if ref_val > 0:
                             week_change = twr_period_return(ref_val, last_val, flow) * 100
@@ -2455,7 +2455,7 @@ def run_weekly_report() -> int:
                         ]
                         if pairs:
                             regime = split_by_regime(pairs)
-                            regime_note = "근사 — 지수 시가 기준"
+                            regime_note = "근사치 — 지수 시가 기준"
                             last_bench = max(closes)
                             last_nav = _d(nav_points[-1][0])
                             if last_bench < last_nav:

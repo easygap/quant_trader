@@ -14,7 +14,7 @@ from core.operator_health import (
 )
 from core.risk_overlays import applied_stock_fraction, invested_fraction
 
-# 2026-09-23 kr_diversified_hold 실측 평균단가(8종목 보유)와 총자산
+# 2026-09-23 kr_diversified_hold 실제 평균단가(8종목 보유)와 총자산
 HOLD_PRICES = [395_500, 362_000, 291_667, 229_500, 37_262, 302_167, 99_900, 156_000]
 HOLD_TOTAL = 9_240_010
 

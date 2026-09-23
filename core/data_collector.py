@@ -201,7 +201,7 @@ def _freshness_target(end_date):
                 return day
             day -= timedelta(days=1)
     except Exception as e:
-        logger.warning("자료 신선도 기준일 판정 실패 — 검사 생략: {}", e)
+        logger.warning("최신 자료 기준일 계산 실패 — 확인 생략: {}", e)
     return None
 
 
@@ -302,7 +302,7 @@ class DataCollector:
                 closes = pd.to_numeric(df[close_col], errors="coerce").dropna()
                 closes = closes[closes > 0]
                 if len(closes) < 2:
-                    logger.warning("벤치마크 {} 유효 종가 부족({})", symbol, source)
+                    logger.warning("벤치마크 {} 쓸 수 있는 종가 부족({})", symbol, source)
                     continue
                 last_day = pd.Timestamp(closes.index.max()).date()
                 if expected is not None and last_day < expected:

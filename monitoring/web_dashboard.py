@@ -241,7 +241,7 @@ def get_baskets_json() -> dict:
             deployment_ratio = None
             latest_measured = None
             if latest is not None:
-                # 스냅샷이 실제로 측정된 시각. 이 시각 뒤의 입금은 아직 평가액에 없다.
+                # 스냅샷을 실제로 찍은 시각. 이 시각 뒤의 입금은 아직 평가액에 없다.
                 latest_measured = latest.created_at or datetime.combine(
                     latest.date.date() if hasattr(latest.date, "date") else latest.date,
                     datetime.max.time(),
@@ -279,7 +279,7 @@ def get_baskets_json() -> dict:
         try:
             freshness = _snapshot_freshness(latest.date if latest is not None else None)
         except Exception as exc:
-            logger.warning("바스켓 '{}' 기록 신선도 판정 실패: {}", name, exc)
+            logger.warning("바스켓 '{}' 기록 공백 계산 실패: {}", name, exc)
             freshness = {"expected_snapshot_date": None, "missed_trading_days": None}
 
         holding_names = basket_config.get("holding_names") or {}
@@ -487,7 +487,7 @@ def _scheduler_freshness(runtime: dict, now: Optional[datetime] = None) -> dict:
         try:
             stale = bool(_calendar().is_market_open(now)) and now - last > _td(minutes=60)
         except Exception as exc:
-            logger.warning("스케줄러 신선도 판정 실패: {}", exc)
+            logger.warning("스케줄러 멈춤 여부 계산 실패: {}", exc)
     return {"scheduler_in_use": in_use, "scheduler_stale": stale}
 
 
@@ -582,7 +582,7 @@ async def handle_api_deposit(request: web.Request) -> web.Response:
     """적립금 기록. 커스텀 헤더로 cross-site 브라우저 요청을 차단한다."""
     if not _is_local_origin(request):
         return web.json_response(
-            {"ok": False, "error": "로컬 대시보드 외 요청 차단"},
+            {"ok": False, "error": "이 컴퓨터에서 연 대시보드에서만 기록할 수 있습니다"},
             status=403,
         )
     if request.headers.get("X-Requested-With") != "quant-dashboard":

@@ -314,7 +314,7 @@ class TestSummarizeDeployment:
         # 60/40이 조용히 70/30이 된다. 현금 래칫의 반대 방향이라 같이 본다(2026-09-23).
         out = self._f(0.90, 0.80)
         assert out["verdict"] == "ATTENTION"
-        assert "초과 배치" in out["note"]
+        assert "설계보다 높다" in out["note"]
 
     def test_small_overdeployment_is_ok(self):
         assert self._f(0.83, 0.80)["verdict"] == "OK"

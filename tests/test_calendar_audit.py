@@ -54,7 +54,7 @@ def test_yaml_weekday_closures_match_verified_list():
 
 
 def test_fallback_weekday_closures_match_yaml():
-    """fallback 표가 교정 전 값으로 남아 있으면 자동 갱신이 교정을 되돌린다."""
+    """fallback 표가 고치기 전 값으로 남아 있으면 자동 갱신이 고친 달력을 되돌린다."""
     dates = _yaml_dates()
     for year in VERIFIED_WEEKDAY_CLOSURES:
         assert _weekday_set(hu.FALLBACK_BY_YEAR[year], year) == _weekday_set(dates, year)
@@ -100,7 +100,7 @@ def test_update_preserves_header_comments(tmp_path, monkeypatch):
 
 
 def test_pykrx_verified_range_is_authoritative_but_future_is_kept(tmp_path, monkeypatch):
-    """시장 데이터로 확인된 구간은 교정하고, 확인되지 않은 미래 구간은 건드리지 않는다."""
+    """시장 데이터로 확인된 구간은 바로잡고, 확인되지 않은 미래 구간은 건드리지 않는다."""
     path = tmp_path / "holidays.yaml"
     # 01-27은 실제로는 개장한 날(틀린 항목), 09-24는 아직 확인 불가한 미래
     _write(path, {"2026-01-27", "2026-09-24", "2026-03-01"})
@@ -112,7 +112,7 @@ def test_pykrx_verified_range_is_authoritative_but_future_is_kept(tmp_path, monk
     hu.update_holidays_yaml(path=path, year_from=2026, year_to=2026)
 
     saved = set(str(d) for d in yaml.safe_load(path.read_text(encoding="utf-8"))["holidays"])
-    assert "2026-01-27" not in saved      # 확인 구간의 틀린 평일 항목은 교정
+    assert "2026-01-27" not in saved      # 확인 구간의 틀린 평일 항목은 바로잡힌다
     assert "2026-02-16" in saved          # 확인 구간의 실제 휴장
     assert "2026-03-01" in saved          # 주말 항목은 그대로
     assert {"2026-09-24", "2026-09-25"} <= saved  # 미래 구간은 기존 ∪ fallback

@@ -144,7 +144,7 @@ def structural_deployment_tolerance(
 
     truncation_unit_value는 '자동으로 메울 수 없는 미달 금액'이다. 헬스는
     unfixable_deployment_gap(max(band, 가장 싼 집행 가능 묶음의 절반))을 넘긴다 —
-    보충 매수가 생긴 뒤로는 그 이상 남는 미달은 절사가 아니라 누수다(2026-09-23 교정:
+    보충 매수가 생긴 뒤로는 그 이상 남는 미달은 절사가 아니라 누수다(2026-09-23 수정:
     예전 호출부는 보유 슬롯별 1주 가격의 합을 넘겨 9종목 바스켓의 허용이 20%p까지
     벌어졌다).
     잔고가 커지면 구조 하한이 저절로 조여져 floor가 다시 지배한다.
@@ -213,7 +213,7 @@ def summarize_deployment(
 
     한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md P1-5)의 배경: 종목별 드리프트
     트리거는 '집계 배치율' 이탈(예: 실효 61% vs 설계 80%)을 영영 못 본다. 여기서 그 이탈을
-    운영자 헬스로 표면화한다. 실제가 설계에서 tolerance(기본 5%p)를 넘게 벗어나면 ATTENTION.
+    운영자 헬스에 보여 준다. 실제가 설계에서 tolerance(기본 5%p)를 넘게 벗어나면 ATTENTION.
 
     초과 배치도 본다. 전 종목이 같이 오르면 종목별 비중은 그대로라 리밸런서가 줄이지
     않는다 — 60/40 설계가 조용히 70/30이 된다(현금 래칫의 반대 방향, 운영 원칙 4).
@@ -234,14 +234,14 @@ def summarize_deployment(
         note = (
             f"주식 배치율 {deployment_ratio:.0%} < 설계 {design_fraction:.0%} "
             f"({-shortfall * 100:.1f}%p) — 미체결 슬롯/자본 점검"
-            " (1주 단위 제약이면 적립 입금 뒤 교정된다)"
+            " (1주 단위라 못 사는 경우면 다음 적립 뒤에 채워진다)"
         )
     elif -shortfall > tolerance:
         verdict = "ATTENTION"
         note = (
             f"주식 배치율 {deployment_ratio:.0%} > 설계 {design_fraction:.0%} "
-            f"(+{-shortfall * 100:.1f}%p) — 상승으로 초과 배치. 종목별 초과가 작으면 "
-            "리밸런서가 줄이지 않으니 비중 조정을 판단할 것"
+            f"(+{-shortfall * 100:.1f}%p) — 주가가 올라 주식 비중이 설계보다 높다. 종목마다 "
+            "조금씩이라 리밸런서가 줄이지 않으니 비중을 조정할지 판단할 것"
         )
     return {
         "verdict": verdict, "note": note,

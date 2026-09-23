@@ -134,7 +134,7 @@ def first_activity_date(account_key: str, mode: str = "paper") -> date | None:
     """이 계정의 첫 활동일(첫 체결·첫 입출금·첫 스냅샷 중 가장 이른 날). 없으면 None.
 
     보충은 '돌았어야 했는데 빠진 날'만 채워야 한다. 계정이 생기기 전 날을 채우면
-    빈 원장이 초기자본 그대로 재생돼 수익률 0%의 가짜 운영일이 생기고, 평가의
+    거래 기록이 없으니 초기자본 그대로 계산돼 수익률 0%의 가짜 운영일이 생기고, 평가의
     운영 시작일(60영업일 시계)과 벤치마크 구간이 앞당겨진다. 트랙을 재시작한 직후
     첫 10일이 정확히 이 경우다(2026-07-07 kr_pocket 재시작 이력).
     """
@@ -247,7 +247,7 @@ def reconstruct_snapshot(
         prev_cum = float(prev.cumulative_return or 0.0) if prev else None
         prev_peak = float(prev.peak_value or 0.0) if prev else 0.0
         prev_date = _as_date(prev.date) if prev else None
-        # 구간 유입의 하한은 직전 스냅샷이 '실제로 측정된 시각'(created_at)이다.
+        # 입금을 어느 구간에 넣을지는 직전 스냅샷을 '실제로 찍은 시각'(created_at)으로 가른다.
         # 날짜 끝(자정 직전)을 쓰면 직전 스냅샷(10:07 측정) 이후 같은 날 들어온 입금이
         # 어느 구간에도 안 잡혀, 그 입금이 복원일의 수익(+25~33%)으로 영구 기록된다.
         prev_measured = getattr(prev, "created_at", None) if prev else None
@@ -256,7 +256,7 @@ def reconstruct_snapshot(
         ):
             prev_measured = datetime.combine(prev_date, datetime.max.time())
         # 예전 복원 행은 created_at이 '저장한 날'(다음 사이클)이다. 복원하려는 날보다
-        # 늦은 측정 시각은 있을 수 없으므로 그날 0시로 자른다.
+        # 늦은 시각에 찍혔을 리는 없으므로 그날 0시로 자른다.
         if prev_measured is not None:
             prev_measured = min(
                 prev_measured, datetime.combine(_as_date(day), datetime.min.time()),
@@ -363,8 +363,8 @@ def backfill_account(
         if snap is None:
             continue
         if not dry_run:
-            # 측정 시각은 복원한 날의 끝으로 남긴다. 저장 시각(다음 날 사이클)으로 두면
-            # 다음 실측 구간의 유입 경계가 하루 밀려, 그 사이 입금이 수익으로 잡힌다.
+            # 찍은 시각은 복원한 날의 끝으로 남긴다. 저장한 시각(다음 날 실행)으로 두면
+            # 다음 구간의 입금 경계가 하루 밀려, 그 사이 입금이 수익으로 잡힌다.
             ok = save_portfolio_snapshot(
                 account_key=account_key, mode=mode, reconstructed=True,
                 measured_at=datetime.combine(_as_date(day), datetime.max.time()),

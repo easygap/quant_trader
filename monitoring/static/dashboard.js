@@ -526,8 +526,8 @@
     $("overviewDate").dateTime = snap?.date || "";
     $("overviewTotal").textContent = won(snap?.total_value);
     $("overviewCash").textContent = `현금 ${won(snap?.cash)}`;
-    // 평가액은 스냅샷 시점의 값이므로 원금도 그 시점 기준으로 비교한다. 방금 기록한
-    // 적립금까지 원금에 넣으면 다음 사이클 전까지 가짜 손실이 보인다.
+    // 평가액은 스냅샷을 찍은 때의 값이라 원금도 그때 기준으로 비교한다. 방금 기록한
+    // 적립금까지 원금에 넣으면 다음 실행 전까지 손실이 난 것처럼 보인다.
     const basePrincipal = Number(b?.principal_at_snapshot ?? b?.principal);
     const pending = Number(b?.pending_deposits || 0);
     const pnl = snap ? Number(snap.total_value) - basePrincipal : null;
@@ -537,7 +537,7 @@
     $("overviewPnl").className = tone(pnl);
     $("overviewPrincipal").textContent = won(b?.principal);
     $("overviewDeposits").textContent = b?.deposits_total
-      ? `적립금 ${won(b.deposits_total)} 포함${pending > 0 ? ` · 기록 이후 적립 ${won(pending)}은 다음 사이클 반영` : ""}`
+      ? `적립금 ${won(b.deposits_total)} 포함${pending > 0 ? ` · 최근 적립한 ${won(pending)}은 다음 자동매매 때 반영됩니다` : ""}`
       : "초기 투자금";
     $("overviewReturn").textContent = pct(snap?.cumulative_return);
     $("overviewReturn").className = tone(snap?.cumulative_return);
@@ -713,8 +713,8 @@
       });
       return;
     }
-    // 기록 공백은 거래일 달력으로 잰다(서버 계산). 달력 날짜로 재면 연휴 뒤에는 거짓
-    // 경보가, 평일 이틀 공백에는 '정상'이 나온다.
+    // 기록이 빠졌는지는 거래일 기준으로 센다(서버에서 계산). 그냥 날짜로 세면 연휴 뒤에는
+    // 잘못된 경보가 뜨고, 평일에 이틀 빠져도 '정상'으로 나온다.
     const stalled = (baskets || []).filter(
       (b) => Number(b.missed_trading_days || 0) >= 1,
     );
@@ -724,7 +724,7 @@
       );
       setDecision({
         title: `자산 기록이 ${worst.missed_trading_days}거래일 빠졌습니다`,
-        description: `${worst.display_name || worst.basket}의 마지막 기록은 ${fmtLong(worst.snapshot?.date)}입니다. 일일 사이클이 돌았는지 운영 상태부터 확인하세요.`,
+        description: `${worst.display_name || worst.basket}의 마지막 기록은 ${fmtLong(worst.snapshot?.date)}입니다. 자동매매가 제대로 실행됐는지 운영 상태부터 확인하세요.`,
         action: "operations",
         actionLabel: "운영 상태 보기",
       });
@@ -732,9 +732,9 @@
     }
     if (state.runtime && state.runtime.scheduler_stale) {
       setDecision({
-        title: "장중인데 자동매매 루프가 멈춰 있습니다",
+        title: "장이 열려 있는데 자동매매가 멈춰 있습니다",
         description:
-          "상시 스케줄러의 최근 실행 기록이 한 시간 넘게 없습니다. 운영 상태를 확인하세요.",
+          "스케줄러가 한 시간 넘게 실행되지 않았습니다. 운영 상태를 확인하세요.",
         action: "operations",
         actionLabel: "운영 상태 보기",
       });
@@ -771,9 +771,9 @@
     }
     if (state.evaluations === null) {
       setDecision({
-        title: "검증 상태를 확인할 수 없습니다",
+        title: "검증 결과를 불러오지 못했습니다",
         description:
-          "계좌 기록은 정상으로 읽었지만 모의투자 검증 결과를 불러오지 못했습니다. 잠시 후 다시 확인하세요.",
+          "계좌 기록은 정상입니다. 모의투자 검증 결과만 불러오지 못했으니 잠시 후 다시 확인하세요.",
       });
       return;
     }
@@ -1699,7 +1699,7 @@
             ? "기록 누락 확인 중"
             : coverage >= 100
               ? restored
-                ? `기록 누락 없음 (사후 복원 ${restored}일 포함 · 실측 ${measured}%)`
+                ? `기록 누락 없음 (나중에 채운 ${restored}일 포함, 제때 기록 ${measured}%)`
                 : "기록 누락 없음"
               : `기록 누락 ${Math.max(0, 100 - coverage)}%`;
         return `<div class="review-item">
@@ -1728,7 +1728,7 @@
     if (v === "bearish")
       return ["하락 추세", "시장 추세 기준 매수 제한", "warning"];
     if (v === "caution") return ["주의", "포지션 축소 구간", "warning"];
-    if (v === "disabled") return ["판단 안 함", "시장 국면 필터 꺼짐", "info"];
+    if (v === "disabled") return ["사용 안 함", "시장 추세 판단을 꺼 두었습니다", "info"];
     return ["확인 불가", "시장 상태 데이터 없음", "warning"];
   }
   const strategyCopy = (s) =>
@@ -1831,7 +1831,7 @@
           : `${formatAge(loopAge)} 실행`
         : "기록 없음";
     const autoDetail = schedulerUnused
-      ? "매매는 평일 일일 사이클(10시대)로 실행합니다"
+      ? "매매는 평일 오전 10시쯤 한 번 실행됩니다"
       : loopElapsed
         ? `마지막 실행 ${fmtDT(loopLast)} · 루프 ${loopElapsed}`
         : "스케줄러 기록 없음";

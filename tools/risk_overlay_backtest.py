@@ -410,11 +410,11 @@ def run_pocket(start="2002-01-01", use_etf=False):
 
 
 def rebalanced_ew_index(panel, drift_threshold=0.08, cost_rate=None):
-    """동일비중 슬리브 지수. 어느 종목이든 목표 비중에서 drift_threshold를 넘게 벗어나면
+    """동일비중 주식 부분의 지수. 어느 종목이든 목표 비중에서 drift_threshold를 넘게 벗어나면
     그날 종가로 동일비중으로 되돌리고, 그 회전에 거래비용을 뺀다(운영 트랙과 같은 규칙).
 
     첫날 매수 후 계속 들고만 가면 오른 종목(2023~25의 하이닉스 같은)이 슬리브를 점점
-    차지해, 운영 트랙(8%p 이탈 시 교정)과 다른 포트폴리오를 재게 된다.
+    차지해서, 운영 트랙(8%p 벗어나면 되돌림)과 다른 포트폴리오를 재게 된다.
     """
     import numpy as np
     import pandas as pd
@@ -442,7 +442,7 @@ def rebalanced_ew_index(panel, drift_threshold=0.08, cost_rate=None):
 
 def run_basket(start="2021-12-01", symbols=None, rf_annual=0.0, target_stock=0.6,
                policies=None, label="EW"):
-    """트랙 2: 대형주 동일비중 슬리브(8%p 이탈 시 재조정) + 무이자 현금, 주식 비중 60%.
+    """트랙 2: 대형주 동일비중(8%p 벗어나면 되돌림) + 이자 없는 현금, 주식 비중 60%.
 
     symbols 미지정 시 baskets.yaml의 kr_diversified_hold 보유 종목(현재 9종목)을 쓴다.
     rf_annual=0: 바스켓 paper 계좌의 현금은 이자를 받지 않는다.
@@ -481,7 +481,7 @@ def run_basket(start="2021-12-01", symbols=None, rf_annual=0.0, target_stock=0.6
 
 
 def run_exposure_review(start="2021-12-01", fractions=(0.6, 0.7, 0.8)):
-    """P3 노출 정책 비교: 같은 9종목 슬리브를 주식 60/70/80%로 들 때의 상승·하락 포착.
+    """P3 주식 비중 비교: 같은 9종목을 주식 60/70/80%로 들 때 오를 때·내릴 때 얼마나 따라가는지.
 
     국면 분해는 주간 리포트와 같은 정의(core.performance_lens.split_by_regime —
     KS200 일간 수익률의 부호로 상승일·하락일을 나눔)를 쓴다.
@@ -652,20 +652,20 @@ def main():
             summary,
             frames,
             image_dir / "overlay-basket.png",
-            f"관찰 트랙 · 대형주 {n}종목 동일비중 60% + 현금 40%(무이자) · 2022년 약세장 포함",
+            f"관찰 트랙 · 대형주 {n}종목 동일비중 60% + 현금 40%(이자 없음) · 2022년 약세장 포함",
         )
-        md += [_markdown(f"관찰 트랙 (현재 보유 {n}종목, 현금 무이자, 2021-12~)", summary), ""]
+        md += [_markdown(f"관찰 트랙 (지금 들고 있는 {n}종목, 이자 없는 현금, 2021-12~)", summary), ""]
         # 비교: 2026-09-17 표의 조건(000660 포함 10종목, 현금 연 3%)
         legacy, _ = run_basket("2021-12-01", symbols=BASKET_SYMBOLS, rf_annual=RF_ANNUAL)
         report["basket_legacy10"] = legacy
-        md += [_markdown("참고 · 이전 표 조건 (000660 포함 10종목, 현금 연 3%)", legacy), ""]
+        md += [_markdown("참고 · 예전 표 조건 (000660 포함 10종목, 현금 연 3%)", legacy), ""]
     if args.track in ("all", "exposure"):
         exposure = run_exposure_review("2021-12-01")
         report["exposure_review"] = exposure
         md += [
-            "### 노출 정책 비교 (현재 보유 종목, 고정 비중, 현금 무이자, 2021-12~)",
+            "### 주식 비중별 비교 (지금 들고 있는 종목, 고정 비중, 이자 없는 현금, 2021-12~)",
             "",
-            "| 주식 비중 | CAGR | 최대낙폭 | 샤프(rf 0%) | 상승 포착 | 하락 포착 |",
+            "| 주식 비중 | 연수익률 | 최대낙폭 | 샤프(금리 0%) | 상승 포착 | 하락 포착 |",
             "|---|---:|---:|---:|---:|---:|",
         ]
         for key, r in exposure["fractions"].items():

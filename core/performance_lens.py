@@ -234,9 +234,9 @@ def format_regime_line(regime: dict[str, dict[str, Any]]) -> str:
     parts: list[str] = []
     # 포착률을 앞세운다 — 이게 행동을 바꾸는 숫자다. 상승 포착이 낮으면 '방어의 대가'가
     # 크다는 뜻이고, 하락 포착이 높으면 방어가 실제로 작동하지 않는다는 뜻이다.
-    for key, label, verb in (
-        ("up", "상승", "따라감"),
-        ("down", "하락", "맞음"),
+    for key, label, verb, move in (
+        ("up", "상승", "따라감", "오를"),
+        ("down", "하락", "맞음", "내릴"),
     ):
         r = regime.get(key) or {}
         if not r.get("days"):
@@ -249,7 +249,7 @@ def format_regime_line(regime: dict[str, dict[str, Any]]) -> str:
         if md is not None and bd is not None:
             parts.append(
                 f"{label} {r['days']}일 포착 {cap * 100:.0f}% "
-                f"(하루 평균 지수 {bd:+.2f}% 중 {md:+.2f}% {verb})"
+                f"(지수가 하루 평균 {bd:+.2f}% {move} 때 {md:+.2f}%)"
             )
         else:
             parts.append(
@@ -268,7 +268,7 @@ def format_risk_line(metrics: dict[str, Any]) -> str:
     if metrics.get("sharpe_annual") is not None:
         # 무위험수익률 0% 기준이다. 백테스트·연구 리포트의 샤프는 rf 3%라 같은 수익
         # 흐름에서도 0.1~0.3 높게 나온다 — 기준을 적어 둬야 비교 착오가 없다.
-        parts.append(f"샤프(rf 0%) {metrics['sharpe_annual']:+.2f}")
+        parts.append(f"샤프(금리 0% 기준) {metrics['sharpe_annual']:+.2f}")
     if metrics.get("down_day_ratio") is not None:
         parts.append(f"하락일 {metrics['down_day_ratio'] * 100:.0f}%")
     if metrics.get("worst_day_pct") is not None:

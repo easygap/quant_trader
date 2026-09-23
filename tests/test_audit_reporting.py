@@ -2,7 +2,7 @@
 
 입금을 달력 날짜로 묶으면, 그날 10:07 스냅샷 뒤에 들어온 입금이나 주말 입금이
 엉뚱한 구간에 들어가 그 구간이 +25~36% 수익으로 잡힌다(#461과 같은 증상이 적립
-주기마다 재발). 흡수한 스냅샷 구간 기준으로 묶어야 한다.
+주기마다 재발). 입금이 처음 반영된 스냅샷 구간으로 묶어야 한다.
 """
 
 from datetime import date, datetime
@@ -38,7 +38,7 @@ def test_weekend_deposit_is_absorbed_by_next_snapshot(monkeypatch):
 
 
 def test_deposit_after_same_day_snapshot_goes_to_next_interval(monkeypatch):
-    """8/26 실측: 10:07 스냅샷 뒤 17:19 입금 — 달력 기준이면 8/26이 -26%, 8/27이 +36%."""
+    """8/26 실제 사례: 10:07 스냅샷 뒤 17:19 입금 — 날짜로 묶으면 8/26이 -26%, 8/27이 +36%."""
     import main
     from core.performance_lens import daily_returns_from_nav
 
@@ -72,7 +72,7 @@ def test_weekly_summary_does_not_call_reconstructed_week_accident_free():
     restored = build_weekly_summary(**base, reconstructed_days=1)
     ev = {f["name"]: f["value"] for f in restored["fields"]}["🛠 주간 이벤트"]
     assert "무사고" in {f["name"]: f["value"] for f in clean["fields"]}["🛠 주간 이벤트"]
-    assert "무사고" not in ev and "사후 복원 1일" in ev
+    assert "무사고" not in ev and "나중에 채운 기록 1일" in ev
 
 
 def test_regime_note_is_shown():
@@ -91,7 +91,7 @@ def test_sharpe_label_states_risk_free_rate():
 
     line = format_risk_line({"samples": 30, "vol_annual_pct": 10.0, "sharpe_annual": 0.5,
                              "down_day_ratio": 0.4, "worst_day_pct": -2.0})
-    assert "샤프(rf 0%)" in line
+    assert "샤프(금리 0% 기준)" in line
 
 
 def test_daily_card_renders_risk_field(monkeypatch):
@@ -100,7 +100,7 @@ def test_daily_card_renders_risk_field(monkeypatch):
     sent = {}
     n = Notifier.__new__(Notifier)
     monkeypatch.setattr(n, "send_embed", lambda title, desc, **kw: sent.update(kw), raising=False)
-    n.send_daily_report({"total_value": 1, "risk": "연변동성 10.0% · 샤프(rf 0%) +0.50"})
+    n.send_daily_report({"total_value": 1, "risk": "연변동성 10.0% · 샤프(금리 0% 기준) +0.50"})
     names = [f["name"] for f in sent["fields"]]
     assert "📉 리스크" in names
 

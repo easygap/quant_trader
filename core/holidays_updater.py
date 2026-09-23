@@ -161,7 +161,7 @@ def update_holidays_yaml(
 
     if verified_through is not None:
         # 시장 영업일로 확인된 구간(≤ verified_through)은 pykrx가 기준이다 — 틀린 기존
-        # 항목도 여기서 교정된다. 주말 항목은 판정에 영향이 없으니 그대로 둔다.
+        # 항목도 여기서 바로잡힌다. 주말 항목은 거래일 판단에 영향이 없으니 그대로 둔다.
         # 확인되지 않은 구간(미래)은 기존 파일 ∪ fallback을 유지한다.
         vt = verified_through.isoformat()
         merged = {d for d in existing if not _in_range(d) or d > vt or _is_weekend(d)}
@@ -173,7 +173,7 @@ def update_holidays_yaml(
         )
     else:
         # pykrx 실패. fallback 표는 사람이 시장 데이터와 대조해 고친 기존 파일보다
-        # 오래됐을 수 있다(2026-08-26 교정이 이 경로로 되돌아갈 뻔했다). 그래서
+        # 오래됐을 수 있다(2026-08-26에 고친 달력이 이 경로로 되돌아갈 뻔했다). 그래서
         # 기존 항목은 절대 지우지 않고 합집합만 한다.
         merged = set(existing) | fallback
         logger.info("휴장일 fallback 사용 ({}~{}년) — 기존 항목은 유지", year_from, year_to)
@@ -208,7 +208,7 @@ def _is_weekend(d: str) -> bool:
 
 
 def _read_header(path: Path) -> List[str]:
-    """파일 맨 앞의 주석 블록. 다시 쓸 때 교정 이력 주석이 사라지지 않게 보존한다."""
+    """파일 맨 앞의 주석 블록. 파일을 다시 쓸 때 수정 이력 주석이 지워지지 않게 남긴다."""
     if not path.exists():
         return []
     lines: List[str] = []
