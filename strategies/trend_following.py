@@ -22,8 +22,11 @@ class TrendFollowingStrategy(BaseStrategy):
 
     조건:
     1. ADX > threshold → 강한 추세 존재
-    2. 가격 > 200일선 → 상승 추세
+    2. 가격 > 추세 이동평균(trend_ma_period, 기본 200일선) → 상승 추세
     3. MACD 골든크로스 → 매수 진입
+
+    손절·트레일링 배수는 이 전략 설정이 아니라 risk_params.yaml(stop_loss/trailing_stop)을
+    따른다. 백테스터와 paper 주문 실행이 모두 그 값을 쓰기 때문이다.
 
     진입이 늦는 구조이므로 손익비(Profit Factor) ≥ 2.0 달성 여부를 반드시 검증하세요.
     한국 시장에서는 추세 지속성이 미국(나스닥)보다 약해 실증 근거가 상대적으로 적으므로, 종목·기간별 검증 권장.
@@ -43,6 +46,10 @@ class TrendFollowingStrategy(BaseStrategy):
         self.params = self.config.strategies.get("trend_following", {})
         logger.info("TrendFollowingStrategy 초기화 완료")
 
+    def _trend_ma_period(self) -> int:
+        """추세 판단 이동평균 기간 (trend_ma_period, 기본 200)."""
+        return max(2, int(self.params.get("trend_ma_period", 200)))
+
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         """모든 지표 계산 + 전략 signal 컬럼 추가"""
         analyzed = self.indicator_engine.calculate_all(df.copy())
@@ -50,16 +57,21 @@ class TrendFollowingStrategy(BaseStrategy):
             return analyzed
 
         adx_threshold = self.params.get("adx_threshold", 25)
+        trend_period = self._trend_ma_period()
 
         adx = analyzed.get("adx", pd.Series(np.nan, index=analyzed.index))
         close = analyzed.get("close", pd.Series(np.nan, index=analyzed.index))
-        sma_200 = analyzed.get("sma_200", pd.Series(np.nan, index=analyzed.index))
+        # 추세선은 전략이 직접 계산한다. 예전에는 IndicatorEngine의 sma_200을 고정으로 읽어
+        # 최적화기가 탐색하던 trend_ma_period가 아무 효과가 없었다(IndicatorEngine은
+        # indicators.moving_average.trend_period 기간만, 그것도 행 수가 충분할 때만 만든다).
+        trend_ma = close.rolling(window=trend_period, min_periods=trend_period).mean()
         macd = analyzed.get("macd", pd.Series(np.nan, index=analyzed.index))
         macd_signal = analyzed.get("macd_signal", pd.Series(np.nan, index=analyzed.index))
 
         has_trend = adx > adx_threshold
-        above_200 = sma_200.notna() & (sma_200 > 0) & (close > sma_200)
-        below_200 = sma_200.notna() & (sma_200 > 0) & (close < sma_200)
+        above_200 = trend_ma.notna() & (trend_ma > 0) & (close > trend_ma)
+        below_200 = trend_ma.notna() & (trend_ma > 0) & (close < trend_ma)
+        analyzed["trend_ma"] = trend_ma
 
         macd_golden = (
             macd.notna() & macd_signal.notna()
@@ -88,16 +100,22 @@ class TrendFollowingStrategy(BaseStrategy):
     def generate_signal(self, df: pd.DataFrame, **kwargs) -> dict:
         """추세 추종 신호 생성"""
         analyzed = self.analyze(df)
+        trend_period = self._trend_ma_period()
 
-        if analyzed.empty or len(analyzed) < 200:
-            return {"signal": self.HOLD, "score": 0, "details": {"이유": "데이터 부족(200일 필요)"}}
+        if analyzed.empty or len(analyzed) < trend_period:
+            return {
+                "signal": self.HOLD,
+                "score": 0,
+                "details": {"이유": f"데이터 부족({trend_period}일 필요)"},
+            }
 
         last = analyzed.iloc[-1]
         prev = analyzed.iloc[-2] if len(analyzed) >= 2 else last
 
         adx = last.get("adx", 0)
         close = last.get("close", 0)
-        sma_200 = last.get("sma_200", 0)
+        trend_ma = last.get("trend_ma", 0)
+        trend_label = f"{trend_period}일선"
         macd = last.get("macd", 0)
         macd_signal = last.get("macd_signal", 0)
         prev_macd = prev.get("macd", 0)
@@ -117,10 +135,10 @@ class TrendFollowingStrategy(BaseStrategy):
         if has_trend:
             reasons.append(f"ADX={adx:.1f} > {adx_threshold}")
 
-        # 조건 2: 상승 추세 (200일선 위)
-        above_200 = pd.notna(sma_200) and sma_200 > 0 and close > sma_200
+        # 조건 2: 상승 추세 (추세선 위, 기본 200일선)
+        above_200 = pd.notna(trend_ma) and trend_ma > 0 and close > trend_ma
         if above_200:
-            reasons.append("종가 > 200일선")
+            reasons.append(f"종가 > {trend_label}")
 
         # 조건 3: MACD 골든크로스
         macd_golden = (
@@ -130,7 +148,7 @@ class TrendFollowingStrategy(BaseStrategy):
         if macd_golden:
             reasons.append("MACD 골든크로스")
 
-        below_200 = pd.notna(sma_200) and sma_200 > 0 and close < sma_200
+        below_200 = pd.notna(trend_ma) and trend_ma > 0 and close < trend_ma
         macd_dead = (
             pd.notna(macd) and pd.notna(macd_signal) and
             macd < macd_signal and prev_macd >= prev_signal
@@ -138,7 +156,7 @@ class TrendFollowingStrategy(BaseStrategy):
         if macd_dead:
             reasons.append("MACD 데드크로스")
         if below_200:
-            reasons.append("종가 < 200일선")
+            reasons.append(f"종가 < {trend_label}")
 
         return {
             "signal": signal,
@@ -146,7 +164,7 @@ class TrendFollowingStrategy(BaseStrategy):
             "details": {
                 "ADX": round(adx, 2) if pd.notna(adx) else 0,
                 "종가": close,
-                "200일선": round(sma_200, 0) if pd.notna(sma_200) else 0,
+                trend_label: round(trend_ma, 0) if pd.notna(trend_ma) else 0,
                 "MACD": round(macd, 2) if pd.notna(macd) else 0,
                 "조건": ", ".join(reasons) if reasons else "없음",
             },

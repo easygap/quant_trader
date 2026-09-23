@@ -197,9 +197,9 @@ relative_strength_rotation:
 # 한국 시장: 코스피/코스닥은 박스권·추세 단명 특성으로 미국(나스닥) 대비 추세 추종 실증 근거가 약함. 종목·기간별 검증 권장.
 trend_following:
   adx_threshold: 25           # 추세 존재 확인 ADX 기준
-  trend_ma_period: 200        # 추세 판단 이동평균 기간
-  atr_stop_multiplier: 2.0    # ATR 기반 손절 배수
-  trailing_atr_multiplier: 3.0  # ATR 기반 트레일링 스탑 배수
+  trend_ma_period: 200        # 추세 판단 이동평균 기간 (전략이 직접 계산)
+  # 손절·트레일링 배수는 risk_params.yaml의 stop_loss.atr_multiplier / trailing_stop.atr_multiplier를 따른다.
+  # (예전 atr_stop_multiplier·trailing_atr_multiplier 키는 어디서도 읽지 않아 삭제)
 
 # --- 펀더멘털 팩터 전략 (가격 OHLC와 독립, pykrx 우선 → yfinance 폴백) ---
 fundamental_factor:

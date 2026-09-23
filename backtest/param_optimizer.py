@@ -36,7 +36,8 @@ DEFAULT_SEARCH_SPACES = {
     "trend_following": {
         "adx_threshold": [15, 20, 25, 30],
         "trend_ma_period": [60, 120, 200],
-        "atr_stop_multiplier": [1.5, 2.0, 2.5, 3.0],
+        # atr_stop_multiplier는 뺐다: 손절은 risk_params.stop_loss.atr_multiplier를 쓰고
+        # 전략 설정은 어디서도 읽지 않아, 조합만 4배로 늘리고 결과는 같았다.
     },
 }
 
@@ -610,7 +611,6 @@ def bayesian_optimize(
         "trend_following": {
             "adx_threshold": (15, 30),
             "trend_ma_period": (60, 200),
-            "atr_stop_multiplier": (1.5, 3.0),
         },
     }
     bounds = param_bounds or default_bounds.get(strategy_name, {})
