@@ -12,6 +12,7 @@ import time as time_mod
 import shutil
 from collections import deque
 from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
 from loguru import logger
 
 from config.config_loader import Config
@@ -39,6 +40,23 @@ from core.position_lock import PositionLock
 _TRADING_DAY_LOOKBACK_DAYS = 31
 # 장마감 처리 시작 시각(장 종료 15:30 + 체결·종가 확정 여유 5분)
 _POST_MARKET_START = dtime(15, 35)
+# 휴장일 파일은 실행 위치(CWD)와 무관하게 프로젝트 루트 기준으로 찾는다.
+_HOLIDAYS_PATH = Path(__file__).resolve().parent.parent / "config" / "holidays.yaml"
+
+
+def _pykrx_holiday_source_available() -> tuple[bool, str]:
+    """holidays_updater가 쓰는 pykrx 거래일 API를 쓸 수 있는지(네트워크 호출 없음).
+
+    설치돼 있어도 버전에 따라 API가 없을 수 있다(현재 환경: pykrx 1.0.51에
+    get_market_trading_date_by_date 없음) — 그때 갱신기는 대체 목록으로 떨어진다.
+    """
+    try:
+        from pykrx import stock
+    except Exception as exc:  # ImportError 외에 pykrx 내부 초기화 오류도 같은 의미
+        return False, f"pykrx import 실패: {type(exc).__name__}: {exc}"
+    if not hasattr(stock, "get_market_trading_date_by_date"):
+        return False, "pykrx.stock.get_market_trading_date_by_date 없음(설치된 pykrx 버전 불일치)"
+    return True, ""
 
 
 class LoopMetrics:
@@ -1725,9 +1743,13 @@ class Scheduler:
         """
         새해 또는 holidays.yaml이 오래된 경우 자동 갱신.
         연초(1/1~1/7) 또는 파일 수정일이 90일 이상 지난 경우 트리거.
+
+        경로는 실행 위치(CWD)가 아니라 프로젝트 루트 기준이다 — 다른 폴더에서 띄우면
+        파일이 '없다'고 보고 매일 갱신을 시도했다. pykrx 휴장일 조회를 쓸 수 없으면
+        갱신하지 않는다: 그때 갱신기는 대체 목록(FALLBACK)을 쓰는데, 검증된 달력을
+        틀린 날짜로 되돌릴 수 있다(2026-08-27 달력 교정분 유실 위험).
         """
-        from pathlib import Path
-        holidays_path = Path("config/holidays.yaml")
+        holidays_path = _HOLIDAYS_PATH
 
         needs_update = False
         now = datetime.now()
@@ -1748,14 +1770,30 @@ class Scheduler:
             except Exception:
                 needs_update = True
 
-        if needs_update:
-            try:
-                from core.holidays_updater import update_holidays_yaml
-                result_path = update_holidays_yaml()
-                logger.info("휴장일 자동 갱신 완료: {}", result_path)
-                self.trading_hours = TradingHours(self.config)
-            except Exception as e:
-                logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
+        if not needs_update:
+            return
+
+        available, reason = _pykrx_holiday_source_available()
+        if not available:
+            logger.warning(
+                "휴장일 자동 갱신 생략 — pykrx 휴장일 조회 불가({}). 대체 목록으로 덮어쓰면 "
+                "검증된 달력이 틀린 날짜로 되돌아갈 수 있어 기존 {}을 유지합니다. "
+                "새 연도 달력은 KRX 휴장일 공지로 직접 갱신한 뒤 "
+                "tools/verify_trading_calendar.py로 검증하세요.",
+                reason, holidays_path,
+            )
+            return
+
+        try:
+            from core.holidays_updater import update_holidays_yaml
+            result_path = update_holidays_yaml(path=holidays_path)
+            logger.info(
+                "휴장일 자동 갱신 완료: {} — tools/verify_trading_calendar.py로 검증 권장",
+                result_path,
+            )
+            self.trading_hours = TradingHours(self.config)
+        except Exception as e:
+            logger.warning("휴장일 자동 갱신 실패 (기존 파일 유지): {}", e)
 
     def _log_basket_execution_owner(self):
         """바스켓은 스케줄러가 거래하지 않는다 — 실행 경로가 일일 CLI 하나뿐임을 남긴다.
