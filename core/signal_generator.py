@@ -453,6 +453,8 @@ class SignalGenerator:
         - 데드크로스 당일: sell_weight (기본 -2)
         - MACD < Signal 유지 중: sell_weight × 0.5 (기본 -1) — 하락 추세 지속
         - 히스토그램 방향 전환 보너스: ±0.5 (기존과 동일)
+        - 워밍업(MACD 또는 시그널선이 NaN) 구간은 0점. 크로스는 전일과 당일이
+          모두 유효한 봉일 때만 인정한다.
         """
         weights = self._get_weights()
         buy_weight = weights["macd_golden_cross"]
@@ -461,20 +463,24 @@ class SignalGenerator:
         score = pd.Series(0.0, index=df.index)
 
         if "macd" in df.columns and "macd_signal" in df.columns:
-            macd_above = df["macd"] > df["macd_signal"]
-            macd_above_prev = macd_above.shift(1, fill_value=False)
-            golden_cross = macd_above & (~macd_above_prev)
-            dead_cross = (~macd_above) & macd_above_prev
+            # NaN 비교는 항상 False라서, 예전에는 워밍업 구간(시그널선 첫 유효값 전 약 33봉)이
+            # 'Signal 아래 유지'(-1)로 채점되고 첫 유효 봉이 가짜 골든크로스(+2)로 잡혔다.
+            # 위/아래 판정과 크로스는 유효한 행에서만 한다.
+            valid = df["macd"].notna() & df["macd_signal"].notna()
+            macd_above = valid & (df["macd"] > df["macd_signal"])
+            macd_below = valid & ~(df["macd"] > df["macd_signal"])
+            golden_cross = macd_above & macd_below.shift(1, fill_value=False)
+            dead_cross = macd_below & macd_above.shift(1, fill_value=False)
 
-            # 기본: MACD > Signal 유지 중 절반 점수
+            # 기본: MACD > Signal 유지 중 절반 점수 (무효 행은 0점 그대로)
             score[macd_above] = buy_weight * 0.5
-            score[~macd_above] = sell_weight * 0.5
+            score[macd_below] = sell_weight * 0.5
 
             # 크로스 당일은 풀 점수로 덮어쓰기
             score[golden_cross] = buy_weight
             score[dead_cross] = sell_weight
 
-            # 히스토그램 방향 보너스 (크로스 아닌 날만)
+            # 히스토그램 방향 보너스 (크로스 아닌 유효 행만)
             if "macd_histogram" in df.columns:
                 hist_positive = df["macd_histogram"] > 0
                 hist_turning_up = (
@@ -484,9 +490,9 @@ class SignalGenerator:
                     df["macd_histogram"] < df["macd_histogram"].shift(1)
                 ) & (~hist_positive)
 
-                is_cross_day = golden_cross | dead_cross
-                score = score.where(~(~is_cross_day & hist_turning_up), score + 0.5)
-                score = score.where(~(~is_cross_day & hist_turning_down), score - 0.5)
+                bonus_day = valid & ~(golden_cross | dead_cross)
+                score = score.where(~(bonus_day & hist_turning_up), score + 0.5)
+                score = score.where(~(bonus_day & hist_turning_down), score - 0.5)
 
         return score
 
@@ -531,9 +537,11 @@ class SignalGenerator:
 
     def _score_ma(self, df: pd.DataFrame) -> pd.Series:
         """
-        이동평균 점수 계산
-        - 5일선이 20일선을 상향 돌파 (골든크로스) → +1점
-        - 5일선이 20일선을 하향 돌파 (데드크로스) → -1점
+        이동평균 점수 계산 (SMA 기준)
+        - 단기선이 중기선을 상향 돌파 (골든크로스) → +1점
+        - 단기선이 중기선을 하향 돌파 (데드크로스) → -1점
+        - 기간은 indicators.moving_average.short_period/mid_period (기본 5일/20일)
+        - 두 선 중 하나라도 NaN인 워밍업 구간은 크로스로 보지 않는다.
         """
         weights = self._get_weights()
         buy_weight = weights["ma_golden_cross"]
@@ -541,23 +549,35 @@ class SignalGenerator:
 
         score = pd.Series(0.0, index=df.index)
 
-        sma_short = None
-        sma_mid = None
+        # 예전에는 'sma_5'/'ema_5', 'sma_20'/'ema_20' 접두어로 찾고 마지막 일치 컬럼을 썼다.
+        # 그래서 실제로는 EMA(5)/EMA(20) 크로스를 봤고('sma_200'도 'sma_20'에 걸림),
+        # 기간 설정을 바꾸면 아무 경고 없이 0점이 됐다. IndicatorEngine과 같은 설정으로
+        # 정확한 SMA 컬럼 이름을 만든다.
+        ma_params = self.indicator_params.get("moving_average", {}) or {}
+        short_col = f"sma_{ma_params.get('short_period', 5)}"
+        mid_col = f"sma_{ma_params.get('mid_period', 20)}"
+        if short_col not in df.columns or mid_col not in df.columns:
+            # 지표가 아직 없는 프레임(30행 미만 등)은 조용히 0점. 다른 SMA는 있는데
+            # 설정한 기간만 없으면 설정 불일치이므로 한 번 경고한다.
+            has_other_sma = any(str(c).startswith("sma_") for c in df.columns)
+            if has_other_sma and not getattr(self, "_ma_columns_warned", False):
+                logger.warning(
+                    "[SignalGenerator] MA 점수 컬럼({}, {})이 없어 MA 점수를 0으로 둡니다. "
+                    "indicators.moving_average 설정과 지표 계산 설정이 같은지 확인하세요.",
+                    short_col, mid_col,
+                )
+                self._ma_columns_warned = True
+            return score
 
-        # SMA 컬럼 찾기
-        for col in df.columns:
-            if col.startswith("sma_5") or col.startswith("ema_5"):
-                sma_short = col
-            if col.startswith("sma_20") or col.startswith("ema_20"):
-                sma_mid = col
+        short_ma = df[short_col]
+        mid_ma = df[mid_col]
+        valid = short_ma.notna() & mid_ma.notna()
+        short_above = valid & (short_ma > mid_ma)
+        short_below = valid & ~(short_ma > mid_ma)
+        golden_cross = short_above & short_below.shift(1, fill_value=False)
+        dead_cross = short_below & short_above.shift(1, fill_value=False)
 
-        if sma_short and sma_mid and sma_short in df.columns and sma_mid in df.columns:
-            short_above = df[sma_short] > df[sma_mid]
-            short_above_prev = short_above.shift(1, fill_value=False)
-            golden_cross = short_above & (~short_above_prev)
-            dead_cross = (~short_above) & short_above_prev
-
-            score[golden_cross] = buy_weight
-            score[dead_cross] = sell_weight
+        score[golden_cross] = buy_weight
+        score[dead_cross] = sell_weight
 
         return score
