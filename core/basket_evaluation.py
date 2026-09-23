@@ -61,11 +61,18 @@ def evaluate_basket_paper_operation(
     issues: list[str] = []
 
     # A. 운영 무결성
+    # 게이트는 '실측' 커버리지로 판정한다. 이 게이트는 일일 사이클이 조용히 죽지
+    # 않았다는 증명인데, 사후 복원분까지 세면 결측 보충이 매번 100%로 메워 게이트가
+    # 목적을 잃는다(보충은 기록의 연속성을 위한 것이지 운영 증명이 아니다).
+    # 전체 커버리지(snapshot_coverage)는 표시용으로 그대로 둔다.
     coverage = (snapshot_days / trading_days_total) if trading_days_total > 0 else 0.0
-    if trading_days_total > 0 and coverage < min_snapshot_coverage:
+    measured_coverage = (measured_days / trading_days_total) if trading_days_total > 0 else 0.0
+    if trading_days_total > 0 and measured_coverage < min_snapshot_coverage:
         issues.append(
-            f"스냅샷 커버리지 {coverage:.0%} < {min_snapshot_coverage:.0%} "
-            f"({snapshot_days}/{trading_days_total} 영업일) — 일일 사이클 누락"
+            f"실측 스냅샷 커버리지 {measured_coverage:.0%} < {min_snapshot_coverage:.0%} "
+            f"({measured_days}/{trading_days_total} 영업일"
+            + (f", 사후 복원 {reconstructed_days}일 제외" if reconstructed_days else "")
+            + ") — 일일 사이클 누락"
         )
     if pending_failed_orders > 0:
         issues.append(f"미해결 실패 주문 {pending_failed_orders}건 (dead-letter)")
@@ -97,9 +104,7 @@ def evaluate_basket_paper_operation(
         "snapshot_days": snapshot_days,
         "reconstructed_days": reconstructed_days,
         "measured_days": measured_days,
-        "measured_coverage": round(
-            (measured_days / trading_days_total) if trading_days_total > 0 else 0.0, 4
-        ),
+        "measured_coverage": round(measured_coverage, 4),
         "min_trading_days": min_trading_days,
         "progress_pct": min(1.0, trading_days_total / min_trading_days) if min_trading_days > 0 else 1.0,
         "snapshot_coverage": round(coverage, 4),

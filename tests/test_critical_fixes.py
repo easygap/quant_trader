@@ -190,6 +190,8 @@ class TestForceLiveRemoved:
         notifier = SimpleNamespace(send_message=MagicMock())
         monkeypatch.setattr(main_mod.Config, "get", lambda: config)
         monkeypatch.setattr(main_mod, "_check_live_readiness_gate", gate)
+        # 휴장일에 테스트가 돌아도 매매 경로를 타도록 거래일로 고정
+        monkeypatch.setattr(main_mod, "_market_closed_today", lambda config, now: False)
         monkeypatch.setattr("core.basket_rebalancer.BasketRebalancer", FakeRebalancer)
         monkeypatch.setattr("core.notifier.Notifier", lambda cfg: notifier)
         monkeypatch.setenv("ENABLE_LIVE_TRADING", "true")

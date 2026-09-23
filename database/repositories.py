@@ -785,11 +785,14 @@ def save_portfolio_snapshot(
     snapshot_date: datetime = None,
     mode: str = "paper",
     reconstructed: bool = False,
+    measured_at: datetime = None,
 ):
     """일일 포트폴리오 스냅샷 저장 (mode+account_key 장부별 격리).
 
     snapshot_date: 스냅샷 귀속 날짜(자정으로 정규화). 미지정 시 오늘.
     비거래일 보충 실행에서 NAV의 가격 기준일(직전 거래일)로 귀속할 때 사용.
+    measured_at: 이 값이 측정된 시각(created_at). 미지정 시 지금. 사후 복원 행은
+    복원한 날의 끝을 넘긴다 — TWR 체인의 입금 경계가 이 시각을 쓰기 때문이다.
     """
     session = get_session()
     try:
@@ -813,6 +816,8 @@ def save_portfolio_snapshot(
             position_count=position_count,
             reconstructed=bool(reconstructed),
         )
+        if measured_at is not None:
+            snapshot.created_at = measured_at
         # merge by (mode, account_key, date)
         existing = session.query(PortfolioSnapshot).filter(
             PortfolioSnapshot.mode == md,
@@ -835,7 +840,7 @@ def save_portfolio_snapshot(
             # created_at은 '이 값이 마지막으로 측정된 시각'이다 — TWR 체인의 유입 경계가
             # 이 시각을 쓰므로, 같은 날 재실행(upsert) 때 갱신하지 않으면 재실행 전에
             # 반영된 입금이 다음 날 구간에 이중 산입돼 수익률이 영구 왜곡된다(적대적 리뷰 HIGH).
-            existing.created_at = datetime.now()
+            existing.created_at = measured_at or datetime.now()
         else:
             session.add(snapshot)
         session.commit()

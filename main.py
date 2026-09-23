@@ -679,6 +679,17 @@ def run_rebalance(args):
         return _run_rebalance_impl(args)
 
 
+def _market_closed_today(config, now) -> bool:
+    """now(KST)가 휴장일인가. 판정에 실패하면 False — 평소대로 진행한다."""
+    try:
+        from core.trading_hours import TradingHours
+
+        return not TradingHours(config).is_trading_day(now)
+    except Exception as exc:
+        logger.warning("거래일 판정 실패 — 평소대로 진행: {}", exc)
+        return False
+
+
 def _run_rebalance_impl(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from datetime import datetime
@@ -691,6 +702,7 @@ def _run_rebalance_impl(args):
         unreported_snapshot_gaps,
         format_gap_alert,
         record_cycle_event,
+        record_event_once_per_day,
     )
 
     config = Config.get()
@@ -758,6 +770,25 @@ def _run_rebalance_impl(args):
         )
     cycle_snapshots_saved = 0
 
+    # 휴장일 실행은 스냅샷(직전 거래일 귀속)과 결측 보충만 하고 매매는 하지 않는다.
+    # 휴장일의 '현재가'는 직전 거래일 종가라, 그 가격으로 체결을 남기면 장이 닫힌
+    # 날의 가짜 체결이 트랙레코드와 비용 통계에 섞인다. 평일 휴장(추석 등)에도
+    # 일일 태스크(월~금 10시)는 돈다. 판정 실패 시 평소대로 진행한다(1일 1매매
+    # 가드와 같은 원칙 — 방어선이지 게이트가 아니다).
+    kst_now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    market_closed_today = _market_closed_today(config, kst_now)
+    holiday_skip = market_closed_today and not dry_run and not force_rebalance
+    if holiday_skip:
+        logger.info(
+            "오늘({})은 휴장일 — 리스크 청산·리밸런싱 매매를 건너뛰고 스냅샷만 남긴다 "
+            "(우회: --force-rebalance)", kst_now.date(),
+        )
+        record_cycle_event(
+            "REBALANCE_SKIPPED_MARKET_CLOSED",
+            f"휴장일({kst_now.date()}) 실행 — 매매 생략, 스냅샷만 기록",
+            mode=mode,
+        )
+
     for name in basket_names:
         try:
             live_strategy_name = _rebalance_live_strategy_id(name)
@@ -786,48 +817,29 @@ def _run_rebalance_impl(args):
                     )
                     sys.exit(1)
 
-            report = rebalancer.get_status_report()
-            logger.info("\n{}", report)
-
-            # 1일 1매매 패스 원칙 강제: 같은 날 두 번째 실행(중복 스케줄·수동 재실행)이
-            # 회전 상한(1회 15%)을 사실상 2배로 만드는 것을 차단한다 — 6/10 진입 뭉침
-            # (하루 4회 실행 → 61% 집중 매입, 타이밍 비용 -1%p)의 재발 방지를 코드로.
-            # 실측: 7/3·7/7 일일 태스크가 사이클을 2회 연속 실행함. 결측 복구 재시도
-            # 크론은 목적이 스냅샷이라 이 가드로 오히려 더 안전해진다(매매 없이 복구).
-            # 판정 실패 시 기존 동작 유지(가드는 방어선이지 게이트가 아님).
-            # 우회: --force-rebalance (운영자 명시 결정).
-            already_traded_today = False
-            if not dry_run and not force_rebalance:
-                try:
-                    from database.repositories import get_trade_history
-                    today0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                    already_traded_today = bool(get_trade_history(
-                        mode=mode, start_date=today0, account_key=live_strategy_name,
-                    ))
-                except Exception as guard_exc:
-                    logger.debug("바스켓 '{}' 당일 체결 판정 실패(가드 생략): {}", name, guard_exc)
-
-            # 최근 결측 스냅샷 자동 보충 — 매매보다 먼저. 매매를 먼저 하면 원장이
-            # 바뀌어 과거 날짜 재구성이 헷갈릴 여지가 생긴다(재생 자체는 시각 기준이라
-            # 정확하지만, 순서를 고정해 두는 편이 읽기 쉽다).
+            # 최근 결측 스냅샷 자동 보충 — 상태 보고·매매보다 먼저 한다.
             #
             # 왜 필요한가: _nav_attribution_date가 '오늘이 거래일이면 오늘'로 귀속하므로
             # 어제 사이클이 안 돌면 그 하루는 영원히 빈다. 실제로 2026-08-18 결측이
             # 8/19~8/26 내내 그대로 남아 커버리지를 승격 기준(95%) 아래로 끌어내렸다.
             # 복원분은 reconstructed=True로 표시돼 평가가 실측과 나눠 표기한다.
+            #
+            # 왜 상태 보고보다 먼저인가: get_status_report가 리스크 오버레이 판단을
+            # 계산해 캐시하는데, 낙폭 가드 입력(NAV 스냅샷)에 어제가 비어 있으면 그날
+            # 판단이 '자료 확인 전 비중 확대 보류'로 굳는다. 보충이 먼저 돌아야 한다.
+            #
+            # 자본은 리밸런서가 이미 해석한 값(baskets.yaml initial_capital → 전역)을 쓴다.
+            # 2026-08-27 도입 때 이 자리에 정의되지 않은 이름(baskets_cfg)을 써서
+            # NameError가 매 사이클 났고, 경고 로그로만 남아 한 달간 아무도 몰랐다.
             if not dry_run:
                 try:
                     from core.snapshot_backfill import backfill_account
 
-                    _cap = (baskets_cfg.get(name) or {}).get("initial_capital")
-                    _today = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None).date()
+                    _today = kst_now.date()
                     filled = backfill_account(
                         config,
                         live_strategy_name,
-                        float(_cap) if _cap is not None else float(
-                            (config.risk_params.get("position_sizing") or {})
-                            .get("initial_capital", 10_000_000)
-                        ),
+                        float(rebalancer.portfolio_mgr.initial_capital),
                         _today - timedelta(days=BACKFILL_LOOKBACK_DAYS),
                         _today - timedelta(days=1),   # 오늘은 아래 스냅샷 단계가 찍는다
                         mode=mode,
@@ -842,8 +854,36 @@ def _run_rebalance_impl(args):
                             "SNAPSHOT_BACKFILLED", msg, severity="warning",
                             strategy=live_strategy_name, mode=mode,
                         )
+                        notifier.send_message(msg)
                 except Exception as bf_exc:
-                    logger.warning("바스켓 '{}' 결측 보충 생략: {}", name, bf_exc)
+                    # 이벤트로 남겨야 주간 리포트·헬스가 센다(로그 경고만으로는 안 보인다).
+                    logger.warning("바스켓 '{}' 결측 보충 실패: {}", name, bf_exc)
+                    record_event_once_per_day(
+                        "SNAPSHOT_BACKFILL_FAILED",
+                        f"바스켓 '{name}' 결측 스냅샷 보충 실패: {bf_exc}",
+                        severity="warning", strategy=live_strategy_name, mode=mode,
+                    )
+
+            report = rebalancer.get_status_report()
+            logger.info("\n{}", report)
+
+            # 1일 1매매 패스 원칙 강제: 같은 날 두 번째 실행(중복 스케줄·수동 재실행)이
+            # 회전 상한(1회 15%)을 사실상 2배로 만드는 것을 차단한다 — 6/10 진입 뭉침
+            # (하루 4회 실행 → 61% 집중 매입, 타이밍 비용 -1%p)의 재발 방지를 코드로.
+            # 실측: 7/3·7/7 일일 태스크가 사이클을 2회 연속 실행함. 결측 복구 재시도
+            # 크론은 목적이 스냅샷이라 이 가드로 오히려 더 안전해진다(매매 없이 복구).
+            # 판정 실패 시 기존 동작 유지(가드는 방어선이지 게이트가 아님).
+            # 우회: --force-rebalance (운영자 명시 결정). '오늘'은 KST 자정 기준.
+            already_traded_today = False
+            if not dry_run and not force_rebalance:
+                try:
+                    from database.repositories import get_trade_history
+                    today0 = kst_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    already_traded_today = bool(get_trade_history(
+                        mode=mode, start_date=today0, account_key=live_strategy_name,
+                    ))
+                except Exception as guard_exc:
+                    logger.debug("바스켓 '{}' 당일 체결 판정 실패(가드 생략): {}", name, guard_exc)
 
             # 리스크 청산(손절/익절/트레일링)을 리밸런싱보다 먼저 평가한다.
             # 그동안 이 사이클은 비중 교정만 했고 손절/익절은 장중 스케줄러
@@ -854,14 +894,19 @@ def _run_rebalance_impl(args):
             # '1일 1매매 패스' 가드는 적용하지 않는다 — 그 가드는 회전율 상한 우회를
             # 막으려는 것이고, 리스크 청산은 회전 예산이 아니라 손실 제한이다.
             # 청산이 이미 끝났으면 포지션이 없어 재평가가 비어 자연히 멱등이다.
-            try:
-                # list로 좁힌다 — 평가 결과가 주문 목록이 아니면 청산을 시도하지 않는다
-                # (빈 목록과 '목록이 아닌 무언가'를 구분하지 않으면 유령 청산이 난다).
-                planned = rebalancer.plan_risk_exits()
-                exit_orders = list(planned) if isinstance(planned, (list, tuple)) else []
-            except Exception as exit_exc:
-                exit_orders = []
-                logger.error("바스켓 '{}' 리스크 청산 평가 실패: {}", name, exit_exc)
+            exit_orders = []
+            if holiday_skip:
+                # 휴장일 가격은 직전 거래일 종가다 — 손절선 판단 근거가 새로 생기지 않았다.
+                logger.info("바스켓 '{}' 휴장일 — 리스크 청산 평가 생략", name)
+            else:
+                try:
+                    # list로 좁힌다 — 평가 결과가 주문 목록이 아니면 청산을 시도하지 않는다
+                    # (빈 목록과 '목록이 아닌 무언가'를 구분하지 않으면 유령 청산이 난다).
+                    planned = rebalancer.plan_risk_exits()
+                    exit_orders = list(planned) if isinstance(planned, (list, tuple)) else []
+                except Exception as exit_exc:
+                    exit_orders = []
+                    logger.error("바스켓 '{}' 리스크 청산 평가 실패: {}", name, exit_exc)
             if exit_orders:
                 exit_result = rebalancer.execute(
                     exit_orders,
@@ -882,7 +927,12 @@ def _run_rebalance_impl(args):
                     notifier.send_message(exit_summary, critical=True)
 
             executed = False
-            if already_traded_today:
+            if holiday_skip:
+                logger.info(
+                    "바스켓 '{}' 휴장일 — 리밸런싱 매매 건너뜀 "
+                    "(스냅샷은 직전 거래일로 귀속, 우회: --force-rebalance)", name,
+                )
+            elif already_traded_today:
                 logger.info(
                     "바스켓 '{}' 오늘 이미 체결 있음 — 1일 1매매 패스 원칙으로 매매 건너뜀 "
                     "(스냅샷·리포트는 진행, 우회: --force-rebalance)", name,
