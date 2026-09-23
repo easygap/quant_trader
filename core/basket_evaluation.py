@@ -165,6 +165,11 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
                 lines.append(f"    - 실행 격차 {exe:+.2f}%p (통제 가능: 미체결 슬롯·진입 타이밍·비용)")
             if comp is not None:
                 lines.append(f"    - 구성 격차 {comp:+.2f}%p (설계 수용: 균등가중 vs 시총지수)")
+    errors = m.get("paper_order_errors")
+    if errors:
+        lines.append(
+            f"  참고: 운영 기간 주문·사이클 오류 이벤트 {errors}건 (판정 제외 — 원인 확인 권장)"
+        )
     rw = result.get("rules_window")
     if rw:
         lines.append(
@@ -552,6 +557,31 @@ def collect_basket_paper_evaluation(
     )
 
     promotion = basket_cfg.get("promotion") or {}
+
+    # A2(미해결 실패 주문 0건)는 paper에서 구조적으로 걸리지 않는다 — dead-letter는 증권사
+    # 주문 경로에서만 쌓인다. 그래서 paper 트랙의 주문·사이클 오류 이벤트를 따로 세어
+    # 보여 준다. 해결 표시가 없는 기록이라 판정에는 넣지 않는다(한 번의 일시 오류가 끝난
+    # 트랙을 영영 떨어뜨리지 않게) — 운영자가 보고 판단할 참고 지표다.
+    try:
+        from database.models import OperationEvent
+
+        session = get_session()
+        try:
+            result["metrics"]["paper_order_errors"] = (
+                session.query(OperationEvent)
+                .filter(
+                    OperationEvent.strategy == basket_key,
+                    OperationEvent.mode == "paper",
+                    OperationEvent.event_type.in_(("ORDER_ERROR", "CYCLE_ERROR")),
+                    OperationEvent.created_at >= datetime.combine(operation_start, datetime.min.time()),
+                )
+                .count()
+            )
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("paper 주문 오류 집계 실패: {}", exc)
+        result["metrics"]["paper_order_errors"] = None
 
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.

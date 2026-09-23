@@ -137,3 +137,20 @@ def test_missing_metric_fails_closed_instead_of_type_error():
 
     ok, _ = _check_paper_only(_metrics(total_return=None))
     assert ok is False
+
+
+def test_paper_order_errors_are_counted_but_not_gating():
+    from core.cycle_observability import record_cycle_event
+    from core.basket_evaluation import format_evaluation_report
+
+    name = "t_paper_errors"
+    key = f"basket_rebalance:{name}"
+    _seed(key, [date(2026, 9, 21)], trade_day=date(2026, 9, 21))
+    record_cycle_event("ORDER_ERROR", "예외", severity="critical", strategy=key, mode="paper")
+    cfg = {"enabled": True, "initial_capital": 1_000_000, "holdings": {"069500": 1.0}}
+
+    r = _collect(name, cfg)
+
+    assert r["metrics"]["paper_order_errors"] == 1
+    assert not any("오류" in i for i in r["issues"])          # 판정에는 넣지 않는다
+    assert "주문·사이클 오류 이벤트 1건" in format_evaluation_report(r, name)
