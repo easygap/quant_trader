@@ -1,12 +1,14 @@
 """백테스트 리포트 감사 회귀 테스트.
 
 - 리포트 거래표가 엔진 지표와 같은 청산 목록(PNL_EXIT_ACTIONS)을 쓴다.
+- 실전 vs 백테스트 슬리피지 카드는 transaction_costs.slippage를 읽고 '하한'으로 표기한다.
 """
 
 import re
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 
 def _report_metrics():
@@ -126,3 +128,139 @@ def test_every_exit_action_emitted_by_engines_is_in_pnl_exit_actions():
         "MAX_HOLD", "GAP_DOWN", "BLACKSWAN",
     } <= portfolio
     assert (single | portfolio) <= backtester_mod.PNL_EXIT_ACTIONS
+
+
+# ─── 실전 vs 백테스트 슬리피지 카드 ─────────────────────────────
+
+
+def test_backtest_slippage_reads_transaction_costs_key(monkeypatch):
+    import backtest.report_generator as report_mod
+    from config.config_loader import Config
+
+    class _Cfg:
+        # 최상위 slippage는 RiskManager가 읽지 않는 키 — 리포트도 무시해야 한다.
+        risk_params = {"slippage": 0.009, "transaction_costs": {"slippage": 0.001}}
+
+    monkeypatch.setattr(Config, "get", classmethod(lambda cls: _Cfg()))
+
+    assert report_mod._default_backtest_slippage_pct() == pytest.approx(0.1)
+
+
+def test_live_slippage_card_labels_backtest_value_as_fixed_rate_floor():
+    import backtest.report_generator as report_mod
+
+    summary = {
+        "n": 3,
+        "mean_pct": 0.12,
+        "median_pct": 0.10,
+        "max_abs_pct": 0.30,
+        "backtest_assumed_pct": 0.05,
+    }
+
+    text = "\n".join(report_mod._format_live_slippage_text_table(summary))
+    assert "transaction_costs.slippage" in text
+    assert "하한" in text
+    assert "risk_params.slippage" not in text
+
+    html = report_mod._format_live_slippage_html_card(summary)
+    assert "고정 비율 하한" in html
+
+
+# ─── 시장 국면별 성과: 월수익률·국면 MDD 공식 ──────────────────────
+
+
+def _q1_2024_dates():
+    return pd.bdate_range("2024-01-01", "2024-03-29")
+
+
+def _step_series(dates, jan, feb_mar):
+    """1월은 jan, 2월 첫 거래일부터는 feb_mar (2월 첫날 갭 하락 후 보합)."""
+    return [jan if d.month == 1 else feb_mar for d in dates]
+
+
+def test_strategy_monthly_return_keeps_month_first_day_move():
+    from backtest.report_generator import _strategy_monthly_returns
+
+    dates = _q1_2024_dates()
+    equity = pd.DataFrame({"date": dates, "value": _step_series(dates, 100.0, 90.0)})
+
+    rets = _strategy_monthly_returns(equity, initial_capital=100.0)
+
+    assert rets[pd.Period("2024-01", "M")] == pytest.approx(0.0)
+    assert rets[pd.Period("2024-02", "M")] == pytest.approx(-0.10)
+    assert rets[pd.Period("2024-03", "M")] == pytest.approx(0.0)
+
+
+def test_strategy_first_month_is_measured_from_initial_capital():
+    from backtest.report_generator import _strategy_monthly_returns
+
+    dates = pd.bdate_range("2024-01-01", "2024-01-31")
+    equity = pd.DataFrame({"date": dates, "value": [95.0] * len(dates)})
+
+    assert _strategy_monthly_returns(equity, initial_capital=100.0).iloc[0] == pytest.approx(-0.05)
+    # 초기자본을 모르면 첫 관측값 기준 (기존 동작과 같음)
+    assert _strategy_monthly_returns(equity).iloc[0] == pytest.approx(0.0)
+
+
+def test_kospi_first_month_uses_close_before_start():
+    from backtest.report_generator import _kospi_monthly_returns_from_ohlc
+
+    dates = pd.bdate_range("2023-12-20", "2024-01-31")
+    close = [100.0 if d.year == 2023 else 105.0 for d in dates]  # 1월 첫 거래일 +5% 갭
+    ks11 = pd.DataFrame({"close": close}, index=dates)
+
+    rets = _kospi_monthly_returns_from_ohlc(ks11, start=pd.Timestamp("2024-01-01"))
+
+    assert list(rets.index) == [pd.Period("2024-01", "M")]
+    assert rets.iloc[0] == pytest.approx(0.05)
+
+
+def test_regime_mdd_only_compounds_that_regimes_months():
+    from backtest.report_generator import _mdd_from_monthly_returns
+
+    # {1월, 3월}이 보합이면 사이의 2월 손실과 무관하게 MDD 0
+    assert _mdd_from_monthly_returns([0.0, 0.0]) == pytest.approx(0.0)
+    # 한 달만 있어도 그 달의 손실은 낙폭이다.
+    assert _mdd_from_monthly_returns([-0.10]) == pytest.approx(-10.0)
+    assert _mdd_from_monthly_returns([0.10, -0.20, 0.05]) == pytest.approx(-20.0)
+    assert _mdd_from_monthly_returns([]) == 0.0
+
+
+def test_market_regime_breakdown_classifies_month_opening_gap(monkeypatch):
+    """2월 첫 거래일 -10% 갭은 2월을 하락장으로 분류하고, 보합인 1·3월 MDD에 섞이지 않는다."""
+    from backtest.report_generator import (
+        REGIME_BEAR,
+        REGIME_SIDEWAYS,
+        compute_market_regime_breakdown,
+    )
+
+    ks_dates = pd.bdate_range("2023-12-15", "2024-03-29")
+    ks11 = pd.DataFrame(
+        {"close": [2_500.0 if d < pd.Timestamp("2024-02-01") else 2_250.0 for d in ks_dates]},
+        index=ks_dates,
+    )
+
+    class FakeCollector:
+        def fetch_korean_stock(self, symbol, start_date=None, end_date=None):
+            assert symbol == "KS11"
+            return ks11.loc[pd.Timestamp(start_date): pd.Timestamp(end_date)].copy()
+
+    monkeypatch.setattr("core.data_collector.DataCollector", FakeCollector)
+
+    dates = _q1_2024_dates()
+    equity = pd.DataFrame({"date": dates, "value": _step_series(dates, 100.0, 90.0)})
+    breakdown = compute_market_regime_breakdown(
+        {"equity_curve": equity, "initial_capital": 100.0},
+        warn_bear_underperformance=False,
+    )
+
+    bear = breakdown[REGIME_BEAR]
+    assert bear["n_months"] == 1
+    assert bear["avg_strat_pct"] == pytest.approx(-10.0)
+    assert bear["avg_kospi_pct"] == pytest.approx(-10.0)
+    assert bear["excess_pct"] == pytest.approx(0.0)
+    assert bear["mdd_pct"] == pytest.approx(-10.0)
+
+    sideways = breakdown[REGIME_SIDEWAYS]
+    assert sideways["n_months"] == 2
+    assert sideways["mdd_pct"] == pytest.approx(0.0)

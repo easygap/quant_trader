@@ -26,12 +26,18 @@ from backtest.cost_impact import render_cost_impact_text, summarize_cost_impact
 
 
 def _default_backtest_slippage_pct() -> float:
-    """risk_params.slippage 비율을 퍼센트로 (기본 0.05%)."""
+    """백테스트 고정 슬리피지 비율(transaction_costs.slippage)을 퍼센트로 (기본 0.05%).
+
+    RiskManager와 같은 키를 읽는다(예전엔 없는 최상위 risk_params.slippage를 읽어 항상 기본값).
+    실제 백테스트 체결가에는 이 비율 위에 호가 틱 하한(slippage_ticks)과 거래량 기반 동적
+    배수가 더해지므로, 이 값은 백테스트 가정 슬리피지의 '하한'이다.
+    """
     try:
         from config.config_loader import Config
 
         rp = Config.get().risk_params or {}
-        return float(rp.get("slippage", 0.0005)) * 100.0
+        costs = rp.get("transaction_costs") or {}
+        return float(costs.get("slippage", 0.0005)) * 100.0
     except Exception:
         return 0.05
 
@@ -73,7 +79,7 @@ def _format_live_slippage_text_table(summary: Optional[Dict[str, Any]]) -> List[
         return lines
     bt = summary["backtest_assumed_pct"]
     lines.extend([
-        f"  백테스트 가정 슬리피지 : {bt:.3f}% (risk_params.slippage)",
+        f"  백테스트 가정 슬리피지 : {bt:.3f}% (transaction_costs.slippage 고정 비율 — 호가 틱·동적 배수 적용 전 하한)",
         f"  실전 집계 건수         : {summary['n']}건",
         "-" * 52,
         f"  평균 (실전)           : {summary['mean_pct']:+.4f}%",
@@ -96,7 +102,7 @@ def _format_live_slippage_html_card(summary: Optional[Dict[str, Any]]) -> str:
         bt = summary["backtest_assumed_pct"]
         body = f"""<table>
             <tbody>
-            <tr><td>백테스트 가정 슬리피지</td><td style="text-align:right;">{bt:.3f}%</td></tr>
+            <tr><td>백테스트 가정 슬리피지 (고정 비율 하한)</td><td style="text-align:right;">{bt:.3f}%</td></tr>
             <tr><td>실전 집계 건수</td><td style="text-align:right;">{summary["n"]}건</td></tr>
             <tr><td>평균 (실전)</td><td style="text-align:right;">{summary["mean_pct"]:+.4f}%</td></tr>
             <tr><td>중앙값 (실전)</td><td style="text-align:right;">{summary["median_pct"]:+.4f}%</td></tr>
@@ -108,6 +114,8 @@ def _format_live_slippage_html_card(summary: Optional[Dict[str, Any]]) -> str:
         <h3 style="margin-bottom:12px;font-size:14px;">📉 실전 vs 백테스트 슬리피지 비교</h3>
         <p style="color:#64748b;font-size:12px;margin-bottom:12px;">
             실전 <code>mode=live</code> 거래 중 DB에 기록된 슬리피지 % (체결가 vs 주문 시점 예상가).
+            백테스트 값은 <code>transaction_costs.slippage</code> 고정 비율로, 호가 틱(<code>slippage_ticks</code>)·거래량 동적 배수가
+            적용되기 전 하한이다 — 저가·소형주의 실제 백테스트 가정은 이보다 크다.
         </p>
         {body}
     </div>"""
@@ -208,30 +216,60 @@ REGIME_LABELS = {
 }
 
 
-def _strategy_monthly_returns(equity: pd.DataFrame) -> pd.Series:
-    """자본 곡선에서 월말 기준 월간 수익률 (당월 첫일 자산 대비 말일)."""
+def _chain_month_end_returns(month_end: pd.Series, first_base: float) -> pd.Series:
+    """월말 값 시리즈 → 월간 수익률(당월 말 / 전월 말 - 1). 첫 달은 first_base 기준."""
+    base = month_end.shift(1)
+    base.iloc[0] = first_base
+    return month_end / base - 1.0
+
+
+def _strategy_monthly_returns(
+    equity: pd.DataFrame, initial_capital: Optional[float] = None
+) -> pd.Series:
+    """자본 곡선의 월간 수익률 = 당월 말 자산 / 전월 말 자산 - 1.
+
+    첫 달은 초기자본(없으면 첫 관측 자산)을 기준으로 삼는다. 예전처럼 당월 첫 거래일 자산을
+    기준으로 쓰면 월 첫 거래일의 등락(예: 월초 갭 하락)이 어느 달에도 잡히지 않는다.
+    """
     if equity.empty or "date" not in equity.columns or "value" not in equity.columns:
         return pd.Series(dtype=float)
     eq = equity.copy()
     eq["date"] = pd.to_datetime(eq["date"])
     eq = eq.sort_values("date")
-    eq["period"] = eq["date"].dt.to_period("M")
-    g = eq.groupby("period", sort=True)["value"].agg(["first", "last"])
-    ret = g["last"] / g["first"] - 1.0
-    return ret
+    values = eq.set_index("date")["value"].astype(float)
+    month_end = values.groupby(values.index.to_period("M"), sort=True).last()
+    if initial_capital is not None and float(initial_capital) > 0:
+        first_base = float(initial_capital)
+    else:
+        first_base = float(values.iloc[0])
+    return _chain_month_end_returns(month_end, first_base)
 
 
-def _kospi_monthly_returns_from_ohlc(ks11: pd.DataFrame) -> pd.Series:
-    """KS11 일봉( DatetimeIndex + close ) → 월간 수익률."""
+def _kospi_monthly_returns_from_ohlc(ks11: pd.DataFrame, start=None) -> pd.Series:
+    """KS11 일봉(DatetimeIndex + close) → 월간 수익률 = 당월 말 종가 / 전월 말 종가 - 1.
+
+    start가 주어지면 그 이후만 집계하고, 첫 달의 기준은 start 직전 거래일 종가로 삼아 전략 쪽
+    (첫 달 기준 = 초기자본)과 같은 구간을 잰다. 직전 종가가 없으면 첫 관측 종가를 기준으로 한다.
+    국면 분류가 이 값으로 정해지므로 전략 쪽과 같은 공식을 써야 월 소속이 한쪽으로 틀어지지 않는다.
+    """
     if ks11 is None or ks11.empty or "close" not in ks11.columns:
         return pd.Series(dtype=float)
     d = ks11.copy()
     if not isinstance(d.index, pd.DatetimeIndex):
         d.index = pd.to_datetime(d.index)
-    d = d.sort_index()
-    d["period"] = d.index.to_period("M")
-    g = d.groupby("period", sort=True)["close"].agg(["first", "last"])
-    return g["last"] / g["first"] - 1.0
+    close = d.sort_index()["close"].astype(float).dropna()
+    prior_close = None
+    if start is not None:
+        start_ts = pd.Timestamp(start)
+        before = close.loc[close.index < start_ts]
+        if not before.empty:
+            prior_close = float(before.iloc[-1])
+        close = close.loc[close.index >= start_ts]
+    if close.empty:
+        return pd.Series(dtype=float)
+    month_end = close.groupby(close.index.to_period("M"), sort=True).last()
+    first_base = prior_close if prior_close is not None else float(close.iloc[0])
+    return _chain_month_end_returns(month_end, first_base)
 
 
 def _classify_regime(kospi_monthly_ret: float) -> str:
@@ -256,20 +294,18 @@ def _monthly_sharpe(
     return float(np.mean(xs) / std * np.sqrt(12))
 
 
-def _mdd_from_month_end_equity(equity: pd.DataFrame, periods: List) -> float:
-    """지정된 월(Period)들에 대해 월말 자산만 이어 MDD(%)."""
-    if equity.empty or not periods:
+def _mdd_from_monthly_returns(monthly_rets: List[float]) -> float:
+    """국면 MDD(%): 해당 국면 달들의 월수익률만 복리로 이은 합성 지수의 최대 낙폭.
+
+    서로 떨어진 달들의 월말 자산을 그대로 이으면 사이에 낀 다른 국면 달의 손익이 섞인다
+    (예: 1월·3월이 모두 보합이어도 2월 -30%가 1월 말→3월 말 낙폭으로 잡힘).
+    """
+    arr = np.asarray(monthly_rets, dtype=float)
+    if arr.size == 0:
         return 0.0
-    eq = equity.copy()
-    eq["date"] = pd.to_datetime(eq["date"])
-    eq["period"] = eq["date"].dt.to_period("M")
-    me = eq.groupby("period", sort=True)["value"].last()
-    sub = me[me.index.isin(periods)].sort_index()
-    if len(sub) < 2:
-        return 0.0
-    peak = sub.cummax()
-    dd = (sub - peak) / peak
-    return float(dd.min() * 100)
+    index = np.concatenate(([1.0], np.cumprod(1.0 + arr)))
+    peak = np.maximum.accumulate(index)
+    return float(((index - peak) / peak).min() * 100)
 
 
 def compute_market_regime_breakdown(
@@ -278,6 +314,9 @@ def compute_market_regime_breakdown(
 ) -> Optional[Dict[str, Dict[str, Any]]]:
     """
     코스피(KS11) 월 수익률로 국면을 나누고, 전략의 월별 성과를 집계한다.
+
+    월 수익률은 양쪽 모두 '당월 말 / 전월 말 - 1'(첫 달은 초기자본 / 시작 직전 종가 기준)이고,
+    국면 MDD는 그 국면 달들의 월수익률만 복리로 이은 합성 지수에서 잰다.
 
     Returns:
         { "bull": {n_months, avg_strat_pct, avg_kospi_pct, excess_pct, sharpe, mdd_pct, periods}, ... }
@@ -292,13 +331,14 @@ def compute_market_regime_breakdown(
 
     eq_start = pd.to_datetime(equity["date"]).min()
     eq_end = pd.to_datetime(equity["date"]).max()
-    start_s = eq_start.strftime("%Y-%m-%d")
+    # 첫 달 코스피 수익률의 기준(시작 직전 거래일 종가)을 얻으려고 연휴를 넘길 만큼 앞에서부터 받는다.
+    fetch_start_s = (eq_start - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
     end_s = eq_end.strftime("%Y-%m-%d")
 
     try:
         from core.data_collector import DataCollector
 
-        ks11 = DataCollector().fetch_korean_stock("KS11", start_date=start_s, end_date=end_s)
+        ks11 = DataCollector().fetch_korean_stock("KS11", start_date=fetch_start_s, end_date=end_s)
     except Exception as e:
         logger.warning("시장 국면 분석: KS11 수집 실패 — {}", e)
         return None
@@ -307,8 +347,11 @@ def compute_market_regime_breakdown(
         logger.warning("시장 국면 분석: KS11 데이터 없음")
         return None
 
-    kospi_m = _kospi_monthly_returns_from_ohlc(ks11)
-    strat_m = _strategy_monthly_returns(equity)
+    initial_capital = result.get("initial_capital") or (result.get("metrics") or {}).get(
+        "initial_capital"
+    )
+    kospi_m = _kospi_monthly_returns_from_ohlc(ks11, start=eq_start)
+    strat_m = _strategy_monthly_returns(equity, initial_capital=initial_capital)
     common = strat_m.index.intersection(kospi_m.index)
     if len(common) == 0:
         logger.warning("시장 국면 분석: 전략·코스피 공통 월 없음")
@@ -351,7 +394,7 @@ def compute_market_regime_breakdown(
             "avg_kospi_pct": round(avg_k, 2),
             "excess_pct": round(avg_s - avg_k, 2),
             "sharpe": round(_monthly_sharpe(b["strat"]), 2),
-            "mdd_pct": round(_mdd_from_month_end_equity(equity, b["periods"]), 2),
+            "mdd_pct": round(_mdd_from_monthly_returns(b["strat"]), 2),
             "periods": b["periods"],
         }
 
@@ -381,7 +424,8 @@ def _format_regime_text_table(breakdown: Dict[str, Dict[str, Any]]) -> List[str]
         )
     lines.append("-" * 72)
     lines.append(
-        f"[ 국면별 위험지표 — 월간 수익 기준 샤프({BACKTEST_RISK_FREE_LABEL}), 월말 자산 기준 MDD ]"
+        f"[ 국면별 위험지표 — 월간 수익 기준 샤프({BACKTEST_RISK_FREE_LABEL}), "
+        "국면 월수익률 복리 기준 MDD ]"
     )
     for key in (REGIME_BULL, REGIME_BEAR, REGIME_SIDEWAYS):
         r = breakdown[key]
@@ -410,7 +454,7 @@ def _format_regime_html_table(breakdown: Dict[str, Dict[str, Any]]) -> str:
     <div class="card" style="margin-top:24px;">
         <h3 style="margin-bottom:12px;font-size:14px;">📉 시장 국면별 성과 (KS11 월 수익률 기준)</h3>
         <p style="color:#64748b;font-size:12px;margin-bottom:12px;">
-            상승장: 월 &gt; +2% · 하락장: 월 &lt; -2% · 횡보장: 그 외. 샤프는 월간 수익 연율화({BACKTEST_RISK_FREE_LABEL}), MDD는 해당 월들의 월말 자산만으로 산출.
+            상승장: 월 &gt; +2% · 하락장: 월 &lt; -2% · 횡보장: 그 외. 월수익률은 당월 말 / 전월 말 기준. 샤프는 월간 수익 연율화({BACKTEST_RISK_FREE_LABEL}), MDD는 해당 국면 달들의 월수익률만 복리로 이은 합성 지수 기준.
         </p>
         <table>
             <thead><tr>
