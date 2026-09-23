@@ -165,8 +165,14 @@ def split_by_regime(
       mine_pct       그 국면 구간들만 이어 붙인 복리 수익률
       bench_pct      같은 구간 벤치마크 복리 수익률
       gap_pct        mine - bench
-      capture        벤치 대비 포착률(bench_pct가 0이 아닐 때). 상승 1.0=완전 추종,
-                     하락 1.0=완전 노출(낮을수록 방어). 방향 해석은 호출부가 한다.
+      mine_daily_pct / bench_daily_pct  그 국면 하루 평균(기하평균) 수익률
+      capture        벤치 대비 포착률 = 하루 평균(기하평균) 수익률의 비. 상승 1.0=완전
+                     추종, 하락 1.0=완전 노출(낮을수록 방어). 방향 해석은 호출부가 한다.
+
+    포착률을 국면 전체 복리 수익률의 비로 재면 기간이 길어질수록 값이 한쪽으로 쏠린다 —
+    상승일만 몇 년치 이어 붙이면 지수가 수천 %가 돼서 60% 주식 계좌도 상승 포착 1%,
+    하락 포착 96%처럼 나온다(2026-09-23 연구 재계산에서 드러남). 하루 평균의 비는
+    기간 길이와 무관하다(업계 표준 up/down capture 정의).
     """
     up_mine: list[float] = []
     up_bench: list[float] = []
@@ -207,12 +213,17 @@ def split_by_regime(
                 "gap_pct": None, "capture": None,
             }
         ms, bs = _compound(mine), _compound(bench)
+        n = len(bench)
+        md = ((1 + ms / 100.0) ** (1.0 / n) - 1) * 100.0 if ms > -100 else -100.0
+        bd = ((1 + bs / 100.0) ** (1.0 / n) - 1) * 100.0 if bs > -100 else -100.0
         return {
-            "days": len(bench),
+            "days": n,
             "mine_pct": ms,
             "bench_pct": bs,
             "gap_pct": ms - bs,
-            "capture": (ms / bs) if bs != 0 else None,
+            "mine_daily_pct": md,
+            "bench_daily_pct": bd,
+            "capture": (md / bd) if bd != 0 else None,
         }
 
     return {"up": _agg(up_mine, up_bench), "down": _agg(down_mine, down_bench)}
@@ -234,10 +245,17 @@ def format_regime_line(regime: dict[str, dict[str, Any]]) -> str:
         if cap is None:
             parts.append(f"{label} {r['days']}일: 지수 무변동")
             continue
-        parts.append(
-            f"{label} {r['days']}일 포착 {cap * 100:.0f}% "
-            f"(지수 {r['bench_pct']:+.1f}% 중 {r['mine_pct']:+.1f}%만 {verb})"
-        )
+        md, bd = r.get("mine_daily_pct"), r.get("bench_daily_pct")
+        if md is not None and bd is not None:
+            parts.append(
+                f"{label} {r['days']}일 포착 {cap * 100:.0f}% "
+                f"(하루 평균 지수 {bd:+.2f}% 중 {md:+.2f}% {verb})"
+            )
+        else:
+            parts.append(
+                f"{label} {r['days']}일 포착 {cap * 100:.0f}% "
+                f"(지수 {r['bench_pct']:+.1f}% 중 {r['mine_pct']:+.1f}%만 {verb})"
+            )
     return " · ".join(parts) if parts else "국면 분해 불가(표본 부족)"
 
 
