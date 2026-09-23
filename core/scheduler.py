@@ -912,13 +912,20 @@ class Scheduler:
                             avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
                         signal_info["symbol"] = symbol
                         self._maybe_record_dashboard_signal(signal_info, "post_cooldown_rescan")
+                        # timestamp가 없으면 30분 경과 후보 폐기가 적용되지 않고(기본값
+                        # now), _signal_at이 없으면 신호→주문 지연이 기록되지 않는다.
+                        # 국면 스케일은 다른 후보들처럼 신호 시점 값(장전·2시간 재확인)을 쓴다.
+                        signal_time = datetime.now()
                         new_candidates.append({
                             "symbol": symbol,
                             "price": signal_info.get("close", 0),
                             "atr": signal_info.get("atr"),
                             "score": signal_info.get("score", 0),
+                            "_signal_at": signal_time,
                             "reason": "post-cooldown rescan",
                             "avg_daily_volume": avg_vol,
+                            "market_regime_scale": self._market_regime_scale,
+                            "timestamp": signal_time,
                         })
                 except Exception as e:
                     logger.debug("쿨다운 후 재스캔 {} 실패: {}", symbol, e)
@@ -1955,14 +1962,18 @@ class Scheduler:
                     if "volume" in df.columns and not df["volume"].empty:
                         avg_vol = float(df["volume"].rolling(20, min_periods=1).mean().iloc[-1])
 
+                    # timestamp/_signal_at: 30분 경과 후보 폐기와 신호→주문 지연 기록용.
+                    signal_time = datetime.now()
                     self._entry_candidates.append({
                         "symbol": symbol,
                         "price": signal_info.get("close", 0),
                         "atr": signal_info.get("atr"),
                         "score": signal_info.get("score", 0),
+                        "_signal_at": signal_time,
                         "reason": "intraday rescan",
                         "avg_daily_volume": avg_vol,
                         "market_regime_scale": regime["position_scale"],
+                        "timestamp": signal_time,
                     })
                     logger.info("장중 재스캔: {} 매수 신호 감지 (score={})", symbol, signal_info.get("score", 0))
                 except Exception:
