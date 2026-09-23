@@ -11,7 +11,7 @@ import math
 import time as time_mod
 import shutil
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
 from loguru import logger
 
 from config.config_loader import Config
@@ -37,6 +37,8 @@ from core.position_lock import PositionLock
 
 # 직전 거래일 탐색 상한(달력 오류로 무한 루프가 되지 않게). KRX 최장 연휴보다 넉넉히.
 _TRADING_DAY_LOOKBACK_DAYS = 31
+# 장마감 처리 시작 시각(장 종료 15:30 + 체결·종가 확정 여유 5분)
+_POST_MARKET_START = dtime(15, 35)
 
 
 class LoopMetrics:
@@ -381,16 +383,7 @@ class Scheduler:
                     # 장전 헬스체크 (10분 주기)
                     self._maybe_run_healthcheck()
 
-                    if self.trading_hours.is_pre_market() and not self._pre_market_done:
-                        self._run_pre_market()
-                        self._pre_market_done = True
-                    elif self.trading_hours.is_market_open():
-                        if self._should_monitor():
-                            self._run_monitoring()
-                            self._last_monitor_time = now
-                    elif now.hour == 15 and now.minute >= 35 and not self._post_market_done:
-                        self._run_post_market()
-                        self._post_market_done = True
+                    self._run_trading_day_phase(now)
 
                 except Exception as loop_exc:
                     logger.exception(
@@ -409,6 +402,23 @@ class Scheduler:
         except KeyboardInterrupt:
             logger.info("⏹️ 스케줄러 종료 (Ctrl+C)")
             self.discord.send_message("⏹️ 퀀트 트레이더 스케줄러 종료")
+
+    def _run_trading_day_phase(self, now: datetime) -> None:
+        """거래일 루프 1회분: 장전(1회) → 장중 모니터링 → 장마감(15:35 이후 1회)."""
+        if self.trading_hours.is_pre_market(now) and not self._pre_market_done:
+            self._run_pre_market()
+            self._pre_market_done = True
+        elif self.trading_hours.is_market_open(now):
+            if self._should_monitor():
+                self._run_monitoring()
+                self._last_monitor_time = now
+        elif now.time() >= _POST_MARKET_START and not self._post_market_done:
+            # 15:35 '이후'면 시각과 무관하게 그날 한 번 실행한다. 예전엔 hour==15만 봐서
+            # 16시 이후 시작·재시작하거나 루프가 15:59를 넘겨 멈추면 그날 스냅샷·
+            # 리포트·evidence·DB 백업이 조용히 사라졌다. 저녁에 켜도 그날 장마감을
+            # 따라잡는다. _post_market_done은 날짜가 바뀔 때만 초기화된다.
+            self._run_post_market()
+            self._post_market_done = True
 
     def _run_pre_market(self):
         """장전 준비: 데이터 수집 + 전략 분석."""
@@ -1428,7 +1438,7 @@ class Scheduler:
             self.discord.send_daily_report({
                 "total_value": summary["total_value"],
                 "cash": summary["cash"],
-                "daily_return": 0,
+                "daily_return": self._report_daily_return(),
                 "cumulative_return": summary["total_return"],
                 "mdd": summary["mdd"],
                 "position_count": summary["position_count"],
@@ -1490,6 +1500,47 @@ class Scheduler:
 
         except Exception as e:
             logger.error("장마감 리포트 실패: {}", e)
+
+    def _report_daily_return(self) -> float:
+        """직전 스냅샷 대비 일간 수익률(%) — 일일 CLI 리포트(main.py)와 같은 TWR 산식.
+
+        예전 스케줄러 리포트는 일간 수익률을 0으로 하드코딩해 매일 '일간 0.00%'였다.
+        입금·출금은 수익이 아니므로 직전 스냅샷의 실제 측정 시각(created_at) 이후
+        현금 흐름을 분모에 더해 중화한다(twr_period_return). 스냅샷이 2개 미만이면 0.
+        계산 실패는 리포트 발송을 막지 않되 경고로 남긴다.
+        """
+        try:
+            import pandas as pd
+
+            from core.portfolio_manager import twr_period_return
+            from database.repositories import (
+                get_cash_flow_total_between,
+                get_portfolio_snapshots,
+            )
+
+            mode = self._resolved_ledger_mode()
+            snaps = get_portfolio_snapshots(days=7, account_key=self.strategy_name, mode=mode)
+            if snaps is None or len(snaps) < 2:
+                return 0.0
+            ordered = snaps.sort_values("date")
+            prev_total = float(ordered["total_value"].iloc[-2])
+            last_total = float(ordered["total_value"].iloc[-1])
+            if prev_total <= 0:
+                return 0.0
+            # 유입 경계는 자정 귀속(date)이 아니라 실제 측정 시각(created_at) — 직전
+            # 스냅샷 '이전'의 같은 날 입금을 이중으로 중화하지 않게.
+            boundary = ordered["created_at"].iloc[-2] if "created_at" in ordered.columns else None
+            if boundary is None or pd.isna(boundary):
+                boundary = ordered["date"].iloc[-2]
+            if hasattr(boundary, "to_pydatetime"):
+                boundary = boundary.to_pydatetime()
+            flow = get_cash_flow_total_between(
+                self.strategy_name, boundary, datetime.now(), mode=mode,
+            )
+            return twr_period_return(prev_total, last_total, flow) * 100
+        except Exception as exc:
+            logger.warning("일간 수익률 계산 실패 — 리포트에는 0으로 표기: {}", exc)
+            return 0.0
 
     def _check_live_readiness(self):
         """paper 모드 장마감 시 실전 전환 준비 자동 평가."""
