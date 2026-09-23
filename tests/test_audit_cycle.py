@@ -332,3 +332,35 @@ def test_coverage_gate_passes_with_few_reconstructed_days():
         pending_failed_orders=0, total_costs=0, initial_capital=10_000_000,
     )
     assert r["verdict"] == "PASS_CANDIDATE"
+
+
+# ------------------------------------------------------------------ 추정 기록과 고점
+
+def test_reconstructed_day_does_not_set_the_peak():
+    """나중에 채운 추정치(시가·종가 중간값)가 고점이 되면 이후 낙폭이 계속 부풀어 보인다."""
+    from database.models import init_database
+    from database.repositories import get_max_cumulative_return, save_portfolio_snapshot
+
+    init_database()
+    key = "basket_rebalance:peak_recon"
+    for day, cum, recon in ((date(2026, 9, 1), 2.0, False),
+                            (date(2026, 9, 2), 5.0, True),     # 추정치가 가장 높다
+                            (date(2026, 9, 3), 3.0, False)):
+        save_portfolio_snapshot(
+            total_value=100.0 + cum, cash=0.0, invested=100.0, cumulative_return=cum,
+            mdd=0.0, position_count=1, account_key=key, mode="paper",
+            snapshot_date=datetime(day.year, day.month, day.day), reconstructed=recon,
+        )
+
+    assert get_max_cumulative_return(account_key=key, mode="paper") == pytest.approx(3.0)
+
+
+def test_overlay_drawdown_skips_reconstructed_peaks():
+    from core.risk_overlays import drawdown_from_cumulative_returns
+
+    series = [0.0, 10.0, 4.5]
+    assert drawdown_from_cumulative_returns(series) == pytest.approx(1.045 / 1.10 - 1)
+    # 10%가 추정 기록이면 고점은 시작점(1.0)이고 지금은 고점 위라 낙폭 0
+    assert drawdown_from_cumulative_returns(series, [True, False, True]) == pytest.approx(0.0)
+    # 마지막 날이 추정 기록이어도 현재 수준으로는 쓴다
+    assert drawdown_from_cumulative_returns([0.0, 10.0, -2.0], [True, True, False]) ==         pytest.approx(0.98 / 1.10 - 1)

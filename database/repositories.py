@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
-from sqlalchemy import and_, text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.exc import IntegrityError
 from loguru import logger
 
@@ -1156,7 +1156,11 @@ def get_snapshot_before(
 def get_max_cumulative_return(
     account_key: str = "", mode: str = "paper"
 ) -> Optional[float]:
-    """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용."""
+    """계정 스냅샷의 최대 누적수익률(%). TWR 지수 기준 MDD의 피크 복원용.
+
+    나중에 채운 기록(reconstructed)은 뺀다. 시가·종가 중간값으로 만든 추정치라 최대
+    2%가량 틀릴 수 있는데, 그 값이 고점이 되면 이후 낙폭이 계속 부풀어 보인다.
+    """
     session = get_session()
     try:
         row = (
@@ -1165,6 +1169,10 @@ def get_max_cumulative_return(
                 PortfolioSnapshot.mode == _ledger_mode(mode),
                 PortfolioSnapshot.account_key == (account_key or ""),
                 PortfolioSnapshot.cumulative_return.isnot(None),
+                or_(
+                    PortfolioSnapshot.reconstructed.is_(None),
+                    PortfolioSnapshot.reconstructed.is_(False),
+                ),
             )
             .order_by(PortfolioSnapshot.cumulative_return.desc())
             .first()
@@ -1205,6 +1213,7 @@ def get_portfolio_snapshots(
             "cumulative_return": r.cumulative_return,
             "mdd": r.mdd,
             "position_count": r.position_count,
+            "reconstructed": bool(r.reconstructed),   # 나중에 채운 추정 기록
         } for r in results]
 
         return pd.DataFrame(data)

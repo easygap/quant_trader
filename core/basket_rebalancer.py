@@ -229,6 +229,7 @@ class BasketRebalancer:
             )
         cumulative = None
         daily = None
+        self._overlay_peak_eligible = None
         if self._overlay_cfg.drawdown.enabled or self._overlay_cfg.volatility.enabled:
             cumulative, daily = self._nav_series_for_overlay()
         decision = compute_decision(
@@ -237,6 +238,7 @@ class BasketRebalancer:
             cumulative_returns_pct=cumulative,
             daily_returns=daily,
             prev_state=prev,
+            peak_eligible=getattr(self, "_overlay_peak_eligible", None),
         )
         decision.data_issues.extend(self._overlay_input_issues)
         decision.source_dates = dict(self._overlay_source_dates)
@@ -396,6 +398,9 @@ class BasketRebalancer:
             cumulative = [float(v) if v is not None else float("nan") for v in snaps["cumulative_return"].tolist()]
         except (TypeError, ValueError):
             return None, None
+        # 나중에 채운 추정 기록은 낙폭 고점 후보에서 뺀다(값 자체는 흐름을 잇는 데 쓴다).
+        if "reconstructed" in snaps.columns:
+            self._overlay_peak_eligible = [not bool(v) for v in snaps["reconstructed"].tolist()]
         index = [1.0 + c / 100.0 for c in cumulative]
         daily = [index[i] / index[i - 1] - 1.0 if index[i - 1] > 0 else float("nan") for i in range(1, len(index))]
         return cumulative, daily

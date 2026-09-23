@@ -159,11 +159,18 @@ def trend_below_ma(
     return bool(prev_below), rel
 
 
-def drawdown_from_cumulative_returns(cumulative_returns_pct: Sequence[float]) -> float | None:
-    """시간가중 누적수익률(%) 시계열 → 현재 고점 대비 낙폭(음수 비율). 고점은 시작 자본(지수 1.0)부터."""
+def drawdown_from_cumulative_returns(
+    cumulative_returns_pct: Sequence[float],
+    peak_eligible: Sequence[bool] | None = None,
+) -> float | None:
+    """시간가중 누적수익률(%) 시계열 → 현재 고점 대비 낙폭(음수 비율). 고점은 시작 자본(지수 1.0)부터.
+
+    peak_eligible이 주어지면 False인 날(나중에 채운 추정 기록)은 고점 후보에서 뺀다.
+    추정치가 고점이 되면 그 뒤 낙폭이 계속 부풀어 규칙이 일찍 발동한다.
+    """
     peak = 1.0
     last = None
-    for cr in cumulative_returns_pct:
+    for i, cr in enumerate(cumulative_returns_pct):
         if cr is None:
             return None
         try:
@@ -172,11 +179,12 @@ def drawdown_from_cumulative_returns(cumulative_returns_pct: Sequence[float]) ->
             return None
         if not math.isfinite(idx) or idx <= 0:
             return None
-        peak = max(peak, idx)
+        if peak_eligible is None or i >= len(peak_eligible) or peak_eligible[i]:
+            peak = max(peak, idx)
         last = idx
     if last is None:
         return None
-    return last / peak - 1.0
+    return min(0.0, last / peak - 1.0)
 
 
 def drawdown_guard_active(drawdown: float | None, cfg: DrawdownGuardConfig, prev_active: bool | None) -> bool | None:
@@ -232,8 +240,12 @@ def compute_decision(
     daily_returns: Sequence[float] | None = None,
     prev_state: dict[str, Any] | None = None,
     now: datetime | None = None,
+    peak_eligible: Sequence[bool] | None = None,
 ) -> OverlayDecision:
-    """설정한 결합 방식에 따라 하나의 위험 배수를 계산한다."""
+    """설정한 결합 방식에 따라 하나의 위험 배수를 계산한다.
+
+    peak_eligible: cumulative_returns_pct와 같은 길이. False인 날은 낙폭 고점에서 뺀다.
+    """
     prev = prev_state or {}
     decision = OverlayDecision(evaluated_at=(now or datetime.now()).isoformat(timespec="seconds"))
     scale = 1.0
@@ -263,7 +275,7 @@ def compute_decision(
             )
 
     if cfg.drawdown.enabled:
-        dd = drawdown_from_cumulative_returns(cumulative_returns_pct or [])
+        dd = drawdown_from_cumulative_returns(cumulative_returns_pct or [], peak_eligible)
         active = drawdown_guard_active(dd, cfg.drawdown, prev.get("drawdown_active"))
         decision.drawdown = None if dd is None else round(dd, 4)
         if dd is None:
