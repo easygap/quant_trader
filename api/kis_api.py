@@ -129,6 +129,13 @@ def reset_shared_token_cache() -> None:
         _TOKEN_REGISTRY.clear()
 
 
+# KIS 게이트웨이는 일부 업무 오류를 HTTP 500 + JSON 본문(rt_cd='1', msg_cd)으로 돌려준다
+# (KIS 개발자 커뮤니티 보고 기준 — VTS 리허설에서 실제 코드 확인 필요).
+# 이것들은 서버 장애가 아니므로 서킷 브레이커 실패로 세지 않는다.
+_KIS_RATE_LIMIT_CODES = frozenset({"EGW00201"})              # 초당 거래건수 초과
+_KIS_TOKEN_ERROR_CODES = frozenset({"EGW00121", "EGW00123"})  # 유효하지 않은/만료된 토큰
+
+
 class KISTokenExpiredError(Exception):
     """KIS API 401 응답(토큰 만료) 시 사용. CircuitBreaker 실패로 누적하지 않음."""
 
@@ -577,6 +584,34 @@ class KISApi:
         }
 
     @staticmethod
+    def _gateway_error_code(response) -> tuple[str, str]:
+        """5xx 응답 본문에서 KIS 업무 오류 코드를 읽는다.
+
+        Returns:
+            (msg_cd, 본문 요약). 본문이 JSON이 아니면 msg_cd는 빈 문자열이고
+            요약에 읽지 못한 이유가 담긴다(진짜 서버 장애의 HTML 오류 페이지 등).
+        """
+        try:
+            payload = response.json()
+        except (ValueError, AttributeError, TypeError) as exc:
+            return "", f"본문 JSON 아님({type(exc).__name__})"
+        if not isinstance(payload, dict):
+            return "", "본문 형식 비정상"
+        code = str(payload.get("msg_cd") or payload.get("error_code") or "").strip()
+        message = str(payload.get("msg1") or payload.get("error_description") or "").strip()
+        return code, f"{code or '코드 없음'} {message[:80]}".strip()
+
+    @staticmethod
+    def _retry_after_seconds(response, default: int) -> int:
+        """Retry-After 헤더(초) — 없거나 HTTP-date 형식이면 default. 1~60초로 제한."""
+        try:
+            retry_after = int(response.headers.get("Retry-After", default))
+        except (TypeError, ValueError, AttributeError):
+            # Retry-After가 HTTP-date 형식이면 정수 변환이 실패한다 — 기본값 사용.
+            retry_after = default
+        return max(1, min(retry_after, 60))
+
+    @staticmethod
     def _backoff_with_jitter(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
         """지수 백오프 + 랜덤 지터. 동시 요청의 thundering-herd 방지."""
         exp = min(base * (2 ** (attempt - 1)), cap)
@@ -646,6 +681,9 @@ class KISApi:
 
                 if response.status_code == 429:
                     total_429s = self._bump_usage_counter("total_429s")
+                    # 429는 서버가 살아 있다는 확정 응답이다 — HALF_OPEN probe였다면
+                    # 점유만 풀어 다음 요청이 60초를 기다리지 않게 한다(상태 유지).
+                    breaker.release_probe()
                     if not idempotent:
                         # 주문 POST는 브로커가 요청을 처리했는지 클라이언트가
                         # 단정할 수 없는 응답을 받으면 절대 재전송하지 않는다.
@@ -656,12 +694,7 @@ class KISApi:
                             path,
                         )
                         raise KISOrderResponseUnknown(f"{path}: HTTP 429")
-                    try:
-                        retry_after = int(response.headers.get("Retry-After", 5))
-                    except (TypeError, ValueError):
-                        # Retry-After가 HTTP-date 형식이면 정수 변환이 실패한다 — 기본값 사용.
-                        retry_after = 5
-                    retry_after = max(1, min(retry_after, 60))
+                    retry_after = self._retry_after_seconds(response, 5)
                     logger.warning(
                         "[429 Too Many Requests] {}초 대기 후 재시도 ({}/{}) - 경로: {} (누적 429: {}회)",
                         retry_after, attempt, max_retries, path, total_429s,
@@ -670,6 +703,30 @@ class KISApi:
                     continue
 
                 if response.status_code in (500, 502, 503, 504):
+                    body_detail = ""
+                    if idempotent:
+                        # 조회(멱등) 요청만 본문을 본다. KIS 게이트웨이는 초당 한도
+                        # 초과(EGW00201)·토큰 무효(EGW00121/00123)도 5xx로 돌려준다 —
+                        # 이를 서버 장애로 세면 조회 두 건의 재시도만으로 서킷이 열려
+                        # 60초간 손절 SELL까지 막히고, 무효 토큰은 로컬 만료 시각까지
+                        # 갱신되지 않는다. 주문(비멱등) POST는 아래의 '응답 불명' 처리를
+                        # 그대로 따른다 — 거절이 확정인지 단정할 수 없으면 재전송 금지.
+                        msg_cd, body_detail = self._gateway_error_code(response)
+                        if msg_cd in _KIS_RATE_LIMIT_CODES:
+                            total_429s = self._bump_usage_counter("total_429s")
+                            breaker.release_probe()
+                            retry_after = self._retry_after_seconds(response, 1)
+                            logger.warning(
+                                "[{} {}] KIS 초당 거래건수 초과 — {}초 대기 후 재시도 ({}/{}) - 경로: {} (누적 429: {}회)",
+                                response.status_code, msg_cd, retry_after, attempt,
+                                max_retries, path, total_429s,
+                            )
+                            time.sleep(retry_after)
+                            continue
+                        if msg_cd in _KIS_TOKEN_ERROR_CODES:
+                            raise KISTokenExpiredError(
+                                f"KIS {msg_cd} (HTTP {response.status_code}) — 토큰 무효/만료"
+                            )
                     breaker.on_failure()
                     if not idempotent:
                         # 5xx는 브로커가 주문을 접수한 뒤 응답 생성에 실패한
@@ -685,8 +742,9 @@ class KISApi:
                         )
                     wait = self._backoff_with_jitter(attempt)
                     logger.warning(
-                        "[{}] 서버 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {}",
-                        response.status_code, wait, attempt, max_retries, path,
+                        "[{}] 서버 오류({}), {:.1f}초 후 재시도 ({}/{}) - 경로: {}",
+                        response.status_code, body_detail or "본문 미확인", wait,
+                        attempt, max_retries, path,
                     )
                     time.sleep(wait)
                     continue
@@ -696,14 +754,16 @@ class KISApi:
 
                 if response.status_code in (400, 403):
                     logger.error("[{}] 복구 불가 오류 즉시 중단 - 경로: {}", response.status_code, path)
+                    breaker.release_probe()
                     return {}
 
                 response.raise_for_status()
                 breaker.on_success()
                 return response.json()
 
-            except KISTokenExpiredError:
-                logger.error("[401] 토큰 만료. 갱신 후 재시도 ({}/{})", attempt, max_retries)
+            except KISTokenExpiredError as token_exc:
+                breaker.release_probe()
+                logger.error("[토큰 거절] {} — 갱신 후 재시도 ({}/{})", token_exc, attempt, max_retries)
                 # 거절된 토큰만 폐기하고 한 번만 재발급한다. 발급 실패 시 공유 쿨다운과
                 # 알림은 _acquire_token이 처리한다(발급 실패 1건당 알림 1번).
                 if not self._acquire_token(rejected_token=used_token):
