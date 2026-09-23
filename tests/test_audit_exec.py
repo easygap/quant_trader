@@ -103,6 +103,9 @@ def test_exposure_check_sees_market_values(executor, monkeypatch):
     monkeypatch.setattr(executor.risk_manager, "check_diversification", _fake_div)
     monkeypatch.setattr(executor, "_pre_order_check", lambda **kw: {"allowed": True})
     monkeypatch.setattr(executor, "_report_buy_rejection", lambda *a, **k: None)
+    # 장 초반·마감 진입 차단 시간대 판정은 실제 시계를 본다 — 실행 시각에 따라 노출
+    # 판정까지 가지 못하므로 고정한다.
+    monkeypatch.setattr(executor, "_should_block_new_buy_volatility_window", lambda: False)
 
     executor.execute_buy_quantity(
         symbol="005490", price=269_000, quantity=1, capital=8_379_910,
