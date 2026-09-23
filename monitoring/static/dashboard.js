@@ -128,6 +128,8 @@
     mode: "unknown",
     baskets: null,
     evaluations: null,
+    // 검증 결과 조회 상태. 처음 불러오는 동안을 '실패'로 보이지 않게 따로 둔다.
+    evaluationsStatus: "loading",
     runtime: null,
     legacy: null,
     flows: new Map(),
@@ -769,11 +771,18 @@
       });
       return;
     }
-    if (state.evaluations === null) {
+    if (state.evaluationsStatus === "error") {
       setDecision({
         title: "검증 결과를 불러오지 못했습니다",
         description:
           "계좌 기록은 정상입니다. 모의투자 검증 결과만 불러오지 못했으니 잠시 후 다시 확인하세요.",
+      });
+      return;
+    }
+    if (state.evaluationsStatus !== "ready") {
+      setDecision({
+        title: "검증 결과를 확인하고 있습니다",
+        description: "계좌 기록은 정상입니다. 모의투자 검증 결과를 불러오는 중입니다.",
       });
       return;
     }
@@ -1656,6 +1665,7 @@
   function renderEvaluations(evaluations) {
     const items = Array.isArray(evaluations) ? evaluations : [];
     state.evaluations = items;
+    state.evaluationsStatus = "ready";
     el.basketEval.setAttribute("aria-busy", "false");
     if (!items.length) {
       el.basketEval.innerHTML =
@@ -2244,6 +2254,7 @@
       .catch(() => {
         // 이전에 성공한 결과로 계속 판단하지 않는다(그 사이 생긴 문제를 못 본다)
         state.evaluations = null;
+        state.evaluationsStatus = "error";
         el.basketEval.setAttribute("aria-busy", "false");
         el.basketEval.innerHTML =
           '<p class="loading">검증 상태를 불러오지 못했습니다. 잠시 후 다시 확인하세요.</p>';
