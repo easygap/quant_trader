@@ -111,12 +111,14 @@ class TestBacktestAndReport:
                 assert key in m
             assert "overtrading_warnings" in result
 
-    def test_report_generator(self):
+    def test_report_generator(self, tmp_path):
         from backtest.backtester import Backtester
         from backtest.report_generator import ReportGenerator
         df = _sample_ohlcv(320)
         result = Backtester().run(df, strategy_name="scoring")
-        rg = ReportGenerator()
+        # 기본 출력 경로(reports/)에 쓰면 실행할 때마다 연구 리포트 폴더에 가짜
+        # backtest_scoring_*.html/txt가 쌓인다 — 임시 폴더로 돌린다.
+        rg = ReportGenerator(output_dir=str(tmp_path))
         assert rg.generate_text_report(result) is not None
         assert rg.generate_html_report(result) is not None
 

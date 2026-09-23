@@ -35,6 +35,8 @@ from loguru import logger
 
 # ─── 상수 ───────────────────────────────────────────────────
 RUNTIME_DIR = Path("reports/paper_runtime")
+# 레거시 전략 등록 파일 — 테스트가 임시 경로로 돌릴 수 있게 모듈 상수로 둔다
+APPROVED_STRATEGIES_PATH = Path("reports/approved_strategies.json")
 CLEAN_DAYS_FOR_UNFREEZE = 3  # 자동 unfreeze에 필요한 연속 clean final days
 CURRENT_SCHEMA_VERSION = 2   # 현재 DailyEvidence schema 버전
 PAPER_RUNTIME_MAX_EVIDENCE_STALE_TRADING_DAYS = 1
@@ -655,7 +657,7 @@ def generate_rebuild_report(strategy: str, history: list[dict]) -> Path:
 def _is_strategy_registered(strategy: str) -> bool:
     """legacy approved_strategies.json 또는 config에서 전략 등록 여부 확인.
     없으면 True (paper 모드에서는 기본 허용 — research_disabled는 명시적 비활성만)."""
-    approved_path = Path("reports/approved_strategies.json")
+    approved_path = APPROVED_STRATEGIES_PATH
     if not approved_path.exists():
         return True
 

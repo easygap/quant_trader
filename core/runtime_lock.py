@@ -182,7 +182,14 @@ def scheduler_lock(lock_path: str | Path) -> Generator[bool, None, None]:
 
 @contextmanager
 def live_runtime_lock(project_root: str | Path) -> Generator[bool, None, None]:
-    """Global lock shared by every non-emergency live order runtime."""
-    lock_path = Path(project_root) / "data" / LIVE_RUNTIME_LOCK_FILENAME
+    """Global lock shared by every non-emergency live order runtime.
+
+    QUANT_RUNTIME_LOCK_DIR가 있으면 그 디렉터리에 둔다 — 테스트가 운영 락 파일을
+    잡으면 같은 시각의 실제 live 실행이 '다른 런타임 실행 중'으로 중단된다.
+    """
+    override = os.environ.get("QUANT_RUNTIME_LOCK_DIR")
+    lock_path = (
+        Path(override) if override else Path(project_root) / "data"
+    ) / LIVE_RUNTIME_LOCK_FILENAME
     with process_runtime_lock(lock_path, label="실전 주문 런타임") as acquired:
         yield acquired

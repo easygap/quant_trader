@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +19,11 @@ _MAX_SIGNALS = 400
 
 
 def _state_path() -> Path:
+    # QUANT_DASHBOARD_STATE_PATH가 있으면 그 파일을 쓴다 — 테스트가 운영 대시보드에
+    # 가짜 신호·루프 지표를 남기지 않도록(conftest가 임시 경로로 지정).
+    override = os.environ.get("QUANT_DASHBOARD_STATE_PATH")
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parent.parent / "data" / "dashboard_runtime_state.json"
 
 

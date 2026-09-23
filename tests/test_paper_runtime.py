@@ -243,7 +243,8 @@ class TestRuntimeStateMachine:
         """approved_strategies.json에서 disabled → research_disabled."""
         from core.paper_runtime import get_paper_runtime_state
 
-        approved = Path("reports/approved_strategies.json")
+        import core.paper_runtime as _paper_runtime
+        approved = _paper_runtime.APPROVED_STRATEGIES_PATH
         original = None
         if approved.exists():
             original = approved.read_text(encoding="utf-8")
@@ -283,7 +284,8 @@ class TestRuntimeStateMachine:
         _seed_evidence(evidence_dir, strategy, [
             {"date": "2026-03-24", "status": "normal", "benchmark_status": "final"},
         ])
-        approved = Path("reports/approved_strategies.json")
+        import core.paper_runtime as _paper_runtime
+        approved = _paper_runtime.APPROVED_STRATEGIES_PATH
         original = None
         if approved.exists():
             original = approved.read_text(encoding="utf-8")
@@ -711,7 +713,8 @@ class TestExitSafePolicy:
         """research_disabled + outstanding position → cleanup O."""
         from core.paper_runtime import get_paper_runtime_state, is_paper_trade_allowed
 
-        approved = Path("reports/approved_strategies.json")
+        import core.paper_runtime as _paper_runtime
+        approved = _paper_runtime.APPROVED_STRATEGIES_PATH
         original = None
         if approved.exists():
             original = approved.read_text(encoding="utf-8")

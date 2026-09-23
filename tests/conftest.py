@@ -25,6 +25,15 @@ def pytest_configure(config):
     # 운영 바스켓의 '추세 아래/낙폭 발동' 상태를 덮어쓰지 않도록 임시 디렉터리로 격리한다.
     if not os.environ.get("QUANT_OVERLAY_STATE_DIR"):
         os.environ["QUANT_OVERLAY_STATE_DIR"] = tempfile.mkdtemp(prefix="quant_test_overlay_")
+    # 대시보드 런타임 상태·live 런타임 락도 운영 파일이다(2026-09-23 확인: 테스트 실행이
+    # data/dashboard_runtime_state.json에 가짜 신호를 남기고 data/.live_runtime.lock을
+    # 잡았다 — 같은 시각의 실제 live 실행은 '다른 런타임 실행 중'으로 중단된다).
+    if not os.environ.get("QUANT_DASHBOARD_STATE_PATH"):
+        os.environ["QUANT_DASHBOARD_STATE_PATH"] = str(
+            Path(tempfile.mkdtemp(prefix="quant_test_dash_")) / "dashboard_runtime_state.json"
+        )
+    if not os.environ.get("QUANT_RUNTIME_LOCK_DIR"):
+        os.environ["QUANT_RUNTIME_LOCK_DIR"] = tempfile.mkdtemp(prefix="quant_test_lock_")
 
     # 사용자가 명시적으로 DB 경로를 지정했다면 존중한다.
     if os.environ.get("QUANT_DB_PATH"):
@@ -117,3 +126,37 @@ def _isolate_global_trading_halt():
     except Exception:
         # 스키마 미생성 등으로 정리에 실패해도 테스트 결과를 바꾸지 않는다.
         pass
+
+
+
+# ---------------------------------------------------------------------------
+# 연구 증거·런타임 원장 격리
+#
+# paper_evidence/paper_runtime/paper_pilot은 reports/ 아래 상대 경로에 원장을 쓴다.
+# 개별 테스트가 경로를 바꾸는 걸 잊으면 운영 원장에 테스트 기록이 쌓인다 —
+# 2026-09-23 확인: 테스트 실행이 reports/paper_evidence/daily_evidence_scoring.jsonl에
+# execution_backed=True인 '실제 paper' 기록을 남기고 pilot_audit.jsonl을 늘렸다.
+# 먼저 임시 경로로 돌려 두고, 경로를 직접 지정하는 테스트는 그 위에 덮어쓴다.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _isolate_research_ledgers(tmp_path_factory, monkeypatch):
+    base = tmp_path_factory.mktemp("ledgers")
+    targets = (
+        ("core.paper_evidence", "EVIDENCE_DIR", base / "paper_evidence"),
+        ("core.paper_evidence", "PROMOTION_DIR", base / "promotion"),
+        ("core.evidence_collector", "EVIDENCE_DIR", base / "paper_evidence"),
+        ("core.paper_runtime", "RUNTIME_DIR", base / "paper_runtime"),
+        ("core.paper_runtime", "APPROVED_STRATEGIES_PATH", base / "approved_strategies.json"),
+        ("core.paper_preflight", "RUNTIME_DIR", base / "paper_runtime"),
+        ("core.paper_pilot", "RUNTIME_DIR", base / "paper_runtime"),
+        ("core.paper_pilot", "PILOT_AUTH_FILE", base / "paper_runtime" / "pilot_authorizations.jsonl"),
+        ("core.paper_pilot", "PILOT_AUDIT_FILE", base / "paper_runtime" / "pilot_audit.jsonl"),
+    )
+    for module_name, attr, path in targets:
+        try:
+            module = __import__(module_name, fromlist=[attr])
+        except Exception:
+            continue
+        if hasattr(module, attr):
+            monkeypatch.setattr(module, attr, path)
+    yield
