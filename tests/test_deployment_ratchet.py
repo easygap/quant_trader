@@ -413,3 +413,62 @@ def test_deployment_monitoring_is_not_disabled():
         assert float(tol) < 1.0, (
             "%s: 배치율 감시가 사실상 꺼져 있다(tolerance=%s)" % (name, tol)
         )
+
+
+# ------------------------------------------------------------- 방어 자산 보충 (2026-09-23)
+
+def _pocket(wired, positions, total_value, cash):
+    holdings = {"069500": 0.5, "357870": 0.5}
+    rb = _rebalancer(holdings=holdings, target_stock_weight=0.95, min_trade=50_000,
+                     positions=positions, turnover=0.6)
+    rb.basket["overlays"] = {"defensive_symbol": "357870"}
+    rb._risk_params = {"diversification": {"min_cash_ratio": 0.05}}
+    rb.basket["min_cash_ratio"] = 0.05
+    wired(rb, total_value)
+    rb.portfolio_mgr.get_portfolio_summary.return_value = {
+        "total_value": total_value, "cash": cash,
+    }
+    return rb
+
+
+def test_idle_cash_goes_to_defensive_parking_etf(wired):
+    """kr_pocket 9/23 실측: 지수 1주·파킹 3주·현금 10.4만 원 — 두 종목 다 상한에 막혀
+    한 달째 현금이 놀았다. 파킹 ETF 1주는 다음 사이클 매도 규칙이 되팔지 않는 범위다."""
+    prices = {"069500": 113_800, "357870": 57_900}
+    positions = [_pos("069500", 122_345, 1), _pos("357870", 57_913, 3)]
+    total = 113_800 + 3 * 57_900 + 103_870
+    rb = _pocket(wired, positions, total, 103_870)
+
+    orders = rb.plan_rebalance(prices)
+
+    buys = [o for o in orders if o.action == "BUY"]
+    assert [(o.symbol, o.quantity) for o in buys] == [("357870", 1)]
+    assert "배치율 보충" in buys[0].reason
+
+
+def test_defensive_exemption_never_applies_to_equity(wired):
+    """주식 종목은 여전히 목표+허용을 넘겨 사지 않는다 — 주식 비중이 설계를 넘는다."""
+    prices = {"069500": 113_800, "357870": 57_900}
+    # 파킹 ETF가 이미 목표 이상이라 보충할 곳은 지수뿐인 상태
+    positions = [_pos("069500", 113_800, 1), _pos("357870", 57_900, 4)]
+    total = 113_800 + 4 * 57_900 + 120_000
+    rb = _pocket(wired, positions, total, 120_000)
+
+    for o in rb.plan_rebalance(prices):
+        if o.action == "BUY" and o.symbol == "069500":
+            investable = total * 0.95
+            projected = (113_800 + o.quantity * o.price) / investable
+            assert projected <= 0.5 + 0.08 + 1e-9
+
+
+def test_defensive_topup_stays_below_sell_back_threshold(wired):
+    """다음 사이클에 되팔릴 만큼(초과분 ≥ max(min_trade, 1주)) 사지는 않는다."""
+    prices = {"069500": 113_800, "357870": 57_900}
+    positions = [_pos("069500", 113_800, 1), _pos("357870", 57_900, 3)]
+    total = 113_800 + 3 * 57_900 + 103_870
+    rb = _pocket(wired, positions, total, 103_870)
+    investable = total * 0.95
+    for o in rb.plan_rebalance(prices):
+        if o.action == "BUY" and o.symbol == "357870":
+            over = (3 + o.quantity) * 57_900 - investable * 0.5
+            assert over < max(50_000, 57_900)

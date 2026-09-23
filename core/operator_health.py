@@ -22,7 +22,8 @@ verdict 규칙(보수적 — 의심스러우면 주의 이상). '운영 건강(�
 
 from __future__ import annotations
 
-from typing import Any
+import math
+from typing import Any, Iterable
 
 # verdict 우선순위 (높을수록 심각)
 _VERDICT_RANK = {"OK": 0, "ATTENTION": 1, "BLOCKED": 2}
@@ -141,15 +142,11 @@ def structural_deployment_tolerance(
 ) -> float:
     """배치율 허용 오차의 구조 하한 — 정수 주식 절사가 만드는 불가피한 미달을 반영(순수).
 
-    적립 직후에는 '부족분 < 1주 가격'인 동안 매수가 보류되므로(설계), 미달폭이
-    슬롯마다 최대 1주 가격까지 벌어진다. truncation_unit_value는 그 상한의 합 —
-    **보유 슬롯별 1주 가격의 합**이다(예: 잔고 40만·ETF 1주 12.8만 단일 슬롯 → 32%p;
-    지수 12.4만+파킹 5.8만 2슬롯 잔고 70만 → 26%p). 최고가 1주만 재면 다중 슬롯
-    바스켓이 정상 적립 중(모든 슬롯이 부족분 < 1주)에도 허용을 초과해 몇 주씩
-    거짓 ATTENTION이 울린다. 잔고가 커지면 구조 하한이 저절로 조여져 floor가 다시
-    지배한다 — 진짜 이상(미달이 절사 상한을 초과)은 규모가 커지는 즉시 잡힌다.
-    완전히 빈 슬롯은 절사가 아니라 실패이므로 합산에 넣지 않는다(호출부는 '보유'
-    포지션의 1주 가격만 합산할 것).
+    truncation_unit_value는 '자동으로 메울 수 없는 미달 금액'이다. 헬스는
+    unfixable_deployment_gap(band + 가장 싼 집행 가능 묶음)을 넘긴다 — 보충 매수가
+    생긴 뒤로는 그 이상 남는 미달은 절사가 아니라 누수다(2026-09-23 교정: 예전 호출부는
+    보유 슬롯별 1주 가격의 합을 넘겨 9종목 바스켓의 허용이 20%p까지 벌어졌다).
+    잔고가 커지면 구조 하한이 저절로 조여져 floor가 다시 지배한다.
 
     반환: max(floor_tolerance, truncation_unit_value/total_value). 입력 불충분 시 floor.
     """
@@ -163,20 +160,65 @@ def structural_deployment_tolerance(
     return max(float(floor_tolerance), unit / total)
 
 
+def unfixable_deployment_gap(
+    lot_prices: Iterable[Any],
+    total_value: Any,
+    *,
+    min_trade: float = 0.0,
+    band: float = 0.0,
+) -> float:
+    """배치율 보충 매수가 메우지 못하고 남길 수 있는 최대 미달 금액(원). 순수 함수.
+
+    2026-08-26부터 리밸런서는 집계 미달이 band를 넘으면 min_trade를 넘기는 최소
+    정수주 묶음을 산다. 한 묶음은 '사면 격차가 줄어들 때'(묶음 < 남은 격차 × 2)만 사고,
+    남은 격차가 band 이하가 되면 멈춘다. 그래서 막힌 슬롯이 없는 정상 상태의 미달은
+    max(band, 가장 싼 묶음의 절반)을 넘지 않는다 — 그 이상 남아 있으면 절사가 아니라
+    누수(또는 종목 상한에 막힌 상태)다.
+
+    예전 허용 하한은 보유 슬롯별 1주 가격을 전부 더했다(보충 매수가 없던 시절의 근거).
+    9종목 바스켓에서 그 합은 총자산의 20%에 달해 5%p 감시가 사실상 꺼져 있었다 —
+    8/07~8/26 현금 래칫(61% → 54.9%)이 그 상태로도 OK였다.
+
+    반환: max(band × total, 가장 싼 묶음 / 2). 가격이나 총액이 없으면 0(설정 허용값만 적용).
+    """
+    try:
+        total = float(total_value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(total) or total <= 0:
+        return 0.0
+    lots = []
+    for raw in lot_prices or []:
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price <= 0:
+            continue
+        qty = max(1, math.ceil(float(min_trade or 0) / price))
+        lots.append(qty * price)
+    if not lots:
+        return 0.0
+    return max(max(0.0, float(band or 0)) * total, min(lots) / 2)
+
+
 def summarize_deployment(
     deployment_ratio: float | None,
     design_fraction: float | None,
     *,
     tolerance: float = 0.05,
 ) -> dict[str, Any]:
-    """집계 배치율(총자산 중 실제 주식비중)이 설계 대비 크게 미달인지 판정(순수 함수).
+    """집계 배치율(총자산 중 실제 주식비중)이 설계에서 크게 벗어났는지 판정(순수 함수).
 
     한 달 운영 리뷰(docs/PAPER_MONTH1_REVIEW_AND_PLAN.md P1-5)의 배경: 종목별 드리프트
     트리거는 '집계 배치율' 이탈(예: 실효 61% vs 설계 80%)을 영영 못 본다. 여기서 그 이탈을
-    운영자 헬스로 표면화한다. 실제가 설계보다 tolerance(기본 5%p) 초과로 낮으면 ATTENTION.
-    (초과 배치는 리밸런서가 자연 교정하므로 '미달'만 감시한다.)
+    운영자 헬스로 표면화한다. 실제가 설계에서 tolerance(기본 5%p)를 넘게 벗어나면 ATTENTION.
+
+    초과 배치도 본다. 전 종목이 같이 오르면 종목별 비중은 그대로라 리밸런서가 줄이지
+    않는다 — 60/40 설계가 조용히 70/30이 된다(현금 래칫의 반대 방향, 운영 원칙 4).
 
     반환: {verdict(OK|ATTENTION), note(str|None), deployment_ratio, design_fraction, shortfall}
+    shortfall = 설계 - 실제 (음수면 초과 배치)
     """
     if deployment_ratio is None or design_fraction is None:
         return {
@@ -191,6 +233,14 @@ def summarize_deployment(
         note = (
             f"주식 배치율 {deployment_ratio:.0%} < 설계 {design_fraction:.0%} "
             f"({-shortfall * 100:.1f}%p) — 미체결 슬롯/자본 점검"
+            " (1주 단위 제약이면 적립 입금 뒤 교정된다)"
+        )
+    elif -shortfall > tolerance:
+        verdict = "ATTENTION"
+        note = (
+            f"주식 배치율 {deployment_ratio:.0%} > 설계 {design_fraction:.0%} "
+            f"(+{-shortfall * 100:.1f}%p) — 상승으로 초과 배치. 종목별 초과가 작으면 "
+            "리밸런서가 줄이지 않으니 비중 조정을 판단할 것"
         )
     return {
         "verdict": verdict, "note": note,

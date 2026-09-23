@@ -241,3 +241,22 @@ def test_shipped_etf_baskets_are_actually_buyable():
             f"{symbol}이 instrument_classes.non_company_symbols에 없다 — "
             "업종·실적 필터에 fail-closed로 막힌다"
         )
+
+
+def test_defensive_parking_etf_is_capped_by_investment_ratio_only():
+    """방어 자산은 현금 대용 — 계획이 유휴 현금을 파킹 ETF로 옮길 때 주문 단계가
+    종목 상한(목표+드리프트)으로 막으면 계획과 실행이 어긋난다(2026-09-23)."""
+    basket = {
+        "target_stock_weight": 0.95,
+        "min_cash_ratio": 0.05,
+        "holdings": {"069500": 0.5, "357870": 0.5},
+        "overlays": {"defensive_symbol": "357870"},
+        "rebalance": {"drift_threshold": 0.08, "deployment_band": 0.03},
+    }
+    rb = _rebalancer(basket)
+    rb._overlay_scale = lambda: 1.0
+    parking = rb._policy_exposure_limits("357870")
+    equity = rb._policy_exposure_limits("069500")
+    assert parking["max_position_ratio"] == pytest.approx(0.95)
+    assert equity["max_position_ratio"] == pytest.approx((0.5 + 0.08) * 0.95)
+    assert parking["max_investment_ratio"] == pytest.approx(0.98)

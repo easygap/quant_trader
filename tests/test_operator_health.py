@@ -308,9 +308,16 @@ class TestSummarizeDeployment:
     def test_within_tolerance_ok(self):
         assert self._f(0.76, 0.80)["verdict"] == "OK"
 
-    def test_overdeployment_is_ok(self):
-        # 초과 배치는 리밸런서가 자연 교정 — 감시 대상 아님
-        assert self._f(0.90, 0.80)["verdict"] == "OK"
+    def test_overdeployment_beyond_tolerance_is_attention(self):
+        # 예전엔 '초과 배치는 리밸런서가 자연 교정'한다고 보고 감시하지 않았다. 그런데
+        # 전 종목이 같이 오르면 종목별 비중은 그대로라 아무것도 팔리지 않는다 —
+        # 60/40이 조용히 70/30이 된다. 현금 래칫의 반대 방향이라 같이 본다(2026-09-23).
+        out = self._f(0.90, 0.80)
+        assert out["verdict"] == "ATTENTION"
+        assert "초과 배치" in out["note"]
+
+    def test_small_overdeployment_is_ok(self):
+        assert self._f(0.83, 0.80)["verdict"] == "OK"
 
     def test_none_inputs_ok(self):
         assert self._f(None, 0.80)["verdict"] == "OK"

@@ -1959,16 +1959,23 @@ def run_health_check() -> int:
         def _design_fraction(cfg: dict, basket_name: str | None = None) -> float:
             """BasketRebalancer._stock_fraction과 동일 규칙(인스턴스 없이 계산).
 
-            리스크 오버레이가 켜진 바스켓은 마지막 실행이 남긴 배수를 곱한 '적용 비중'을
-            쓴다 — 오버레이가 비중을 절반으로 줄인 날 설계 비중과 비교하면 매일 거짓
-            미달 경보가 울리기 때문이다(선언한 숫자마다 감시가 붙는 원칙의 대상은
-            그날 실제로 유효한 목표다).
+            리스크 오버레이가 켜진 바스켓은 마지막 실행이 남긴 배수를 반영한 '그날
+            실제로 유효한 목표'를 쓴다(선언한 숫자마다 감시가 붙는 원칙의 대상). 방어
+            자산(CD ETF)이 있으면 줄인 주식만큼 그 자산을 사므로 투자 비중은 설계
+            그대로다 — 리밸런서와 같은 헬퍼(invested_fraction)로 계산해야 기준이 같다.
+            상태 파일은 이 함수의 다른 조회와 같은 paper 장부 것을 읽는다(모드 없이
+            읽으면 더 이상 갱신되지 않는 예전 공용 파일을 본다).
             """
             from core.basket_deploy import effective_stock_fraction
-            from core.risk_overlays import applied_stock_fraction, load_overlay_state, parse_overlay_config
+            from core.risk_overlays import invested_fraction, load_overlay_state, parse_overlay_config
             design = effective_stock_fraction(cfg, config.risk_params)
             if basket_name and parse_overlay_config(cfg).any_enabled:
-                return applied_stock_fraction(design, load_overlay_state(basket_name))
+                return invested_fraction(
+                    cfg.get("holdings") or {},
+                    design,
+                    load_overlay_state(basket_name, mode="paper"),
+                    (cfg.get("overlays") or {}).get("defensive_symbol"),
+                )
             return design
 
         # 바스켓별 전용 계정 키(basket_rebalance:<name>) 기준으로 조회한다.
@@ -2010,29 +2017,37 @@ def run_health_check() -> int:
                     if snap and snap.total_value and snap.total_value > 0:
                         from core.operator_health import structural_deployment_tolerance
 
+                        from core.operator_health import unfixable_deployment_gap
+
                         cfg_b = baskets_cfg.get(name) or {}
                         dep_ratio = max(0.0, (snap.total_value - (snap.cash or 0)) / snap.total_value)
                         design = _design_fraction(cfg_b, name)
                         floor_tol = float(
                             (cfg_b.get("monitoring") or {}).get("deployment_tolerance", 0.05)
                         )
-                        # 보유 슬롯별 1주 가격의 합 — 슬롯마다 '부족분 < 1주' 절사가
-                        # 동시에 존재할 수 있으므로 최고가 1주만 재면 다중 슬롯 바스켓이
-                        # 정상 적립 중에 거짓 ATTENTION을 울린다. 빈 슬롯은 실패이므로 제외.
-                        truncation_unit = sum(
-                            float(p.avg_price or 0) for p in positions_b
+                        # 보충 매수가 메우지 못하고 남길 수 있는 미달 = band + 가장 싼
+                        # 집행 가능 묶음. 예전엔 보유 슬롯별 1주 가격을 전부 더해서
+                        # 9종목 바스켓의 허용이 20%p까지 벌어졌고, 8/26에 '복원'한 5%p
+                        # 감시가 실제로는 울릴 수 없었다(8/07~8/26 현금 래칫 54.9%도 OK).
+                        reb_b = cfg_b.get("rebalance") or {}
+                        unit = unfixable_deployment_gap(
+                            [float(p.avg_price or 0) for p in positions_b],
+                            float(snap.total_value),
+                            min_trade=float(reb_b.get("min_trade_amount", 100000)),
+                            band=float(reb_b.get("deployment_band", 0.03)),
                         )
                         tol_b = structural_deployment_tolerance(
-                            truncation_unit, float(snap.total_value), floor_tol,
+                            unit, float(snap.total_value), floor_tol,
                         )
-                        violation = (design - dep_ratio) - tol_b
+                        # 미달·초과 양쪽을 본다(원칙 4 — 한쪽으로만 도는 장치를 의심한다).
+                        violation = abs(design - dep_ratio) - tol_b
                         if worst_shortfall is None or violation > worst_shortfall:
                             worst_shortfall = violation
                             worst_dep_ratio = dep_ratio
                             worst_design = design
                             worst_tolerance = tol_b
                 except Exception as dep_exc:
-                    logger.debug("바스켓 '{}' 배치율 계산 생략: {}", name, dep_exc)
+                    logger.warning("바스켓 '{}' 배치율 계산 실패 — 배치율 감시 생략: {}", name, dep_exc)
         finally:
             session.close()
         oldest_last = (

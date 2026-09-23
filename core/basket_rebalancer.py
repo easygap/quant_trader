@@ -653,9 +653,16 @@ class BasketRebalancer:
         except (TypeError, ValueError):
             min_cash = float(div_cfg.get("min_cash_ratio", 0.20))
 
+        # 슬리브 내 비중 상한을 총자산 기준으로 환산
+        position_cap = (float(target_w) + drift) * stock_fraction
+        if symbol == (self.basket.get("overlays") or {}).get("defensive_symbol"):
+            # 방어 자산(CD 파킹 ETF)은 현금 대용이다. 오버레이가 주식을 전부 줄이면 투자분
+            # 전체가 이 자산이 되는 설계라 종목 상한 대신 투자 비중 상한만 건다 — 계획의
+            # 배치율 보충이 파킹 ETF로 유휴 현금을 옮길 때 주문 단계가 막지 않도록
+            # 같은 기준을 쓴다(2026-09-23).
+            position_cap = stock_fraction
         return {
-            # 슬리브 내 비중 상한을 총자산 기준으로 환산
-            "max_position_ratio": min(1.0, (float(target_w) + drift) * stock_fraction),
+            "max_position_ratio": min(1.0, position_cap),
             "max_investment_ratio": min(1.0, stock_fraction + band),
             "min_cash_ratio": min_cash,
         }
@@ -856,6 +863,7 @@ class BasketRebalancer:
             )
             remaining = shortfall
             drift_limit = float(self.rebalance_cfg.get("drift_threshold", 0.05))
+            defensive = (self.basket.get("overlays") or {}).get("defensive_symbol")
             topups: list[tuple[float, float, str, int, float]] = []
             for symbol, target_w in targets.items():
                 if symbol in already or symbol in cooldown:
@@ -881,11 +889,19 @@ class BasketRebalancer:
                     if investable > 0 else 1.0
                 )
                 if projected_w > target_w + drift_limit:
-                    logger.debug(
-                        "종목 {} 보충 보류: 매수 후 비중 {:.1%} > 목표 {:.1%} + 허용 {:.1%}",
-                        symbol, projected_w, target_w, drift_limit,
-                    )
-                    continue
+                    # 방어 자산(CD 파킹 ETF)은 현금 대용이다 — 설계가 '무수익 현금 대신
+                    # 파킹 ETF'인데 종목 상한에 막히면 소액 계좌에서 현금이 그대로 논다
+                    # (2026-09-23 kr_pocket 실측: 설계 95% vs 실제 73%, 유휴 현금 10.4만 원이
+                    # 두 종목 모두 1주가 상한을 넘어 한 달째 그대로). 다음 사이클의 매도
+                    # 규칙이 되팔지 않는 범위(초과분 < max(min_trade, 1주))에서는 허용한다.
+                    # 주식 종목에는 적용하지 않는다 — 주식 비중이 설계를 넘게 된다.
+                    over_value = investable * (projected_w - target_w)
+                    if not (symbol == defensive and over_value < max(min_trade, price)):
+                        logger.info(
+                            "종목 {} 보충 보류: 매수 후 비중 {:.1%} > 목표 {:.1%} + 허용 {:.1%}",
+                            symbol, projected_w, target_w, drift_limit,
+                        )
+                        continue
                 topups.append((residual, notional, symbol, qty, price))
             # 잔여 격차를 가장 많이 줄이는 순서로 집행한다(1주 단가가 낮을수록 정밀).
             topups.sort()

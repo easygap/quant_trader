@@ -411,6 +411,30 @@ def save_overlay_state(
     return path
 
 
+def invested_fraction(
+    weights: dict[str, float],
+    design_fraction: float,
+    state: dict[str, Any] | None,
+    defensive_symbol: str | None = None,
+) -> float:
+    """리밸런서가 실제로 맞추는 투자 비중(방어 자산 포함) — BasketRebalancer._stock_fraction과 같은 규칙.
+
+    방어 자산(CD ETF)이 있으면 오버레이가 주식을 줄인 만큼 방어 자산을 사므로 투자
+    비중은 설계 그대로다. 헬스가 applied_stock_fraction(설계 × 배수)으로 감시하면
+    오버레이가 켜진 날 기준이 절반으로 내려가, 방어 자산 매수가 실패해 현금이 쌓여도
+    '정상'으로 읽힌다. 방어 자산이 없으면 두 값은 같다.
+    """
+    scale = 1.0
+    if state:
+        try:
+            scale = min(1.0, max(0.0, float(state.get("scale", 1.0))))
+        except (TypeError, ValueError):
+            scale = 1.0
+    if not weights:
+        return float(design_fraction) * scale
+    return sum(overlay_target_weights(weights, float(design_fraction), scale, defensive_symbol).values())
+
+
 def applied_stock_fraction(design_fraction: float, state: dict[str, Any] | None) -> float:
     """설계 주식 비중 × 마지막 오버레이 배수. 상태가 없으면 설계 그대로."""
     if not state:
