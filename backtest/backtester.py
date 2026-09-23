@@ -18,8 +18,21 @@ from backtest.cost_impact import (
 from core.market_regime import resolve_market_regime_config
 from core.risk_manager import RiskManager
 
+# 보유 종목의 데이터가 백테스트 도중 끝나면(상장폐지·합병·종목 캐시 조기 종료) 마지막 관측
+# 종가로 강제 청산했다는 기록용 액션. 포트폴리오 엔진이 쓰며, 지표·리포트에서 빠지지 않게
+# 전량 청산 목록에 함께 둔다.
+DATA_END_EXIT_ACTION = "DATA_END"
 _FULL_EXIT_SELL_ACTIONS = frozenset(
-    ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD", "GAP_DOWN", "BLACKSWAN")
+    (
+        "SELL",
+        "STOP_LOSS",
+        "TAKE_PROFIT",
+        "TRAILING_STOP",
+        "MAX_HOLD",
+        "GAP_DOWN",
+        "BLACKSWAN",
+        DATA_END_EXIT_ACTION,
+    )
 )
 _PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
 # 실현 손익이 생기는 모든 매도 액션(전량 청산 + 부분 익절). 승률·손익비·거래 수 같은 지표와

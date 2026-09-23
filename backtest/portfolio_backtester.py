@@ -1,9 +1,17 @@
 """
 멀티종목 포트폴리오 백테스터
 - 여러 종목에 대해 동시에 매매 신호를 평가하고 포트폴리오 수준에서 자금을 관리
-- 분산 투자 제한, 업종 비중, 최대 포지션 수 등 실전 리스크 관리 반영
+- 종목당 비중·총 투자 비중·최소 현금 비중·최대 포지션 수 한도를 반영
 - 단일 종목 백테스트와 달리 "포트폴리오 MDD", "종목 간 상관관계 영향" 등을 측정
 - gap/어닝/BlackSwan 이벤트 guard로 paper/live와 백테스트 리스크 전제 차이를 축소
+
+실전(order_executor)·단일 종목 Backtester보다 느슨한 부분 — 아직 반영하지 않는다:
+- 업종 비중(max_sector_ratio)·상관관계 기반 축소 한도
+- 전역 최소 보유 기간(position_limits.min_holding_days). 전략 설정의 min_hold_days만 쓴다.
+- 종목별 월간 매수 횟수 상한(position_limits.max_monthly_roundtrips)
+- 냉각기(min_hold_days)는 전략 SELL과 TRAILING_STOP을 막는데, 실전은 TRAILING_STOP을 손실 방어
+  청산으로 보고 막지 않는 대신 익절·보유기간 만료 매도를 막는다.
+따라서 이 엔진의 스윕·승격 지표는 실전보다 회전이 잦고 업종 집중이 제한 없는 조건의 결과다.
 """
 
 import pandas as pd
@@ -11,7 +19,11 @@ import numpy as np
 from loguru import logger
 from datetime import timedelta
 
-from backtest.backtester import BACKTEST_RISK_FREE_ANNUAL, BACKTEST_RISK_FREE_LABEL
+from backtest.backtester import (
+    BACKTEST_RISK_FREE_ANNUAL,
+    BACKTEST_RISK_FREE_LABEL,
+    DATA_END_EXIT_ACTION,
+)
 from backtest.cost_impact import (
     cost_impact_metric_fields,
     render_cost_impact_text,
@@ -239,6 +251,7 @@ class PortfolioBacktester:
             "blackswan_triggers": result.get("blackswan_triggers", 0),
             "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
             "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
+            "data_end_exits": result.get("data_end_exits", 0),
         }
 
     def _strategy_config_for_run(self, strategy_name: str, param_overrides: dict | None = None):
@@ -465,6 +478,19 @@ class PortfolioBacktester:
         blackswan_triggers = 0
         blackswan_buy_blocks = 0
         blackswan_recovery_buys = 0
+        data_end_exits = 0
+
+        # 당일 행이 없는 보유 종목(거래정지·데이터 결측)은 마지막 관측 종가로 평가한다.
+        # 평균단가로 되돌리면 그동안의 평가손실이 하루아침에 사라지는 가짜 수익이 생긴다.
+        # legacy_same_close는 과거 결과 재현 경로라 기존 평가(평균단가)를 그대로 둔다.
+        use_last_close_marks = execution_model == EXECUTION_MODEL_NEXT_OPEN
+        last_close: dict[str, float] = {}
+        # 종목별 마지막 데이터 일자. 이 날짜가 지나도 들고 있으면 데이터 종료로 보고 청산한다.
+        data_end_date = {
+            sym: sig_df.index.max()
+            for sym, sig_df in signals.items()
+            if sig_df is not None and len(sig_df.index) > 0
+        }
 
         # ── 진단 계측 (ablation diagnostics) ──
         exit_reason_counts = {}
@@ -608,161 +634,142 @@ class PortfolioBacktester:
                 "reason": reason,
             })
 
-        for date_idx, date in enumerate(all_dates):
-            total_pos_value = sum(
-                self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
-                for s in positions
-            )
-            total_equity = cash + total_pos_value
+        def _holding_days(pos: dict) -> int:
+            return (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
 
-            portfolio_blackswan_reason = ""
-            blackswan_activated_today = False
+        def _fallback_mark(sym: str) -> float:
+            """당일 행이 없을 때의 평가가격 (next_open: 마지막 관측 종가, legacy: 평균단가)."""
+            if use_last_close_marks and sym in last_close:
+                return last_close[sym]
+            return positions[sym]["avg_price"]
+
+        def _close_mark(sym: str) -> float:
+            """종가 기준 평가가격. 당일 행이 없으면 _fallback_mark."""
+            return self._get_close(signals, sym, date, _fallback_mark(sym))
+
+        def _open_mark(sym: str) -> float:
+            """시가 시점에 알 수 있는 평가가격: 당일 시가 → 전일 종가 → _fallback_mark 순."""
+            sig_df = signals.get(sym)
+            pos_idx = _index_position(sig_df, date)
+            if pos_idx is not None:
+                raw_open = sig_df["open"].iloc[pos_idx] if "open" in sig_df.columns else None
+                if raw_open is not None and pd.notna(raw_open) and float(raw_open) > 0:
+                    return float(raw_open)
+                prev_close = _previous_close(sym, date)
+                if prev_close is not None:
+                    return prev_close
+            return _fallback_mark(sym)
+
+        def _record_daily_return(sym: str, close: float, prev_close: float | None) -> float | None:
+            if prev_close is None or prev_close <= 0:
+                return None
+            stock_daily_return = (close - prev_close) / prev_close
+            if bs_enabled:
+                symbol_returns = bs_symbol_returns.setdefault(sym, [])
+                symbol_returns.append(stock_daily_return)
+                if len(symbol_returns) > bs_consecutive_days:
+                    bs_symbol_returns[sym] = symbol_returns[-bs_consecutive_days:]
+            return stock_daily_return
+
+        def _portfolio_blackswan_reason(total_equity: float) -> str:
             if bs_enabled and positions and prev_portfolio_value is not None and prev_portfolio_value > 0:
                 portfolio_return = (total_equity - prev_portfolio_value) / prev_portfolio_value
                 if portfolio_return <= bs_portfolio_threshold:
-                    portfolio_blackswan_reason = f"portfolio_drop {portfolio_return * 100:.2f}%"
+                    return f"portfolio_drop {portfolio_return * 100:.2f}%"
+            return ""
 
-            to_sell = []
-            for sym in list(positions.keys()):
-                sig_df = signals.get(sym)
-                if sig_df is None or date not in sig_df.index:
-                    continue
-                row = sig_df.loc[date]
-                close = float(row.get("close", positions[sym]["avg_price"]))
-                open_price = _row_price(row, "open", close)
-                pos = positions[sym]
-                pos["high_water_mark"] = max(pos["high_water_mark"], close)
-
-                sell_reason = None
-                sell_price_ref = close
-                sell_signal_date = None
-                avg_daily_volume = _avg_daily_volume(sig_df, date, row)
-                row_atr = _get_atr(sig_df, date)
-                hd = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
-                in_cooling = min_hold_days > 0 and hd < min_hold_days
-                prev_close = _previous_close(sym, date)
-                stock_daily_return = None
-                if prev_close is not None and prev_close > 0:
-                    stock_daily_return = (close - prev_close) / prev_close
-                    if bs_enabled:
-                        symbol_returns = bs_symbol_returns.setdefault(sym, [])
-                        symbol_returns.append(stock_daily_return)
-                        if len(symbol_returns) > bs_consecutive_days:
-                            bs_symbol_returns[sym] = symbol_returns[-bs_consecutive_days:]
-
-                if gap_enabled and prev_close is not None and prev_close > 0:
-                    gap_pct = (open_price - prev_close) / prev_close
-                    if gap_pct <= gap_down_threshold:
-                        sell_reason = "GAP_DOWN"
-                        sell_price_ref = open_price
-                        gap_down_exits += 1
-
-                if not sell_reason and bs_enabled:
-                    bs_reason = portfolio_blackswan_reason
-                    if not bs_reason and stock_daily_return is not None and stock_daily_return <= bs_single_threshold:
-                        bs_reason = f"single_stock_drop {stock_daily_return * 100:.2f}%"
-                    symbol_returns = bs_symbol_returns.get(sym, [])
-                    if (
-                        not bs_reason
-                        and len(symbol_returns) >= bs_consecutive_days
-                        and all(ret <= bs_consecutive_threshold for ret in symbol_returns[-bs_consecutive_days:])
-                    ):
-                        bs_reason = "consecutive_drop"
-                    if bs_reason:
-                        sell_reason = "BLACKSWAN"
-                        sell_price_ref = close
-                        if not blackswan_activated_today:
-                            blackswan_triggers += 1
-                            _activate_backtest_blackswan(date_idx)
-                            blackswan_activated_today = True
-
-                if not sell_reason and max_holding_days > 0 and hd >= max_holding_days:
-                    sell_reason = "MAX_HOLD"
-                if not sell_reason and close <= _stop_loss_price(pos["avg_price"], row_atr):
-                    sell_reason = "STOP_LOSS"
-                if not sell_reason and close >= pos["avg_price"] * (1 + tp_rate):
-                    sell_reason = "TAKE_PROFIT"
-                if not disable_trailing_stop:
-                    ts_price = _trailing_stop_price(pos["high_water_mark"], row_atr)
-                    if not sell_reason and ts_price is not None and close <= ts_price:
-                        if in_cooling:
-                            sell_reason = None  # 냉각기: TRAILING_STOP 억제
-                        else:
-                            sell_reason = "TRAILING_STOP"
-                strategy_row, strategy_signal_date = _strategy_signal_context(sym, date)
+        def _close_rule_exit_reason(
+            sym: str,
+            pos: dict,
+            close: float,
+            row_atr,
+            hd: int,
+            in_cooling: bool,
+            stock_daily_return: float | None,
+            portfolio_blackswan_reason: str,
+            date_idx: int,
+        ) -> str | None:
+            """종가로 판정하는 청산 사유: 블랙스완 → 보유기간 만료 → 손절 → 익절 → 트레일링."""
+            nonlocal blackswan_triggers, blackswan_activated_today
+            sell_reason = None
+            if bs_enabled:
+                bs_reason = portfolio_blackswan_reason
+                if not bs_reason and stock_daily_return is not None and stock_daily_return <= bs_single_threshold:
+                    bs_reason = f"single_stock_drop {stock_daily_return * 100:.2f}%"
+                symbol_returns = bs_symbol_returns.get(sym, [])
                 if (
-                    not sell_reason
-                    and strategy_row is not None
-                    and strategy_row.get("signal") == "SELL"
+                    not bs_reason
+                    and len(symbol_returns) >= bs_consecutive_days
+                    and all(ret <= bs_consecutive_threshold for ret in symbol_returns[-bs_consecutive_days:])
                 ):
-                    if in_cooling:
-                        sell_reason = None  # 냉각기: 전략 SELL 억제
-                    else:
-                        sell_reason = "SELL"
-                        sell_signal_date = strategy_signal_date
-                        sell_price_ref = (
-                            open_price
-                            if execution_model == EXECUTION_MODEL_NEXT_OPEN
-                            else close
-                        )
-                        avg_daily_volume = _avg_daily_volume(
-                            sig_df, strategy_signal_date, strategy_row
-                        )
+                    bs_reason = "consecutive_drop"
+                if bs_reason:
+                    sell_reason = "BLACKSWAN"
+                    if not blackswan_activated_today:
+                        blackswan_triggers += 1
+                        _activate_backtest_blackswan(date_idx)
+                        blackswan_activated_today = True
 
-                if sell_reason:
-                    to_sell.append(
-                        (
-                            sym,
-                            sell_price_ref,
-                            sell_reason,
-                            avg_daily_volume,
-                            sell_signal_date,
-                        )
-                    )
-                    exit_reason_counts[sell_reason] = exit_reason_counts.get(sell_reason, 0) + 1
+            if not sell_reason and max_holding_days > 0 and hd >= max_holding_days:
+                sell_reason = "MAX_HOLD"
+            if not sell_reason and close <= _stop_loss_price(pos["avg_price"], row_atr):
+                sell_reason = "STOP_LOSS"
+            if not sell_reason and close >= pos["avg_price"] * (1 + tp_rate):
+                sell_reason = "TAKE_PROFIT"
+            if not sell_reason and not disable_trailing_stop:
+                ts_price = _trailing_stop_price(pos["high_water_mark"], row_atr)
+                # 냉각기(in_cooling)에는 TRAILING_STOP을 억제한다.
+                if ts_price is not None and close <= ts_price and not in_cooling:
+                    sell_reason = "TRAILING_STOP"
+            return sell_reason
 
-            executed_sell_count += len(to_sell)
-            for sym, close, reason, avg_daily_volume, signal_date in to_sell:
-                pos = positions.pop(sym)
-                costs = self.risk_manager.calculate_transaction_costs(
-                    close,
-                    pos["qty"],
-                    "SELL",
-                    avg_daily_volume=avg_daily_volume,
-                    avg_price=pos["avg_price"],
-                    symbol=sym,
-                )
-                sell_price = costs["execution_price"]
-                tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
-                pnl = (sell_price - pos["avg_price"]) * pos["qty"] - costs["commission"] - tax_amt
-                cash += sell_price * pos["qty"] - costs["commission"] - tax_amt
-                per_symbol_pnl[sym] = per_symbol_pnl.get(sym, 0) + pnl
-                holding_days = (date - pos["buy_date"]).days if pos.get("buy_date") and hasattr(date, "date") else 0
-                trade = {
-                    "date": date, "symbol": sym, "action": reason,
-                    "price": sell_price, "quantity": pos["qty"],
-                    "pnl": pnl, "pnl_rate": ((sell_price / pos["avg_price"]) - 1) * 100,
-                    "commission": costs["commission"],
-                    "tax": float(tax_amt),
-                    "slippage_cost": costs.get("slippage", 0),
-                    "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
-                    "participation_rate": costs.get("participation_rate", 0),
-                    "entry_score": pos.get("entry_score", 0),
-                    "score_macd": pos.get("score_macd", 0),
-                    "score_bollinger": pos.get("score_bollinger", 0),
-                    "score_volume": pos.get("score_volume", 0),
-                    "holding_days": holding_days,
-                }
-                if signal_date is not None:
-                    trade["signal_date"] = signal_date
-                trades.append(trade)
+        def _execute_exit(
+            sym: str,
+            price_ref: float,
+            reason: str,
+            avg_daily_volume: float | None,
+            signal_date,
+        ) -> None:
+            """보유 포지션 하나를 청산하고 현금·종목 손익·계측을 갱신한다."""
+            nonlocal cash, executed_sell_count
+            pos = positions.pop(sym)
+            costs = self.risk_manager.calculate_transaction_costs(
+                price_ref,
+                pos["qty"],
+                "SELL",
+                avg_daily_volume=avg_daily_volume,
+                avg_price=pos["avg_price"],
+                symbol=sym,
+            )
+            sell_price = costs["execution_price"]
+            tax_amt = costs["tax"] + costs.get("capital_gains_tax", 0)
+            pnl = (sell_price - pos["avg_price"]) * pos["qty"] - costs["commission"] - tax_amt
+            cash += sell_price * pos["qty"] - costs["commission"] - tax_amt
+            per_symbol_pnl[sym] = per_symbol_pnl.get(sym, 0) + pnl
+            trade = {
+                "date": date, "symbol": sym, "action": reason,
+                "price": sell_price, "quantity": pos["qty"],
+                "pnl": pnl, "pnl_rate": ((sell_price / pos["avg_price"]) - 1) * 100,
+                "commission": costs["commission"],
+                "tax": float(tax_amt),
+                "slippage_cost": costs.get("slippage", 0),
+                "slippage_multiplier": costs.get("slippage_multiplier", 1.0),
+                "participation_rate": costs.get("participation_rate", 0),
+                "entry_score": pos.get("entry_score", 0),
+                "score_macd": pos.get("score_macd", 0),
+                "score_bollinger": pos.get("score_bollinger", 0),
+                "score_volume": pos.get("score_volume", 0),
+                "holding_days": _holding_days(pos),
+            }
+            if signal_date is not None:
+                trade["signal_date"] = signal_date
+            trades.append(trade)
+            executed_sell_count += 1
+            exit_reason_counts[reason] = exit_reason_counts.get(reason, 0) + 1
 
-            # 시장국면 판별 (TICKET-05): T-1일 지수 기준, look-ahead bias 없음
-            regime_at_t = "bullish"
-            if regime_enabled and date in regime_series.index:
-                regime_at_t = regime_series.loc[date]
-
-            # ── 신호 집계: 전략이 생성한 원본 BUY/SELL 수 ──
+        def _count_raw_signals() -> None:
+            """전략이 오늘 종가로 낸 원본 BUY/SELL 신호 수 (체결 여부와 무관)."""
+            nonlocal signal_buy_count, signal_sell_count
             for sym in symbols:
                 sig_df = signals.get(sym)
                 if sig_df is None or date not in sig_df.index:
@@ -775,6 +782,9 @@ class PortfolioBacktester:
                 elif sig_val == "SELL":
                     signal_sell_count += 1
 
+        def _collect_buy_candidates(date_idx: int, regime_at_t: str, sold_today) -> list:
+            """오늘 체결할 예약 BUY 후보 (점수 내림차순). 진입 guard에 걸린 신호는 사유별로 센다."""
+            nonlocal gap_up_buy_blocks, earnings_buy_blocks, blackswan_buy_blocks, regime_buy_blocks
             buy_candidates = []
             if regime_at_t != "bearish":
                 for sym in symbols:
@@ -789,6 +799,10 @@ class PortfolioBacktester:
                     execution_row = sig_df.iloc[current_pos]
                     strategy_row, signal_date = _strategy_signal_context(sym, date)
                     if strategy_row is not None and strategy_row.get("signal") == "BUY":
+                        if sym in sold_today:
+                            # 같은 날 이미 청산한 종목은 다시 사지 않는다 (시가 청산 직후 재매수 방지).
+                            skipped_reasons["sold_today"] = skipped_reasons.get("sold_today", 0) + 1
+                            continue
                         close = float(execution_row.get("close", 0))
                         prev_close = _previous_close(sym, date)
                         open_price = _row_price(execution_row, "open", close)
@@ -836,7 +850,7 @@ class PortfolioBacktester:
                 # bearish: 오늘 체결될 예약 BUY 신호를 모두 차단한다.
                 blocked_pending = []
                 for sym in symbols:
-                    if sym in positions:
+                    if sym in positions or sym in sold_today:
                         continue
                     strategy_row, signal_date = _strategy_signal_context(sym, date)
                     if strategy_row is not None and strategy_row.get("signal") == "BUY":
@@ -859,23 +873,21 @@ class PortfolioBacktester:
                         })
 
             buy_candidates.sort(key=lambda x: -x[2])
+            return buy_candidates
 
+        def _execute_buys(date_idx: int, buy_candidates: list, regime_at_t: str, mark) -> None:
+            """후보 순서대로 매수한다. mark(sym)는 보유 종목 평가가격 (주문 시점에 알 수 있는 값)."""
+            nonlocal cash, executed_buy_count, regime_caution_buys, blackswan_recovery_buys
             for sym, execution_price_ref, score, sig_row, signal_date in buy_candidates:
                 if len(positions) >= max_positions:
                     skipped_reasons["max_positions"] = skipped_reasons.get("max_positions", 0) + 1
                     continue
-                total_equity_now = cash + sum(
-                    self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
-                    for s in positions
-                )
+                total_equity_now = cash + sum(mark(s) * positions[s]["qty"] for s in positions)
                 if total_equity_now <= 0:
                     skipped_reasons["no_equity"] = skipped_reasons.get("no_equity", 0) + 1
                     continue
 
-                invested_now = sum(
-                    self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
-                    for s in positions
-                )
+                invested_now = sum(mark(s) * positions[s]["qty"] for s in positions)
                 if total_equity_now > 0 and invested_now / total_equity_now >= max_investment_ratio:
                     skipped_reasons["max_investment_ratio"] = skipped_reasons.get("max_investment_ratio", 0) + 1
                     continue
@@ -984,10 +996,177 @@ class PortfolioBacktester:
                     **entry_scores,
                 })
 
-            portfolio_value = cash + sum(
-                self._get_close(signals, s, date, positions[s]["avg_price"]) * positions[s]["qty"]
-                for s in positions
-            )
+        blackswan_activated_today = False
+        for date_idx, date in enumerate(all_dates):
+            blackswan_activated_today = False
+
+            # 시장국면 판별 (TICKET-05): T-1일 지수 기준, look-ahead bias 없음
+            regime_at_t = "bullish"
+            if regime_enabled and date in regime_series.index:
+                regime_at_t = regime_series.loc[date]
+
+            if execution_model == EXECUTION_MODEL_LEGACY_SAME_CLOSE:
+                # 과거 결과 재현 경로 — 체결 순서를 바꾸지 않는다. 모든 청산 판정과 전략 주문을
+                # 당일 종가 한 시점에서 처리한다.
+                total_equity = cash + sum(_close_mark(s) * positions[s]["qty"] for s in positions)
+                portfolio_blackswan_reason = _portfolio_blackswan_reason(total_equity)
+
+                to_sell = []
+                for sym in list(positions.keys()):
+                    sig_df = signals.get(sym)
+                    if sig_df is None or date not in sig_df.index:
+                        continue
+                    row = sig_df.loc[date]
+                    close = float(row.get("close", positions[sym]["avg_price"]))
+                    open_price = _row_price(row, "open", close)
+                    pos = positions[sym]
+                    pos["high_water_mark"] = max(pos["high_water_mark"], close)
+
+                    sell_reason = None
+                    sell_price_ref = close
+                    sell_signal_date = None
+                    avg_daily_volume = _avg_daily_volume(sig_df, date, row)
+                    row_atr = _get_atr(sig_df, date)
+                    hd = _holding_days(pos)
+                    in_cooling = min_hold_days > 0 and hd < min_hold_days
+                    prev_close = _previous_close(sym, date)
+                    stock_daily_return = _record_daily_return(sym, close, prev_close)
+
+                    if gap_enabled and prev_close is not None and prev_close > 0:
+                        gap_pct = (open_price - prev_close) / prev_close
+                        if gap_pct <= gap_down_threshold:
+                            sell_reason = "GAP_DOWN"
+                            sell_price_ref = open_price
+                            gap_down_exits += 1
+
+                    if not sell_reason:
+                        sell_reason = _close_rule_exit_reason(
+                            sym, pos, close, row_atr, hd, in_cooling,
+                            stock_daily_return, portfolio_blackswan_reason, date_idx,
+                        )
+
+                    strategy_row, strategy_signal_date = _strategy_signal_context(sym, date)
+                    if (
+                        not sell_reason
+                        and strategy_row is not None
+                        and strategy_row.get("signal") == "SELL"
+                        and not in_cooling  # 냉각기: 전략 SELL 억제
+                    ):
+                        sell_reason = "SELL"
+                        sell_signal_date = strategy_signal_date
+                        avg_daily_volume = _avg_daily_volume(
+                            sig_df, strategy_signal_date, strategy_row
+                        )
+
+                    if sell_reason:
+                        to_sell.append(
+                            (sym, sell_price_ref, sell_reason, avg_daily_volume, sell_signal_date)
+                        )
+
+                for sym, price_ref, reason, avg_daily_volume, signal_date in to_sell:
+                    _execute_exit(sym, price_ref, reason, avg_daily_volume, signal_date)
+
+                _count_raw_signals()
+                buy_candidates = _collect_buy_candidates(date_idx, regime_at_t, frozenset())
+                _execute_buys(date_idx, buy_candidates, regime_at_t, _close_mark)
+            else:
+                # next_open — 실제 시간 순서: (1) 시가 청산 → (2) 시가 매수 → (3) 종가 청산.
+                # 종가 사건(손절·익절 등)이 그보다 앞선 시가 주문을 밀어내거나, 종가에 판 종목을
+                # 같은 날 시가에 다시 사는 시간 역행이 생기지 않게 한다.
+                sold_today: set[str] = set()
+
+                # (0) 데이터가 끝난 보유 종목(이후 행이 하나도 없음)은 마지막 관측 종가로 청산한다.
+                # 중간에 행만 빠진 거래정지는 청산하지 않고 마지막 종가로 평가만 한다.
+                for sym in list(positions.keys()):
+                    last_date = data_end_date.get(sym)
+                    if last_date is None or date <= last_date:
+                        continue
+                    sig_df = signals[sym]
+                    sell_reason = DATA_END_EXIT_ACTION
+                    data_end_exits += 1
+                    _execute_exit(
+                        sym, _fallback_mark(sym), sell_reason,
+                        _avg_daily_volume(sig_df, last_date, sig_df.iloc[-1]), None,
+                    )
+                    sold_today.add(sym)
+
+                # (1) 시가: 전일부터 보유한 종목만. 갭다운 청산이 먼저, 그다음 예약된 전략 SELL.
+                for sym in list(positions.keys()):
+                    sig_df = signals.get(sym)
+                    if sig_df is None or date not in sig_df.index:
+                        continue
+                    row = sig_df.loc[date]
+                    pos = positions[sym]
+                    close = float(row.get("close", pos["avg_price"]))
+                    open_price = _row_price(row, "open", close)
+                    prev_close = _previous_close(sym, date)
+
+                    if gap_enabled and prev_close is not None and prev_close > 0:
+                        gap_pct = (open_price - prev_close) / prev_close
+                        if gap_pct <= gap_down_threshold:
+                            sell_reason = "GAP_DOWN"
+                            gap_down_exits += 1
+                            _execute_exit(
+                                sym, open_price, sell_reason,
+                                _avg_daily_volume(sig_df, date, row), None,
+                            )
+                            sold_today.add(sym)
+                            continue
+
+                    hd = _holding_days(pos)
+                    in_cooling = min_hold_days > 0 and hd < min_hold_days
+                    strategy_row, strategy_signal_date = _strategy_signal_context(sym, date)
+                    if (
+                        strategy_row is not None
+                        and strategy_row.get("signal") == "SELL"
+                        and not in_cooling  # 냉각기: 전략 SELL 억제
+                    ):
+                        sell_reason = "SELL"
+                        _execute_exit(
+                            sym, open_price, sell_reason,
+                            _avg_daily_volume(sig_df, strategy_signal_date, strategy_row),
+                            strategy_signal_date,
+                        )
+                        sold_today.add(sym)
+
+                # (2) 시가 매수: 수량·비중 한도는 시가 시점에 알 수 있는 평가가격으로 계산한다.
+                buy_candidates = _collect_buy_candidates(date_idx, regime_at_t, sold_today)
+                _execute_buys(date_idx, buy_candidates, regime_at_t, _open_mark)
+
+                # (3) 종가: 시가를 넘긴 포지션(오늘 산 종목 포함)에 종가 기준 청산 규칙을 적용한다.
+                # 포트폴리오 급락 판정도 시가 거래까지 반영한 종가 기준 자산으로 한다.
+                total_equity = cash + sum(_close_mark(s) * positions[s]["qty"] for s in positions)
+                portfolio_blackswan_reason = _portfolio_blackswan_reason(total_equity)
+                to_sell = []
+                for sym in list(positions.keys()):
+                    sig_df = signals.get(sym)
+                    if sig_df is None or date not in sig_df.index:
+                        continue
+                    row = sig_df.loc[date]
+                    pos = positions[sym]
+                    close = float(row.get("close", pos["avg_price"]))
+                    pos["high_water_mark"] = max(pos["high_water_mark"], close)
+                    hd = _holding_days(pos)
+                    in_cooling = min_hold_days > 0 and hd < min_hold_days
+                    prev_close = _previous_close(sym, date)
+                    stock_daily_return = _record_daily_return(sym, close, prev_close)
+                    sell_reason = _close_rule_exit_reason(
+                        sym, pos, close, _get_atr(sig_df, date), hd, in_cooling,
+                        stock_daily_return, portfolio_blackswan_reason, date_idx,
+                    )
+                    if sell_reason:
+                        to_sell.append(
+                            (sym, close, sell_reason, _avg_daily_volume(sig_df, date, row), None)
+                        )
+                for sym, price_ref, reason, avg_daily_volume, signal_date in to_sell:
+                    _execute_exit(sym, price_ref, reason, avg_daily_volume, signal_date)
+
+                # 원본 신호 집계는 신호가 확정되는 장 마감 기준 보유 상태로 센다.
+                _count_raw_signals()
+
+            for sym in positions:
+                last_close[sym] = _close_mark(sym)
+            portfolio_value = cash + sum(last_close[s] * positions[s]["qty"] for s in positions)
             equity_curve.append({
                 "date": date,
                 "value": portfolio_value,
@@ -1031,6 +1210,7 @@ class PortfolioBacktester:
             "blackswan_triggers": blackswan_triggers,
             "blackswan_buy_blocks": blackswan_buy_blocks,
             "blackswan_recovery_buys": blackswan_recovery_buys,
+            "data_end_exits": data_end_exits,
         }
 
     @staticmethod
@@ -1151,6 +1331,7 @@ class PortfolioBacktester:
             "blackswan_triggers": result.get("blackswan_triggers", 0),
             "blackswan_buy_blocks": result.get("blackswan_buy_blocks", 0),
             "blackswan_recovery_buys": result.get("blackswan_recovery_buys", 0),
+            "data_end_exits": result.get("data_end_exits", 0),
         }
         cost_impact = summarize_cost_impact(metrics, trades)
         metrics.update(cost_impact_metric_fields(cost_impact))
@@ -1217,6 +1398,7 @@ class PortfolioBacktester:
         print(f"    blackswan_triggers   : {result.get('blackswan_triggers', 0):>5d}건")
         print(f"    blackswan_buy_blocks : {result.get('blackswan_buy_blocks', 0):>5d}건")
         print(f"    blackswan_recovery_buys: {result.get('blackswan_recovery_buys', 0):>5d}건")
+        print(f"    data_end_exits       : {result.get('data_end_exits', 0):>5d}건 (데이터 종료 강제 청산)")
         if result.get("blocked_buy_examples"):
             print(f"  [진단: blocked BUY 예시 (최대 10건)]")
             for ex in result["blocked_buy_examples"]:
