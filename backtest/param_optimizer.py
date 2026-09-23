@@ -145,8 +145,12 @@ def _run_single(
     config: Config,
     strict_lookahead: bool,
     initial_capital: float,
+    trade_start_date=None,
 ) -> Optional[dict]:
-    """한 번의 백테스트 실행. 실패 시 None."""
+    """한 번의 백테스트 실행. 실패 시 None.
+
+    trade_start_date가 있으면 그 이전 행은 지표 워밍업으로만 쓰고 거래·지표는 그 날짜부터 잰다.
+    """
     try:
         backtester = Backtester(config=config)
         result = backtester.run(
@@ -155,6 +159,7 @@ def _run_single(
             initial_capital=initial_capital,
             strict_lookahead=strict_lookahead,
             param_overrides={strategy_name: param_overrides},
+            trade_start_date=trade_start_date,
         )
         return result.get("metrics") if result else None
     except Exception as e:
@@ -285,9 +290,11 @@ def grid_search(
 
     oos_metrics = None
     if df_oos is not None and len(df_oos) >= 30:
+        # OOS는 학습 구간을 지표 워밍업으로 함께 넣고 거래·지표는 OOS 구간만 잰다.
         oos_metrics = _run_single(
-            df_oos, strategy_name, best_params, config,
+            df, strategy_name, best_params, config,
             strict_lookahead, initial_capital,
+            trade_start_date=df_oos.index[0],
         )
         logger.info(
             "OOS 구간 성과 (오버피팅 확인용): {} ~ {} | {}={}",
@@ -472,8 +479,10 @@ def grid_search_scoring_weights(
         logger.warning("OOS 구간이 30거래일 미만입니다. 채택 검증을 수행할 수 없습니다.")
         return None
 
+    # OOS는 학습 구간을 지표 워밍업으로 함께 넣고 거래·지표는 OOS 구간만 잰다.
     oos_metrics = _run_single(
-        df_oos, "scoring", best["params"], config, strict_lookahead, initial_capital,
+        df, "scoring", best["params"], config, strict_lookahead, initial_capital,
+        trade_start_date=df_oos.index[0],
     )
     oos_sharpe = None
     if oos_metrics:
@@ -667,9 +676,11 @@ def bayesian_optimize(
 
     oos_metrics = None
     if df_oos is not None and len(df_oos) >= 30:
+        # OOS는 학습 구간을 지표 워밍업으로 함께 넣고 거래·지표는 OOS 구간만 잰다.
         oos_metrics = _run_single(
-            df_oos, strategy_name, best_params, config,
+            df, strategy_name, best_params, config,
             strict_lookahead, initial_capital,
+            trade_start_date=df_oos.index[0],
         )
 
     return {

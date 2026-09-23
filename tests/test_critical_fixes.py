@@ -1266,12 +1266,17 @@ def _build_offline_walk_forward_validator(monkeypatch, tmp_path):
             frame["close"] = frame["close"] * 0.95
         return frame
 
-    def fake_run(df, *, strategy_name, strict_lookahead=True):
+    def fake_run(df, *, strategy_name, strict_lookahead=True, trade_start_date=None):
         run_calls.append(
             {
                 "strategy_name": strategy_name,
                 "strict_lookahead": strict_lookahead,
                 "rows": len(df),
+                "warmup_rows": (
+                    int(df.index.searchsorted(pd.Timestamp(trade_start_date)))
+                    if trade_start_date is not None
+                    else 0
+                ),
             }
         )
         return {
@@ -1316,7 +1321,11 @@ class TestWalkForwardWindows:
         ]
         assert len(run_calls) == n_total
         assert all(call["strict_lookahead"] is True for call in run_calls)
-        assert all(call["rows"] == 252 for call in run_calls)
+        # 감사 수정(워크포워드 콜드 스타트): 예전엔 테스트 252행만 넘겨 60~200일 지표가 창
+        # 앞부분 내내 꺼져 있었다. 이제 각 창은 직전 train_days(504행)를 지표 워밍업으로 함께
+        # 넘기고 trade_start_date(테스트 시작일)부터 거래·평가한다.
+        assert all(call["rows"] == 504 + 252 for call in run_calls)
+        assert all(call["warmup_rows"] == 504 for call in run_calls)
         assert str(result["report_path"]).startswith(str(tmp_path))
 
     def test_wf_result_has_flat_keys(self, monkeypatch, tmp_path):

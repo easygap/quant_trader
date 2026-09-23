@@ -285,10 +285,14 @@ class StrategyValidator:
             strategy_name=strategy_name,
             strict_lookahead=True,
         )
+        # OOS는 인샘플 구간을 지표 워밍업으로 함께 넣고 거래·지표는 OOS 구간만 잰다.
+        # OOS만 잘라 넣으면 60~200일 지표가 구간 앞부분에서 꺼져 있어 전략이 아니라
+        # 워밍업을 평가하게 된다.
         out_sample_result = self.backtester.run(
-            strategy_df.iloc[split_idx:].copy(),
+            strategy_df.copy(),
             strategy_name=strategy_name,
             strict_lookahead=True,
+            trade_start_date=strategy_df.index[split_idx],
         )
 
         benchmark = {
@@ -408,8 +412,11 @@ class StrategyValidator:
     ) -> dict:
         """
         워크포워드(슬라이딩 윈도우) 검증.
-        train_days 기간 훈련 구간 다음 test_days 기간을 테스트로 사용하고, step_days만큼 슬라이드해 반복.
-        예: train_days=504(2년), test_days=252(1년), step_days=252 → 2019~2020 훈련→2021 테스트, 2020~2021→2022 테스트, ...
+        train_days 구간 다음 test_days 구간을 테스트로 사용하고, step_days만큼 슬라이드해 반복.
+        예: train_days=504(2년), test_days=252(1년), step_days=252 → 2019~2020 워밍업→2021 테스트, ...
+
+        train_days 구간은 파라미터를 학습하지 않고 지표 워밍업으로만 쓴다(결과의 warmup_period).
+        각 창은 워밍업+테스트 구간을 함께 넣고 거래·지표는 테스트 구간만 잰다.
         """
         if validation_years < 3:
             logger.warning("검증 연수는 최소 3년 권장. {}년 → 3년으로 적용합니다.", validation_years)
@@ -437,18 +444,23 @@ class StrategyValidator:
             test_end = test_start + test_days
             if test_end > len(strategy_df):
                 break
-            test_df = strategy_df.iloc[test_start:test_end].copy()
+            # 평가 구간(벤치마크 슬라이스도 이 구간 기준)
+            test_df = strategy_df.iloc[test_start:test_end]
+            # 창 직전 train_days 구간을 지표 워밍업으로 함께 넣는다. 테스트 구간만 잘라 넣으면
+            # 60~200일 지표를 쓰는 전략이 창 앞부분 내내 신호를 못 내 통과율이 워밍업을 잰다.
+            window_df = strategy_df.iloc[train_start:test_end].copy()
             try:
                 test_result = self.backtester.run(
-                    test_df,
+                    window_df,
                     strategy_name=strategy_name,
                     strict_lookahead=True,
+                    trade_start_date=strategy_df.index[test_start],
                 )
             except Exception as e:
                 logger.warning("워크포워드 창 {} 백테스트 실패: {}", i + 1, e)
                 windows.append({
                     "window": i + 1,
-                    "train_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
+                    "warmup_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
                     "test_period": f"{strategy_df.index[test_start].date()} ~ {strategy_df.index[test_end - 1].date()}",
                     "metrics": None,
                     "passed": False,
@@ -464,7 +476,7 @@ class StrategyValidator:
                     bench = self._buy_and_hold_metrics(bench_slice, test_result["initial_capital"])
             windows.append({
                 "window": i + 1,
-                "train_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
+                "warmup_period": f"{strategy_df.index[train_start].date()} ~ {strategy_df.index[train_end - 1].date()}",
                 "test_period": f"{strategy_df.index[test_start].date()} ~ {strategy_df.index[test_end - 1].date()}",
                 "metrics": metrics,
                 "benchmark": bench,
@@ -583,7 +595,8 @@ class StrategyValidator:
             "=" * 70,
             f"워크포워드 검증 리포트 | {result['strategy']} | {result['symbol']}",
             f"기간: {result['period']}",
-            f"train_days={result['train_days']} test_days={result['test_days']} step_days={result['step_days']}",
+            f"워밍업(train_days)={result['train_days']} test_days={result['test_days']} step_days={result['step_days']} "
+            "— 워밍업 구간은 지표 예열에만 쓰고 파라미터 학습은 하지 않는다",
             f"기준: 샤프({BACKTEST_RISK_FREE_LABEL}) ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
             f"창별 통과: {result['n_passed']}/{result['n_total']} | 기준 미달 창: {result.get('n_failed', 0)}",
             f"통과율: {result.get('pass_rate', 0) * 100:.1f}% | 80% 이상 워크포워드 통과: {result.get('wf_passed', False)}",
@@ -843,13 +856,19 @@ class StrategyValidator:
 
         split_idx = max(60, int(len(df) * 0.7))
         split_idx = min(split_idx, len(df) - 30)
-        oos_df = df.iloc[split_idx:].copy()
+        oos_start = df.index[split_idx]
 
         results = {}
         for strat in strategies:
             try:
                 full = self.backtester.run(df.copy(), strategy_name=strat, strict_lookahead=True)
-                oos = self.backtester.run(oos_df.copy(), strategy_name=strat, strict_lookahead=True)
+                # OOS도 앞 구간을 지표 워밍업으로 넣고 거래·지표는 OOS 구간만 잰다 (run()과 같은 규약).
+                oos = self.backtester.run(
+                    df.copy(),
+                    strategy_name=strat,
+                    strict_lookahead=True,
+                    trade_start_date=oos_start,
+                )
                 results[strat] = {
                     "full": full["metrics"],
                     "oos": oos["metrics"],

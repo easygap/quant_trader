@@ -65,6 +65,13 @@ def _validate_execution_model(execution_model: str) -> str:
     return execution_model
 
 
+def _trade_start_position(index: pd.Index, trade_start_date) -> int:
+    """trade_start_date 이상인 첫 행의 위치. None이면 0 (워밍업 없음)."""
+    if trade_start_date is None:
+        return 0
+    return int(index.searchsorted(pd.Timestamp(trade_start_date), side="left"))
+
+
 def _count_roundtrips(trades: list) -> int:
     """완전 청산 1회당 왕복 1회 (부분 익절 후 잔량 청산까지 한 사이클로 묶음)."""
     pos = 0
@@ -146,6 +153,7 @@ class Backtester:
         notify_overtrading: bool = False,
         symbol: str = None,
         execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
+        trade_start_date=None,
     ) -> dict:
         """
         백테스팅 실행
@@ -162,6 +170,10 @@ class Backtester:
             execution_model: 전략 신호 체결 모델. 기본값 ``next_open``은 T일 종가로
                 확정된 BUY/SELL 신호를 다음 거래일 시가에 체결한다.
                 과거 결과 재현이 필요할 때만 ``legacy_same_close``를 사용한다.
+            trade_start_date: 데이터 워밍업과 별도로 실제 거래·평가를 시작할 날짜
+                (PortfolioBacktester.run과 같은 규약). 이전 행은 지표 계산에만 쓰고, 거래·자본
+                곡선·성과 지표는 이 날짜부터 잰다. 직전 행의 신호는 next_open에서 첫날 시가에
+                체결될 수 있다. None이면 첫 행부터 거래한다.
 
         Returns:
             백테스팅 결과 딕셔너리
@@ -172,14 +184,27 @@ class Backtester:
             ).get("initial_capital", 10000000)
 
         execution_model = _validate_execution_model(execution_model)
+        start_pos = _trade_start_position(df.index, trade_start_date)
+        if trade_start_date is not None and start_pos >= len(df):
+            raise ValueError(
+                f"trade_start_date={trade_start_date} 이후 거래할 데이터가 없습니다 "
+                f"(마지막 행 {df.index[-1] if len(df) else 'N/A'})."
+            )
 
         self._param_overrides = param_overrides
         strategy = self._get_strategy(strategy_name)
         if strict_lookahead:
             # Look-Ahead Bias 방어: 시점 T에서는 T 이전(및 T) 데이터만 사용
             logger.info("strict_lookahead=True: 시점별 슬라이싱 분석 실행 중...")
+            # 워밍업 행 중 신호가 쓰이지 않는 행(거래 시작 전날보다 앞)은 분석을 건너뛴다.
+            # 쓰이는 행의 신호는 여전히 그 시점까지의 데이터(df[:i+1])로만 계산하므로
+            # 지표는 워밍업 구간 전체로 예열된 상태다.
+            first_needed = max(0, start_pos - 1)
             rows = []
             for i in range(len(df)):
+                if i < first_needed:
+                    rows.append({"signal": "HOLD", "close": df.iloc[i]["close"]})
+                    continue
                 chunk = strategy.analyze(df.iloc[: i + 1].copy())
                 if not chunk.empty and "signal" in chunk.columns:
                     rows.append(chunk.iloc[-1].to_dict())
@@ -188,6 +213,13 @@ class Backtester:
             df_analyzed = pd.DataFrame(rows, index=df.index)
             if "close" not in df_analyzed.columns:
                 df_analyzed["close"] = df["close"].values
+            if first_needed > 0:
+                # 분석을 건너뛴 워밍업 행은 원본 값으로 채운다 (거래량 이동평균·전일 종가 계산용).
+                for col in df.columns:
+                    if col in df_analyzed.columns and col != "signal":
+                        df_analyzed.iloc[:first_needed, df_analyzed.columns.get_loc(col)] = (
+                            df[col].iloc[:first_needed].to_numpy()
+                        )
         else:
             df_analyzed = strategy.analyze(df.copy())
 
@@ -229,6 +261,7 @@ class Backtester:
             regime_series=regime_series,
             symbol=symbol,
             execution_model=execution_model,
+            trade_start_date=trade_start_date,
         )
         result["look_ahead_bias_verified"] = (
             "STRICT" if strict_lookahead else "DISABLED_WITH_WARNING"
@@ -257,7 +290,9 @@ class Backtester:
             "trades": result["trades"],
             "equity_curve": result["equity_curve"],
             "strategy": strategy_name,
-            "period": f"{df.index[0]} ~ {df.index[-1]}",
+            # 평가(거래) 구간. 워밍업 행은 기간에 넣지 않는다.
+            "period": f"{df.index[start_pos]} ~ {df.index[-1]}",
+            "warmup_rows": start_pos,
             "initial_capital": initial_capital,
             "execution_model": execution_model,
             "look_ahead_bias_verified": result.get("look_ahead_bias_verified", "PASS"),
@@ -397,17 +432,20 @@ class Backtester:
         regime_series: pd.Series = None,
         symbol: str = None,
         execution_model: str = EXECUTION_MODEL_NEXT_OPEN,
+        trade_start_date=None,
     ) -> dict:
         """
         거래 시뮬레이션 실행.
         방어: 날짜 순으로 순회하며 미래 행을 참조하지 않는다. 기본 ``next_open``은
         T일 종가로 확정된 전략 신호를 T+1일 시가에 체결한다.
         설정에 따라 ATR 손절, 1% 룰 포지션 사이징, 부분 익절을 반영한다.
+        trade_start_date 이전 행(워밍업)은 건너뛰고, 거래·자본 곡선은 그 날짜부터 기록한다.
         """
         execution_model = _validate_execution_model(execution_model)
         assert df.index.is_monotonic_increasing or len(df) <= 1, (
             "시뮬레이션은 시간 순서대로만 순회해야 하며, 미래 데이터를 참조하지 않습니다."
         )
+        start_pos = _trade_start_position(df.index, trade_start_date)
         cash = initial_capital
         position = 0
         avg_price = 0
@@ -824,6 +862,9 @@ class Backtester:
                 sold_today = True
 
         for i, (date, row) in enumerate(df.iterrows()):
+            if i < start_pos:
+                # 워밍업 구간: 지표 예열에만 쓰고 거래·자본 곡선은 기록하지 않는다.
+                continue
             close = row["close"]
             raw_open = row.get("open")
             valid_open = (
