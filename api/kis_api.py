@@ -62,6 +62,13 @@ def _shared_rate_state(
                 "minute_window": deque(),
                 "token_lock": threading.Lock(),
                 "minute_lock": threading.Lock(),
+                # 사용량 카운터도 호출 예산과 같은 단위로 프로세스 전체가 공유한다.
+                # 인스턴스별로 세면 새로 만든 인스턴스의 통계는 늘 0건·429 0회라
+                # 429 폭주·연결 오류가 로그에서 보이지 않는다. minute_lock으로 보호.
+                "created_at": time.monotonic(),
+                "total_requests": 0,
+                "total_429s": 0,
+                "total_conn_errors": 0,
             }
             _RATE_STATE_REGISTRY[key] = state
         else:
@@ -76,6 +83,50 @@ def _shared_rate_state(
                 float(state["tokens"]), float(state["max_calls_per_sec"])
             )
         return state
+
+
+# 접근 토큰도 호출 예산처럼 (base_url, app_key) 단위로 프로세스 전체가 공유한다.
+# 인스턴스마다 토큰을 따로 발급하면 live 한 사이클(동기화·잔고 요약·매수마다 새
+# KISApi)에서 몇 초 사이에 발급 요청이 여러 번 나가는데, KIS는 발급을 1분당 1회로
+# 제한한다(EGW00133). 두 번째 발급부터 거절돼 잔고 확인이 실패하고, 그 결과 live
+# 매수가 전부 보류되며 인증 실패 알림이 폭주한다. 모의(VTS)와 실전은 base_url이
+# 달라 절대 같은 토큰을 쓰지 않는다.
+TOKEN_ERROR_COOLDOWN_SECONDS = 60.0
+_TOKEN_REGISTRY_LOCK = threading.Lock()
+_TOKEN_REGISTRY: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _new_token_state() -> dict[str, Any]:
+    return {
+        # 발급 요청(네트워크)을 이 락 안에서 수행해 동시 발급을 한 번으로 모은다.
+        "lock": threading.RLock(),
+        "access_token": None,
+        "expires_at": None,       # 로컬 시각 기준, 실제 만료보다 1시간 당겨 둔 값
+        "issued_at": None,
+        "issue_count": 0,
+        # 발급 실패 후 재발급 억제 종료 시각(time.monotonic 기준). 발급에 성공하면
+        # 즉시 0으로 돌아간다 — 다른 인스턴스의 성공 뒤까지 쿨다운이 남지 않는다.
+        "error_until": 0.0,
+        "last_error": "",
+        "last_error_at": None,
+    }
+
+
+def _shared_token_state(base_url: str, app_key: str) -> dict[str, Any]:
+    """같은 KIS app/domain 인스턴스들이 공유하는 토큰 상태."""
+    key = (str(base_url), str(app_key))
+    with _TOKEN_REGISTRY_LOCK:
+        state = _TOKEN_REGISTRY.get(key)
+        if state is None:
+            state = _new_token_state()
+            _TOKEN_REGISTRY[key] = state
+        return state
+
+
+def reset_shared_token_cache() -> None:
+    """프로세스 공유 토큰 캐시를 비운다(테스트 격리·운영 점검용)."""
+    with _TOKEN_REGISTRY_LOCK:
+        _TOKEN_REGISTRY.clear()
 
 
 class KISTokenExpiredError(Exception):
@@ -126,9 +177,14 @@ class KISApi:
                 self.base_url,
             )
 
-        # 인증 토큰
+        # 인증 토큰: (base_url, app_key)별 프로세스 공유 캐시를 쓴다. 인스턴스
+        # 필드(_access_token 등)는 공유 토큰의 미러다 — 요청 때마다 다시 맞춘다.
+        # 발급 실패 쿨다운(_token_error_until)도 공유 상태에 있으므로 여기서
+        # 초기화하지 않는다(새 인스턴스가 진행 중인 쿨다운을 지우면 안 된다).
+        self._token_state = _shared_token_state(self.base_url, self.app_key)
         self._access_token = None
         self._token_expires_at = None
+        self._adopt_shared_token()
 
         # 계좌번호 파싱 (XXXXXXXX-XX)
         parts = self.account_no.split("-")
@@ -149,20 +205,12 @@ class KISApi:
         self._tokens = self._rate_state["tokens"]
         self._last_refill = self._rate_state["last_refill"]
         self._token_lock = self._rate_state["token_lock"]
-        self._auth_lock = threading.Lock()
 
         # 분당 슬라이딩 윈도우: 최근 60초 내 요청 타임스탬프
         self._minute_window = self._rate_state["minute_window"]
         self._minute_lock = self._rate_state["minute_lock"]
 
-        # 모니터링 카운터 (사용량 추적)
-        self._total_requests = 0
-        self._total_429s = 0
-        self._total_conn_errors = 0
-        self._session_start = time.monotonic()
-
-        # 토큰 에러 쿨다운: 발급 실패 시 60초간 재시도 억제
-        self._token_error_until: float = 0.0
+        # 모니터링 카운터(총 요청·429·연결 오류)는 _rate_state에서 프로세스 공유로 센다.
 
         masked_account = "미설정"
         if self.account_no:
@@ -230,76 +278,190 @@ class KISApi:
     # 인증
     # =============================================================
 
-    def authenticate(self) -> bool:
-        """
-        OAuth 토큰 발급 (동시 갱신 방지를 위해 Lock 사용)
-        Returns:
-            성공 여부
-        """
-        with self._auth_lock:
-            return self._authenticate_impl()
+    def _get_token_state(self) -> dict[str, Any]:
+        """이 인스턴스가 쓰는 토큰 상태(정상 인스턴스는 프로세스 공유 항목).
 
-    def _authenticate_impl(self) -> bool:
-        """토큰 발급 실제 로직 (Lock 내부에서만 호출)."""
+        ``object.__new__``로 만든 테스트 더블처럼 ``__init__``을 거치지 않은
+        인스턴스는 공유 레지스트리를 오염시키지 않도록 인스턴스 전용 상태를 쓴다.
+        """
+        state = self.__dict__.get("_token_state")
+        if state is None:
+            state = _new_token_state()
+            self.__dict__["_token_state"] = state
+        return state
+
+    @property
+    def _token_error_until(self) -> float:
+        """토큰 발급 실패 쿨다운 종료 시각(time.monotonic 기준, 공유 상태)."""
+        return float(self._get_token_state().get("error_until") or 0.0)
+
+    @_token_error_until.setter
+    def _token_error_until(self, value: float) -> None:
+        state = self._get_token_state()
+        with state["lock"]:
+            state["error_until"] = float(value or 0.0)
+
+    def _adopt_shared_token(self) -> bool:
+        """공유 캐시에 유효한 토큰이 있으면 인스턴스 미러에 반영하고 True."""
+        state = self._get_token_state()
+        with state["lock"]:
+            token = state.get("access_token")
+            expires_at = state.get("expires_at")
+        if token and expires_at is not None and datetime.now() < expires_at:
+            self._access_token = token
+            self._token_expires_at = expires_at
+            return True
+        return False
+
+    def token_status(self) -> Dict[str, Any]:
+        """토큰을 새로 발급하지 않고 공유 캐시 상태만 보고한다(헬스체크용).
+
+        토큰 값 자체는 돌려주지 않는다 — 로그·알림으로 새지 않게.
+        """
+        state = self._get_token_state()
+        with state["lock"]:
+            token = state.get("access_token")
+            expires_at = state.get("expires_at")
+            issued_at = state.get("issued_at")
+            error_until = float(state.get("error_until") or 0.0)
+            last_error = state.get("last_error") or ""
+            last_error_at = state.get("last_error_at")
+        return {
+            "has_token": bool(token),
+            "valid": bool(token) and expires_at is not None and datetime.now() < expires_at,
+            "expires_at": expires_at,
+            "issued_at": issued_at,
+            "cooldown_remaining": max(0.0, error_until - time.monotonic()),
+            "last_error": last_error,
+            "last_error_at": last_error_at,
+        }
+
+    def authenticate(self) -> bool:
+        """유효한 접근 토큰을 확보한다(성공 여부 반환).
+
+        같은 (base_url, app_key)의 인스턴스들은 토큰 하나를 공유한다. 유효한 공유
+        토큰이 있으면 발급 요청 없이 그대로 쓰고, 없을 때만 발급한다. 발급이
+        실패하면 60초 동안 어느 인스턴스도 다시 발급을 시도하지 않는다.
+        """
+        return self._acquire_token()
+
+    def _acquire_token(self, rejected_token: Optional[str] = None) -> bool:
+        """공유 토큰을 확보한다. rejected_token은 서버가 거절(401 등)한 토큰.
+
+        거절된 토큰이 아직 공유 캐시에 있으면 폐기하고 새로 발급한다. 다른
+        인스턴스가 이미 새 토큰으로 바꿔 놓았으면 발급 없이 그 토큰을 쓴다 —
+        401을 받은 인스턴스마다 재발급하면 1분 1회 한도에 바로 걸린다.
+        """
         if not self._is_configured():
             logger.warning("KIS API 키가 설정되지 않았습니다. settings.yaml을 확인해주세요.")
             return False
 
+        state = self._get_token_state()
+        with state["lock"]:
+            token = state.get("access_token")
+            expires_at = state.get("expires_at")
+            if rejected_token is not None and token == rejected_token:
+                state["access_token"] = None
+                state["expires_at"] = None
+                token = None
+            if token and expires_at is not None and datetime.now() < expires_at:
+                self._access_token = token
+                self._token_expires_at = expires_at
+                return True
+
+            remaining = float(state.get("error_until") or 0.0) - time.monotonic()
+            if remaining > 0:
+                logger.warning(
+                    "KIS 토큰 발급 억제 중 ({:.0f}초 남음) — 직전 발급 실패: {}",
+                    remaining, state.get("last_error") or "원인 미상",
+                )
+                return False
+
+            ok, failure = self._issue_token(state)
+            if ok:
+                return True
+            state["error_until"] = time.monotonic() + TOKEN_ERROR_COOLDOWN_SECONDS
+            state["last_error"] = failure
+            state["last_error_at"] = datetime.now()
+            self._access_token = None
+            self._token_expires_at = None
+
+        # 알림은 Discord·SMTP 네트워크 I/O라 락을 놓은 뒤 보낸다 — 다른 인스턴스가
+        # 알림 전송 시간만큼 토큰 확인에서 막히지 않게. 쿨다운 동안의 재시도는
+        # 위에서 발급 없이 끝나므로 알림도 발급 실패 1건당 1번만 나간다.
+        self._notify_auth_failure(
+            f"{failure} ({TOKEN_ERROR_COOLDOWN_SECONDS:.0f}초간 재발급 억제)"
+        )
+        return False
+
+    def _issue_token(self, state: dict[str, Any]) -> tuple[bool, str]:
+        """토큰 발급 POST. state 락 안에서만 호출하며 성공 시 공유 상태를 갱신한다.
+
+        Returns:
+            (성공 여부, 실패 사유)
+        """
         url = f"{self.base_url}/oauth2/tokenP"
         body = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
+        domain = "모의투자" if self.use_mock else "실전"
 
         try:
             response = requests.post(url, json=body, timeout=10)
-            domain = "모의투자" if self.use_mock else "실전"
             if not response.ok:
                 try:
                     err_body = response.json()
-                    err_msg = err_body.get("msg", err_body.get("error_description", str(err_body)))[:200]
+                    err_msg = str(
+                        err_body.get("msg", err_body.get("error_description", str(err_body)))
+                    )[:200]
                 except Exception:
-                    err_msg = response.text[:200] if response.text else ""
+                    err_msg = str(response.text or "")[:200]
                 logger.error(
                     "KIS API 토큰 발급 실패 [{}] {} (app_key: {})",
                     response.status_code, err_msg, self._mask_key(self.app_key),
                 )
-                self._notify_auth_failure(
-                    f"HTTP {response.status_code} / {err_msg or '토큰 발급 실패'}"
-                )
-                return False
+                return False, f"HTTP {response.status_code} / {err_msg or '토큰 발급 실패'}"
             response.raise_for_status()
             data = response.json()
-
-            self._access_token = data.get("access_token")
+            access_token = data.get("access_token")
+            if not access_token:
+                logger.error("KIS API 토큰 발급 실패: 응답에 access_token 없음 (도메인: {})", domain)
+                return False, "토큰 발급 응답에 access_token 없음"
             # 토큰 유효시간 (기본 24시간에서 1시간 여유)
             expires_in = int(data.get("expires_in", 86400))
-            self._token_expires_at = datetime.now() + timedelta(seconds=expires_in - 3600)
-
-            logger.info(
-                "KIS API 토큰 발급 성공 (도메인: {}, 만료: {})",
-                domain, self._token_expires_at,
-            )
-            return True
+            expires_at = datetime.now() + timedelta(seconds=expires_in - 3600)
         except requests.RequestException as e:
             logger.error(
                 "KIS API 토큰 발급 네트워크 오류: {} (url: {})",
                 e, url.split("?")[0],
             )
-            self._notify_auth_failure(str(e))
-            return False
+            return False, str(e)
         except Exception as e:
             logger.error("KIS API 토큰 발급 실패: {}", e)
-            self._notify_auth_failure(str(e))
-            return False
+            return False, str(e)
 
-    def _ensure_token(self):
-        """토큰이 유효한지 확인하고, 만료 임박 시 갱신"""
-        if self._access_token is None or (
-            self._token_expires_at and datetime.now() >= self._token_expires_at
-        ):
-            self.authenticate()
+        state["access_token"] = access_token
+        state["expires_at"] = expires_at
+        state["issued_at"] = datetime.now()
+        state["issue_count"] = int(state.get("issue_count") or 0) + 1
+        state["error_until"] = 0.0
+        state["last_error"] = ""
+        state["last_error_at"] = None
+        self._access_token = access_token
+        self._token_expires_at = expires_at
+        logger.info(
+            "KIS API 토큰 발급 성공 (도메인: {}, 만료: {})",
+            domain, expires_at,
+        )
+        return True, ""
+
+    def _ensure_token(self) -> bool:
+        """유효한 공유 토큰을 미러에 반영하고, 없거나 만료됐으면 발급을 시도한다."""
+        if self._adopt_shared_token():
+            return True
+        return self._acquire_token()
 
     def _get_headers(self, tr_id: str) -> dict:
         """API 요청 헤더 생성"""
@@ -345,7 +507,23 @@ class KISApi:
         # 분당 윈도우에 현재 요청 기록
         with state["minute_lock"]:
             state["minute_window"].append(time.monotonic())
-        self._total_requests += 1
+            state["total_requests"] = int(state.get("total_requests") or 0) + 1
+
+    def _bump_usage_counter(self, name: str) -> int:
+        """사용량 카운터(total_429s 등)를 1 올리고 새 값을 반환한다.
+
+        정상 인스턴스는 프로세스 공유 상태를 올린다. ``__init__``을 거치지 않은
+        테스트 더블(_rate_state 없음)은 인스턴스 속성으로 센다.
+        """
+        state = self.__dict__.get("_rate_state")
+        if state is None:
+            value = int(self.__dict__.get(f"_{name}", 0) or 0) + 1
+            self.__dict__[f"_{name}"] = value
+            return value
+        with state["minute_lock"]:
+            value = int(state.get(name) or 0) + 1
+            state[name] = value
+            return value
 
     def _wait_for_minute_window(self):
         """분당 한도 초과 시 가장 오래된 요청이 윈도우를 벗어날 때까지 대기."""
@@ -369,7 +547,7 @@ class KISApi:
             time.sleep(wait)
 
     def get_rate_limit_stats(self) -> dict:
-        """현재 Rate Limiter 사용량 통계 반환."""
+        """현재 Rate Limiter 사용량 통계 반환 (같은 app/domain 프로세스 전체 합계)."""
         state = self._rate_state
         with state["minute_lock"]:
             now = time.monotonic()
@@ -378,16 +556,20 @@ class KISApi:
             while window and window[0] < cutoff:
                 window.popleft()
             recent_minute = len(window)
+            total_requests = int(state.get("total_requests") or 0)
+            total_429s = int(state.get("total_429s") or 0)
+            total_conn_errors = int(state.get("total_conn_errors") or 0)
+            started_at = float(state.get("created_at") or now)
 
-        elapsed_sec = max(1, time.monotonic() - self._session_start)
+        elapsed_sec = max(1, time.monotonic() - started_at)
         return {
-            "total_requests": self._total_requests,
-            "total_429s": self._total_429s,
-            "total_conn_errors": self._total_conn_errors,
+            "total_requests": total_requests,
+            "total_429s": total_429s,
+            "total_conn_errors": total_conn_errors,
             "requests_last_60s": recent_minute,
             "max_per_sec": state["max_calls_per_sec"],
             "max_per_min": state["max_calls_per_min"],
-            "avg_per_sec": round(self._total_requests / elapsed_sec, 2),
+            "avg_per_sec": round(total_requests / elapsed_sec, 2),
             "minute_utilization_pct": round(
                 recent_minute / int(state["max_calls_per_min"]) * 100, 1
             ),
@@ -448,6 +630,12 @@ class KISApi:
                 return {}
 
             headers = self._get_headers(tr_id)
+            if time.monotonic() < self._token_error_until:
+                # 토큰을 확보하지 못했다(발급 실패 → 공유 쿨다운). 'Bearer None'으로
+                # 요청을 보내 401만 되돌려 받는 대신 여기서 멈춘다.
+                logger.warning("KIS 접근 토큰 없음 — 요청 스킵: {}", path)
+                return {}
+            used_token = getattr(self, "_access_token", None)
             self._wait_for_token()
 
             try:
@@ -457,7 +645,7 @@ class KISApi:
                     response = requests.post(url, headers=headers, json=body, timeout=10)
 
                 if response.status_code == 429:
-                    self._total_429s += 1
+                    total_429s = self._bump_usage_counter("total_429s")
                     if not idempotent:
                         # 주문 POST는 브로커가 요청을 처리했는지 클라이언트가
                         # 단정할 수 없는 응답을 받으면 절대 재전송하지 않는다.
@@ -476,7 +664,7 @@ class KISApi:
                     retry_after = max(1, min(retry_after, 60))
                     logger.warning(
                         "[429 Too Many Requests] {}초 대기 후 재시도 ({}/{}) - 경로: {} (누적 429: {}회)",
-                        retry_after, attempt, max_retries, path, self._total_429s,
+                        retry_after, attempt, max_retries, path, total_429s,
                     )
                     time.sleep(retry_after)
                     continue
@@ -516,18 +704,16 @@ class KISApi:
 
             except KISTokenExpiredError:
                 logger.error("[401] 토큰 만료. 갱신 후 재시도 ({}/{})", attempt, max_retries)
-                if not self.authenticate():
-                    self._token_error_until = time.monotonic() + 60.0
-                    self._notify_auth_failure(
-                        "401 응답 후 토큰 자동 갱신 실패 (60초 쿨다운 진입). API 키·네트워크를 확인하세요."
-                    )
+                # 거절된 토큰만 폐기하고 한 번만 재발급한다. 발급 실패 시 공유 쿨다운과
+                # 알림은 _acquire_token이 처리한다(발급 실패 1건당 알림 1번).
+                if not self._acquire_token(rejected_token=used_token):
                     return {}
                 if attempt < max_retries:
                     continue
                 return {}
 
             except (requests.exceptions.ConnectionError, ssl.SSLError, ConnectionResetError, EOFError) as e:
-                self._total_conn_errors += 1
+                total_conn_errors = self._bump_usage_counter("total_conn_errors")
                 breaker.on_failure()
                 if not idempotent:
                     # 주문 제출처럼 비멱등 요청은 응답 유실 시 재전송하면 이중 체결 위험.
@@ -541,7 +727,7 @@ class KISApi:
                 wait = self._backoff_with_jitter(attempt, base=2.0)
                 logger.warning(
                     "연결/SSL 오류, {:.1f}초 후 재시도 ({}/{}) - 경로: {} - {} (누적: {}회)",
-                    wait, attempt, max_retries, path, type(e).__name__, self._total_conn_errors,
+                    wait, attempt, max_retries, path, type(e).__name__, total_conn_errors,
                 )
                 time.sleep(wait)
 

@@ -34,7 +34,14 @@ class TestKISApiMockE2E:
         orig = dict(config._settings.get("kis_api", {}))
         config._settings.setdefault("kis_api", {})
         config._settings["kis_api"].update(mock_kis)
+        # 접근 토큰은 이제 (base_url, app_key) 단위로 프로세스 전역 공유된다
+        # (인스턴스별 발급이 1분 1회 발급 한도를 넘겨 live 매수를 막던 결함 수정).
+        # 이 클래스의 테스트들은 같은 키를 쓰므로, 앞 테스트가 발급한 토큰이나
+        # 발급 실패 쿨다운이 다음 테스트로 새지 않게 매 테스트 전후로 비운다.
+        from api.kis_api import reset_shared_token_cache
+        reset_shared_token_cache()
         yield
+        reset_shared_token_cache()
         config._settings["kis_api"].clear()
         config._settings["kis_api"].update(orig)
 
