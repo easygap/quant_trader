@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 TRADING_DAYS_PER_YEAR = 252
 
 
@@ -163,6 +165,17 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
                 lines.append(f"    - 실행 격차 {exe:+.2f}%p (통제 가능: 미체결 슬롯·진입 타이밍·비용)")
             if comp is not None:
                 lines.append(f"    - 구성 격차 {comp:+.2f}%p (설계 수용: 균등가중 vs 시총지수)")
+    rw = result.get("rules_window")
+    if rw:
+        lines.append(
+            f"  새 규칙({rw['since']}~): {rw['trading_days']}/{rw['min_trading_days']} 영업일"
+            f" · 실측 커버리지 {rw['measured_coverage']:.0%}"
+        )
+    if m.get("attribution_window"):
+        lines.append(
+            f"  귀속 분해 기간: {m['attribution_window'][0]} ~ {m['attribution_window'][1]}"
+            " (현재 설계 적용 이후)"
+        )
     if result["issues"]:
         lines.append("  이슈:")
         for issue in result["issues"]:
@@ -234,6 +247,12 @@ def build_daily_report_extras(
         extras["progress"] = (
             f"{progress_days}/{disp_denom}일 ({pct:.0%}) · 커버리지 {coverage:.0%} · 결측예산 {budget}일"
         )
+        # 규칙을 바꾼 트랙은 새 규칙의 날수가 검토 근거다 — 전체 운영 일수 옆에 함께 적는다
+        rw = eval_result.get("rules_window")
+        if rw and eval_result.get("paper_only"):
+            extras["progress"] += (
+                f" · 새 규칙 {rw.get('trading_days', 0)}/{rw.get('min_trading_days', disp_denom)}일"
+            )
 
         # 실행 품질 — 누적 비용 (연환산은 기간 미충족 시 과장되므로 라벨로 구분)
         cum = eval_result.get("cost_drag_cum")
@@ -425,6 +444,14 @@ def collect_basket_paper_evaluation(
     def _d(v):
         return v.date() if hasattr(v, "date") and callable(getattr(v, "date")) else v
 
+    def _config_date(value):
+        if not value:
+            return None
+        try:
+            return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
+
     today = date.today()
     candidates = [_d(t.executed_at) for t in trades if getattr(t, "executed_at", None)]
     candidates += [_d(s.date) for s in snaps]
@@ -524,35 +551,103 @@ def collect_basket_paper_evaluation(
         min_trading_days=min_days,
     )
 
+    promotion = basket_cfg.get("promotion") or {}
+
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
+    #
+    # promotion.design_effective_from이 있으면 그날부터만 귀속을 잰다. 지금의 설계
+    # (비중·종목)를 운영 시작일부터 소급 적용하면, 설계를 바꾼 사실 자체가 '실행 격차
+    # ≈ 0'으로 보이거나 엉뚱한 격차로 섞인다(kr_diversified_hold는 2026-08-07에 80% →
+    # 60%, 10 → 9종목으로 바뀌었다). NAV·설계·벤치마크를 같은 창으로 다시 잰다.
     if include_attribution:
         from core.basket_deploy import effective_stock_fraction
         design_fraction = effective_stock_fraction(basket_cfg, config.risk_params)
         holdings = basket_cfg.get("holdings") or {}
+        design_from = _config_date(promotion.get("design_effective_from"))
+        window_start = operation_start
+        window_nav = nav_return_pct
+        window_bench = benchmark_return_pct
+        if design_from and design_from > operation_start and snaps:
+            window_start = design_from
+            base = [s for s in snaps if _d(s.date) < design_from]
+            base_cum = float(base[-1].cumulative_return or 0.0) if base else 0.0
+            end_cum = float(snaps[-1].cumulative_return or 0.0)
+            window_nav = ((1 + end_cum / 100) / (1 + base_cum / 100) - 1) * 100
+            window_bench = None
+            if include_benchmark:
+                try:
+                    from core.data_collector import DataCollector
+                    window_bench = DataCollector.fetch_benchmark_return(
+                        str(design_from), str(nav_end), symbol="KS11",
+                    )
+                except Exception as exc:
+                    logger.warning("귀속 창 벤치마크 조회 실패: {}", exc)
         design_return_pct = None
         if snaps and holdings:
             try:
-                # 벤치마크·NAV와 같은 종료일(nav_end)로 조회 — 창 불일치 방지.
+                # 벤치마크·NAV와 같은 창(window_start ~ nav_end)으로 조회 — 창 불일치 방지.
                 design_return_pct = compute_design_portfolio_return(
-                    holdings, design_fraction, operation_start, nav_end,
+                    holdings, design_fraction, window_start, nav_end,
                 )
-            except Exception:
+            except Exception as exc:
+                logger.warning("설계 포트폴리오 수익률 계산 실패: {}", exc)
                 design_return_pct = None  # 참고 지표 — 실패해도 평가는 진행
-        gaps = decompose_return_gap(nav_return_pct, design_return_pct, benchmark_return_pct)
+        gaps = decompose_return_gap(window_nav, design_return_pct, window_bench)
         result["metrics"]["design_return_pct"] = design_return_pct
         result["metrics"]["execution_gap_pct"] = gaps["execution_gap_pct"]
         result["metrics"]["composition_gap_pct"] = gaps["composition_gap_pct"]
         result["metrics"]["total_gap_pct"] = gaps["total_gap_pct"]
+        if window_start > operation_start:
+            # 설계 적용일로 창을 줄였을 때만 기간을 따로 적는다(전체 기간이면 운영 기간과 같다)
+            result["metrics"]["attribution_window"] = [str(window_start), str(nav_end)]
+            result["metrics"]["attribution_nav_pct"] = window_nav
+            result["metrics"]["attribution_benchmark_pct"] = window_bench
 
-    promotion = basket_cfg.get("promotion") or {}
+    # promotion.rules_effective_from이 있으면 그날 이후만 따로 센 창을 더한다. 운용 규칙을
+    # 바꾼 트랙(kr_pocket, 9/17 위험 관리 규칙)은 전체 운영 일수가 60일을 넘어도 새 규칙의
+    # 기록은 그보다 훨씬 짧다 — 예전 규칙의 날수로 '100%'가 되면 검토 근거가 없다.
+    # 상위 판정·진행률 키는 그대로 두고(화면·게이트가 읽는다) 같은 정의로 추가만 한다.
+    rules_from = _config_date(promotion.get("rules_effective_from"))
+    if rules_from:
+        rw_start = max(rules_from, operation_start)
+        rw_total = rw_snap = rw_recon = 0
+        d = rw_start
+        while d <= today:
+            if th.is_trading_day(datetime(d.year, d.month, d.day)):
+                if d == today and d not in snapshot_dates:
+                    break
+                rw_total += 1
+                if d in snapshot_dates:
+                    rw_snap += 1
+                    if d in reconstructed_dates:
+                        rw_recon += 1
+            d += timedelta(days=1)
+        rw_costs = sum(
+            float(t.commission or 0) + float(t.tax or 0) + float(t.slippage or 0)
+            for t in trades
+            if getattr(t, "executed_at", None) and _d(t.executed_at) >= rw_start
+        )
+        result["rules_window"] = {
+            "since": str(rw_start),
+            "trading_days": rw_total,
+            "min_trading_days": min_days,
+            "measured_days": rw_snap - rw_recon,
+            "reconstructed_days": rw_recon,
+            "measured_coverage": round((rw_snap - rw_recon) / rw_total, 4) if rw_total else 0.0,
+            "total_costs": round(rw_costs, 2),
+        }
     if promotion.get("paper_only", False):
         # 운영 일수는 남겨 두되, 이전 규칙의 기록으로 새 정책이 통과하지 않게 한다.
         result["operation_verdict"] = result["verdict"]
         result["paper_only"] = True
         if result["verdict"] == "PASS_CANDIDATE":
             result["verdict"] = "WAIT"
-        result["issues"].append(str(promotion.get("review_note") or
-            "변경한 운용 규칙을 모의투자로 검증하고 있습니다. 실전 전환은 제한됩니다."))
+        note = str(promotion.get("review_note") or
+                   "변경한 운용 규칙을 모의투자로 검증하고 있습니다. 실전 전환은 제한됩니다.")
+        result["issues"].append(note)
+        # 화면이 이 상시 안내를 '확인할 항목'과 구분할 수 있게 따로도 둔다 — 섞여 있으면
+        # 적립금 미기록 같은 실제 할 일을 가린다(2026-09 적립 알림이 이 문구에 가려졌다).
+        result["review_note"] = note
 
     return result, basket_name

@@ -482,6 +482,21 @@ def _probe_portfolio_metrics(account_key: str, date: datetime) -> dict:
 
         # 4) 거래 없음 + 직전 snapshot 존재 → cash-only carry-forward
         #    포트폴리오 가치 불변이므로 daily_return=0.0
+        #    단, 보유 종목이 있으면 가치가 불변이 아니다 — 시장이 움직인 날을 0%로 채우면
+        #    변동성이 작게, paper 샤프가 크게 잡히고 빠진 날이 증거 일수로 셈해진다.
+        #    그때는 추론하지 않고 결측으로 둔다.
+        if (prev_snap.position_count or 0) > 0 or (prev_snap.invested or 0) > 0:
+            return _portfolio_probe_metadata(
+                account_key=ak,
+                date=date,
+                source="missing_current_snapshot_with_positions",
+                reason="positions were held since previous snapshot; value cannot be inferred",
+                current_snapshot_found=False,
+                previous_snapshot_found=True,
+                previous_snapshot_at=prev_snap.date,
+                trades_today=trades_today,
+                trades_since_previous=trades_since,
+            )
         return {
             **_portfolio_probe_metadata(
                 account_key=ak,
@@ -789,7 +804,9 @@ def _compute_benchmark_excess(
 
         universe_return = sum(returns) / len(returns)
         invested_ratio = 1.0 - cash_ratio
-        rf_daily = RF_ANNUAL / 252
+        # 다른 항(daily_return·universe_return)은 퍼센트 단위다 — rf도 퍼센트/일로 맞춘다.
+        # 예전엔 소수(0.000139)를 그대로 빼서 현금분 무위험수익이 100분의 1로 줄었다.
+        rf_daily = RF_ANNUAL / 252 * 100
 
         result["same_universe_excess"] = round(daily_return - universe_return, 4)
         result["exposure_matched_excess"] = round(
