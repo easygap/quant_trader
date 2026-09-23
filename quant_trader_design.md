@@ -933,8 +933,8 @@ quant_trader/
 │   ├── risk_manager.py          # 포지션 사이징(1% 룰·신호 강도 스케일), check_diversification(업종), **check_correlation_risk**, check_recent_performance, 손절/익절/트레일링(국면 배수), 거래비용
 │   ├── order_executor.py        # 매수/매도. 국면 손절·익절, 상관 축소, **갭업 매수 차단**, 유동성·어닝·분산, Dead-letter
 │   ├── portfolio_manager.py     # 보유 포지션·잔고·수익률. sync_with_broker(KIS 잔고↔DB 크로스체크), save_daily_snapshot()
-│   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드, 스케줄러 장전 자동 통합
-│   ├── scheduler.py             # 장전/장중(10분)/장마감. **갭다운 즉시 청산**, 동적 손절 갱신, auto_entry 시 장중 재스캔, 블랙스완 recovery, 바스켓 리밸런싱, paper 실전 전환 평가
+│   ├── basket_rebalancer.py     # 바스켓 리밸런싱: 목표 비중 vs 실제 비중 드리프트 감지, 주문 생성·실행, 신호 가중 모드. 실행은 일일 CLI(--mode rebalance)에서만
+│   ├── scheduler.py             # 장전/장중(10분)/장마감. **갭다운 즉시 청산**, 동적 손절 갱신, auto_entry 시 장중 재스캔, 블랙스완 recovery, paper 실전 전환 평가 (바스켓은 거래하지 않음)
 │   ├── runtime_lock.py        # `data/.scheduler.lock` — schedule 모드 단일 인스턴스(중복 실행 방지)
 │   ├── trading_hours.py         # 한국 장·휴장일(holidays.yaml → pykrx → fallback). 미국: us_holidays.yaml + 동부 09:30~16:00 (`is_us_trading_day` 등)
 │   ├── holidays_updater.py      # 휴장일 YAML 자동 갱신 (pykrx 또는 fallback)
@@ -1353,7 +1353,7 @@ quant_trader/
 - [x] KIS 호출 제어 강화 — 지수 백오프+지터, SSL/커넥션 에러 전용 핸들러, 토큰 오류 쿨다운 (§9.1)
 - [x] 주문 실패 Dead-letter 큐 — FailedOrder 테이블에 실패 주문 영구 저장, 재처리 지원 (§9.1)
 - [x] 전략 등록 레지스트리(플러그인형) — `strategies/__init__.py`에서 `create_strategy(name)` 호출로 전략 동적 로딩 (§4.5)
-- [x] 바스켓 포트폴리오 리밸런싱 — `BasketRebalancer`로 종목별 목표 비중 관리, 드리프트/주기 기반 리밸런싱, 신호 가중 모드 지원. `--mode rebalance --basket <name>` CLI 및 스케줄러 장전 단계 자동 통합 (§10)
+- [x] 바스켓 포트폴리오 리밸런싱 — `BasketRebalancer`로 종목별 목표 비중 관리, 드리프트/주기 기반 리밸런싱, 신호 가중 모드 지원. `--mode rebalance --basket <name>` 일일 CLI로 실행 (§10). 스케줄러 장전 경로는 2026-09에 제거
 - [x] **`--mode schedule`** — 모의 매매 전용 무한 스케줄 루프, `core/runtime_lock.py`로 단일 인스턴스 락
 - [x] **미국 티커·장시간** — `DataCollector.fetch_stock` 미국 분기, `config/us_holidays.yaml`, `TradingHours` NYSE 구간
 - [x] **DART(선택)** — `dart_loader` + `earnings_filter` 폴백, `DART_API_KEY` / `settings.dart`
