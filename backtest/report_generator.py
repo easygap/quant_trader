@@ -17,6 +17,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from backtest.backtester import (
+    BACKTEST_RISK_FREE_ANNUAL,
+    BACKTEST_RISK_FREE_LABEL,
+    PNL_EXIT_ACTIONS,
+)
 from backtest.cost_impact import render_cost_impact_text, summarize_cost_impact
 
 
@@ -107,16 +112,9 @@ def _format_live_slippage_html_card(summary: Optional[Dict[str, Any]]) -> str:
         {body}
     </div>"""
 
-_TRADES_WITH_PNL = frozenset(
-    (
-        "SELL",
-        "STOP_LOSS",
-        "TAKE_PROFIT",
-        "TAKE_PROFIT_PARTIAL",
-        "TRAILING_STOP",
-        "MAX_HOLD",
-    )
-)
+# 리포트의 거래표·누적 실현손익 차트는 엔진 지표와 같은 청산 목록(PNL_EXIT_ACTIONS)을 쓴다.
+# 별도 목록을 두면 GAP_DOWN·BLACKSWAN처럼 가장 큰 하루 손실이 표에서 빠져 리포트가
+# 자본 곡선보다 좋아 보인다.
 
 
 def _overtrading_charts_png_base64(trades: list, equity: pd.DataFrame) -> str:
@@ -155,7 +153,7 @@ def _overtrading_charts_png_base64(trades: list, equity: pd.DataFrame) -> str:
     idx = pd.date_range(d0, d1, freq="D")
     tdf["dn"] = tdf["d"].dt.normalize()
     comm_day = tdf.groupby("dn")["commission"].sum()
-    tdf_p = tdf.loc[tdf["action"].isin(_TRADES_WITH_PNL)]
+    tdf_p = tdf.loc[tdf["action"].isin(PNL_EXIT_ACTIONS)]
     pnl_day = tdf_p.groupby(tdf_p["dn"])["pnl"].sum() if not tdf_p.empty else pd.Series(dtype=float)
     cum_c = comm_day.reindex(idx, fill_value=0).cumsum()
     cum_p = pnl_day.reindex(idx, fill_value=0).cumsum()
@@ -244,7 +242,9 @@ def _classify_regime(kospi_monthly_ret: float) -> str:
     return REGIME_SIDEWAYS
 
 
-def _monthly_sharpe(monthly_rets: List[float], risk_free_annual: float = 0.03) -> float:
+def _monthly_sharpe(
+    monthly_rets: List[float], risk_free_annual: float = BACKTEST_RISK_FREE_ANNUAL
+) -> float:
     arr = np.array(monthly_rets, dtype=float)
     if len(arr) < 2:
         return 0.0
@@ -380,7 +380,9 @@ def _format_regime_text_table(breakdown: Dict[str, Dict[str, Any]]) -> List[str]
             f"{r['avg_kospi_pct']:>+12.1f}% | {r['excess_pct']:>+7.1f}%"
         )
     lines.append("-" * 72)
-    lines.append("[ 국면별 위험지표 — 월간 수익 기준 샤프, 월말 자산 기준 MDD ]")
+    lines.append(
+        f"[ 국면별 위험지표 — 월간 수익 기준 샤프({BACKTEST_RISK_FREE_LABEL}), 월말 자산 기준 MDD ]"
+    )
     for key in (REGIME_BULL, REGIME_BEAR, REGIME_SIDEWAYS):
         r = breakdown[key]
         if r["n_months"] == 0:
@@ -408,11 +410,11 @@ def _format_regime_html_table(breakdown: Dict[str, Dict[str, Any]]) -> str:
     <div class="card" style="margin-top:24px;">
         <h3 style="margin-bottom:12px;font-size:14px;">📉 시장 국면별 성과 (KS11 월 수익률 기준)</h3>
         <p style="color:#64748b;font-size:12px;margin-bottom:12px;">
-            상승장: 월 &gt; +2% · 하락장: 월 &lt; -2% · 횡보장: 그 외. 샤프는 월간 수익 연율화, MDD는 해당 월들의 월말 자산만으로 산출.
+            상승장: 월 &gt; +2% · 하락장: 월 &lt; -2% · 횡보장: 그 외. 샤프는 월간 수익 연율화({BACKTEST_RISK_FREE_LABEL}), MDD는 해당 월들의 월말 자산만으로 산출.
         </p>
         <table>
             <thead><tr>
-                <th>국면</th><th>기간(개월)</th><th>전략 평균 월수익률</th><th>코스피 월수익률</th><th>초과 수익</th><th>샤프</th><th>MDD</th>
+                <th>국면</th><th>기간(개월)</th><th>전략 평균 월수익률</th><th>코스피 월수익률</th><th>초과 수익</th><th>샤프({BACKTEST_RISK_FREE_LABEL})</th><th>MDD</th>
             </tr></thead>
             <tbody>{rows}</tbody>
         </table>
@@ -452,7 +454,7 @@ class ReportGenerator:
         trades = result.get("trades", [])
 
         # 매도·청산 거래만 추출 (수익 계산용)
-        sell_trades = [t for t in trades if t["action"] in _TRADES_WITH_PNL]
+        sell_trades = [t for t in trades if t["action"] in PNL_EXIT_ACTIONS]
 
         lines = [
             "=" * 60,
@@ -472,7 +474,7 @@ class ReportGenerator:
             f"  연간 수익률   : {m['annual_return']:>13.2f}%",
             "",
             "[ 위험 지표 ]",
-            f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}",
+            f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}  ({BACKTEST_RISK_FREE_LABEL})",
             f"  최대 낙폭     : {m['max_drawdown']:>13.2f}%",
             f"  칼마 비율     : {m['calmar_ratio']:>13.2f}",
             "",
@@ -700,7 +702,7 @@ class ReportGenerator:
             <div class="value {'positive' if m['total_return'] >= 0 else 'negative'}">{m['total_return']:.2f}%</div>
         </div>
         <div class="card">
-            <div class="label">샤프 지수</div>
+            <div class="label">샤프 지수 ({BACKTEST_RISK_FREE_LABEL})</div>
             <div class="value">{m['sharpe_ratio']:.2f}</div>
         </div>
         <div class="card">
@@ -814,7 +816,7 @@ class ReportGenerator:
     @staticmethod
     def _generate_trades_table(trades: list) -> str:
         """거래 내역 HTML 테이블 생성"""
-        sell_trades = [t for t in trades if t["action"] in _TRADES_WITH_PNL]
+        sell_trades = [t for t in trades if t["action"] in PNL_EXIT_ACTIONS]
 
         if not sell_trades:
             return "<p style='color:#64748b;'>거래 내역 없음</p>"

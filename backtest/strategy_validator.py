@@ -17,7 +17,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from backtest.backtester import Backtester
+from backtest.backtester import (
+    BACKTEST_RISK_FREE_ANNUAL,
+    BACKTEST_RISK_FREE_LABEL,
+    Backtester,
+)
 from config.config_loader import Config
 from core.data_collector import DataCollector
 from core.notifier import Notifier
@@ -103,7 +107,7 @@ def _portfolio_metrics_from_equity(equity: pd.Series, initial_capital: float) ->
     if len(daily_returns) > 0 and daily_returns.std() > 0:
         annual_return = daily_returns.mean() * 252
         annual_std = daily_returns.std() * np.sqrt(252)
-        sharpe = (annual_return - 0.03) / annual_std
+        sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
     else:
         sharpe = 0.0
     peak = equity.cummax()
@@ -476,7 +480,7 @@ class StrategyValidator:
         verdict = "통과" if result.get("wf_passed") else "실패"
         body = (
             f"[전략 검증] {strat} 전략 워크포워드 결과: {npass}/{ntot} 통과\n"
-            f"OOS 평균 샤프: {avg_s} | OOS 평균 MDD: {avg_m}%\n"
+            f"OOS 평균 샤프({BACKTEST_RISK_FREE_LABEL}): {avg_s} | OOS 평균 MDD: {avg_m}%\n"
             f"판정: {verdict}"
         )
         try:
@@ -511,10 +515,10 @@ class StrategyValidator:
             f"워크포워드 검증 리포트 | {result['strategy']} | {result['symbol']}",
             f"기간: {result['period']}",
             f"train_days={result['train_days']} test_days={result['test_days']} step_days={result['step_days']}",
-            f"기준: 샤프 ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
+            f"기준: 샤프({BACKTEST_RISK_FREE_LABEL}) ≥ {result['min_sharpe']}, MDD ≤ {abs(result['max_mdd']):.0f}% (지표값 max_drawdown ≥ {result['max_mdd']})",
             f"창별 통과: {result['n_passed']}/{result['n_total']} | 기준 미달 창: {result.get('n_failed', 0)}",
             f"통과율: {result.get('pass_rate', 0) * 100:.1f}% | 80% 이상 워크포워드 통과: {result.get('wf_passed', False)}",
-            f"OOS 평균 샤프: {result.get('avg_oos_sharpe', 0)} | OOS 평균 MDD: {result.get('avg_oos_mdd', 0)}%",
+            f"OOS 평균 샤프({BACKTEST_RISK_FREE_LABEL}): {result.get('avg_oos_sharpe', 0)} | OOS 평균 MDD: {result.get('avg_oos_mdd', 0)}%",
             f"전체 창 통과: {result['all_passed']}",
             "=" * 70,
             "",
@@ -589,7 +593,7 @@ class StrategyValidator:
         lines.extend([
             "-" * 70,
             f"손익비(Profit Factor): FULL {validation.get('full_profit_factor', 0):.2f} | OOS {validation.get('oos_profit_factor', 0):.2f}",
-            f"샤프 기준({validation['min_sharpe']:.2f}) 충족: {validation['full_passed']}",
+            f"샤프({BACKTEST_RISK_FREE_LABEL}) 기준({validation['min_sharpe']:.2f}) 충족: {validation['full_passed']}",
             f"Out-of-sample 기준 통과: {validation['out_sample_passed']}",
         ])
         if validation.get("warnings"):
@@ -689,7 +693,7 @@ class StrategyValidator:
         if len(daily_returns) > 0 and daily_returns.std() > 0:
             annual_return = daily_returns.mean() * 252
             annual_std = daily_returns.std() * np.sqrt(252)
-            sharpe = (annual_return - 0.03) / annual_std
+            sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
         else:
             sharpe = 0
 
@@ -719,12 +723,13 @@ class StrategyValidator:
         turnover = metrics.get("annual_turnover_pct", 0)
         ev = metrics.get("ev_per_trade", 0)
         cost_drag = metrics.get("cost_drag_pct", 0)
+        rf = BACKTEST_RISK_FREE_LABEL
         return "\n".join([
             f"[{title}]",
-            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | CAGR {cagr:>6.2f}% | 샤프 {metrics.get('sharpe_ratio', 0):>5.2f} | 소르티노 {sortino:>5.2f}",
+            f"전략 수익률 {metrics.get('total_return', 0):>8.2f}% | CAGR {cagr:>6.2f}% | 샤프({rf}) {metrics.get('sharpe_ratio', 0):>5.2f} | 소르티노 {sortino:>5.2f}",
             f"MDD {metrics.get('max_drawdown', 0):>6.2f}% | 칼마 {calmar:>5.2f} | 턴오버 {turnover:>6.1f}%/y | 비용 드래그 {cost_drag:>5.2f}%",
             f"승률 {metrics.get('win_rate', 0):>5.1f}% | EV/거래 {ev:>8,.0f}원 | 거래 {metrics.get('total_trades', 0)}건",
-            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프 {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}% | 초과수익 {metrics.get('total_return', 0) - benchmark_return:>+.2f}%",
+            f"벤치 수익률 {benchmark_return:>8.2f}% | 샤프({rf}) {benchmark_sharpe:>5.2f} | MDD {benchmark_mdd:>6.2f}% | 초과수익 {metrics.get('total_return', 0) - benchmark_return:>+.2f}%",
         ])
 
     # ═══════════════════════════════════════════════════════════
@@ -843,7 +848,7 @@ class StrategyValidator:
         lines = [
             "=" * 70,
             f"Strategy Ablation Report | {result['symbol']}",
-            f"기간: {result['period']} | OOS 분할: {result['split_date']}~",
+            f"기간: {result['period']} | OOS 분할: {result['split_date']}~ | 샤프는 {BACKTEST_RISK_FREE_LABEL} 기준",
             "=" * 70,
             "",
             f"{'전략':<25} | {'FULL Sharpe':>12} | {'OOS Sharpe':>11} | {'FULL 수익률':>12} | {'OOS 수익률':>11} | {'OOS EV/거래':>12}",

@@ -22,12 +22,24 @@ _FULL_EXIT_SELL_ACTIONS = frozenset(
     ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "MAX_HOLD", "GAP_DOWN", "BLACKSWAN")
 )
 _PARTIAL_EXIT_ACTION = "TAKE_PROFIT_PARTIAL"
+# 실현 손익이 생기는 모든 매도 액션(전량 청산 + 부분 익절). 승률·손익비·거래 수 같은 지표와
+# 리포트 거래표가 모두 이 한 목록만 쓴다. 목록이 여러 벌이면 한쪽에서 빠진 청산 사유의
+# 거래가 통계에서 조용히 사라진다(MAX_HOLD가 지표에서, GAP_DOWN·BLACKSWAN이 리포트에서
+# 빠져 있던 사례). 청산 사유를 새로 만들면 위 목록에만 추가한다.
+PNL_EXIT_ACTIONS = _FULL_EXIT_SELL_ACTIONS | frozenset((_PARTIAL_EXIT_ACTION,))
 
 EXECUTION_MODEL_NEXT_OPEN = "next_open"
 EXECUTION_MODEL_LEGACY_SAME_CLOSE = "legacy_same_close"
 _SUPPORTED_EXECUTION_MODELS = frozenset(
     (EXECUTION_MODEL_NEXT_OPEN, EXECUTION_MODEL_LEGACY_SAME_CLOSE)
 )
+
+# 백테스트 샤프·소르티노에 쓰는 연 무위험수익률. 운영 성과 렌즈(core/performance_lens.py)는
+# rf=0이라 같은 '샤프'라도 약 0.03/연변동성만큼 정의가 다르다 — 운영 샤프와 비교할 때 감안한다.
+# 값을 바꾸면 min_sharpe·OOS 샤프 게이트·후보 순위처럼 이 기준에 맞춰 둔 문턱이 함께
+# 움직이므로 반드시 재기준화와 같이 바꾼다. 리포트는 샤프 옆에 BACKTEST_RISK_FREE_LABEL을 표기한다.
+BACKTEST_RISK_FREE_ANNUAL = 0.03
+BACKTEST_RISK_FREE_LABEL = f"rf {BACKTEST_RISK_FREE_ANNUAL * 100:g}%"
 
 
 def _validate_execution_model(execution_model: str) -> str:
@@ -213,8 +225,9 @@ class Backtester:
         metrics = self._calculate_metrics(result, initial_capital)
 
         logger.info(
-            "백테스팅 완료 | 수익률: {:.2f}% | 샤프: {:.2f} | MDD: {:.2f}% | 승률: {:.1f}%",
+            "백테스팅 완료 | 수익률: {:.2f}% | 샤프({}): {:.2f} | MDD: {:.2f}% | 승률: {:.1f}%",
             metrics["total_return"],
+            BACKTEST_RISK_FREE_LABEL,
             metrics["sharpe_ratio"],
             metrics["max_drawdown"],
             metrics["win_rate"],
@@ -1116,11 +1129,11 @@ class Backtester:
             ) - 1.0
         daily_returns = equity["daily_return"].dropna()
 
-        # 샤프 지수 (연율화, 무위험수익률 3%)
+        # 샤프 지수 (연율화, 무위험수익률 BACKTEST_RISK_FREE_ANNUAL)
         if len(daily_returns) > 0 and daily_returns.std() > 0:
             annual_return = daily_returns.mean() * 252
             annual_std = daily_returns.std() * np.sqrt(252)
-            sharpe = (annual_return - 0.03) / annual_std
+            sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
         else:
             sharpe = 0
 
@@ -1128,24 +1141,12 @@ class Backtester:
         downside_returns = daily_returns[daily_returns < 0]
         if len(downside_returns) > 0 and downside_returns.std() > 0:
             downside_std = downside_returns.std() * np.sqrt(252)
-            sortino = (daily_returns.mean() * 252 - 0.03) / downside_std
+            sortino = (daily_returns.mean() * 252 - BACKTEST_RISK_FREE_ANNUAL) / downside_std
         else:
             sortino = sharpe
 
-        # 매매 기준 성과
-        sell_trades = [
-            t
-            for t in trades
-            if t["action"] in (
-                "SELL",
-                "STOP_LOSS",
-                "TAKE_PROFIT",
-                "TAKE_PROFIT_PARTIAL",
-                "TRAILING_STOP",
-                "GAP_DOWN",
-                "BLACKSWAN",
-            )
-        ]
+        # 매매 기준 성과 (보유기간 만료 MAX_HOLD 포함 — 실현 손익이 있는 매도 전부)
+        sell_trades = [t for t in trades if t["action"] in PNL_EXIT_ACTIONS]
 
         # 꼬리 리스크: VaR 95%, CVaR 95% (일일 기준)
         if len(daily_returns) >= 20:
@@ -1204,10 +1205,9 @@ class Backtester:
         gross_loss = abs(sum(t["pnl"] for t in losing))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
-        # 칼마 비율
+        # 연간 수익률(산술: 총수익률 ÷ 연수). 복리 기준은 아래 CAGR이며 칼마도 CAGR로 계산한다.
         years = len(equity) / 252 if len(equity) > 0 else 1
         annual_return_pct = total_return / years
-        calmar = abs(annual_return_pct / max_drawdown) if max_drawdown != 0 else 0
 
         # 과매매 분석: 총 수수료·세금·슬리피지(종가 대비 체결 불리분), 평균 보유 기간(일)
         total_commission = sum(t.get("commission", 0) for t in trades)
@@ -1224,13 +1224,14 @@ class Backtester:
         for t in trades:
             if t["action"] == "BUY":
                 position_open_date = t["date"]
-            elif t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TAKE_PROFIT_PARTIAL", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN") and position_open_date is not None:
+            elif t["action"] in PNL_EXIT_ACTIONS and position_open_date is not None:
                 try:
                     delta = t["date"] - position_open_date
                     holding_days_list.append(delta.days if hasattr(delta, "days") else 0)
                 except (TypeError, ValueError):
                     pass
-                if t["action"] in ("SELL", "STOP_LOSS", "TAKE_PROFIT", "TRAILING_STOP", "GAP_DOWN", "BLACKSWAN"):
+                # 부분 익절은 포지션이 남아 있으므로 전량 청산일 때만 보유 시작일을 지운다.
+                if t["action"] in _FULL_EXIT_SELL_ACTIONS:
                     position_open_date = None
         avg_holding_days = round(np.mean(holding_days_list), 1) if holding_days_list else 0.0
 
@@ -1257,6 +1258,10 @@ class Backtester:
         cagr = 0.0
         if initial_capital > 0 and final_value > 0 and years_bt > 0:
             cagr = ((final_value / initial_capital) ** (1 / years_bt) - 1) * 100
+
+        # 칼마 비율 = CAGR / |MDD|. 부호를 유지해야 꾸준히 잃는 전략이 양(+)의 칼마로
+        # '우수'해 보이지 않는다(예전 abs(산술 연수익 / MDD)는 손실 전략도 양수였다).
+        calmar = (cagr / abs(max_drawdown)) if max_drawdown < 0 else 0.0
 
         # 2) Turnover: 연간 총 거래대금 / 평균 자산 (100% = 전 자산 1회 회전)
         total_buy_amount = sum(t["price"] * t["quantity"] for t in trades if t["action"] == "BUY")
@@ -1393,10 +1398,11 @@ class Backtester:
         print(f"  초기 자본     : {m['initial_capital']:>14,.0f}원")
         print(f"  최종 자본     : {m['final_value']:>14,.0f}원")
         print(f"  총 수익률     : {m['total_return']:>13.2f}%")
-        print(f"  연간 수익률   : {m['annual_return']:>13.2f}%")
+        print(f"  연간 수익률   : {m['annual_return']:>13.2f}%  (산술)")
+        print(f"  CAGR          : {m.get('cagr', 0):>13.2f}%  (복리, 칼마 기준)")
         print("-" * 60)
-        print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}")
-        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}")
+        print(f"  샤프 지수     : {m['sharpe_ratio']:>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
+        print(f"  소르티노 비율 : {m.get('sortino_ratio', 0):>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
         print(f"  최대 낙폭     : {m['max_drawdown']:>13.2f}%")
         print(f"  MDD 회복 기간 : {m.get('mdd_recovery_days', 0):>13d}일")
         print(f"  칼마 비율     : {m['calmar_ratio']:>13.2f}")

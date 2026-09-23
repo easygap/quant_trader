@@ -11,6 +11,7 @@ import numpy as np
 from loguru import logger
 from datetime import timedelta
 
+from backtest.backtester import BACKTEST_RISK_FREE_ANNUAL, BACKTEST_RISK_FREE_LABEL
 from backtest.cost_impact import (
     cost_impact_metric_fields,
     render_cost_impact_text,
@@ -202,9 +203,9 @@ class PortfolioBacktester:
         metrics = self._calculate_portfolio_metrics(result, initial_capital)
 
         logger.info(
-            "포트폴리오 백테스트 완료 | 종목={}개 | 수익률: {:.2f}% | 샤프: {:.2f} | MDD: {:.2f}%",
+            "포트폴리오 백테스트 완료 | 종목={}개 | 수익률: {:.2f}% | 샤프({}): {:.2f} | MDD: {:.2f}%",
             len(valid_symbols), metrics["total_return"],
-            metrics["sharpe_ratio"], metrics["max_drawdown"],
+            BACKTEST_RISK_FREE_LABEL, metrics["sharpe_ratio"], metrics["max_drawdown"],
         )
 
         return {
@@ -1066,13 +1067,15 @@ class PortfolioBacktester:
         if len(daily_returns) > 0 and daily_returns.std() > 0:
             annual_return = daily_returns.mean() * 252
             annual_std = daily_returns.std() * np.sqrt(252)
-            sharpe = (annual_return - 0.03) / annual_std
+            sharpe = (annual_return - BACKTEST_RISK_FREE_ANNUAL) / annual_std
         else:
             sharpe = 0
 
         downside = daily_returns[daily_returns < 0]
         if len(downside) > 0 and downside.std() > 0:
-            sortino = (daily_returns.mean() * 252 - 0.03) / (downside.std() * np.sqrt(252))
+            sortino = (daily_returns.mean() * 252 - BACKTEST_RISK_FREE_ANNUAL) / (
+                downside.std() * np.sqrt(252)
+            )
         else:
             sortino = sharpe
 
@@ -1091,9 +1094,14 @@ class PortfolioBacktester:
         gross_loss = abs(sum(t["pnl"] for t in losing))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
 
+        # 연간 수익률(산술)은 기존 의미 그대로 두고, 칼마는 단일 종목 엔진과 같이
+        # 부호 있는 CAGR / |MDD|로 계산한다(MDD가 0이면 0.0).
         years = len(equity) / 252 if len(equity) > 0 else 1
         annual_return_pct = total_return / years
-        calmar = abs(annual_return_pct / max_drawdown) if max_drawdown != 0 else 0
+        cagr = 0.0
+        if initial_capital > 0 and final_value > 0 and years > 0:
+            cagr = ((final_value / initial_capital) ** (1 / years) - 1) * 100
+        calmar = (cagr / abs(max_drawdown)) if max_drawdown < 0 else 0.0
 
         if len(daily_returns) >= 20:
             var_95 = float(np.percentile(daily_returns, 5))
@@ -1115,6 +1123,7 @@ class PortfolioBacktester:
             ),
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return_pct, 2),
+            "cagr": round(cagr, 2),
             "sharpe_ratio": round(sharpe, 2),
             "sortino_ratio": round(sortino, 2),
             "max_drawdown": round(max_drawdown, 2),
@@ -1161,10 +1170,11 @@ class PortfolioBacktester:
         print(f"  초기 자본      : {m['initial_capital']:>14,.0f}원")
         print(f"  최종 자본      : {m['final_value']:>14,.0f}원")
         print(f"  총 수익률      : {m['total_return']:>13.2f}%")
-        print(f"  연간 수익률    : {m['annual_return']:>13.2f}%")
+        print(f"  연간 수익률    : {m['annual_return']:>13.2f}%  (산술)")
+        print(f"  CAGR           : {m.get('cagr', 0):>13.2f}%  (복리, 칼마 기준)")
         print("-" * 60)
-        print(f"  샤프 지수      : {m['sharpe_ratio']:>13.2f}")
-        print(f"  소르티노 비율  : {m.get('sortino_ratio', 0):>13.2f}")
+        print(f"  샤프 지수      : {m['sharpe_ratio']:>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
+        print(f"  소르티노 비율  : {m.get('sortino_ratio', 0):>13.2f}  ({BACKTEST_RISK_FREE_LABEL})")
         print(f"  최대 낙폭      : {m['max_drawdown']:>13.2f}%")
         print(f"  칼마 비율      : {m.get('calmar_ratio', 0):>13.2f}")
         print(f"  VaR 95%(일)    : {m.get('var_95_daily', 0):>13.3f}%")
