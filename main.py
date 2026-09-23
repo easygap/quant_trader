@@ -2095,7 +2095,27 @@ def run_health_check() -> int:
                 if plan_state["note"]:
                     contribution_notes.append(plan_state["note"])
         except Exception as plan_exc:
-            logger.debug("적립 계획 점검 생략: {}", plan_exc)
+            logger.warning("적립 계획 점검 실패: {}", plan_exc)
+
+        # 위험 관리(오버레이) 입력 문제: 마지막 사이클이 남긴 상태 파일의 data_issues.
+        data_notes: list[str] = []
+        try:
+            from core.risk_overlays import load_overlay_state, parse_overlay_config
+
+            for name in enabled_baskets:
+                cfg_b = baskets_cfg.get(name) or {}
+                if not parse_overlay_config(cfg_b).any_enabled:
+                    continue
+                state = load_overlay_state(name, mode="paper") or {}
+                issues = [str(i) for i in (state.get("data_issues") or [])]
+                if issues:
+                    more = f" 외 {len(issues) - 1}건" if len(issues) > 1 else ""
+                    data_notes.append(
+                        f"바스켓 '{name}' 위험 관리 입력 문제({state.get('evaluated_at', '?')}): "
+                        f"{issues[0]}{more}"
+                    )
+        except Exception as ov_exc:
+            logger.warning("위험 관리 입력 점검 실패: {}", ov_exc)
 
         basket_operation = {
             "enabled_baskets": enabled_baskets,
@@ -2106,6 +2126,7 @@ def run_health_check() -> int:
             "design_fraction": worst_design,
             "deployment_tolerance": worst_tolerance,
             "contribution_notes": contribution_notes,
+            "data_notes": data_notes,
         }
     except Exception as exc:
         logger.warning("바스켓 운영 상태 조회 실패: {}", exc)

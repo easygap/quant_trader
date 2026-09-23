@@ -240,8 +240,14 @@ def compute_decision(
         below, rel = trend_below_ma(index_closes or [], cfg.trend, prev.get("trend_below"))
         decision.trend_rel_to_ma = None if rel is None else round(rel, 4)
         if rel is None:
+            # 원인을 구분해 적는다. 자료가 오래돼 입력이 비었는데 '200일치 부족'이라고
+            # 쓰면 운영자가 엉뚱한 곳(기간 설정)을 보게 된다(2026-09-17 이후 실제 사례).
+            cause = (
+                f"종가 {cfg.trend.ma_days}일치 부족" if index_closes
+                else "종가를 쓸 수 없음(조회 실패 또는 오래된 자료)"
+            )
             decision.data_issues.append(
-                f"추세 필터: {cfg.trend.index_symbol} 종가 {cfg.trend.ma_days}일치 부족 — 직전 상태 유지"
+                f"추세 필터: {cfg.trend.index_symbol} {cause} — 직전 상태 유지"
             )
         decision.trend_below = below
         if below:

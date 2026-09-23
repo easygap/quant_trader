@@ -20,6 +20,8 @@ import yaml
 from loguru import logger
 
 _KST = ZoneInfo("Asia/Seoul")
+# 추세 필터 지수 → 그 지수를 추종하는 ETF(지수 자료가 멈췄을 때의 대용)
+_INDEX_PROXY = {"KS200": "069500"}
 
 from config.config_loader import Config
 from core.basket_risk import (
@@ -229,6 +231,21 @@ class BasketRebalancer:
             logger.warning("바스켓 '{}' 오버레이 상태 저장 실패: {}", self.basket_name, exc)
         if decision.data_issues:
             logger.warning("바스켓 '{}' 오버레이 데이터 문제: {}", self.basket_name, "; ".join(decision.data_issues))
+            # 로그만으로는 헬스·주간 리포트가 못 센다(9/17 이후 추세 필터 동결이 로그에만
+            # 남아 있었다). 같은 날 같은 내용은 한 번만 남긴다.
+            try:
+                from core.cycle_observability import record_event_once_per_day
+
+                record_event_once_per_day(
+                    "OVERLAY_DATA_ISSUE",
+                    f"바스켓 '{self.basket_name}' 위험 관리 입력 문제: " + "; ".join(decision.data_issues),
+                    severity="warning",
+                    strategy=getattr(self, "account_key", None) or None,
+                    mode=self._ledger_mode(),
+                    dedupe_key="; ".join(decision.data_issues)[:500],
+                )
+            except Exception as exc:
+                logger.warning("오버레이 데이터 문제 이벤트 기록 실패: {}", exc)
         if decision.reasons:
             logger.info("바스켓 '{}' 리스크 오버레이 발동: {} (배수 {})", self.basket_name, " · ".join(decision.reasons), decision.scale)
         else:
@@ -297,9 +314,11 @@ class BasketRebalancer:
         except Exception as exc:
             logger.warning("오버레이 지수 조회 실패 {}: {}", symbol, exc)
             return None
-        if df is None or df.empty or "close" not in df.columns:
-            return None
-        frame = self._overlay_dated_frame(df, "지수 종가")
+        frame = None
+        if df is not None and not df.empty and "close" in df.columns:
+            frame = self._overlay_dated_frame(df, "지수 종가")
+        if frame is None:
+            frame = self._index_proxy_frame(symbol, start, end)
         if frame is None:
             return None
         # 누락 봉을 삭제하면 이동평균 창이 과거로 밀려 잘못 복귀할 수 있다.
@@ -308,6 +327,39 @@ class BasketRebalancer:
         except (TypeError, ValueError):
             return None
         return closes or None
+
+    def _index_proxy_frame(self, symbol: str, start, end):
+        """지수 자료가 없거나 늦을 때 그 지수를 추종하는 ETF 종가로 대신 판단한다.
+
+        2026-09-17 이후 FDR의 KS200 자료가 멈춰 kr_pocket 추세 필터가 '직전 상태
+        유지'로 동결됐다. 추종 ETF(069500)는 같은 날에도 정상이었다. ETF 가격은 분배락
+        날 조금 내려가 이동평균 대비 위치가 약간 보수적으로(아래쪽으로) 잡힐 수 있다.
+        대용을 쓴 사실은 data_issues와 source_dates에 남긴다 — 원자료 복구는 따로 확인할 것.
+        """
+        proxy = _INDEX_PROXY.get(str(symbol).upper())
+        if not proxy:
+            return None
+        try:
+            pdf = self.data_collector.fetch_korean_stock(proxy, start, end)
+        except Exception as exc:
+            logger.warning("오버레이 지수 대용 조회 실패 {}: {}", proxy, exc)
+            return None
+        if pdf is None or pdf.empty or "close" not in pdf.columns:
+            return None
+        issues_before = len(getattr(self, "_overlay_input_issues", []) or [])
+        frame = self._overlay_dated_frame(pdf, f"지수 대용({proxy}) 종가")
+        if frame is None:
+            return None
+        # 대용으로 판단이 가능해졌으니 '비중 확대 보류' 문구는 거두고 대용 사용 사실을 남긴다
+        issues = getattr(self, "_overlay_input_issues", []) or []
+        self._overlay_input_issues = [
+            i for i in issues[:issues_before] if not i.startswith("지수 종가:")
+        ]
+        self._overlay_data_issue(
+            f"{symbol} 지수 자료가 늦어 추종 ETF {proxy} 종가로 추세를 판단함 — 원자료 복구 확인 필요"
+        )
+        logger.warning("바스켓 '{}' 추세 필터: {} 대신 {} 종가 사용", self.basket_name, symbol, proxy)
+        return frame
 
     def _nav_series_for_overlay(self) -> tuple[list[float] | None, list[float] | None]:
         """이 바스켓 계정의 시간가중 누적수익률(%)과 일간 수익률."""

@@ -143,9 +143,10 @@ def structural_deployment_tolerance(
     """배치율 허용 오차의 구조 하한 — 정수 주식 절사가 만드는 불가피한 미달을 반영(순수).
 
     truncation_unit_value는 '자동으로 메울 수 없는 미달 금액'이다. 헬스는
-    unfixable_deployment_gap(band + 가장 싼 집행 가능 묶음)을 넘긴다 — 보충 매수가
-    생긴 뒤로는 그 이상 남는 미달은 절사가 아니라 누수다(2026-09-23 교정: 예전 호출부는
-    보유 슬롯별 1주 가격의 합을 넘겨 9종목 바스켓의 허용이 20%p까지 벌어졌다).
+    unfixable_deployment_gap(max(band, 가장 싼 집행 가능 묶음의 절반))을 넘긴다 —
+    보충 매수가 생긴 뒤로는 그 이상 남는 미달은 절사가 아니라 누수다(2026-09-23 교정:
+    예전 호출부는 보유 슬롯별 1주 가격의 합을 넘겨 9종목 바스켓의 허용이 20%p까지
+    벌어졌다).
     잔고가 커지면 구조 하한이 저절로 조여져 floor가 다시 지배한다.
 
     반환: max(floor_tolerance, truncation_unit_value/total_value). 입력 불충분 시 floor.
@@ -318,6 +319,7 @@ def summarize_basket_operation(
     design_fraction: float | None = None,
     deployment_tolerance: float = 0.05,
     contribution_notes: list[str] | None = None,
+    data_notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """바스켓 paper 운영(트랙레코드 축적) 상태를 verdict + 요약으로 환원한다.
 
@@ -375,6 +377,12 @@ def summarize_basket_operation(
 
     # 적립 미실행 — 적립식 트랙에서는 '주문 실패 0건'과 무관하게 설계가 안 돌아가는 상태다.
     for note in contribution_notes or []:
+        verdict = "ATTENTION"
+        notes.append(note)
+
+    # 위험 관리(오버레이) 입력 문제 — 켜 둔 추세 필터가 오래된 자료로 동결되면 설정상
+    # 켜져 있어도 실제로는 꺼진 것과 같다. 로그에만 있으면 아무도 못 본다.
+    for note in data_notes or []:
         verdict = "ATTENTION"
         notes.append(note)
 
