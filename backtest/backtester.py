@@ -860,6 +860,11 @@ class Backtester:
             if regime_enabled and date in regime_series.index:
                 regime_at_t = regime_series.loc[date]
 
+            # 갭다운 청산은 전일 종가를 넘겨 보유한 포지션에만 적용한다. 아래 next_open
+            # 시가 주문으로 방금 산 주식을 같은 시가에 갭다운으로 되팔면 비용만 내는 가짜
+            # 왕복이 생긴다(실전 갭다운 청산도 장 시작 시점 보유 종목만 대상).
+            carried_position = position > 0
+
             # next_open은 당일 시가 전략 주문이 먼저, 이후 갭/블랙스완/종가 위험
             # 청산이 발생하는 실제 시간 순서를 따른다. 시가 결측 주문은 종가로
             # 대체하지 않고 명시적으로 스킵한다.
@@ -886,7 +891,7 @@ class Backtester:
                         bs_daily_returns = bs_daily_returns[-bs_consecutive_days:]
 
             if position > 0 and previous_close is not None and previous_close > 0:
-                if gap_enabled and open_price is not None:
+                if gap_enabled and open_price is not None and carried_position:
                     gap_pct = (open_price - previous_close) / previous_close
                     if gap_pct <= gap_down_threshold:
                         if _execute_full_exit(
@@ -922,9 +927,19 @@ class Backtester:
                 stop_loss_price = _stop_loss_price(row_atr)
                 take_profit_price = avg_price * (1 + tp_rate)
                 holding_days = (date - buy_date).days if buy_date is not None else 0
+                # 실전(order_executor)은 최소 보유 기간 동안 손실 방어 청산(STOP_LOSS·
+                # TRAILING_STOP·GAP_DOWN·BLACKSWAN)만 허용하고 익절·부분 익절·보유기간 만료
+                # 매도는 거부한다. 백테스트도 같은 규칙을 따라야 1~4일차 익절로 승률이 부풀지
+                # 않는다. legacy_same_close는 과거 결과 재현 경로라 기존 규칙을 그대로 둔다.
+                in_min_hold = (
+                    execution_model == EXECUTION_MODEL_NEXT_OPEN
+                    and min_holding_days > 0
+                    and buy_date is not None
+                    and holding_days < min_holding_days
+                )
 
                 # 최대 보유 기간 초과 시 강제 청산
-                if max_holding_days > 0 and holding_days >= max_holding_days:
+                if max_holding_days > 0 and holding_days >= max_holding_days and not in_min_hold:
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, position, "SELL", avg_daily_volume=row_volume,
                         avg_price=avg_price, symbol=symbol,
@@ -978,7 +993,12 @@ class Backtester:
                     sold_today = True
 
                 # 부분 익절 (1차 목표 도달)
-                elif partial_exit and not partial_exit_done and close >= avg_price * (1 + partial_target):
+                elif (
+                    partial_exit
+                    and not partial_exit_done
+                    and not in_min_hold
+                    and close >= avg_price * (1 + partial_target)
+                ):
                     sell_qty = max(1, int(position * partial_ratio))
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, sell_qty, "SELL", avg_daily_volume=row_volume,
@@ -1008,7 +1028,7 @@ class Backtester:
                         sold_today = True
 
                 # 전량 익절
-                elif close >= take_profit_price:
+                elif not in_min_hold and close >= take_profit_price:
                     costs = self.risk_manager.calculate_transaction_costs(
                         close, position, "SELL", avg_daily_volume=row_volume,
                         avg_price=avg_price, symbol=symbol,
