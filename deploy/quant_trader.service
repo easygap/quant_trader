@@ -7,6 +7,8 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/quant_trader
 Environment=PATH=/home/ubuntu/quant_trader/.venv/bin
+# 장 시간·거래일·1일 1매매 판정은 한국 시각 기준이다. 서버 TZ가 UTC면 9시간 어긋난다.
+Environment=TZ=Asia/Seoul
 # .env 가 없으면 유닛 시작 실패를 막기 위해 '-' 접두(선택 파일)
 EnvironmentFile=-/home/ubuntu/quant_trader/.env
 ExecStart=/home/ubuntu/quant_trader/.venv/bin/python main.py --mode schedule
