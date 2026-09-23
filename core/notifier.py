@@ -329,6 +329,7 @@ class Notifier:
             ("deployment", "🎯 주식 배치율", False),
             ("progress", "📅 진행률", False),
             ("cost", "💸 누적 비용", True),
+            ("risk", "📉 리스크", False),
             ("slot_warning", "⚠️ 미체결 슬롯", False),
         ):
             val = report.get(key)

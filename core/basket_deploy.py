@@ -47,13 +47,18 @@ def estimate_order_costs(
     *,
     commission_rate: float = DEFAULT_COMMISSION_RATE,
     tax_rate: float = DEFAULT_TAX_RATE,
+    tax_exempt_symbols: Any = None,
 ) -> dict[str, Any]:
     """주문 목록의 예상 거래비용(수수료+세금)과 총 거래액을 추정한다.
 
     orders는 .action('BUY'/'SELL'), .symbol, .quantity 속성을 가진 객체.
+    tax_exempt_symbols: 매도 거래세가 없는 종목(국내 주식형 ETF 등) — 체결 모델과 같은
+    목록(transaction_costs.tax_exempt_symbols)을 넘긴다.
     """
+    exempt = {str(x) for x in (tax_exempt_symbols or [])}
     buy_amount = 0.0
     sell_amount = 0.0
+    taxable_sell = 0.0
     for o in orders:
         price = float(prices.get(o.symbol, 0) or 0)
         amount = price * int(o.quantity)
@@ -61,10 +66,12 @@ def estimate_order_costs(
             buy_amount += amount
         else:
             sell_amount += amount
+            if str(o.symbol) not in exempt:
+                taxable_sell += amount
 
     total_amount = buy_amount + sell_amount
     commission = total_amount * commission_rate   # 매수·매도 양방향 수수료
-    tax = sell_amount * tax_rate                   # 세금은 매도만
+    tax = taxable_sell * tax_rate                  # 세금은 매도만(면제 종목 제외)
     total_cost = commission + tax
     return {
         "order_count": len(orders),
@@ -85,6 +92,7 @@ def summarize_basket_deployment(
     prices: dict[str, float],
     *,
     portfolio_value: float | None = None,
+    tax_exempt_symbols: Any = None,
 ) -> dict[str, Any]:
     """바스켓 배포 점검 요약 — 계획·비용·회전율·활성화 절차.
 
@@ -93,7 +101,7 @@ def summarize_basket_deployment(
     enabled = bool(basket_cfg.get("enabled", False))
     holdings = basket_cfg.get("holdings", {})
     rb = basket_cfg.get("rebalance", {}) or {}
-    costs = estimate_order_costs(orders, prices)
+    costs = estimate_order_costs(orders, prices, tax_exempt_symbols=tax_exempt_symbols)
 
     turnover_pct = None
     if portfolio_value and portfolio_value > 0:

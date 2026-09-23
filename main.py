@@ -626,9 +626,26 @@ def run_deploy_check(args) -> int:
 
     rb = BasketRebalancer(basket_name=basket_name, config=config)
     orders = rb.plan_rebalance(prices=prices) if prices else []
+    # 회전율 분모는 이 바스켓 계정의 실제 평가액이다. 예전엔 1,000만 원으로 고정돼
+    # kr_pocket(약 39만 원) 점검에서 회전율이 약 25배 작게 나왔다.
+    portfolio_value = getattr(args, "initial_capital", None)
+    if not portfolio_value:
+        try:
+            portfolio_value = rb.portfolio_mgr.get_portfolio_summary(
+                current_prices=prices or None,
+            ).get("total_value")
+        except Exception as exc:
+            logger.warning("바스켓 평가액 조회 실패 — 설정 자본 사용: {}", exc)
+            portfolio_value = None
+    portfolio_value = float(
+        portfolio_value or basket_cfg.get("initial_capital") or 10_000_000
+    )
     summary = summarize_basket_deployment(
         basket_name, basket_cfg, orders, prices,
-        portfolio_value=float(getattr(args, "initial_capital", None) or 10_000_000),
+        portfolio_value=portfolio_value,
+        tax_exempt_symbols=(config.risk_params.get("transaction_costs") or {}).get(
+            "tax_exempt_symbols"
+        ),
     )
 
     if getattr(args, "json", False):
@@ -1070,17 +1087,15 @@ def _run_rebalance_impl(args):
                             else:
                                 prev_boundary = sdf["date"].iloc[-2]
                             if prev > 0:
-                                flow = 0.0
-                                try:
-                                    flow = get_cash_flow_total_between(
-                                        live_strategy_name, prev_boundary, datetime.now(),
-                                        mode=ledger_mode,
-                                    )
-                                except Exception:
-                                    pass
+                                # 입금 조회에 실패하면 일간 수익률을 비워 둔다 — 중화 없이
+                                # 계산하면 입금일이 통째로 수익으로 보인다.
+                                flow = get_cash_flow_total_between(
+                                    live_strategy_name, prev_boundary, datetime.now(),
+                                    mode=ledger_mode,
+                                )
                                 daily_ret = twr_period_return(prev, last, flow) * 100
-                    except Exception:
-                        pass
+                    except Exception as dr_exc:
+                        logger.warning("바스켓 '{}' 일간 수익률 계산 실패: {}", name, dr_exc)
                     report_card = {
                         "total_value": summary_data.get("total_value", 0),
                         "cash": summary_data.get("cash", 0),
@@ -1112,10 +1127,44 @@ def _run_rebalance_impl(args):
                             )
                         )
                     except Exception as e:
-                        logger.debug("바스켓 '{}' 리포트 v2 부가필드 생략: {}", name, e)
+                        logger.warning("바스켓 '{}' 리포트 v2 부가필드 생략: {}", name, e)
+                    # 리스크 한 줄(변동성·샤프·하락일) — 수익률 한 숫자만 보면 '방어의
+                    # 대가'가 안 보인다(운영 원칙 9). 입금은 흡수한 스냅샷 구간 기준으로
+                    # 중화한다(달력 날짜로 묶으면 입금일이 +25~36% 수익으로 잡힌다).
+                    try:
+                        from core.performance_lens import (
+                            daily_returns_from_nav, format_risk_line, risk_metrics,
+                        )
+                        from database.models import PortfolioSnapshot, get_session
+
+                        _sess = get_session()
+                        try:
+                            _snaps = (
+                                _sess.query(PortfolioSnapshot)
+                                .filter(
+                                    PortfolioSnapshot.mode == ledger_mode,
+                                    PortfolioSnapshot.account_key == live_strategy_name,
+                                )
+                                .order_by(PortfolioSnapshot.date.asc())
+                                .all()
+                            )
+                        finally:
+                            _sess.close()
+                        if len(_snaps) >= 3:
+                            _flows = account_flows_by_snapshot(
+                                live_strategy_name, _snaps, mode=ledger_mode,
+                            )
+                            _daily = daily_returns_from_nav(
+                                [(s.date, s.total_value) for s in _snaps], flows=_flows,
+                            )
+                            report_card["risk"] = format_risk_line(
+                                risk_metrics([r for _, r in _daily])
+                            )
+                    except Exception as e:
+                        logger.warning("바스켓 '{}' 리스크 지표 생략: {}", name, e)
                     notifier.send_daily_report(report_card)
                 except Exception as e:
-                    logger.debug("바스켓 '{}' 일일 리포트 발송 실패(무시): {}", name, e)
+                    logger.warning("바스켓 '{}' 일일 리포트 발송 실패: {}", name, e)
 
         except Exception as e:
             logger.error("바스켓 '{}' 리밸런싱 실패: {}", name, e)
@@ -2181,12 +2230,49 @@ def account_flows_by_day(account_key: str, mode: str = "paper") -> dict:
     return out
 
 
+def account_flows_by_snapshot(account_key: str, snapshots, mode: str = "paper") -> dict:
+    """외부 현금흐름을 '그 흐름을 흡수한 스냅샷'의 날짜로 모은다.
+
+    흐름은 발생 시각 이후 처음 측정된 스냅샷 구간에 속한다(created_at >= occurred_at)
+    — PortfolioManager의 TWR 체인·일일 카드와 같은 경계다. 달력 날짜로 묶으면(예전
+    account_flows_by_day) 그날 10:07 스냅샷 뒤에 들어온 입금이나 주말·휴장일 입금이
+    엉뚱한 구간에 들어가 그 구간이 +25~36% 수익으로 잡힌다(#461과 같은 증상이 적립
+    주기마다 재발). 아직 측정되지 않은 흐름(마지막 스냅샷 이후)은 넣지 않는다.
+    """
+    from bisect import bisect_left
+    from datetime import datetime as _dt
+    from database.repositories import get_cash_flows
+
+    points = []
+    for s in snapshots or []:
+        day = s.date.date() if hasattr(s.date, "date") else s.date
+        measured = getattr(s, "created_at", None) or _dt.combine(day, _dt.max.time())
+        points.append((measured, day))
+    points.sort()
+    measured_at = [p[0] for p in points]
+
+    out: dict = {}
+    for occurred_at, amount in get_cash_flows(account_key=account_key, mode=mode):
+        if occurred_at is None:
+            continue
+        i = bisect_left(measured_at, occurred_at)
+        if i >= len(points):
+            continue  # 다음 사이클이 흡수할 흐름 — 아직 어떤 구간에도 속하지 않는다
+        day = points[i][1]
+        out[day] = out.get(day, 0.0) + float(amount or 0)
+    return out
+
+
 def _fetch_benchmark_closes(start, end) -> dict:
     """벤치마크(KS11) 종가를 {date: close}로. 실패하면 빈 dict.
 
-    일간 수익률이 아니라 **종가 레벨**을 준다 — 스냅샷이 빠진 날이 있으면 NAV 수익률은
+    일간 수익률이 아니라 **레벨**을 준다 — 스냅샷이 빠진 날이 있으면 NAV 수익률은
     여러 날 구간이 되므로, 벤치마크도 같은 구간으로 다시 계산해야 비교가 성립한다
     (core.performance_lens.aligned_returns 참고).
+
+    NAV는 10:07 장중 마크라 지수 종가(15:30)와 비교하면 하루의 절반가량이 어긋나
+    포착률이 양쪽 다 0 쪽으로 쏠린다. 시가(09:00)가 측정 시각에 훨씬 가깝다 —
+    완전히 맞출 수는 없으니 결과는 근사로 표기한다. 시가가 없으면 종가를 쓴다.
     """
     from datetime import timedelta
 
@@ -2196,10 +2282,17 @@ def _fetch_benchmark_closes(start, end) -> dict:
         s = (start.date() if hasattr(start, "date") else start) - timedelta(days=7)
         e = end.date() if hasattr(end, "date") else end
         df = fdr.DataReader("KS11", s.isoformat(), e.isoformat())
-        if df is None or df.empty or "Close" not in df.columns:
+        if df is None or df.empty:
             return {}
-        return {idx.date(): float(v) for idx, v in df["Close"].items()}
-    except Exception:
+        col = "Open" if "Open" in df.columns else ("Close" if "Close" in df.columns else None)
+        if col is None:
+            return {}
+        return {
+            idx.date(): float(v) for idx, v in df[col].items()
+            if v is not None and float(v) > 0
+        }
+    except Exception as exc:
+        logger.warning("국면 분해용 지수 조회 실패: {}", exc)
         return {}
 
 
@@ -2275,7 +2368,14 @@ def run_weekly_report() -> int:
                     if last_date - timedelta(days=10) <= _d(s.date) <= last_date - timedelta(days=4)
                 ]
                 if band:
-                    ref = band[-1]
+                    # 정확히 1주 전에 가장 가까운 스냅샷(같으면 더 최근). 예전엔 밴드의
+                    # 마지막(= 4일 전 근처)을 써서 금요일 리포트가 월→금만 재고
+                    # 금 10:07~월 10:07 구간(주말 갭 포함)을 매주 빠뜨렸다.
+                    target = last_date - timedelta(days=7)
+                    ref = min(
+                        band,
+                        key=lambda s: (abs((_d(s.date) - target).days), -_d(s.date).toordinal()),
+                    )
                     ref_val = float(ref.total_value)
                     if ref_val > 0:
                         from core.portfolio_manager import twr_period_return
@@ -2290,9 +2390,11 @@ def run_weekly_report() -> int:
                                 last_boundary,
                                 mode="paper",
                             )
-                        except Exception:
-                            pass
-                        week_change = twr_period_return(ref_val, last_val, flow) * 100
+                        except Exception as flow_exc:
+                            logger.warning("주간 변화 입금 중화 실패 — 주간 항 생략: {}", flow_exc)
+                            ref_val = 0.0
+                        if ref_val > 0:
+                            week_change = twr_period_return(ref_val, last_val, flow) * 100
 
             # 결측은 '고유 일수'로 집계(SNAPSHOT_GAP 이벤트는 미복구 결측을 매 사이클
             # 재경보해 부풀려짐 → 최근 7일 실제 빠진 영업일 수를 직접 센다).
@@ -2300,13 +2402,20 @@ def run_weekly_report() -> int:
                 missing_days = len(detect_snapshot_gaps_for_account(
                     config, key, now_kst, lookback_calendar_days=7,
                 ))
-            except Exception:
+            except Exception as gap_exc:
+                logger.warning("주간 결측 집계 실패: {}", gap_exc)
                 missing_days = 0
+            reconstructed_days = sum(
+                1 for s in snaps
+                if bool(getattr(s, "reconstructed", False))
+                and _d(s.date) >= (now_kst - timedelta(days=7)).date()
+            )
 
             # 국면 분해 + 리스크 지표 — 수익률 한 숫자로는 '방어의 대가'가 안 보인다
             # (docs/OPERATING_PRINCIPLES.md 원칙 9). 스냅샷의 daily_return과 같은 날의
             # 벤치마크 일간 수익률을 짝지어 상승/하락 국면을 나눠 잰다.
             regime = risk = None
+            regime_note = None
             try:
                 from core.performance_lens import (
                     aligned_returns, daily_returns_from_nav, risk_metrics,
@@ -2322,7 +2431,7 @@ def run_weekly_report() -> int:
                 # 10만원을 넣자 NAV가 284,499 → 385,460이 되면서 그날이 +35% 수익으로
                 # 계산돼 연환산 변동성 109%, 샤프 +2.28이라는 허구가 나왔다.
                 # 적립식 트랙은 이 경로가 상시라 한 번 새면 계속 샌다.
-                flows = account_flows_by_day(key, mode="paper")
+                flows = account_flows_by_snapshot(key, snaps, mode="paper")
 
                 daily = daily_returns_from_nav(nav_points, flows=flows)
                 risk = risk_metrics([r for _, r in daily])
@@ -2337,14 +2446,20 @@ def run_weekly_report() -> int:
                         ]
                         if pairs:
                             regime = split_by_regime(pairs)
+                            regime_note = "근사 — 지수 시가 기준"
+                            last_bench = max(closes)
+                            last_nav = _d(nav_points[-1][0])
+                            if last_bench < last_nav:
+                                regime_note += f", 지수 자료 {last_bench}까지만 반영"
             except Exception as lens_exc:
-                logger.debug("국면/리스크 지표 생략: {}", lens_exc)
+                logger.warning("국면/리스크 지표 생략: {}", lens_exc)
 
             summary = build_weekly_summary(
                 basket_name=basket_name, eval_result=eval_result,
                 week_nav_change_pct=week_change,
                 missing_days=missing_days, cycle_errors=cycle_errors,
                 regime=regime, risk=risk,
+                reconstructed_days=reconstructed_days, regime_note=regime_note,
             )
             logger.info("\n{}", summary["text"])
             try:
