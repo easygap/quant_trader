@@ -26,6 +26,43 @@
   --signal: #82cfff;
   --cursor: #ffffff;
 }
+
+/* 시장 조사: 계좌 성과와 다른 기준일·표본을 명시한다. */
+.research-status { margin: 18px 0 12px; color: var(--ink-soft); }
+.research-status[data-state="error"], .research-status[data-state="stale"] { color: var(--warn); }
+.research-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--rule); margin-bottom: 16px; }
+.research-metric { padding: 14px; border-right: 1px solid var(--rule); }
+.research-metric:last-child { border-right: 0; }
+.research-metric span, .research-metric small { display: block; color: var(--ink-faint); font-size: 12px; }
+.research-metric strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; margin: 3px 0; }
+.research-controls { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 0 0 12px; }
+.research-controls label { font-size: 12px; color: var(--ink-soft); }
+.research-controls select { background: var(--paper); border: 1px solid var(--rule-strong); padding: 7px 24px 7px 9px; max-width: 100%; }
+.research-table td:first-child { min-width: 155px; }
+.research-table caption { position: static; width: auto; height: auto; margin: 0; padding: 0 0 10px; clip-path: none; overflow: visible; white-space: normal; text-align: left; font-size: 12px; color: var(--ink-soft); }
+.research-table small { display: block; color: var(--ink-faint); font-weight: 400; font-size: 11px; white-space: normal; }
+.research-table .research-bar { display: block; height: 3px; width: var(--bar-width); background: var(--accent); margin: 5px 0 0 auto; opacity: .55; }
+.research-theses-head { margin: 24px 0 12px; }
+.research-theses-head h3 { font-size: 15px; }
+.research-thesis { border-top: 1px solid var(--rule); padding: 16px 0; }
+.research-thesis header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+.research-thesis h4 { font-size: 15px; }
+.research-thesis p { margin: 6px 0; }
+.research-thesis .research-evidence-status { color: var(--warn); font-size: 12px; flex-shrink: 0; }
+.research-thesis a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.research-thesis ul, #researchLimitations ul { padding-left: 20px; margin: 8px 0; }
+.research-thesis details { margin-top: 8px; }
+.research-thesis summary { cursor: pointer; color: var(--ink-soft); }
+.operations-disclosures { padding-left: 20px; }
+.operations-disclosures li { margin: 8px 0; overflow-wrap: anywhere; }
+.operations-disclosures a { color: var(--accent); text-decoration: underline; }
+.operations-wrap { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .research-metric { padding: 10px 8px; }
+  .research-metric strong { font-size: 18px; }
+  .research-controls { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 8px; }
+  .research-thesis header { align-items: flex-start; }
+}
 * {
   box-sizing: border-box;
 }

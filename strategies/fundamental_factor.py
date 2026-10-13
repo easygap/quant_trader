@@ -2,8 +2,9 @@
 펀더멘털 팩터 전략
 - 가격(OHLC)이 아닌 재무 지표만으로 신호 산출 (pykrx 우선 → yfinance 폴백).
 - 백테스트 시 DataFrame에 종목코드를 넣으려면 df.attrs['symbol'] = '005930' 설정.
-- Point-in-time 안전장치: as_of_date가 주어지면 해당 시점 기준 공시 가용 데이터만 사용.
-  한국 상장사는 분기 종료 후 통상 45일 내 실적 공시. 안전 마진으로 60일 적용.
+- 과거 시점에는 당시 일자에 조회 가능한 시장 배수만 사용한다.
+  Yahoo의 현재 재무 수치를 과거에 붙이지 않는다. 공시 시각을 가진 재무 이력이
+  없으면 해당 항목은 결측이며 임의의 60일 지연으로 가용성을 만들어내지 않는다.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from loguru import logger
 
 from strategies.base_strategy import BaseStrategy
 from config.config_loader import Config
+from core.fundamental_loader import yahoo_debt_to_equity_pct
 
 try:
     import yfinance as yf
@@ -230,20 +232,7 @@ def _yf_roe_debt_op_yoy(symbol: str) -> tuple[Optional[float], Optional[float], 
             except (TypeError, ValueError):
                 roe = None
 
-        debt_ratio = None
-        de = info.get("debtToEquity")
-        if de is not None:
-            try:
-                debt_ratio = float(de) * 100.0
-            except (TypeError, ValueError):
-                pass
-        if debt_ratio is None:
-            td, te = info.get("totalDebt"), info.get("totalStockholderEquity")
-            if td is not None and te is not None and float(te) != 0:
-                try:
-                    debt_ratio = float(td) / float(te) * 100.0
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
+        debt_ratio = yahoo_debt_to_equity_pct(info)
 
         yoy = _yf_operating_income_yoy(t)
         return roe, debt_ratio, yoy
@@ -307,6 +296,9 @@ def _fetch_fundamental_bundle(symbol: str, as_of_date: datetime = None) -> dict[
         "debt_ratio": None,
         "op_income_yoy": None,
         "source": "",
+        "field_sources": {},
+        "as_of": as_of_date.isoformat() if as_of_date is not None else None,
+        "financial_history_available": as_of_date is None,
     }
     per_pykrx = _stock_per_pykrx(symbol, as_of_date=as_of_date)
     mdf, dstr, mkt = _market_fundamental_for_symbol(symbol, as_of_date=as_of_date)
@@ -319,14 +311,23 @@ def _fetch_fundamental_bundle(symbol: str, as_of_date: datetime = None) -> dict[
         else:
             bench = _sector_median_per_pykrx(mdf)
     per = per_pykrx
-    if per is None:
+    if per is None and as_of_date is None:
         per = _yf_per(symbol)
-    roe, debt, yoy = _yf_roe_debt_op_yoy(symbol)
+    # Yahoo .info and quarterly_financials contain current/revised information.
+    # Merely changing pykrx's date (or subtracting 60 days) does not date Yahoo's
+    # values. Exclude them for every historical call until filing-time data exists.
+    roe, debt, yoy = _yf_roe_debt_op_yoy(symbol) if as_of_date is None else (None, None, None)
     out["per"] = per
     out["sector_benchmark_per"] = bench
     out["roe"] = roe
     out["debt_ratio"] = debt
     out["op_income_yoy"] = yoy
+    out["field_sources"] = {key: source for key, value, source in (
+        ("per", per, "pykrx" if per_pykrx is not None else "yfinance"),
+        ("sector_benchmark_per", bench, "pykrx"), ("roe", roe, "yfinance"),
+        ("debt_ratio", debt, "yfinance"), ("op_income_yoy", yoy, "yfinance"),
+    ) if value is not None}
+    out["debt_ratio_basis"] = "interest_bearing_debt_to_equity_pct" if debt is not None else None
     parts: list[str] = []
     if per_pykrx is not None or mdf is not None:
         parts.append("pykrx")
@@ -349,10 +350,6 @@ class FundamentalFactorStrategy(BaseStrategy):
     SELL = "SELL"
     HOLD = "HOLD"
 
-    # Point-in-time 안전 마진: 분기 종료 후 실적 공시까지 최소 일수.
-    # 한국 상장사 통상 45일 이내 공시, 안전 마진 60일.
-    PIT_SAFE_MARGIN_DAYS = 60
-
     def __init__(self, config: Config = None, as_of_date: datetime = None):
         super().__init__(
             name="fundamental_factor",
@@ -370,10 +367,9 @@ class FundamentalFactorStrategy(BaseStrategy):
             return {}
 
         ref_date = as_of_date or self._as_of_date
-        # Point-in-time: 백테스트 시 공시 가용 시점으로 조회 시점을 후퇴
-        pit_date = None
-        if ref_date is not None:
-            pit_date = ref_date - timedelta(days=self.PIT_SAFE_MARGIN_DAYS)
+        # A market PER is already a dated market observation. Statement availability
+        # must come from real filing timestamps, not an invented fixed delay.
+        pit_date = ref_date
 
         cache_key = f"{sym}_{pit_date.strftime('%Y%m%d') if pit_date else 'live'}"
         ent = _CACHE.get(cache_key)
@@ -421,8 +417,9 @@ class FundamentalFactorStrategy(BaseStrategy):
         # 부채비율: provider 신뢰도 검증. yfinance debtToEquity는 한국 회계 기준과
         # 다르므로(차입금/자본 vs 총부채/자본) 신뢰 소스가 아니면 점수 계산에서 제외.
         dr = bundle.get("debt_ratio")
-        source = bundle.get("source", "")
-        debt_source_trusted = any(ts in source for ts in self._TRUSTED_DEBT_SOURCES)
+        field_sources = bundle.get("field_sources") or {}
+        source = field_sources.get("debt_ratio", "unknown")
+        debt_source_trusted = source in self._TRUSTED_DEBT_SOURCES and bundle.get("debt_ratio_basis") == "total_liabilities_to_equity_pct"
         if dr is not None and debt_source_trusted:
             max_score += 1
             if dr <= debt_max:
@@ -460,57 +457,46 @@ class FundamentalFactorStrategy(BaseStrategy):
         return self._signal_from_score_adaptive(score, max_score)
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Historical frame analysis is unavailable until filing-time data exists.
+
+        Historical pykrx PER alone cannot supply the two independent factors that
+        this strategy requires. Fetching it once per row would issue hundreds of
+        calls for a guaranteed HOLD result. Report that limitation immediately.
+        Current observations use analyze_current()/generate_signal() explicitly.
+        """
         result = df.copy()
-        if result.empty:
-            result["signal"] = self.HOLD
-            result["strategy_score"] = 0.0
-            result["ensemble_skip"] = True
+        result["signal"] = self.HOLD
+        result["strategy_score"] = 0.0
+        result["fundamental_score"] = 0
+        result["ensemble_skip"] = True
+        result["fundamental_data_status"] = "point_in_time_financial_history_unavailable"
+        return result
+
+    def analyze_current(self, df: pd.DataFrame, *, symbol: str = None) -> pd.DataFrame:
+        """Explicit current observation, assigned only to the final decision row.
+
+        The caller chooses this context; a row whose date happens to equal today's
+        date never implicitly authorizes current financial data in a backtest.
+        """
+        result = self.analyze(df)
+        if result.empty or self._as_of_date is not None:
             return result
-
-        sym = ""
-        if hasattr(result, "attrs") and isinstance(result.attrs, dict):
-            sym = str(result.attrs.get("symbol") or "").strip()
-
-        if not sym:
-            result["signal"] = self.HOLD
-            result["strategy_score"] = 0.0
-            result["fundamental_score"] = 0
-            result["ensemble_skip"] = True
-            return result
-
-        # 백테스트: DataFrame의 마지막 날짜를 as_of_date로 사용
-        row_date = None
-        if self._as_of_date:
-            row_date = self._as_of_date
-        elif hasattr(result.index, 'max') and len(result) > 0:
-            try:
-                last_idx = result.index[-1]
-                if isinstance(last_idx, (datetime, pd.Timestamp)):
-                    row_date = last_idx.to_pydatetime() if hasattr(last_idx, 'to_pydatetime') else last_idx
-            except Exception:
-                pass
-
-        bundle = self._cached_bundle(sym, as_of_date=row_date)
-        if not any(
-            bundle.get(k) is not None
-            for k in ("per", "sector_benchmark_per", "roe", "debt_ratio", "op_income_yoy")
-        ):
-            result["signal"] = self.HOLD
-            result["strategy_score"] = 0.0
-            result["fundamental_score"] = 0
-            result["ensemble_skip"] = True
-            return result
-
-        sc, det = self._score_bundle(bundle)
-        max_sc = det.get("_max_score", 4)
-        sig = self._signal_from_score(sc, max_sc)
-        result["signal"] = sig
-        result["strategy_score"] = float(sc)
-        result["fundamental_score"] = sc
-        result["ensemble_skip"] = False
+        current = self.generate_signal(df, symbol=symbol)
+        skipped = current.get("ensemble_skip", True)
+        for column, value in (("signal", current.get("signal", self.HOLD)),
+                              ("strategy_score", float(current.get("score", 0))),
+                              ("fundamental_score", current.get("score", 0)),
+                              ("ensemble_skip", skipped),
+                              ("fundamental_data_status", "current_unavailable" if skipped else "current_observation")):
+            result.iat[-1, result.columns.get_loc(column)] = value
         return result
 
     def generate_signal(self, df: pd.DataFrame, symbol: str = None, **kwargs) -> dict:
+        """Current observation by default; historical callers must pass as_of_date.
+
+        Backtests use analyze(), which returns explicit unavailability until dated
+        financial snapshots exist. Dated lookups stay separate from current cache.
+        """
         sym = symbol or kwargs.get("symbol") or (
             df.attrs.get("symbol") if hasattr(df, "attrs") and isinstance(df.attrs, dict) else None
         )
@@ -518,10 +504,11 @@ class FundamentalFactorStrategy(BaseStrategy):
             return {
                 "signal": self.HOLD,
                 "score": 0,
+                "ensemble_skip": True,
                 "details": {"사유": "종목코드 없음 — df.attrs['symbol'] 또는 symbol 인자 필요"},
             }
 
-        bundle = self._cached_bundle(sym)
+        bundle = self._cached_bundle(sym, as_of_date=kwargs.get("as_of_date"))
         if not any(
             bundle.get(k) is not None
             for k in ("per", "roe", "debt_ratio", "op_income_yoy")
@@ -529,6 +516,7 @@ class FundamentalFactorStrategy(BaseStrategy):
             return {
                 "signal": self.HOLD,
                 "score": 0,
+                "ensemble_skip": True,
                 "details": {"사유": "펀더멘털 데이터 조회 실패"},
                 "source": bundle.get("source", "none"),
             }
@@ -540,6 +528,7 @@ class FundamentalFactorStrategy(BaseStrategy):
         return {
             "signal": sig,
             "score": sc,
+            "ensemble_skip": max_sc <= 1,
             "details": det,
             "close": float(df["close"].iloc[-1]) if not df.empty and "close" in df.columns else 0,
             "date": df.index[-1] if not df.empty else None,

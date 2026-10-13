@@ -6,6 +6,7 @@
 """
 
 from typing import Optional
+import math
 
 from loguru import logger
 
@@ -32,6 +33,25 @@ def _korean_ticker(symbol: str) -> str:
     return f"{s}.KS"
 
 
+def yahoo_debt_to_equity_pct(info: dict) -> Optional[float]:
+    """Yahoo debtToEquity is already expressed in percent (145.03 means 145.03%).
+
+    This measures interest-bearing debt/equity, not Korean total liabilities/equity.
+    Keep the basis explicit at callers; negative equity is not a healthy low ratio.
+    """
+    value = info.get("debtToEquity")
+    try:
+        if value is not None:
+            ratio = float(value)
+            return ratio if math.isfinite(ratio) and ratio >= 0 else None
+        debt, equity = float(info["totalDebt"]), float(info["totalStockholderEquity"])
+        if math.isfinite(debt) and math.isfinite(equity) and debt >= 0 and equity > 0:
+            return debt / equity * 100.0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
 def _get_fundamentals_pykrx(symbol: str) -> dict:
     """pykrx로 한국 종목 PER·부채비율 조회. 설치되지 않았거나 실패하면 빈 결과."""
     result = {"per": None, "debt_ratio": None, "available": False, "source": "pykrx"}
@@ -54,7 +74,7 @@ def _get_fundamentals_pykrx(symbol: str) -> dict:
             per_val = per_df["PER"].dropna()
             if not per_val.empty:
                 per = float(per_val.iloc[-1])
-                result["per"] = per if per > 0 else None
+                result["per"] = per if math.isfinite(per) and per > 0 else None
 
         result["available"] = result["per"] is not None
         if result["available"]:
@@ -82,26 +102,15 @@ def _get_fundamentals_yfinance(symbol: str) -> dict:
         if per is not None:
             try:
                 per = float(per)
-                if per < 0:
+                if not math.isfinite(per) or per <= 0:
                     per = None
             except (TypeError, ValueError):
                 per = None
         result["per"] = per
 
-        debt_eq = info.get("debtToEquity")
-        if debt_eq is not None:
-            try:
-                result["debt_ratio"] = float(debt_eq) * 100.0
-            except (TypeError, ValueError):
-                pass
-        if result["debt_ratio"] is None:
-            td = info.get("totalDebt")
-            te = info.get("totalStockholderEquity")
-            if td is not None and te is not None and float(te) != 0:
-                try:
-                    result["debt_ratio"] = float(td) / float(te) * 100.0
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
+        result["debt_ratio"] = yahoo_debt_to_equity_pct(info)
+        result["debt_ratio_basis"] = "interest_bearing_debt_to_equity_pct"
+        result["field_sources"] = {key: "yfinance" for key in ("per", "debt_ratio") if result[key] is not None}
 
         result["available"] = result["per"] is not None or result["debt_ratio"] is not None
     except Exception as e:
@@ -119,8 +128,9 @@ def get_fundamentals(symbol: str) -> dict:
     """
     # 1차: pykrx (한국 종목 정확도 높음)
     result = _get_fundamentals_pykrx(symbol)
-    if result["available"]:
-        return result
+    result["field_sources"] = {key: "pykrx" for key in ("per", "debt_ratio") if result.get(key) is not None}
+    # pykrx provides PER but no debt field. A successful PER lookup must not
+    # short-circuit the separate debt lookup and reject every PER-successful stock.
 
     # 2차: yfinance (폴백)
     yf_result = _get_fundamentals_yfinance(symbol)
@@ -128,13 +138,16 @@ def get_fundamentals(symbol: str) -> dict:
         # pykrx에서 못 가져온 필드를 yfinance로 보충
         if result["per"] is None and yf_result["per"] is not None:
             result["per"] = yf_result["per"]
+            result["field_sources"]["per"] = "yfinance"
         if result["debt_ratio"] is None and yf_result["debt_ratio"] is not None:
             result["debt_ratio"] = yf_result["debt_ratio"]
+            result["field_sources"]["debt_ratio"] = "yfinance"
+            result["debt_ratio_basis"] = yf_result.get("debt_ratio_basis", "interest_bearing_debt_to_equity_pct")
         result["available"] = result["per"] is not None or result["debt_ratio"] is not None
-        result["source"] = "pykrx+yfinance" if result["source"] == "pykrx" else "yfinance"
+        result["source"] = "+".join(dict.fromkeys(result["field_sources"].values())) or "none"
         return result
 
-    result["source"] = "none"
+    result["source"] = "+".join(dict.fromkeys(result["field_sources"].values())) or "none"
     return result
 
 
@@ -143,6 +156,7 @@ def check_fundamental_filter(
     per_min: Optional[float] = 0,
     per_max: Optional[float] = 50,
     debt_ratio_max: Optional[float] = 200,
+    debt_ratio_basis: str = "total_liabilities_to_equity_pct",
 ) -> tuple[bool, str]:
     """
     PER·부채비율이 정상 범위인지 확인.
@@ -152,6 +166,8 @@ def check_fundamental_filter(
         per_min: PER 하한 (None이면 검사 생략). 0이면 적자(PER 음수) 제외
         per_max: PER 상한 (None이면 검사 생략)
         debt_ratio_max: 부채비율(%) 상한 (None이면 검사 생략)
+        debt_ratio_basis: 기본 총부채/자본. Yahoo의 차입금/자본을 사용하려면
+            interest_bearing_debt_to_equity_pct를 명시해야 한다.
 
     Returns:
         (통과 여부, 사유 문자열)
@@ -175,11 +191,24 @@ def check_fundamental_filter(
                 reasons.append(f"PER {per:.1f} > {per_max}")
 
     if debt_ratio_max is not None:
+        basis_labels = {
+            "total_liabilities_to_equity_pct": "총부채/자본",
+            "interest_bearing_debt_to_equity_pct": "차입금/자본",
+        }
         dr = data.get("debt_ratio")
-        if dr is None:
+        actual_basis = data.get("debt_ratio_basis")
+        if debt_ratio_basis not in basis_labels:
+            reasons.append("펀더멘털 필터 설정 오류: 알 수 없는 부채비율 기준")
+        elif dr is None:
             reasons.append("부채비율 미제공")
+        elif actual_basis != debt_ratio_basis:
+            reasons.append(
+                f"부채비율 기준 불일치: 요구 {basis_labels[debt_ratio_basis]}, "
+                f"제공 {basis_labels.get(actual_basis, '미확인')}"
+            )
         elif dr > debt_ratio_max:
-            reasons.append(f"부채비율 {dr:.1f}% > {debt_ratio_max}%")
+            label = basis_labels[debt_ratio_basis]
+            reasons.append(f"{label} {dr:.1f}% > {debt_ratio_max}%")
 
     if reasons:
         return False, "; ".join(reasons)

@@ -63,16 +63,20 @@ def test_flow_after_last_snapshot_is_not_yet_counted(monkeypatch):
     assert main.account_flows_by_snapshot("acct", snaps) == {}
 
 
-def test_weekly_summary_does_not_call_reconstructed_week_accident_free():
+def test_weekly_summary_requires_complete_records_before_reporting_no_issues():
     from core.weekly_report import build_weekly_summary
 
-    base = dict(basket_name="t", eval_result={"verdict": "WAIT", "metrics": {}},
+    base = dict(basket_name="t", eval_result={"verdict": "WAIT", "metrics": {"recent_order_rejections": 0}},
                 missing_days=0, cycle_errors=0)
     clean = build_weekly_summary(**base)
     restored = build_weekly_summary(**base, reconstructed_days=1)
     ev = {f["name"]: f["value"] for f in restored["fields"]}["🛠 주간 이벤트"]
-    assert "무사고" in {f["name"]: f["value"] for f in clean["fields"]}["🛠 주간 이벤트"]
-    assert "무사고" not in ev and "나중에 채운 기록 1일" in ev
+    assert "기록된 운영 이상 없음" in {f["name"]: f["value"] for f in clean["fields"]}["🛠 주간 이벤트"]
+    assert "기록된 운영 이상 없음" not in ev and "나중에 채운 기록 1일" in ev
+    unknown = build_weekly_summary(**{**base, "eval_result": {"verdict": "WAIT", "metrics": {}}})
+    unknown_events = {f["name"]: f["value"] for f in unknown["fields"]}["🛠 주간 이벤트"]
+    assert "주문 거부 기록 미확인" in unknown_events
+    assert "미확인건" not in unknown_events and "기록된 운영 이상 없음" not in unknown_events
 
 
 def test_regime_note_is_shown():

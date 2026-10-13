@@ -82,7 +82,7 @@ function dashboard({ now = "2026-10-01T00:15:00+09:00", fetch } = {}) {
     history: { replaceState() {} },
   });
   const exports =
-    "parseDate, fmtLong, fmtDT, calendarAgeDays, rowInstant, buildSeries, monthlyReturns, currentMonthContributionState, renderSignals, refreshCore, refreshSlow, refreshChart, updateChart, renderChartTable, moveHistoryTable, renderDecision, renderEvaluations, state, chart";
+    "parseDate, fmtLong, fmtDT, calendarAgeDays, rowInstant, buildSeries, monthlyReturns, currentMonthContributionState, renderSignals, refreshCore, refreshSlow, refreshChart, updateChart, renderChartTable, moveHistoryTable, renderDecision, renderEvaluations, holdingsTable, renderBasketTracks, state, chart";
   assert.match(source, /\n  main\(\);\s*\}\)\(\);\s*$/);
   vm.runInContext(
     source.replace(/\n  main\(\);/, `\n  globalThis.dashboard = {${exports}};`),
@@ -365,4 +365,40 @@ test("검증 결과를 처음 불러오는 동안에는 실패 안내를 띄우�
   d.state.evaluationsStatus = "error";
   d.renderDecision();
   assert.equal(title(), "검증 결과를 불러오지 못했습니다");
+});
+
+test("시장 비중은 측정한 가격·수량으로만 표시", () => {
+  const d = dashboard();
+  const basket = {display_name: "테스트", snapshot: {total_value: 1000},
+    positions: [{symbol: "A", quantity: 2, invested: 400, avg_price: 200}],
+    target_weights: {A: 0.5}, measurement: {positions: [{symbol: "A", quantity: 2, price: 100}]}};
+  assert.match(d.holdingsTable(basket), /20\.0%/);
+  basket.measurement.positions[0].quantity = 1;
+  assert.doesNotMatch(d.holdingsTable(basket), /20\.0%/);
+});
+
+test("매수 차단과 거부 기록을 검증 카드에 표시", () => {
+  const d = dashboard();
+  d.renderEvaluations([{basket: "a", verdict: "WAIT", recent_order_rejections: 3,
+    entry_status: {status: "BLOCKED", measured_at: "2026-10-12T10:10:00"}}]);
+  const html = d.element("basketEval").innerHTML;
+  assert.match(html, /신규 매수 차단/);
+  assert.match(html, /주문 거부 기록 3건/);
+});
+
+test("이번 달 입금이 있어도 지난달 부족 금액을 숨기지 않음", () => {
+  const d = dashboard();
+  d.state.runtime = {trading_halt: null, scheduler_stale: false};
+  d.state.runtimeStatus = "ready";
+  d.state.baskets = [{basket: "kr_pocket", account_key: "basket_rebalance:kr_pocket", snapshot: {date: "2026-09-30"},
+    contribution_status: {issues: ["2026-09 적립 90,000원 확인 필요"]}}];
+  d.renderEvaluations([{basket: "kr_pocket", issues: []}]);
+  assert.equal(d.element("decisionTitle").textContent, "지난 적립 계획의 금액을 확인해 주세요");
+});
+
+test("소액 입금 한 건으로 월 적립이 완료되지 않음", () => {
+  const d = dashboard();
+  d.state.flowStatus.set("test", "ready");
+  d.state.flows.set("test", [{occurred_at: "2026-10-01T00:01:00", amount: 10000}]);
+  assert.equal(d.currentMonthContributionState({basket: "test", contribution_plan: {enabled: true, amount: 100000}}), "partial");
 });

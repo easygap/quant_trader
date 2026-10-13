@@ -161,7 +161,8 @@ mean_reversion:
     enabled: true                       # pykrx(우선) → yfinance(폴백) 순서로 조회
     per_min: 0                          # PER 하한 (0 = 적자 종목 제외). null 이면 검사 생략
     per_max: 50                         # PER 상한. null 이면 검사 생략
-    debt_ratio_max: 200                 # 부채비율(%) 상한. 미신뢰 소스(yfinance debtToEquity)는 자동 skip됨. DART/pykrx만 점수에 반영.
+    debt_ratio_max: 200                 # 부채비율(%) 상한. 요구 기준과 다른 공급자 비율은 매수 필터를 통과하지 못함.
+    debt_ratio_basis: total_liabilities_to_equity_pct  # 총부채/자본. 차입금/자본을 의도할 때만 interest_bearing_debt_to_equity_pct로 명시 변경.
 
 # --- 눌림목 전략 (C-3A) ---
 # 중기 상승 추세 + RSI 눌림목 + ADX 추세 확인. edge-trigger 진입.

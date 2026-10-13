@@ -19,7 +19,7 @@ from database.models import (
     get_session, with_retry, StockPrice, TradeHistory,
     Position, PortfolioSnapshot, DailyReport, FailedOrder,
     PendingOrderGuard, OrderRecord as DbOrderRecord, CashFlow,
-    OperationEvent,
+    OperationEvent, ExecutionCostEvent,
 )
 
 
@@ -786,6 +786,7 @@ def save_portfolio_snapshot(
     mode: str = "paper",
     reconstructed: bool = False,
     measured_at: datetime = None,
+    valuation_context: dict = None,
 ):
     """일일 포트폴리오 스냅샷 저장 (mode+account_key 장부별 격리).
 
@@ -816,8 +817,8 @@ def save_portfolio_snapshot(
             position_count=position_count,
             reconstructed=bool(reconstructed),
         )
-        if measured_at is not None:
-            snapshot.created_at = measured_at
+        observed_at = measured_at or datetime.now()
+        snapshot.created_at = observed_at
         # merge by (mode, account_key, date)
         existing = session.query(PortfolioSnapshot).filter(
             PortfolioSnapshot.mode == md,
@@ -825,6 +826,9 @@ def save_portfolio_snapshot(
             PortfolioSnapshot.date == today,
         ).first()
         if existing:
+            # Preserve the previous observation in the same transaction as the
+            # replacement, including the first legacy row after this migration.
+            _append_valuation(session, existing, None, existing.created_at or existing.date)
             existing.total_value = total_value
             existing.cash = cash
             existing.invested = invested
@@ -840,9 +844,11 @@ def save_portfolio_snapshot(
             # created_at은 '이 값이 마지막으로 측정된 시각'이다 — TWR 체인의 유입 경계가
             # 이 시각을 쓰므로, 같은 날 재실행(upsert) 때 갱신하지 않으면 재실행 전에
             # 반영된 입금이 다음 날 구간에 이중 산입돼 수익률이 영구 왜곡된다(적대적 리뷰 HIGH).
-            existing.created_at = measured_at or datetime.now()
+            existing.created_at = observed_at
         else:
             session.add(snapshot)
+        target = existing if existing is not None else snapshot
+        _append_valuation(session, target, valuation_context, observed_at)
         session.commit()
         return True
     except Exception as e:
@@ -883,6 +889,89 @@ def get_latest_peak_value(
 # =============================================================
 # 외부 현금 흐름 (입금/출금) — 적립식 지원 (docs/POCKET_TRACK_PLAN.md §4)
 # =============================================================
+
+def _append_valuation(session, snapshot, context, measured_at):
+    import hashlib
+    import json
+    from database.models import PortfolioValuation
+
+    # A legacy row may already have a richer record. Do not replace its metadata
+    # with an unknown-price archive when the next daily upsert happens.
+    if context is None and session.query(PortfolioValuation.id).filter(
+        PortfolioValuation.mode == snapshot.mode,
+        PortfolioValuation.account_key == snapshot.account_key,
+        PortfolioValuation.date == snapshot.date,
+        PortfolioValuation.measured_at == measured_at,
+        PortfolioValuation.total_value == snapshot.total_value,
+        PortfolioValuation.cash == snapshot.cash,
+        PortfolioValuation.cumulative_return == snapshot.cumulative_return,
+        PortfolioValuation.daily_return == snapshot.daily_return,
+        PortfolioValuation.mdd == snapshot.mdd,
+    ).first():
+        return
+    context = dict(context or {})
+    kind = context.get("valuation_kind") or ("reconstructed" if snapshot.reconstructed else "unverified")
+    payload = {
+        "mode": snapshot.mode, "account_key": snapshot.account_key,
+        "date": snapshot.date.isoformat(), "measured_at": measured_at.isoformat(),
+        "kind": kind, "total_value": snapshot.total_value, "cash": snapshot.cash,
+        "cumulative_return": snapshot.cumulative_return, "daily_return": snapshot.daily_return,
+        "mdd": snapshot.mdd, "context": context,
+    }
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    if session.query(PortfolioValuation.id).filter_by(fingerprint=fingerprint).first():
+        return
+    session.add(PortfolioValuation(
+        mode=snapshot.mode, account_key=snapshot.account_key, date=snapshot.date,
+        measured_at=measured_at, kind=kind, total_value=snapshot.total_value,
+        cash=snapshot.cash, cumulative_return=snapshot.cumulative_return,
+        daily_return=snapshot.daily_return, mdd=snapshot.mdd,
+        detail=json.dumps(context, ensure_ascii=False, allow_nan=False), fingerprint=fingerprint,
+    ))
+
+
+def get_portfolio_valuations(account_key: str, mode: str = "paper", *, kind=None, day=None):
+    """Read measurements in time order; no external price request."""
+    import json
+    from database.models import PortfolioValuation
+
+    session = get_session()
+    try:
+        q = session.query(PortfolioValuation).filter(
+            PortfolioValuation.account_key == account_key, PortfolioValuation.mode == _ledger_mode(mode),
+        )
+        if kind:
+            q = q.filter(PortfolioValuation.kind == kind)
+        if day is not None:
+            d = datetime.fromisoformat(str(day)[:10])
+            q = q.filter(PortfolioValuation.date == d)
+        return [{"id": r.id, "date": r.date.isoformat(), "measured_at": r.measured_at.isoformat(),
+                 "recorded_at": r.recorded_at.isoformat(), "kind": r.kind, "total_value": r.total_value,
+                 "cash": r.cash, "cumulative_return": r.cumulative_return, "daily_return": r.daily_return,
+                 "mdd": r.mdd, "context": json.loads(r.detail or "{}")}
+                for r in q.order_by(PortfolioValuation.date, PortfolioValuation.measured_at, PortfolioValuation.id).all()]
+    finally:
+        session.close()
+
+
+def append_portfolio_valuation(*, account_key, mode, day, measured_at, total_value, cash,
+                               cumulative_return, daily_return, mdd, context):
+    """Append a separate valuation without touching the daily operating ledger."""
+    from types import SimpleNamespace
+    row = SimpleNamespace(account_key=account_key, mode=_ledger_mode(mode),
+                          date=datetime.fromisoformat(str(day)[:10]), total_value=total_value,
+                          cash=cash, cumulative_return=cumulative_return, daily_return=daily_return,
+                          mdd=mdd, reconstructed=False)
+    session = get_session()
+    try:
+        _append_valuation(session, row, context, measured_at)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 
 @with_retry
 def record_cash_flow(
@@ -1688,6 +1777,42 @@ def resolve_failed_order(order_id: int, status: str = "retried"):
 OPEN_ORDER_RECORD_STATUSES = ("SUBMITTED", "ACKED", "PARTIAL_FILLED")
 
 
+@with_retry
+def append_execution_cost_event(payload: dict, event_type: str) -> bool:
+    """Idempotent observation, separate from position/cash/order transactions."""
+    import hashlib
+    material = {key: value for key, value in payload.items() if key not in {"observed_at", "updated_at", "reconciled_observed_at"}}
+    event_key = hashlib.sha256(json.dumps([event_type, material], sort_keys=True, default=str).encode()).hexdigest()
+    session = get_session()
+    try:
+        if session.query(ExecutionCostEvent.id).filter_by(event_key=event_key).first():
+            return False
+        session.add(ExecutionCostEvent(
+            event_key=event_key, attempt_id=payload["attempt_id"], order_id=payload.get("order_id"),
+            account_key=payload.get("account_key", ""), mode=payload["mode"], event_type=event_type,
+            payload_json=json.dumps(payload, ensure_ascii=False, allow_nan=False, default=str),
+        ))
+        session.commit()
+        return True
+    except IntegrityError:
+        session.rollback()
+        return False
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def latest_execution_cost_payload(order_id: str) -> dict | None:
+    session = get_session()
+    try:
+        record = session.query(ExecutionCostEvent).filter_by(order_id=order_id).order_by(ExecutionCostEvent.id.desc()).first()
+        return json.loads(record.payload_json) if record else None
+    finally:
+        session.close()
+
+
 def _status_value(status) -> str:
     return getattr(status, "value", status) or ""
 
@@ -1789,6 +1914,7 @@ def reconcile_order_record(
     filled_price: float | None = None,
     remaining_qty: int | None = 0,
     reason: str = "",
+    execution_price_observed: bool | None = None,
 ) -> dict | None:
     """브로커 대조가 끝난 order_records 행을 open 상태에서 제외한다."""
     session = get_session()
@@ -1812,7 +1938,7 @@ def reconcile_order_record(
             record.filled_at = datetime.now()
         record.updated_at = datetime.now()
         session.commit()
-        return {
+        result = {
             "order_id": record.order_id,
             "account_key": record.account_key,
             "symbol": record.symbol,
@@ -1825,6 +1951,10 @@ def reconcile_order_record(
             "remaining_qty": record.remaining_qty or 0,
             "reason": record.reject_reason or "",
         }
+        # Observation is independent of the authoritative reconciliation transaction.
+        from core.execution_analytics import observe_reconciled_order
+        observe_reconciled_order(result, execution_price_observed=execution_price_observed)
+        return result
     except Exception as e:
         session.rollback()
         logger.error("주문 상태 대조 완료 처리 실패: {}", e)

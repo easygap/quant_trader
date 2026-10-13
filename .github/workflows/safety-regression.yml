@@ -45,7 +45,7 @@ jobs:
           package-manager-cache: false
 
       - name: Check dashboard date calculations and refresh behavior
-        run: node --test tests/js/dashboard.test.cjs
+        run: node --test tests/js/dashboard.test.cjs tests/js/research.test.cjs tests/js/operations.test.cjs
 
       - name: Run safety regression tests
         env:

@@ -514,6 +514,7 @@ def build_promotion_results(
     canonical_metadata=None,
 ):
     from core.live_gate import validate_canonical_metadata_integrity
+    from core.research_admission import canonical_research_review
     from core.promotion_engine import (
         StrategyMetrics,
         attach_paper_evidence_metrics,
@@ -574,6 +575,9 @@ def build_promotion_results(
         else datetime.now()
     )
     for name, m in metrics_all.items():
+        research_review = canonical_research_review(canonical_metadata or {}, name)
+        m["research_admission_status"] = research_review["status"]
+        m["research_admission_issues"] = research_review["issues"]
         for key in paper_fields:
             m.pop(key, None)
         paper_metrics = paper_evidence_metrics_from_package(
@@ -605,6 +609,9 @@ def build_promotion_results(
             benchmark_excess_return=m.get("benchmark_excess_return"),
             benchmark_excess_sharpe=m.get("benchmark_excess_sharpe"),
             canonical_benchmark_required=True,
+            research_admission_required=research_review["required"],
+            research_admission_status=research_review["status"],
+            research_admission_issues=research_review["issues"],
             canonical_data_integrity_ok=m.get("canonical_data_integrity_ok"),
             canonical_data_integrity_issues=m.get("canonical_data_integrity_issues"),
             ev_per_trade=m.get("ev_per_trade"),
@@ -5266,12 +5273,23 @@ def validate_promotion_operator_artifacts(
     ]
 
 
-def run_canonical():
+def run_canonical(research_admission_artifact=None):
     """canonical 평가 실행 → artifact 저장."""
     from config.config_loader import Config
     from backtest.portfolio_backtester import PortfolioBacktester
     from core.data_collector import DataCollector
     import FinanceDataReader as fdr
+    from core.research_admission import RESEARCH_ADMISSION_POLICY, proof_from_sweep, research_code_fingerprint
+
+    research_proofs = {}
+    if research_admission_artifact:
+        source = json.loads(Path(research_admission_artifact).read_text(encoding="utf-8"))
+        if not isinstance(source, dict):
+            raise ValueError("research admission artifact must be a JSON object")
+        proof = proof_from_sweep(source)
+        selected = (proof.get("oos_holdout") or {}).get("selected_candidate_id")
+        if selected:
+            research_proofs[selected] = proof
 
     EVAL_START = CANONICAL_EVAL_START
     EVAL_END = CANONICAL_EVAL_END
@@ -5586,6 +5604,11 @@ def run_canonical():
         canonical_research_candidate_metadata(spec)
         for spec in research_specs
     ]
+    strategy_specs_metadata.extend({
+        "candidate_id": name, "base_strategy": name,
+        "params": Config.get().strategies.get(name, {}),
+        "candidate_source": "configured_base_strategy",
+    } for name in STRATEGIES)
 
     data_snapshot_manifest = build_data_snapshot_manifest(
         provider="FinanceDataReader/DataCollector",
@@ -5603,6 +5626,9 @@ def run_canonical():
     metadata = {
         "schema_version": 1,
         "artifact_type": "canonical_promotion_bundle",
+        "research_admission_policy": RESEARCH_ADMISSION_POLICY,
+        "research_admission_proofs": research_proofs,
+        "research_code_fingerprint": research_code_fingerprint(),
         "eval_start": EVAL_START,
         "eval_end": EVAL_END,
         "universe_rule": UNIVERSE_RULE,
@@ -5692,6 +5718,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Canonical 평가 + 승격 판정")
     parser.add_argument("--canonical", action="store_true", help="전체 평가 실행")
+    parser.add_argument("--research-admission-artifact", help="새 paper 승격에 사용할 검증된 research sweep JSON")
     parser.add_argument("--check-only", action="store_true", help="promotion artifact 로드 및 운영 artifact 동기화 검증")
     parser.add_argument(
         "--blocker-summary",
@@ -5731,7 +5758,7 @@ def main():
     args = parser.parse_args()
 
     if args.canonical:
-        run_canonical()
+        run_canonical(research_admission_artifact=args.research_admission_artifact)
     elif args.paper_evidence_quarantine_invalid:
         results = quarantine_invalid_paper_evidence_operator_packages(
             "reports/promotion",

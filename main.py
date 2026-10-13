@@ -707,6 +707,11 @@ def _market_closed_today(config, now) -> bool:
         return False
 
 
+def _basket_session_open(config, now):
+    from core.trading_hours import TradingHours
+    return TradingHours(config).can_place_order(now)["allowed"]
+
+
 def _run_rebalance_impl(args):
     """바스켓 포트폴리오 리밸런싱 모드."""
     from datetime import datetime
@@ -787,22 +792,21 @@ def _run_rebalance_impl(args):
         )
     cycle_snapshots_saved = 0
 
-    # 휴장일 실행은 스냅샷(직전 거래일 날짜로 저장)과 빠진 날 채우기만 하고 매매는 하지 않는다.
-    # 휴장일의 '현재가'는 직전 거래일 종가라, 그 가격으로 체결을 남기면 장이 닫힌
-    # 날의 가짜 체결이 트랙레코드와 비용 통계에 섞인다. 평일 휴장(추석 등)에도
-    # 일일 태스크(월~금 10시)는 돈다. 판정 실패 시 평소대로 진행한다(1일 1매매
-    # 가드와 같은 원칙 — 방어선이지 게이트가 아니다).
-    kst_now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    # 장외 진단·종가 수집은 가능하지만 paper/live 체결은 정규장에만 한다.
+    # force는 당일 중복 체결 가드만 우회하며 거래 시간을 우회하지 않는다.
+    from core.trading_hours import _now_kst
+    kst_now = _now_kst().replace(tzinfo=None)
     market_closed_today = _market_closed_today(config, kst_now)
-    holiday_skip = market_closed_today and not dry_run and not force_rebalance
+    holiday_skip = not dry_run and (market_closed_today or not _basket_session_open(config, kst_now))
+    from core.trading_hours import TradingHours
+    pre_open = not market_closed_today and kst_now.time() < TradingHours(config).market_open
     if holiday_skip:
         logger.info(
-            "오늘({})은 휴장일 — 리스크 청산·리밸런싱 매매를 건너뛰고 스냅샷만 남긴다 "
-            "(우회: --force-rebalance)", kst_now.date(),
+            "현재({})는 정규장 밖 — 리스크 청산·리밸런싱 체결 보류", kst_now,
         )
         record_cycle_event(
             "REBALANCE_SKIPPED_MARKET_CLOSED",
-            f"휴장일({kst_now.date()}) 실행 — 매매 생략, 스냅샷만 기록",
+            f"정규장 밖({kst_now}) 실행 — 매매 생략",
             mode=mode,
         )
 
@@ -817,6 +821,15 @@ def _run_rebalance_impl(args):
                 account_key=live_strategy_name,
                 execution_strategy=live_strategy_name,
             )
+            if not dry_run and mode == "paper":
+                try:
+                    from core.basket_close import finalize_basket_closes
+                    finalized = finalize_basket_closes(rebalancer, now=kst_now)
+                    if finalized:
+                        logger.info("바스켓 '{}' 종가 평가 추가: {}", name, finalized)
+                except Exception as close_exc:
+                    record_event_once_per_day("CLOSE_VALUATION_FAILED", f"바스켓 '{name}' 종가 평가 실패: {close_exc}",
+                                              strategy=live_strategy_name, mode=mode)
 
             if mode == "live" and not dry_run:
                 sync_result = rebalancer.portfolio_mgr.sync_with_broker()
@@ -949,8 +962,7 @@ def _run_rebalance_impl(args):
             executed = False
             if holiday_skip:
                 logger.info(
-                    "바스켓 '{}' 휴장일 — 리밸런싱 매매 건너뜀 "
-                    "(스냅샷은 직전 거래일 날짜로 저장, 우회: --force-rebalance)", name,
+                    "바스켓 '{}' 정규장 밖 — 리밸런싱 체결 보류", name,
                 )
             elif already_traded_today:
                 logger.info(
@@ -1008,7 +1020,7 @@ def _run_rebalance_impl(args):
 
             # 트랙레코드: 거래 여부와 무관하게 바스켓 계정의 일일 NAV 스냅샷을 남긴다.
             # 보유 종목 가격이 전부 확보된 경우에만 저장(가짜 NAV 방지), 멱등 upsert.
-            if not dry_run:
+            if not dry_run and not pre_open:
                 snapshot_saved = rebalancer.save_daily_nav_snapshot()
                 # 사이클 관측·경보: 스냅샷 저장/스킵을 기록하고, 최근 영업일 결측을
                 # 당일 경보로 노출한다(6/26류 조용한 누락 재발 방지). best-effort.
@@ -1155,11 +1167,8 @@ def _run_rebalance_impl(args):
                         finally:
                             _sess.close()
                         if len(_snaps) >= 3:
-                            _flows = account_flows_by_snapshot(
-                                live_strategy_name, _snaps, mode=ledger_mode,
-                            )
                             _daily = daily_returns_from_nav(
-                                [(s.date, s.total_value) for s in _snaps], flows=_flows,
+                                account_performance_points(live_strategy_name, _snaps, mode=ledger_mode),
                             )
                             report_card["risk"] = format_risk_line(
                                 risk_metrics([r for _, r in _daily])
@@ -1198,6 +1207,11 @@ def _run_rebalance_impl(args):
             run_daily_backup(config)
         except Exception as e:
             logger.warning("리밸런싱 후 DB 백업 실패: {}", e)
+
+        # 주문과 종가 기록을 마친 뒤 별도 프로세스에서 관측 자료를 수집한다.
+        # 공급자 지연은 주문 루프를 막지 않으며 결과·중단은 대시보드에 남긴다.
+        from core.research_operations import launch_research_operations
+        launch_research_operations("rebalance")
 
 
 def run_paper_trading(args):
@@ -2111,7 +2125,6 @@ def run_health_check() -> int:
         # 설계가 굴러가지 않는다(잔고가 1주 단위를 못 넘겨 배치율이 수렴 불가).
         contribution_notes: list[str] = []
         try:
-            from core.operator_health import summarize_contribution_plan
             from database.repositories import get_cash_flows
 
             for name in enabled_baskets:
@@ -2123,9 +2136,6 @@ def run_health_check() -> int:
                 # get_cash_flows는 (occurred_at, amount) 튜플 목록을 준다 — 객체가
                 # 아니다. getattr로 읽으면 항상 None이 잡혀 '입금 0건'으로 오판한다.
                 flows = get_cash_flows(account_key=key, mode="paper")
-                last_flow = max(
-                    (f[0] for f in flows if f and f[0] is not None), default=None,
-                )
                 # 트랙 개시일 = 이 계정의 첫 스냅샷. 개시 직후에는 아직 적립 시점이
                 # 오지 않았을 수 있으므로 판정에 필요하다.
                 sess = get_session()
@@ -2142,16 +2152,22 @@ def run_health_check() -> int:
                 finally:
                     sess.close()
                 first_snap = row[0] if row else None
-                plan_state = summarize_contribution_plan(
-                    name, plan, last_flow, first_snap, date.today(),
-                )
-                if plan_state["note"]:
-                    contribution_notes.append(plan_state["note"])
+                from core.basket_observability import monthly_contribution_status
+                plan_state = monthly_contribution_status(plan, flows, first_snap, date.today())
+                contribution_notes.extend(f"바스켓 '{name}' {note}" for note in plan_state["issues"])
         except Exception as plan_exc:
             logger.warning("적립 계획 점검 실패: {}", plan_exc)
 
         # 위험 관리(오버레이) 입력 문제: 마지막 사이클이 남긴 상태 파일의 data_issues.
         data_notes: list[str] = []
+        from core.basket_observability import read_basket_diagnostics
+        for name in enabled_baskets:
+            try:
+                diag = read_basket_diagnostics(baskets_cfg.get(name) or {}, rebalance_live_strategy_id(name), config.risk_params)
+                data_notes.extend(f"바스켓 '{name}' {note}" for note in diag["entry_status"]["reasons"])
+                data_notes.extend(f"바스켓 '{name}' {note}" for note in diag["allocation"]["issues"])
+            except Exception as diag_exc:
+                data_notes.append(f"바스켓 '{name}' 자산별 배분·진입 상태 확인 실패: {diag_exc}")
         try:
             from core.risk_overlays import load_overlay_state, parse_overlay_config
 
@@ -2276,6 +2292,13 @@ def account_flows_by_snapshot(account_key: str, snapshots, mode: str = "paper") 
     return out
 
 
+def account_performance_points(account_key, snapshots, mode="paper"):
+    """Deposited accounts use the persisted linked index, not day-bucketed flows."""
+    from database.repositories import has_cash_flows
+    linked = has_cash_flows(account_key, mode=mode)
+    return [(s.date, 1 + float(s.cumulative_return) / 100 if linked else float(s.total_value)) for s in snapshots]
+
+
 def _fetch_benchmark_closes(start, end) -> dict:
     """벤치마크(KS11) 종가를 {date: close}로. 실패하면 빈 dict.
 
@@ -2283,9 +2306,7 @@ def _fetch_benchmark_closes(start, end) -> dict:
     여러 날 구간이 되므로, 벤치마크도 같은 구간으로 다시 계산해야 비교가 성립한다
     (core.performance_lens.aligned_returns 참고).
 
-    NAV는 10:07 장중 마크라 지수 종가(15:30)와 비교하면 하루의 절반가량이 어긋나
-    포착률이 양쪽 다 0 쪽으로 쏠린다. 시가(09:00)가 기록 시각에 훨씬 가깝다 —
-    완전히 맞출 수는 없으니 결과는 근사로 표기한다. 시가가 없으면 종가를 쓴다.
+    별도 종가 평가 장부와만 비교한다. 장중 NAV를 시가·종가에 억지로 맞추지 않는다.
     """
     from datetime import timedelta
 
@@ -2297,7 +2318,7 @@ def _fetch_benchmark_closes(start, end) -> dict:
         df = fdr.DataReader("KS11", s.isoformat(), e.isoformat())
         if df is None or df.empty:
             return {}
-        col = "Open" if "Open" in df.columns else ("Close" if "Close" in df.columns else None)
+        col = "Close" if "Close" in df.columns else None
         if col is None:
             return {}
         return {
@@ -2391,23 +2412,8 @@ def run_weekly_report() -> int:
                     )
                     ref_val = float(ref.total_value)
                     if ref_val > 0:
-                        from core.portfolio_manager import twr_period_return
-                        from database.repositories import get_cash_flow_total_between
-                        flow = 0.0
-                        try:
-                            ref_boundary = ref.created_at or ref.date
-                            last_boundary = snaps[-1].created_at or now_kst
-                            flow = get_cash_flow_total_between(
-                                key,
-                                ref_boundary,
-                                last_boundary,
-                                mode="paper",
-                            )
-                        except Exception as flow_exc:
-                            logger.warning("주간 변화 계산 중 입금 조회 실패 — 주간 항목 생략: {}", flow_exc)
-                            ref_val = 0.0
-                        if ref_val > 0:
-                            week_change = twr_period_return(ref_val, last_val, flow) * 100
+                        points = account_performance_points(key, [ref, snaps[-1]])
+                        week_change = (points[-1][1] / points[0][1] - 1) * 100 if points[0][1] > 0 else None
 
             # 결측은 '고유 일수'로 집계(SNAPSHOT_GAP 이벤트는 미복구 결측을 매 사이클
             # 재경보해 부풀려짐 → 최근 7일 실제 빠진 영업일 수를 직접 센다).
@@ -2438,32 +2444,35 @@ def run_weekly_report() -> int:
                 # 스냅샷의 daily_return 열이 아니라 NAV 시계열에서 직접 뽑는다 —
                 # 그 열은 2026-08-10 이전 전 구간이 0.0이라(값을 안 넘기던 버그)
                 # 그대로 쓰면 변동성이 0으로 깔려 없는 안정성을 주장하게 된다.
-                nav_points = [(s.date, s.total_value) for s in snaps]
-                # 입금은 수익이 아니다 — 날짜별 유입을 넘겨 분모에서 중화한다.
-                # 안 넘기면 적립 하루가 통째로 수익률로 잡힌다: 2026-08-26 kr_pocket에
-                # 10만원을 넣자 NAV가 284,499 → 385,460이 되면서 그날이 +35% 수익으로
-                # 계산돼 연환산 변동성 109%, 샤프 +2.28이라는 허구가 나왔다.
-                # 적립식 트랙은 이 경로가 상시라 한 번 새면 계속 샌다.
-                flows = account_flows_by_snapshot(key, snaps, mode="paper")
-
-                daily = daily_returns_from_nav(nav_points, flows=flows)
+                nav_points = account_performance_points(key, snaps)
+                # 적립 계정은 같은 날 여러 측정의 경계를 보존한 누적 TWR 지수를 쓴다.
+                daily = daily_returns_from_nav(nav_points)
                 risk = risk_metrics([r for _, r in daily])
-                if len(nav_points) >= 2:
+                from database.repositories import get_portfolio_valuations
+                close_rows = get_portfolio_valuations(key, "paper", kind="close")
+                by_day = {v["date"][:10]: v for v in close_rows}
+                close_points = [(datetime.fromisoformat(day), 1 + v["cumulative_return"] / 100) for day, v in sorted(by_day.items())]
+                regime_note = "비교 가능한 종가 평가 2일 이상 필요 — 장중 기록은 종가와 비교하지 않음"
+                if len(close_points) >= 2:
                     closes = _fetch_benchmark_closes(
-                        nav_points[0][0], nav_points[-1][0],
+                        close_points[0][0], close_points[-1][0],
                     )
                     if closes:
                         pairs = [
                             (m, b)
-                            for _d, m, b in aligned_returns(nav_points, closes, flows=flows)
+                            for _day, m, b in aligned_returns(close_points, closes)
                         ]
                         if pairs:
                             regime = split_by_regime(pairs)
-                            regime_note = "근사치 — 지수 시가 기준"
+                            regime_note = "별도 종가 평가 · KS11 종가 기준"
                             last_bench = max(closes)
-                            last_nav = _d(nav_points[-1][0])
+                            last_nav = _d(close_points[-1][0])
                             if last_bench < last_nav:
                                 regime_note += f", 지수 자료 {last_bench}까지만 반영"
+                        else:
+                            regime_note = "종가 평가와 같은 날짜의 KS11 자료 부족"
+                    else:
+                        regime_note = "KS11 종가 자료 없음 — 비교 보류"
             except Exception as lens_exc:
                 logger.warning("국면/리스크 지표 생략: {}", lens_exc)
 

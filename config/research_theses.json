@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "curator": "2026-10-13 공식 원문 조사 초안 · 자동 뉴스 수집 아님",
+  "entries": [
+    {
+      "id": "ai_electricity_constraints_20261013",
+      "title": "AI 확산과 전력 공급 제약을 함께 점검",
+      "theme": "AI · 데이터센터 · 전력 인프라",
+      "thesis": "IEA의 2026년 보고서는 데이터센터 투자 확대와 전력망·공급망 대응을 함께 다룬다. 연구 가설은 AI 수요 확대가 전력 인프라 투자 수요로 이어질 수 있다는 것이다. 국내 개별 기업의 수혜·수익성은 이 보고서만으로 확인할 수 없으며 수주, 매출 구성, 증설 비용과 가격을 추가 확인해야 한다.",
+      "invalidation_condition": "후속 자료에서 데이터센터 투자 축소, 효율 개선에 따른 전력 수요 전망 하향 또는 공급망 제약으로 인한 사업 지연이 확인되면 가설을 재검토한다. 기업별 실적 연결 근거가 없으면 종목 후보로 승격하지 않는다.",
+      "horizon": "산업 변화 관찰 6-24개월 · 월별 자료 재검토",
+      "review_at": "2026-11-13T09:00:00+09:00",
+      "expires_at": "2027-01-13T09:00:00+09:00",
+      "evidence_type": "industry_thesis",
+      "sources": [
+        {
+          "url": "https://www.iea.org/reports/key-questions-on-energy-and-ai",
+          "title": "IEA — Key Questions on Energy and AI",
+          "published_at": null,
+          "published_date": "2026-04-16",
+          "publication_note": "공식 페이지의 Published 16 April 2026 확인. 시각·시간대가 없어 정확한 published_at은 미상. 현재 가격 신호 또는 기업 수혜 확정 근거가 아니다."
+        }
+      ],
+      "symbols": [],
+      "counterevidence": [
+        "산업 수요 증가와 주주 수익은 다르다. 증설 비용, 경쟁, 규제, 이미 높은 주가가 수익성을 낮출 수 있다.",
+        "전력 공급 제약은 공급자의 매출 증가뿐 아니라 데이터센터 사업의 지연 요인일 수 있다.",
+        "보고서 공개 후 시간이 지났으므로 최신 투자 계획과 실제 전력 수요를 추가 확인해야 한다."
+      ]
+    },
+    {
+      "id": "samsung_3q26_earnings_review",
+      "title": "삼성전자 3분기 가이던스와 확정 실적의 차이 검토",
+      "theme": "기업 실적 · 이익 지속성 · 자본 배분",
+      "thesis": "삼성전자 공식 뉴스룸은 2026년 10월 8일 3분기 실적 가이던스를 발표했고, IR 페이지는 10월 29일 오전 10시 KST 실적 설명회를 안내한다. 현재의 가이던스를 확정 결산으로 취급하지 않는다. 설명회와 후속 보고서에서 사업별 이익, 현금흐름, 투자 지출 및 전망을 검토해 보유 논거를 업데이트한다.",
+      "invalidation_condition": "확정 실적이 가이던스와 달라지거나 이익 증가가 일회성 항목에 의존하거나 현금 창출·후속 전망이 약해지면 기존 성장 가설을 재검토한다. 설명회 일정 변경 시 event_at도 새 버전으로 수정한다.",
+      "horizon": "2026년 3분기 실적 이벤트와 후속 분기 비교",
+      "event_at": "2026-10-29T10:00:00+09:00",
+      "review_at": "2026-10-29T18:00:00+09:00",
+      "expires_at": "2026-11-16T18:00:00+09:00",
+      "evidence_type": "scheduled_event",
+      "sources": [
+        {
+          "url": "https://news.samsung.com/be/samsung-electronics-announces-earnings-guidance-for-third-quarter-2026",
+          "title": "Samsung Electronics Announces Earnings Guidance for Third Quarter 2026",
+          "published_at": null,
+          "published_date": "2026-10-08",
+          "publication_note": "공식 뉴스룸의 08-10-2026 확인. 공개 시각이 없어 published_at 미상. 잠정 가이던스이며 확정 결산 자료가 아니다."
+        },
+        {
+          "url": "https://www.samsung.com/global/ir/",
+          "title": "Samsung Investor Relations — 3Q26 Earnings Call",
+          "published_at": null,
+          "published_date": null,
+          "publication_note": "2026-10-13 조회 시 2026-10-29 10:00 KST 일정 확인. 페이지 게시 시각은 미상이며 일정은 변경될 수 있다."
+        }
+      ],
+      "symbols": [
+        {
+          "symbol": "005930",
+          "rationale": "삼성전자가 자사 분기 가이던스와 실적 설명회를 공지한 직접 기업 이벤트다. AI 수혜 정도 또는 매수 우위를 이 공지만으로 판단하지 않는다.",
+          "source_url": "https://www.samsung.com/global/ir/"
+        }
+      ],
+      "counterevidence": [
+        "가이던스는 확정 실적이 아니며 세부 사업 및 현금흐름 정보가 충분하지 않다.",
+        "좋은 실적이 이미 가격에 반영됐다면 실적 성장 자체가 초과수익의 근거가 되지 않는다.",
+        "설명회 일정은 취소·변경될 수 있어 임박 시 원문을 재확인해야 한다."
+      ]
+    }
+  ]
+}

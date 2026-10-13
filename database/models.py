@@ -190,6 +190,27 @@ class PortfolioSnapshot(Base):
         )
 
 
+class PortfolioValuation(Base):
+    """Append-only measurements; daily upserts must not erase flow boundaries."""
+    __tablename__ = "portfolio_valuations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    mode = Column(String(20), nullable=False)
+    account_key = Column(String(64), nullable=False)
+    date = Column(DateTime, nullable=False)
+    measured_at = Column(DateTime, nullable=False)
+    recorded_at = Column(DateTime, default=datetime.now, nullable=False)
+    kind = Column(String(24), nullable=False, default="unverified")
+    total_value = Column(Float, nullable=False)
+    cash = Column(Float, nullable=False)
+    cumulative_return = Column(Float, nullable=False)
+    daily_return = Column(Float)
+    mdd = Column(Float)
+    detail = Column(Text, nullable=False, default="{}")
+    fingerprint = Column(String(64), nullable=False, unique=True)
+    __table_args__ = (Index("ix_valuation_account_date", "mode", "account_key", "date"),)
+
+
 class DailyReport(Base):
     """
     일일 리포트 테이블
@@ -320,6 +341,21 @@ class PendingOrderGuard(Base):
 
     def __repr__(self):
         return f"<PendingOrderGuard({self.symbol}, expires={self.expires_at})>"
+
+
+class ExecutionCostEvent(Base):
+    """Append-only observation of new execution attempts; never an order ledger."""
+    __tablename__ = "execution_cost_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_key = Column(String(64), nullable=False, unique=True)
+    attempt_id = Column(String(64), nullable=False, index=True)
+    order_id = Column(String(64), index=True)
+    account_key = Column(String(64), nullable=False, default="", index=True)
+    mode = Column(String(20), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    payload_json = Column(Text, nullable=False)
+    recorded_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
 class OrderRecord(Base):

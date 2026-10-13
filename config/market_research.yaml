@@ -1,0 +1,83 @@
+# Observation list, not a trading universe. Updating this file cannot authorize orders.
+version: 1
+name: "한국 주식·업종 관찰 레이더"
+benchmark:
+  symbol: "069500"
+  name: "KODEX 200"
+  role: benchmark
+  cohort: benchmark
+  reference: "https://www.samsungfund.com/upload/kodex/newsroom/2026011317101936.pdf"
+horizons: [20, 60, 120]
+ranking_horizon: 60
+require_adjusted_prices: true
+# Current constituents are an observation sample, never a historical market universe.
+universe:
+  - {symbol: "005930", name: "삼성전자", cohort: basket_equities, role: basket_target, group: "반도체"}
+  - {symbol: "035420", name: "NAVER", cohort: basket_equities, role: basket_target, group: "인터넷"}
+  - {symbol: "005380", name: "현대차", cohort: basket_equities, role: basket_target, group: "자동차"}
+  - {symbol: "051910", name: "LG화학", cohort: basket_equities, role: basket_target, group: "화학"}
+  - {symbol: "005490", name: "POSCO홀딩스", cohort: basket_equities, role: basket_target, group: "철강"}
+  - {symbol: "055550", name: "신한지주", cohort: basket_equities, role: basket_target, group: "금융"}
+  - {symbol: "035720", name: "카카오", cohort: basket_equities, role: basket_target, group: "인터넷"}
+  - {symbol: "012330", name: "현대모비스", cohort: basket_equities, role: basket_target, group: "자동차부품"}
+  - {symbol: "105560", name: "KB금융", cohort: basket_equities, role: basket_target, group: "금융"}
+  - symbol: "091160"
+    name: "KODEX 반도체"
+    cohort: sector_etfs
+    role: observation_only
+    group: "반도체"
+    reference: "https://www.samsungfund.com/upload/kodex/newsroom/20260427141121713.pdf"
+  - symbol: "091170"
+    name: "KODEX 은행"
+    cohort: sector_etfs
+    role: observation_only
+    group: "은행"
+    reference: "https://m.samsungfund.com/etf/search.do?searchText=091170"
+  - symbol: "091180"
+    name: "KODEX 자동차"
+    cohort: sector_etfs
+    role: observation_only
+    group: "자동차"
+    reference: "https://www.samsungfund.com/upload/kodex/newsroom/2026011317101936.pdf"
+  - symbol: "305720"
+    name: "KODEX 2차전지산업"
+    cohort: sector_etfs
+    role: observation_only
+    group: "2차전지"
+    reference: "https://m.samsungfund.com/etf/product/view.do?id=2ETFB1"
+  - symbol: "266420"
+    name: "KODEX 헬스케어"
+    cohort: sector_etfs
+    role: observation_only
+    group: "헬스케어"
+    reference: "https://www.samsungfund.com/upload/kodex/newsroom/20251016084306186.pdf"
+  - symbol: "117700"
+    name: "KODEX 건설"
+    cohort: sector_etfs
+    role: observation_only
+    group: "건설"
+    reference: "https://www.samsungfund.com/etf/product/pensionlist.do"
+  - symbol: "117460"
+    name: "KODEX 에너지화학"
+    cohort: sector_etfs
+    role: observation_only
+    group: "에너지화학"
+    reference: "https://www.samsungfund.com/etf/product/pensionlist.do"
+  - symbol: "266370"
+    name: "KODEX IT"
+    cohort: sector_etfs
+    role: observation_only
+    group: "IT"
+    reference: "https://www.samsungfund.com/upload/kodex/newsroom/20251016084306186.pdf"
+  - symbol: "0115D0"
+    name: "KODEX K조선TOP10"
+    cohort: sector_etfs
+    role: observation_only
+    group: "조선"
+    reference: "https://www.samsungfund.com/fund/lounge/promotion/40.do"
+  - symbol: "0080G0"
+    name: "KODEX 방산TOP10"
+    cohort: sector_etfs
+    role: observation_only
+    group: "방산"
+    reference: "https://www.samsungfund.com/fund/lounge/promotion/40.do"

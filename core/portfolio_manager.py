@@ -334,6 +334,7 @@ class PortfolioManager:
         # 이후 MDD가 가짜로 커진다(주문 가드·자본 조회가 가격 없이 이 함수를 부른다).
         market_priced = bool(state.get("market_priced", True)) or broker_balance_ok is True
 
+        return_context = {"method": "initial_capital", "initial_capital": self.initial_capital}
         if not account_has_flows:
             # 무입금 계정: 기존 산식 그대로 (하위 호환 — 결과 불변)
             total_return = ((total_value / self.initial_capital) - 1) * 100 if self.initial_capital > 0 else 0
@@ -358,6 +359,7 @@ class PortfolioManager:
                 # 첫 측정: 초기자본이 첫 유입, 그간의 입금 전액이 구간 유입
                 r = twr_period_return(self.initial_capital, total_value, deposits_total)
                 total_return = r * 100
+                return_context.update(method="initial_capital_with_flows", flow_since=deposits_total)
             else:
                 # 경계는 실제 측정 시각(created_at) — date(자정 귀속)를 쓰면 스냅샷
                 # 이전의 같은 날 입금이 이중 산입된다.
@@ -374,6 +376,11 @@ class PortfolioManager:
                 )
                 r = twr_period_return(prev_total, total_value, flow_since)
                 total_return = ((1 + prev_return / 100) * (1 + r) - 1) * 100
+                return_context = {
+                    "method": "linked_measurements", "boundary": str(boundary),
+                    "previous_total_value": prev_total, "previous_cumulative_return": prev_return,
+                    "flow_since": flow_since,
+                }
 
             # MDD도 TWR 지수 기준 — 원화 피크로 재면 입금이 낙폭을 가짜 회복시킨다.
             index_now = 1 + total_return / 100
@@ -414,6 +421,8 @@ class PortfolioManager:
             "invested": round(invested, 0),
             "current_value": round(current_value, 0),
             "total_return": round(total_return, 2),
+            "total_return_precise": total_return,
+            "return_context": return_context,
             "mdd": round(mdd, 2),
             "position_count": len(positions),
             "realized_pnl": round(realized_pnl, 0),
@@ -426,7 +435,7 @@ class PortfolioManager:
             "broker_balance_error": broker_balance_error,
         }
 
-    def save_daily_snapshot(self, current_prices: dict = None, snapshot_date=None) -> bool:
+    def save_daily_snapshot(self, current_prices: dict = None, snapshot_date=None, *, valuation_context=None) -> bool:
         """일일 포트폴리오 스냅샷 저장. 성공 여부를 반환한다.
 
         snapshot_date: 귀속 날짜 지정(미지정 시 오늘). 비거래일 보충 실행에서
@@ -454,19 +463,32 @@ class PortfolioManager:
         daily_return = self._compute_daily_return(
             summary["total_value"], snapshot_date,
         )
+        cumulative = summary.get("total_return_precise", summary["total_return"])
+        # Link the same measured TWR index used by the cumulative return. A day's
+        # morning/after-deposit boundaries cannot be replaced by a start-day flow.
+        if has_cash_flows(self.account_key, mode=self._ledger_mode):
+            from datetime import datetime
+            prev_day = get_snapshot_before(snapshot_date or datetime.now(), account_key=self.account_key, mode=self._ledger_mode)
+            if prev_day and 1 + float(prev_day["cumulative_return"]) / 100 > 0:
+                daily_return = ((1 + cumulative / 100) / (1 + float(prev_day["cumulative_return"]) / 100) - 1) * 100
+        from datetime import datetime
+        context = dict(valuation_context or {})
+        context["return_context"] = summary.get("return_context") or {}
 
         ok = save_portfolio_snapshot(
             total_value=summary["total_value"],
             cash=summary["cash"],
             invested=summary["invested"],
             daily_return=daily_return,
-            cumulative_return=summary["total_return"],
+            cumulative_return=cumulative,
             mdd=summary["mdd"],
             position_count=summary["position_count"],
             account_key=self.account_key,
             peak_value=self._peak_value,
             snapshot_date=snapshot_date,
             mode=self._ledger_mode,
+            valuation_context=context,
+            measured_at=(datetime.fromisoformat(context["measured_at"]) if context.get("measured_at") else None),
         )
 
         if ok:

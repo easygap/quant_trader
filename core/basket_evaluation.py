@@ -152,7 +152,7 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
     if m.get("nav_return_pct") is not None:
         bench = (
             f" | KS11 {m['benchmark_return_pct']:+.2f}%"
-            if m.get("benchmark_return_pct") is not None else " | KS11 조회 불가"
+            if m.get("benchmark_return_pct") is not None else ""
         )
         lines.append(f"  성과(참고): NAV {m['nav_return_pct']:+.2f}%{bench}")
         lines.append("    ※ 베타 전략 — '시장을 이겼는가'는 합격 기준이 아님(비용·무결성·추종이 기준)")
@@ -166,6 +166,18 @@ def format_evaluation_report(result: dict[str, Any], basket_name: str = "") -> s
             if comp is not None:
                 lines.append(f"    - 구성 격차 {comp:+.2f}%p (설계 수용: 균등가중 vs 시총지수)")
     errors = m.get("paper_order_errors")
+    if m.get("comparison_basis_note"):
+        lines.append("  비교: " + m["comparison_basis_note"])
+    close = m.get("close_comparison")
+    if close:
+        bench = close.get("benchmark_return_pct")
+        lines.append(f"  종가 구간 {close['start']} ~ {close['end']}: NAV {close['nav_return_pct']:+.2f}%" + (f" | KS11 {bench:+.2f}%" if bench is not None else " | KS11 같은 구간 자료 없음"))
+    entry = result.get("entry_status") or {}
+    if entry:
+        lines.append(f"  최근 평가의 진입 상태: {entry.get('status')} (측정 {entry.get('measured_at') or '없음'})")
+        lines.append(f"    {entry.get('note', '')}")
+    rejected = m.get("recent_order_rejections")
+    lines.append(f"  최근 7일 주문 거부 기록: {rejected if rejected is not None else '조회 불가'}건 (동일 일자·원인은 중복 제외)")
     if errors:
         lines.append(
             f"  참고: 운영 중 주문·실행 오류 {errors}건 (합격 판단에는 넣지 않음 — 원인 확인 필요)"
@@ -349,6 +361,7 @@ def compute_design_portfolio_return(
     today: Any,
     *,
     fetch: Any = None,
+    require_complete: bool = False,
 ) -> float | None:
     """설계 포트폴리오(목표비중 buy&hold, 주식 비중 design_stock_fraction)의 구간 수익%(단위: %).
 
@@ -374,6 +387,8 @@ def compute_design_portfolio_return(
         except Exception:
             r = None
         if r is None:
+            if require_complete and float(weight) > 0:
+                return None
             continue
         wn = float(weight) / total_w
         weighted_sum += wn * float(r)
@@ -457,7 +472,8 @@ def collect_basket_paper_evaluation(
         except ValueError:
             return None
 
-    today = date.today()
+    from core.trading_hours import _now_kst
+    today = _now_kst().date()
     candidates = [_d(t.executed_at) for t in trades if getattr(t, "executed_at", None)]
     candidates += [_d(s.date) for s in snaps]
     operation_start = min(candidates) if candidates else today
@@ -531,11 +547,23 @@ def collect_basket_paper_evaluation(
     nav_end = _d(snaps[-1].date) if snaps else today
 
     benchmark_return_pct = None
-    if include_benchmark:
+    from database.repositories import get_portfolio_valuations
+    close_by_day = {v["date"][:10]: v for v in get_portfolio_valuations(basket_key, "paper", kind="close")}
+    design_from = _config_date((basket_cfg.get("promotion") or {}).get("design_effective_from"))
+    close_rows = [v for day, v in sorted(close_by_day.items()) if not design_from or date.fromisoformat(day) >= design_from]
+    comparison = None
+    if len(close_rows) >= 2:
+        start_close, end_close = close_rows[0], close_rows[-1]
+        base_index = 1 + start_close["cumulative_return"] / 100
+        if base_index > 0:
+            comparison = {"start": start_close["date"][:10], "end": end_close["date"][:10],
+                          "nav_return_pct": ((1 + end_close["cumulative_return"] / 100) / base_index - 1) * 100,
+                          "benchmark_return_pct": None}
+    if include_benchmark and comparison:
         try:
             from core.data_collector import DataCollector
-            benchmark_return_pct = DataCollector.fetch_benchmark_return(
-                str(operation_start), str(nav_end), symbol="KS11",
+            comparison["benchmark_return_pct"] = DataCollector.fetch_benchmark_return(
+                comparison["start"], comparison["end"], symbol="KS11", exact_boundaries=True,
             )
         except Exception:
             benchmark_return_pct = None  # 참고 지표 — 실패해도 평가는 진행
@@ -557,6 +585,10 @@ def collect_basket_paper_evaluation(
     )
 
     promotion = basket_cfg.get("promotion") or {}
+    result.setdefault("metrics", {})["close_comparison"] = comparison
+    result["metrics"]["comparison_basis_note"] = (
+        "별도 종가 평가 기준" if comparison else "동일 시점 종가 평가 기록 부족 — 벤치마크·귀속 비교 보류"
+    )
 
     # A2(미해결 실패 주문 0건)는 paper에서는 애초에 걸릴 수가 없다 — dead-letter는 증권사
     # 주문 경로에서만 쌓인다. 그래서 paper 트랙의 주문·사이클 오류 이벤트를 따로 세어
@@ -585,6 +617,28 @@ def collect_basket_paper_evaluation(
     # 평가 결과에 metrics가 없을 수도 있다(판정 함수를 바꿔 끼운 경우 등) — 집계 실패가
     # 평가 전체를 깨뜨리지 않게 setdefault로 넣는다.
     result.setdefault("metrics", {})["paper_order_errors"] = paper_order_errors
+    from core.basket_observability import snapshot_entry_status
+    latest = snaps[-1] if snaps else None
+    result["entry_status"] = snapshot_entry_status(
+        {k: getattr(latest, k, None) for k in ("date", "created_at", "mdd", "daily_return")} if latest else None,
+        basket_cfg, config.risk_params,
+    )
+    session = get_session()
+    try:
+        rejected = session.query(OperationEvent).filter(
+            OperationEvent.strategy == basket_key, OperationEvent.mode == "paper",
+            OperationEvent.event_type == "ORDER_REJECTED",
+            OperationEvent.created_at >= datetime.combine(today - timedelta(days=6), datetime.min.time()),
+        ).order_by(OperationEvent.created_at.desc()).all()
+        result["metrics"]["recent_order_rejections"] = len(rejected)
+        result["entry_status"]["last_rejection"] = (
+            {"at": str(rejected[0].created_at), "reason": rejected[0].message} if rejected else None
+        )
+    except Exception as exc:
+        result["metrics"]["recent_order_rejections"] = None
+        logger.warning("paper 주문 거부 집계 실패: {}", exc)
+    finally:
+        session.close()
 
     # 성과 귀속(실행 격차/구성 격차) — 종목별 조회(네트워크)라 기본 off.
     # 일일 사이클(리포트 부가필드)은 호출하지 않고, CLI 평가 도구에서만 켠다.
@@ -593,35 +647,24 @@ def collect_basket_paper_evaluation(
     # (비중·종목)를 운영 시작일부터 소급 적용하면, 설계를 바꾼 사실 자체가 '실행 격차
     # ≈ 0'으로 보이거나 엉뚱한 격차로 섞인다(kr_diversified_hold는 2026-08-07에 80% →
     # 60%, 10 → 9종목으로 바뀌었다). NAV·설계·벤치마크를 같은 창으로 다시 잰다.
-    if include_attribution:
+    from core.risk_overlays import parse_overlay_config
+    if include_attribution and comparison and not parse_overlay_config(basket_cfg).any_enabled:
         from core.basket_deploy import effective_stock_fraction
         design_fraction = effective_stock_fraction(basket_cfg, config.risk_params)
         holdings = basket_cfg.get("holdings") or {}
-        design_from = _config_date(promotion.get("design_effective_from"))
-        window_start = operation_start
-        window_nav = nav_return_pct
-        window_bench = benchmark_return_pct
-        if design_from and design_from > operation_start and snaps:
-            window_start = design_from
-            base = [s for s in snaps if _d(s.date) < design_from]
-            base_cum = float(base[-1].cumulative_return or 0.0) if base else 0.0
-            end_cum = float(snaps[-1].cumulative_return or 0.0)
-            window_nav = ((1 + end_cum / 100) / (1 + base_cum / 100) - 1) * 100
-            window_bench = None
-            if include_benchmark:
-                try:
-                    from core.data_collector import DataCollector
-                    window_bench = DataCollector.fetch_benchmark_return(
-                        str(design_from), str(nav_end), symbol="KS11",
-                    )
-                except Exception as exc:
-                    logger.warning("격차 계산 기간의 벤치마크 조회 실패: {}", exc)
+        window_start = date.fromisoformat(comparison["start"])
+        nav_end = date.fromisoformat(comparison["end"])
+        window_nav = comparison["nav_return_pct"]
+        window_bench = comparison["benchmark_return_pct"]
         design_return_pct = None
         if snaps and holdings:
             try:
+                from core.data_collector import DataCollector
                 # 벤치마크·NAV와 같은 창(window_start ~ nav_end)으로 조회 — 창 불일치 방지.
                 design_return_pct = compute_design_portfolio_return(
                     holdings, design_fraction, window_start, nav_end,
+                    fetch=lambda start, end, symbol: DataCollector.fetch_benchmark_return(start, end, symbol=symbol, exact_boundaries=True),
+                    require_complete=True,
                 )
             except Exception as exc:
                 logger.warning("설계 포트폴리오 수익률 계산 실패: {}", exc)
@@ -683,4 +726,9 @@ def collect_basket_paper_evaluation(
         # 적립금 미기록 같은 실제 할 일을 가린다(2026-09 적립 알림이 이 문구에 가려졌다).
         result["review_note"] = note
 
+    if result["entry_status"]["status"] == "BLOCKED":
+        result.setdefault("operation_verdict", result["verdict"])
+        if result["verdict"] == "PASS_CANDIDATE":
+            result["verdict"] = "WAIT"
+        result["issues"].extend(result["entry_status"]["reasons"])
     return result, basket_name

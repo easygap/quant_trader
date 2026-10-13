@@ -84,6 +84,20 @@ class TestOverlayOff:
         assert rb.data_collector.calls == []  # 지수 조회조차 하지 않는다
 
 
+def test_overlay_issue_is_reported_on_change_and_recovery_only(monkeypatch):
+    cfg = _basket({"trend_filter": {"enabled": True, "index_symbol": "KS200", "ma_days": 200}})
+    events = MagicMock()
+    monkeypatch.setattr("core.cycle_observability.record_cycle_event", events)
+    first = _make(cfg, closes=None)
+    first.overlay_decision()
+    again = _make(cfg, closes=None)
+    again.overlay_decision()
+    assert [c.args[0] for c in events.call_args_list] == ["OVERLAY_DATA_ISSUE"]
+    recovered = _make(cfg, closes=[100.] * 220)
+    recovered.overlay_decision()
+    assert [c.args[0] for c in events.call_args_list] == ["OVERLAY_DATA_ISSUE", "OVERLAY_DATA_RECOVERED"]
+
+
 class TestTrendFilter:
     overlays = {"trend_filter": {"enabled": True, "index_symbol": "KS200", "ma_days": 200, "band": 0.02, "off_scale": 0.5}}
 

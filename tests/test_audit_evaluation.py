@@ -82,26 +82,40 @@ def test_daily_card_shows_new_rules_progress():
 def test_attribution_window_starts_at_design_date():
     name = "t_design_window"
     days = [date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
-    # 8/06까지 누적 +10%, 8/10 누적 +12.2% → 설계 적용 이후 구간은 +2%
+    # 새 설계 적용일인 8/07 종가부터 8/10 종가까지 비교한다.
+    # 8/06 종가를 기준으로 삼으면 설계 적용 전 구간이 섞인다.
     _seed(f"basket_rebalance:{name}", days, cum=[5.0, 10.0, 11.0, 12.2],
           trade_day=date(2026, 8, 5))
+    from database.repositories import append_portfolio_valuation
+    for day, cumulative in zip(days, [5.0, 10.0, 11.0, 12.2]):
+        append_portfolio_valuation(
+            account_key=f"basket_rebalance:{name}", mode="paper", day=day,
+            measured_at=datetime.combine(day, datetime.strptime("15:30", "%H:%M").time()),
+            total_value=1_000_000 * (1 + cumulative / 100), cash=400_000,
+            cumulative_return=cumulative, daily_return=0, mdd=0,
+            context={"valuation_kind": "close"},
+        )
     cfg = {"enabled": True, "initial_capital": 1_000_000,
            "holdings": {"005930": 1.0}, "target_stock_weight": 0.6,
            "promotion": {"design_effective_from": "2026-08-07"}}
     seen = {}
 
-    def _design(holdings, fraction, start, end):
+    def _design(holdings, fraction, start, end, **kwargs):
         seen["start"] = start
+        seen["end"] = end
+        assert kwargs["require_complete"] is True
         return 1.0
 
     with patch("core.basket_evaluation.compute_design_portfolio_return", _design):
         r = _collect(name, cfg, include_attribution=True)
 
     assert seen["start"] == date(2026, 8, 7)
+    assert seen["end"] == date(2026, 8, 10)
     m = r["metrics"]
     assert m["attribution_window"][0] == "2026-08-07"
-    assert m["attribution_nav_pct"] == pytest.approx(2.0, abs=1e-6)
-    assert m["execution_gap_pct"] == pytest.approx(1.0, abs=1e-6)
+    close_return = (1.122 / 1.11 - 1) * 100
+    assert m["attribution_nav_pct"] == pytest.approx(close_return, abs=1e-6)
+    assert m["execution_gap_pct"] == pytest.approx(close_return - 1, abs=1e-6)
 
 
 # ------------------------------------------------------------ 승격 판정 NaN

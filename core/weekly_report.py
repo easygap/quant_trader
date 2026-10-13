@@ -59,10 +59,16 @@ def build_weekly_summary(
 
     # 2) vs KS11 + 귀속 분해(실행/구성)
     bench = m.get("benchmark_return_pct")
+    comparison = m.get("close_comparison")
+    comparison_nav = comparison.get("nav_return_pct") if comparison else nav
+    if comparison:
+        bench = comparison.get("benchmark_return_pct")
     exe = m.get("execution_gap_pct")
     comp = m.get("composition_gap_pct")
-    if bench is not None and nav is not None:
-        line = f"NAV {nav:+.2f}% vs KS11 {bench:+.2f}% (격차 {nav - bench:+.2f}%p)"
+    if bench is not None and comparison_nav is not None:
+        line = f"NAV {comparison_nav:+.2f}% vs KS11 {bench:+.2f}% (격차 {comparison_nav - bench:+.2f}%p)"
+        if comparison:
+            line += f" · 종가 {comparison['start']} ~ {comparison['end']}"
         fields.append({"name": "📊 vs KS11", "value": line, "inline": False})
     if exe is not None or comp is not None:
         parts = []
@@ -89,6 +95,8 @@ def build_weekly_summary(
             "value": value,
             "inline": False,
         })
+    elif regime_note:
+        fields.append({"name": "🌗 국면 분해", "value": regime_note, "inline": False})
 
     # 2-c) 리스크 지표 — daily_return이 복구되기 전(~2026-08-10)에는 스냅샷의 이 열이
     #      전부 0이라 변동성·샤프를 아예 계산할 수 없었다. 이제 표면화한다.
@@ -117,10 +125,15 @@ def build_weekly_summary(
     ce = int(cycle_errors or 0)
     rd = int(reconstructed_days or 0)
     ev_line = f"결측 {md}일 · 사이클 오류 {ce}건"
+    rejected = m.get("recent_order_rejections")
+    ev_line += f" · 주문 거부 기록 {rejected}건" if rejected is not None else " · 주문 거부 기록 미확인"
+    entry = (eval_result or {}).get("entry_status") or {}
+    if entry.get("status") == "BLOCKED":
+        fields.append({"name": "⛔ 최근 평가의 매수 차단", "value": "; ".join(entry.get("reasons") or []) + f" (측정 {entry.get('measured_at')})", "inline": False})
     if rd:
         ev_line += f" · 나중에 채운 기록 {rd}일(그날은 자동매매가 돌지 않았음)"
-    if md == 0 and ce == 0 and rd == 0:
-        ev_line += " (무사고)"
+    if md == 0 and ce == 0 and rd == 0 and rejected == 0 and entry.get("status") != "BLOCKED":
+        ev_line += " (기록된 운영 이상 없음)"
     fields.append({"name": "🛠 주간 이벤트", "value": ev_line, "inline": False})
 
     title = f"{icon} 주간 요약 — {basket_name} ({verdict})"

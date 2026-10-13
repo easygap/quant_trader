@@ -55,6 +55,9 @@ class StrategyMetrics:
     canonical_benchmark_required: bool = False
     canonical_data_integrity_ok: Optional[bool] = None
     canonical_data_integrity_issues: Optional[list[str]] = None
+    research_admission_required: bool = False
+    research_admission_status: Optional[str] = None
+    research_admission_issues: Optional[list[str]] = None
     ev_per_trade: Optional[float] = None              # 원/trade
     cost_adjusted_cagr: Optional[float] = None        # %
     turnover_per_year: Optional[float] = None         # %/year
@@ -119,6 +122,8 @@ def _invalid_metrics(m: StrategyMetrics, fields: tuple[str, ...]) -> list[str]:
 
 def _check_paper_only(m: StrategyMetrics) -> tuple[bool, str]:
     """paper_only 조건: 절대수익>0, PF≥1.0, WF positive≥50%."""
+    if m.research_admission_required and m.research_admission_status != "passed":
+        return False, "research admission required: " + "; ".join(m.research_admission_issues or ["unavailable"])
     bad = _invalid_metrics(m, ("total_return", "profit_factor", "wf_positive_rate"))
     if bad:
         return False, "paper_only 미달: 지표 값이 유효하지 않음(" + ", ".join(bad) + ")"
@@ -971,6 +976,8 @@ def load_metrics_from_artifact(
     excess_return = benchmark_raw.get("strategy_excess_return_pct", {})
     excess_sharpe = benchmark_raw.get("strategy_excess_sharpe", {})
     for name, m in metrics_raw.items():
+        from core.research_admission import canonical_research_review
+        research_review = canonical_research_review(metadata, name)
         wf = wf_raw.get(name, {})
         paper_metrics = paper_evidence_metrics_from_package(
             load_paper_evidence_package(name, evidence_dir, log_warnings=False),
@@ -994,6 +1001,9 @@ def load_metrics_from_artifact(
             benchmark_excess_return=m.get("benchmark_excess_return", excess_return.get(name)),
             benchmark_excess_sharpe=m.get("benchmark_excess_sharpe", excess_sharpe.get(name)),
             canonical_benchmark_required=True,
+            research_admission_required=research_review["required"],
+            research_admission_status=research_review["status"],
+            research_admission_issues=research_review["issues"],
             ev_per_trade=m.get("ev_per_trade"),
             cost_adjusted_cagr=m.get("cost_adjusted_cagr"),
             turnover_per_year=m.get("turnover_per_year"),

@@ -1,0 +1,26 @@
+# Research evidence only. These collectors cannot authorize or execute orders.
+version: 1
+request_timeout_seconds: 12
+collection_budget_seconds: 120
+workers: 3
+disclosures:
+  enabled: true
+  lookback_calendar_days: 14
+  max_pages_per_company: 4
+  # Key comes only from DART_API_KEY / existing Config.dart, never this file.
+investor_flows:
+  enabled: true
+  provider: naver_securities
+  lookback_sessions: 4
+  # Provider offers only five recent rows; reserve one for excluded current day.
+  # Public web data, not a contracted KRX feed. Net quantities are shares, not KRW.
+universe:
+  - {symbol: "005930", name: "삼성전자"}
+  - {symbol: "035420", name: "NAVER"}
+  - {symbol: "005380", name: "현대차"}
+  - {symbol: "051910", name: "LG화학"}
+  - {symbol: "005490", name: "POSCO홀딩스"}
+  - {symbol: "055550", name: "신한지주"}
+  - {symbol: "035720", name: "카카오"}
+  - {symbol: "012330", name: "현대모비스"}
+  - {symbol: "105560", name: "KB금융"}

@@ -612,10 +612,10 @@
     if (!basket || !basket.contribution_plan?.enabled) return "not-planned";
     if (state.flowStatus.get(basket.basket) !== "ready") return "unknown";
     const month = koreaDate(new Date()).slice(0, 7);
-    const recorded = (state.flows.get(basket.basket) || []).some((flow) => {
-      return koreaDate(flow.occurred_at).slice(0, 7) === month;
-    });
-    return recorded ? "recorded" : "empty";
+    const recorded = (state.flows.get(basket.basket) || []).reduce((sum, flow) =>
+      sum + (koreaDate(flow.occurred_at).slice(0, 7) === month ? Math.max(0, Number(flow.amount) || 0) : 0), 0);
+    if (!recorded) return "empty";
+    return recorded >= Number(basket.contribution_plan?.amount || 0) ? "recorded" : "partial";
   }
   function runtimeAgeMinutes() {
     const parsed = parseDate(
@@ -654,6 +654,8 @@
     // 이번 달 적립금 미기록 같은 실제 할 일이 가려진다.
     const reviewNote = evaluation?.review_note || null;
     const issues = (evaluation?.issues || []).filter((item) => item !== reviewNote);
+    const contributionIssues = primary?.contribution_status?.issues || [];
+    const allocationIssues = primary?.allocation?.issues || [];
     const contribution = currentMonthContributionState(primary);
     el.decisionMeta.textContent = `${modeLabel()}${latest ? ` · 마지막 자산 기록 ${fmtLong(latest)}` : " · 자산 기록 없음"}`;
 
@@ -751,6 +753,16 @@
       });
       return;
     }
+    if (contributionIssues.length) {
+      setDecision({ title: "지난 적립 계획의 금액을 확인해 주세요", description: contributionIssues.join(" · "), action: "portfolio", actionLabel: "적립 기록 보기" });
+      return;
+    }
+    if (allocationIssues.length) {
+      setDecision({ title: primary?.allocation?.status === "UNKNOWN" ? "자산별 평가 자료를 기다리고 있습니다" : "자산별 비중이 목표에서 벗어났습니다",
+        description: [...allocationIssues, ...(primary?.plan_diagnostics || []).map(d => `${d.symbol}: ${d.reason}`)].join(" · "),
+        action: "portfolio", actionLabel: "포트폴리오 보기" });
+      return;
+    }
     if (contribution === "unknown") {
       setDecision({
         title: "적립금 기록을 확인할 수 없습니다",
@@ -761,10 +773,10 @@
       });
       return;
     }
-    if (contribution === "empty") {
+    if (contribution === "empty" || contribution === "partial") {
       const planned = Number(primary.contribution_plan?.amount || 0);
       setDecision({
-        title: "이번 달 적립금 기록이 없습니다",
+        title: contribution === "partial" ? "이번 달 적립 계획의 일부만 기록됐습니다" : "이번 달 적립금 기록이 없습니다",
         description: `${planned > 0 ? `매월 ${compactWon(planned)}을 적립하는 계좌입니다. ` : ""}${state.mode === "live" ? "입금을 마쳤다면 같은 금액을 기록해 주세요." : "추가할 모의투자금을 기록해 주세요."}`,
         action: "deposit",
         actionLabel: "적립금 기록",
@@ -836,9 +848,11 @@
       return '<p class="flow">아직 보유 종목이 없습니다.</p>';
     const total = basket.snapshot ? Number(basket.snapshot.total_value) : null;
     const targets = basket.target_weights || {};
+    const measured = new Map((basket.measurement?.positions || []).map(p => [p.symbol, p]));
     const rows = positions.map((p) => ({
       ...p,
       weight: total ? Number(p.invested || 0) / total : null,
+      marketWeight: total && measured.get(p.symbol)?.quantity === p.quantity && measured.get(p.symbol)?.price != null ? Number(p.quantity) * Number(measured.get(p.symbol).price) / total : null,
       target: targets[p.symbol] == null ? null : Number(targets[p.symbol]),
     }));
     const maxW = Math.max(
@@ -856,7 +870,7 @@
         : holdingsValue - holdingsCost;
     return `<div class="table-scroll" tabindex="0" role="region" aria-label="${escapeHtml(basket.display_name)} 보유 종목"><table class="holdings">
       <caption>${escapeHtml(basket.display_name)} 보유 종목과 비중</caption>
-      <thead><tr><th scope="col">종목</th><th scope="col" class="num">수량</th><th scope="col" class="num">평단가</th><th scope="col" class="num">매입금액</th><th scope="col">매입 비중</th><th scope="col">목표 비중</th></tr></thead>
+      <thead><tr><th scope="col">종목</th><th scope="col" class="num">수량</th><th scope="col" class="num">평단가</th><th scope="col" class="num">매입금액</th><th scope="col">매입 비중</th><th scope="col">시장가격 비중</th><th scope="col">목표 비중</th></tr></thead>
       <tbody>${rows
         .map(
           (r) => `<tr>
@@ -865,13 +879,14 @@
         <td class="num">${won(r.avg_price)}</td>
         <td class="num">${won(r.invested)}</td>
         <td><span class="wbar"><span>${r.weight == null ? "—" : pct(r.weight * 100, { sign: false, digits: 1 })}</span><i style="width:${barWidth(r.weight)}"></i></span></td>
+        <td>${r.marketWeight == null ? "—" : pct(r.marketWeight * 100, { sign: false, digits: 1 })}</td>
         <td><span class="wbar"><span>${r.target == null ? "—" : pct(r.target * 100, { sign: false, digits: 1 })}</span><i class="t" style="width:${barWidth(r.target)}"></i></span></td>
       </tr>`,
         )
         .join("")}</tbody>
-      <tfoot><tr><td colspan="6">보유분 평가금액 ${won(holdingsValue)} · 매입금액 ${won(holdingsCost)} · 평가손익 <span class="${tone(holdingsPnl)}">${signedWon(holdingsPnl)}</span>${holdingsCost && holdingsPnl != null ? ` (${pct((holdingsPnl / holdingsCost) * 100)})` : ""}</td></tr></tfoot>
+      <tfoot><tr><td colspan="7">보유분 평가금액 ${won(holdingsValue)} · 매입금액 ${won(holdingsCost)} · 평가손익 <span class="${tone(holdingsPnl)}">${signedWon(holdingsPnl)}</span>${holdingsCost && holdingsPnl != null ? ` (${pct((holdingsPnl / holdingsCost) * 100)})` : ""}</td></tr></tfoot>
     </table></div>
-    <p class="fine">현재가는 계좌 기록에 저장하지 않으므로 종목별 비중은 매입금액 기준이고, 보유분 평가금액은 총자산에서 현금을 뺀 값입니다.</p>`;
+    <p class="fine">시장가격 비중은 마지막 평가의 가격·수량 기준입니다. 가격 기록이 없거나 이후 수량이 바뀌면 —로 표시합니다.</p>`;
   }
 
   function renderBasketTracks(data) {
@@ -951,6 +966,12 @@
           <div class="bar" role="meter" aria-label="${escapeHtml(b.display_name)} 투자 비중" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(width)}"><i style="width:${width}%" data-width="${width}"></i>${target == null ? "" : `<em style="left:${clamp(target, 0, 100)}%" aria-hidden="true"></em>`}</div>
           <p class="note">${escapeHtml(note)}</p>
           ${overlayLine}
+          <p class="fine">평가 ${escapeHtml(fmtDT(b.measurement?.measured_at))} · ${{ intraday: "장중", close: "종가", unverified: "가격 시점 미확인", reconstructed: "복원 추정" }[b.measurement?.kind] || "가격 시점 미확인"}${b.measurement?.quote_dates?.length ? ` · 가격 기준일 ${escapeHtml(b.measurement.quote_dates.join(", "))}` : ""}</p>
+          ${(b.allocation?.assets || []).map(a => `<p class="note">${escapeHtml(a.label)} ${pct(Number(a.actual) * 100)} · 목표 ${pct(Number(a.target) * 100)} · 차이 ${pct(Number(a.gap) * 100)}p</p>`).join("")}
+          ${(b.allocation?.issues || []).map(s => `<p class="note">${escapeHtml(s)}</p>`).join("")}
+          ${(b.plan_diagnostics || []).map(d => `<p class="fine">주문 보류 · ${escapeHtml(d.symbol)}: ${escapeHtml(d.reason)}</p>`).join("")}
+          ${(b.contribution_status?.issues || []).map(s => `<p class="flow error">${escapeHtml(s)}</p>`).join("")}
+          <p class="fine">${b.latest_close ? `별도 종가 평가 ${escapeHtml(b.latest_close.date.slice(0, 10))} · ${won(b.latest_close.total_value)} · 누적 ${pct(b.latest_close.cumulative_return)}` : "별도 종가 평가 기록 대기"}</p>
         </div>
         ${holdingsTable(b)}
         ${latestFlow ? `<p class="flow">최근 적립 ${escapeHtml(fmtMD(latestFlow.occurred_at))} · ${escapeHtml(signedWon(latestFlow.amount))}${latestFlow.note ? ` · ${escapeHtml(latestFlow.note)}` : ""}</p>` : ""}
@@ -1719,6 +1740,9 @@
           <p><span>${item.paper_only ? `전체 운영 ${days}거래일` : `${days} / ${minimum} 거래일`}</span><span>${coverageText}</span></p>
         </div>
         <p class="verdict ${cls}">${copy}</p>
+        ${item.entry_status ? `<p class="verdict ${item.entry_status.status === "BLOCKED" ? "warn" : ""}">${item.entry_status.status === "BLOCKED" ? "최근 평가 기준 신규 매수 차단" : "주문 직전 진입 조건 재검사"} · ${escapeHtml(fmtDT(item.entry_status.measured_at))}</p>` : ""}
+        <p class="fine">최근 7일 주문 거부 기록 ${item.recent_order_rejections ?? "미확인"}건 · 동일 일자·원인은 중복 제외</p>
+        ${item.rules_window ? `<p class="fine">현재 규칙: ${escapeHtml(item.rules_window.since)}부터 ${Number(item.rules_window.trading_days)} / ${Number(item.rules_window.min_trading_days)}거래일</p>` : ""}
         ${issues.length ? `<ul class="review-issues">${issues.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : ""}
       </div>`;
       })

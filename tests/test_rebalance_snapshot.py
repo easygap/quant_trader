@@ -26,6 +26,8 @@ def patched_rebalance(monkeypatch):
     """run_rebalance의 협력자들을 모킹하고 fake_rebalancer를 돌려준다."""
     from config.config_loader import Config
     Config._instance = None  # settings.yaml 재로드 (trading.mode=paper)
+    from datetime import datetime
+    monkeypatch.setattr("core.trading_hours._now_kst", lambda: datetime(2026, 10, 13, 10, 10))
 
     fake_rb = MagicMock()
     fake_rb.get_status_report.return_value = "status"

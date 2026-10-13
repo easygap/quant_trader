@@ -46,6 +46,7 @@ pytest_tmp*/
 .claude/worktrees/
 output/
 .playwright-mcp/
+.playwright-cli/
 
 # --- IDE / OS ---
 .idea/

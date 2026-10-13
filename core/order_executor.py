@@ -28,6 +28,7 @@ from database.repositories import (
 from monitoring.logger import log_trade
 from core.order_guard import OrderGuard
 from core.position_lock import PositionLock
+from core.execution_analytics import observe_execution, observe_order_created, observe_order_state
 from core.order_state import OrderBook, OrderStatus
 
 try:
@@ -293,6 +294,7 @@ class OrderExecutor:
             logger.error("DB 미완료 주문 상태 복구 실패: {}", e)
 
     def _persist_order_record(self, order) -> None:
+        observe_order_state(order)
         if self.mode != "live":
             return
         save_order_record(order)
@@ -1516,6 +1518,7 @@ class OrderExecutor:
             raise ValueError("포지션 투자금에 NaN/Inf 또는 음수가 포함됨")
         return value
 
+    @observe_execution("BUY")
     def execute_buy(
         self,
         symbol: str,
@@ -1833,6 +1836,7 @@ class OrderExecutor:
             requested_price=expected_price, strategy=strategy,
             account_key=self.account_key, mode=self.mode,
         )
+        observe_order_created(order)
 
         # 2) 중복 주문 확인 (OrderBook 기반 + 기존 guard)
         existing_open = [o for o in self.order_book.get_open_orders(symbol)
@@ -1999,6 +2003,7 @@ class OrderExecutor:
 
         return result
 
+    @observe_execution("BUY")
     def execute_buy_quantity(
         self,
         symbol: str,
@@ -2467,6 +2472,7 @@ class OrderExecutor:
             account_key=self.account_key,
             mode=self.mode,
         )
+        observe_order_created(order)
         existing_open = [
             o for o in self.order_book.get_open_orders(symbol)
             if o.order_id != order.order_id
@@ -2638,6 +2644,7 @@ class OrderExecutor:
         )
         return result
 
+    @observe_execution("SELL")
     def execute_sell(
         self,
         symbol: str,
@@ -2766,6 +2773,7 @@ class OrderExecutor:
             requested_price=expected_price, strategy=strategy,
             account_key=self.account_key, mode=self.mode,
         )
+        observe_order_created(order)
 
         if self.mode == "live":
             ttl_seconds = self._safe_order_guard_ttl(
@@ -3476,6 +3484,7 @@ class OrderExecutor:
                 filled_price=resolved_filled_price,
                 remaining_qty=max(resolved_remaining_qty, 0),
                 reason="broker_execution_confirmed_after_recovery_check",
+                execution_price_observed=self._positive_order_price(filled_price) is not None,
             )
             if updated:
                 OrderGuard.clear(symbol)
@@ -3572,6 +3581,16 @@ class OrderExecutor:
             drawdown_check = self._drawdown_pre_order_check(action)
         if not drawdown_check["allowed"]:
             return drawdown_check
+
+        # 실시간 paper 바스켓은 executor를 직접 호출해도 거래 시간을 지킨다.
+        strict_paper_session = self.mode == "paper" and str(
+            getattr(self, "account_key", "") or ""
+        ).startswith("basket_rebalance:")
+        if strict_paper_session:
+            time_check = self.trading_hours.can_place_order()
+            if not time_check["allowed"]:
+                logger.warning("⏰ 주문 차단: {}", time_check["reason"])
+                return time_check
 
         # 페이퍼/스케줄 신규 진입은 runtime/preflight 확인에 실패하면 차단한다.
         if self.mode != "live":
