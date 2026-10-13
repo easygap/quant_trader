@@ -13,6 +13,13 @@ def setup(monkeypatch):
     monkeypatch.setattr(daily.shutil, "disk_usage", lambda _: SimpleNamespace(free=1024 ** 3))
 
 
+def test_missing_local_settings_uses_default_market_close(monkeypatch, tmp_path):
+    from config import config_loader
+    monkeypatch.setattr(config_loader, "CONFIG_DIR", tmp_path)
+    assert not (tmp_path / "settings.yaml").exists()
+    assert daily._expected_session(datetime(2026, 10, 13, 16, 30, tzinfo=daily.KST)) == "2026-10-13"
+
+
 def test_close_failure_does_not_block_research_and_status_is_not_green(monkeypatch, tmp_path):
     setup(monkeypatch)
     run = Mock(side_effect=[(2, {"status": "partial", "issues": ["quote_missing"]}), (0, {"status": "completed"})])

@@ -37,12 +37,16 @@ def _number(value, *, positive=False):
         return None
 
 
-def _stamp(value):
+def _stamp(value, *, system_local=False):
     if value is None:
         return None
     try:
         parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return (parsed.replace(tzinfo=KST) if parsed.tzinfo is None else parsed.astimezone(KST)).isoformat()
+        # OrderState timestamps come from datetime.now() in the host time zone.
+        # Report query dates without an offset retain their documented KST basis.
+        if parsed.tzinfo is None and not system_local:
+            parsed = parsed.replace(tzinfo=KST)
+        return parsed.astimezone(KST).isoformat()
     except (TypeError, ValueError):
         return None
 
@@ -111,7 +115,7 @@ def observe_execution(action):
             values = bound.arguments
             entered = _now()
             reference = _number(decision.get("price"), positive=True)
-            reference_at = _stamp(decision.get("at"))
+            reference_at = _stamp(decision.get("at"), system_local=True)
             genuine_decision = reference is not None and reference_at is not None and reference_at <= entered
             payload = {
                 "schema_version": 1, "attempt_id": uuid.uuid4().hex,
@@ -122,7 +126,7 @@ def observe_execution(action):
                 "reference_price": reference if genuine_decision else _number(values.get("price"), positive=True),
                 "reference_at": reference_at if genuine_decision else entered,
                 "reference_kind": "basket_plan" if genuine_decision and decision.get("source") == "basket_plan" else ("decision" if genuine_decision else "executor_input"),
-                "executor_entered_at": entered, "signal_at": _stamp(values.get("signal_at")),
+                "executor_entered_at": entered, "signal_at": _stamp(values.get("signal_at"), system_local=True),
                 "status": "INPUT_RECEIVED", "filled_qty": 0, "filled_price": None,
                 "commission_amount": None, "tax_amount": None, "fees_basis": "unavailable",
                 "fill_price_basis": "modeled" if self.mode != "live" else "broker_observed",
@@ -192,7 +196,8 @@ def observe_order_state(order, *, result=None, outcome=None):
     payload.update(order_id=order.order_id, status=getattr(order.status, "value", order.status),
                    requested_qty=order.requested_qty, filled_qty=order.filled_qty,
                    filled_price=_number(order.filled_price, positive=True),
-                   submitted_at=_stamp(order.submitted_at), fill_observed_at=_stamp(order.filled_at),
+                   submitted_at=_stamp(order.submitted_at, system_local=True),
+                   fill_observed_at=_stamp(order.filled_at, system_local=True),
                    remaining_qty=max(0, order.requested_qty - order.filled_qty))
     if result is not None:
         payload["outcome"] = "completed" if result.get("success") else ("pending" if result.get("order_pending") else "rejected")

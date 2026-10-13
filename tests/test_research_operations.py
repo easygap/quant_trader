@@ -13,6 +13,14 @@ def configure(monkeypatch):
     monkeypatch.setattr(ops.shutil, "disk_usage", lambda path: SimpleNamespace(free=1024 ** 3))
 
 
+def test_missing_local_settings_uses_default_market_close(monkeypatch, tmp_path):
+    from config import config_loader
+    monkeypatch.setattr(config_loader, "CONFIG_DIR", tmp_path)
+    assert not (tmp_path / "settings.yaml").exists()
+    period = ops._collection_period(datetime(2026, 10, 13, 16, tzinfo=ops.KST))
+    assert period["phase"] == "post_market" and period["is_trading_day"]
+
+
 def test_daily_run_persists_and_duplicate_does_not_refetch(monkeypatch, tmp_path):
     configure(monkeypatch)
     run = Mock(return_value=SimpleNamespace(returncode=0))

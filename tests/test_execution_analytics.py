@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -55,7 +56,23 @@ def _report(executor):
     return execution_cost_report(account_key=executor.account_key, db_path=executor.report_path)
 
 
-def test_actual_paper_round_trip_observes_decision_and_signed_fill_costs(executor):
+@pytest.fixture(params=[None, "UTC", "Asia/Seoul"])
+def host_timezone(request, monkeypatch):
+    if request.param is None:
+        yield
+        return
+    if not hasattr(time, "tzset"):
+        pytest.skip("이 운영체제는 프로세스 시간대 변경을 지원하지 않습니다.")
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setenv("TZ", request.param)
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
+
+
+def test_actual_paper_round_trip_observes_decision_and_signed_fill_costs(executor, host_timezone):
     decision_at = (datetime.now(timezone(timedelta(hours=9))) - timedelta(seconds=20)).isoformat()
     bought = _buy(executor, decision_context={"price": 59900, "at": decision_at, "source": "basket_plan"})
     assert bought["success"], bought

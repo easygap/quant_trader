@@ -30,11 +30,11 @@ def _now():
 
 
 def _expected_session(now):
-    from config.config_loader import load_yaml
+    from config.config_loader import load_settings
     from core.market_research import _calendar, _sessions, expected_session
     calendar = _calendar()
     expected_session(now)  # Fail closed if the locally saved calendar is unknown.
-    settings = load_yaml(str(ROOT / "config/settings.yaml"))
+    settings = load_settings()
     market_close = datetime.strptime(settings.get("trading", {}).get("market_close", "15:30"), "%H:%M").time()
     local = now.astimezone(KST).replace(tzinfo=None)
     # The scheduled close run starts one hour after the regular session ends.

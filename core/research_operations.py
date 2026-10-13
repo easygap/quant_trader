@@ -42,14 +42,14 @@ def _now():
 
 def _collection_period(now):
     """Allow an independent settled-close run, preserving T-1 price evidence."""
-    from config.config_loader import load_yaml
+    from config.config_loader import load_settings
     from core.market_research import _calendar, _sessions, expected_session
 
     local = now.astimezone(KST)
     day = local.date().isoformat()
     expected = expected_session(local)  # Also validates the calendar year.
     is_session = bool(len(_sessions(day, day, _calendar())))
-    settings = load_yaml(str(ROOT / "config" / "settings.yaml"))
+    settings = load_settings()
     close = datetime.strptime(settings.get("trading", {}).get("market_close", "15:30"), "%H:%M").time()
     settled = datetime.combine(local.date(), close, tzinfo=KST) + timedelta(minutes=30)
     phase = "post_market" if is_session and local >= settled else "intraday" if is_session else "closed_day"

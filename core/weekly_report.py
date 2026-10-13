@@ -126,7 +126,7 @@ def build_weekly_summary(
     rd = int(reconstructed_days or 0)
     ev_line = f"결측 {md}일 · 사이클 오류 {ce}건"
     rejected = m.get("recent_order_rejections")
-    ev_line += f" · 주문 거부 기록 {rejected if rejected is not None else '미확인'}건"
+    ev_line += f" · 주문 거부 기록 {rejected}건" if rejected is not None else " · 주문 거부 기록 미확인"
     entry = (eval_result or {}).get("entry_status") or {}
     if entry.get("status") == "BLOCKED":
         fields.append({"name": "⛔ 최근 평가의 매수 차단", "value": "; ".join(entry.get("reasons") or []) + f" (측정 {entry.get('measured_at')})", "inline": False})
