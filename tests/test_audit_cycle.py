@@ -27,6 +27,7 @@ def cycle(monkeypatch):
     from config.config_loader import Config
 
     Config._instance = None
+    monkeypatch.setattr("core.trading_hours._now_kst", lambda: datetime(2026, 10, 13, 10, 10))
     order = []
     fake_rb = MagicMock()
     fake_rb.portfolio_mgr.initial_capital = 300_000
@@ -70,7 +71,7 @@ def test_holiday_run_skips_trading_but_saves_snapshot(cycle, monkeypatch):
     fake_rb.save_daily_nav_snapshot.assert_called_once()
 
 
-def test_holiday_run_can_be_forced(cycle, monkeypatch):
+def test_force_does_not_bypass_market_session(cycle, monkeypatch):
     import main
 
     fake_rb, _, _ = cycle
@@ -78,8 +79,9 @@ def test_holiday_run_can_be_forced(cycle, monkeypatch):
 
     main.run_rebalance(_args(force_rebalance=True))
 
-    fake_rb.plan_risk_exits.assert_called_once()
-    fake_rb.plan_rebalance.assert_called_once()
+    fake_rb.plan_risk_exits.assert_not_called()
+    fake_rb.plan_rebalance.assert_not_called()
+    fake_rb.execute.assert_not_called()
 
 
 def test_trading_day_runs_normal_path(cycle, monkeypatch):

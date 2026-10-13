@@ -20,20 +20,30 @@ import tempfile
 from pathlib import Path
 
 
+def _isolate_session_path(name, *, prefix, filename=None):
+    """Only create/clean paths owned by this pytest process, never caller paths."""
+    if os.environ.get(name):
+        return
+    directory = Path(tempfile.mkdtemp(prefix=prefix)).resolve()
+    os.environ[name] = str(directory / filename if filename else directory)
+    # Capture the exact newly-created directory now. Tests may later change env;
+    # looking the path up during shutdown could delete a caller-owned directory.
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+
+
 def pytest_configure(config):
+    # Automatic research hooks must never launch real provider collection in tests.
+    os.environ.setdefault("QUANT_RESEARCH_AUTOMATION_DISABLED", "true")
+    for name in ("QUANT_RESEARCH_OPERATIONS_DIR", "QUANT_PAPER_VALIDATION_DIR", "QUANT_MARKET_INTELLIGENCE_DIR", "QUANT_DAILY_OBSERVATION_DIR"):
+        _isolate_session_path(name, prefix="quant_test_research_")
     # 리스크 오버레이 상태 파일(data/overlay_state/*.json)도 운영 파일이다. 테스트가
     # 운영 바스켓의 '추세 아래/낙폭 발동' 상태를 덮어쓰지 않도록 임시 디렉터리로 격리한다.
-    if not os.environ.get("QUANT_OVERLAY_STATE_DIR"):
-        os.environ["QUANT_OVERLAY_STATE_DIR"] = tempfile.mkdtemp(prefix="quant_test_overlay_")
+    _isolate_session_path("QUANT_OVERLAY_STATE_DIR", prefix="quant_test_overlay_")
     # 대시보드 런타임 상태·live 런타임 락도 운영 파일이다(2026-09-23 확인: 테스트 실행이
     # data/dashboard_runtime_state.json에 가짜 신호를 남기고 data/.live_runtime.lock을
     # 잡았다 — 같은 시각의 실제 live 실행은 '다른 런타임 실행 중'으로 중단된다).
-    if not os.environ.get("QUANT_DASHBOARD_STATE_PATH"):
-        os.environ["QUANT_DASHBOARD_STATE_PATH"] = str(
-            Path(tempfile.mkdtemp(prefix="quant_test_dash_")) / "dashboard_runtime_state.json"
-        )
-    if not os.environ.get("QUANT_RUNTIME_LOCK_DIR"):
-        os.environ["QUANT_RUNTIME_LOCK_DIR"] = tempfile.mkdtemp(prefix="quant_test_lock_")
+    _isolate_session_path("QUANT_DASHBOARD_STATE_PATH", prefix="quant_test_dash_", filename="dashboard_runtime_state.json")
+    _isolate_session_path("QUANT_RUNTIME_LOCK_DIR", prefix="quant_test_lock_")
 
     # 사용자가 명시적으로 DB 경로를 지정했다면 존중한다.
     if os.environ.get("QUANT_DB_PATH"):

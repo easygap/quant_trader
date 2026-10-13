@@ -226,6 +226,7 @@ class MeanReversionStrategy(BaseStrategy):
                     per_min=per_min,
                     per_max=per_max,
                     debt_ratio_max=debt_ratio_max,
+                    debt_ratio_basis=fund_cfg.get("debt_ratio_basis", "total_liabilities_to_equity_pct"),
                 )
                 details["펀더멘털필터"] = reason
                 if not passed:

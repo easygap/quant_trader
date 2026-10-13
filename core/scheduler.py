@@ -437,6 +437,8 @@ class Scheduler:
             # 따라잡는다. _post_market_done은 날짜가 바뀔 때만 초기화된다.
             self._run_post_market()
             self._post_market_done = True
+            from core.research_operations import launch_research_operations
+            launch_research_operations("post_market")
 
     def _run_pre_market(self):
         """장전 준비: 데이터 수집 + 전략 분석."""

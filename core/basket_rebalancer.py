@@ -89,6 +89,9 @@ class RebalanceOrder:
         self.quantity = quantity
         self.price = price
         self.reason = reason
+        # Capture when this plan chose its price; never reconstruct from old trades.
+        self.decision_price = price
+        self.decision_at = datetime.now(_KST).isoformat()
 
     def __repr__(self):
         return f"<RebalanceOrder({self.symbol} {self.action} {self.quantity}주 @{self.price:,.0f} | {self.reason})>"
@@ -246,23 +249,33 @@ class BasketRebalancer:
             save_overlay_state(self.basket_name, decision, mode=self._ledger_mode())
         except OSError as exc:
             logger.warning("바스켓 '{}' 오버레이 상태 저장 실패: {}", self.basket_name, exc)
+        # Source dates advance every session; that alone is not a new incident.
+        import re
+        def issue_key(issues):
+            return sorted(re.sub(r"\d{4}-\d{2}-\d{2}", "<date>", str(i)) for i in issues)
+        previous_issues = (prev or {}).get("data_issues") or []
+        issue_changed = issue_key(previous_issues) != issue_key(decision.data_issues)
         if decision.data_issues:
             logger.warning("바스켓 '{}' 오버레이 데이터 문제: {}", self.basket_name, "; ".join(decision.data_issues))
             # 로그만으로는 헬스·주간 리포트가 못 센다(9/17 이후 추세 필터 동결이 로그에만
-            # 남아 있었다). 같은 날 같은 내용은 한 번만 남긴다.
+            # 남아 있었다). 원인 변경·발생·복구 때만 이벤트를 남긴다.
             try:
-                from core.cycle_observability import record_event_once_per_day
+                from core.cycle_observability import record_cycle_event
 
-                record_event_once_per_day(
-                    "OVERLAY_DATA_ISSUE",
-                    f"바스켓 '{self.basket_name}' 위험 관리에 쓸 자료 문제: " + "; ".join(decision.data_issues),
-                    severity="warning",
-                    strategy=getattr(self, "account_key", None) or None,
-                    mode=self._ledger_mode(),
-                    dedupe_key="; ".join(decision.data_issues)[:500],
-                )
+                if issue_changed:
+                    record_cycle_event(
+                        "OVERLAY_DATA_ISSUE",
+                        f"바스켓 '{self.basket_name}' 위험 관리에 쓸 자료 문제: " + "; ".join(decision.data_issues),
+                        severity="warning",
+                        strategy=getattr(self, "account_key", None) or None,
+                        mode=self._ledger_mode(),
+                    )
             except Exception as exc:
                 logger.warning("오버레이 데이터 문제 이벤트 기록 실패: {}", exc)
+        elif previous_issues:
+            from core.cycle_observability import record_cycle_event
+            record_cycle_event("OVERLAY_DATA_RECOVERED", f"바스켓 '{self.basket_name}' 위험 관리 자료 복구",
+                               strategy=self.account_key, mode=self._ledger_mode())
         if decision.reasons:
             logger.info("바스켓 '{}' 리스크 오버레이 발동: {} (배수 {})", self.basket_name, " · ".join(decision.reasons), decision.scale)
         else:
@@ -426,6 +439,13 @@ class BasketRebalancer:
         커버리지에 영원히 안 잡히는 낭비였다). (account_key, date) upsert 멱등.
         """
         try:
+            from core.trading_hours import TradingHours
+            from core.basket_observability import valuation_context
+            now = datetime.now(_KST).replace(tzinfo=None)
+            th = TradingHours(self.config)
+            if th.is_trading_day(now) and now.time() < th.market_open:
+                logger.info("바스켓 '{}' 장전 — 오늘 NAV 측정 보류", self.basket_name)
+                return False
             snapshot = getattr(self, "_market_snapshot", None) or self._fetch_market_snapshot()
             prices = {s: v["price"] for s, v in snapshot.items()}
             positions = get_all_positions(
@@ -439,9 +459,14 @@ class BasketRebalancer:
                     self.basket_name, missing,
                 )
                 return False
+            day = self._nav_attribution_date()
+            context = valuation_context(snapshot, positions, now, day, th.market_close)
+            context["allocation"] = self.diagnose_deployment(prices).get("allocation")
+            context["plan_diagnostics"] = getattr(self, "_plan_diagnostics", [])
             ok = self.portfolio_mgr.save_daily_snapshot(
                 current_prices=prices or None,
-                snapshot_date=self._nav_attribution_date(),
+                snapshot_date=day,
+                valuation_context=context,
             )
             # 저장 실패(예: DB 제약 충돌)를 성공으로 보고하면 관측성이 거짓
             # SNAPSHOT_SAVED를 남긴다 — 반환값을 그대로 전파한다.
@@ -462,6 +487,8 @@ class BasketRebalancer:
 
             th = TradingHours(self.config)
             d = now
+            if th.is_trading_day(d) and d.time() < th.market_open:
+                d -= timedelta(days=1)
             for _ in range(15):  # 최장 연휴 커버
                 if th.is_trading_day(d):
                     return d
@@ -618,6 +645,15 @@ class BasketRebalancer:
                 })
 
         overlay = self.overlay_decision()
+        from core.basket_observability import allocation_diagnostics
+        positions = get_all_positions(account_key=self.account_key, mode=self._ledger_mode())
+        measured = [{"symbol": p.symbol, "quantity": p.quantity, "price": prices.get(p.symbol)} for p in positions]
+        allocation = allocation_diagnostics(
+            total_value, cash, measured,
+            {s: w * design_fraction for s, w in targets.items()},
+            (self.basket.get("overlays") or {}).get("defensive_symbol"),
+            float(self.rebalance_cfg.get("drift_threshold", 0.05)),
+        )
         return {
             "total_value": total_value,
             "stock_value": stock_value,
@@ -627,6 +663,7 @@ class BasketRebalancer:
             "base_stock_fraction": self.base_stock_fraction(),
             "overlay": overlay.to_dict() if overlay is not None else None,
             "unfilled_slots": unfilled,
+            "allocation": allocation,
         }
 
     # ------------------------------------------------------------------
@@ -799,6 +836,7 @@ class BasketRebalancer:
         SELL 주문을 먼저 배치하여 현금 확보 후 BUY 주문을 실행할 수 있도록 합니다.
         max_turnover_ratio를 초과하는 리밸런싱은 부분 실행합니다.
         """
+        self._plan_diagnostics = []
         prices = prices or self._fetch_current_prices()
         summary = self.portfolio_mgr.get_portfolio_summary(current_prices=prices)
         # live에서 KIS 잔고가 확인되지 않으면(broker_balance_ok=False) stale DB 자본으로
@@ -839,6 +877,7 @@ class BasketRebalancer:
             actual_w = actuals.get(symbol, 0.0)
             drift = target_w - actual_w
             if drift > 0 and symbol in cooldown:
+                self._plan_diagnostics.append({"symbol": symbol, "code": "COOLDOWN", "reason": str(cooldown[symbol])})
                 logger.info(
                     "종목 {} 매수 보류 — {} (비중 부족 {:.1%}는 차단 해제 후 교정)",
                     symbol, cooldown[symbol], drift,
@@ -846,6 +885,8 @@ class BasketRebalancer:
                 continue
             trade_value = abs(investable * target_w - investable * actual_w)
             if trade_value < min_trade:
+                self._plan_diagnostics.append({"symbol": symbol, "code": "MIN_TRADE", "gap_amount": trade_value,
+                                               "reason": f"조정액 {trade_value:,.0f}원 < 최소 거래 {min_trade:,.0f}원"})
                 if drift > 0 and actual_w <= 0:
                     # 미보유 슬롯의 목표 금액이 min_trade_amount보다 작으면 이 분기에서
                     # 영원히 침묵 스킵된다 — 채움 불가(아래 quantity<=0)와 같은 부류의
@@ -858,10 +899,13 @@ class BasketRebalancer:
                 continue
             price = prices.get(symbol, 0)
             if price <= 0:
+                self._plan_diagnostics.append({"symbol": symbol, "code": "MISSING_PRICE", "reason": "시장가격 미확보"})
                 logger.warning("종목 {} 가격 조회 불가 — 스킵", symbol)
                 continue
             quantity = int(trade_value / price)
             if quantity <= 0:
+                self._plan_diagnostics.append({"symbol": symbol, "code": "MIN_LOT", "gap_amount": trade_value,
+                                               "price": price, "reason": f"조정액 {trade_value:,.0f}원 < 1주 {price:,.0f}원"})
                 if drift > 0 and actual_w <= 0:
                     # 미보유 슬롯인데 1주 가격이 목표 거래금액을 초과 — 현재 자본
                     # 규모로는 이 슬롯을 영원히 채울 수 없다(예: 자본 1,000만·목표
@@ -904,12 +948,14 @@ class BasketRebalancer:
         for order, notional in candidates:
             budget_left = max_turnover_amount - total_trade_amount
             if budget_left < min_trade:
+                self._plan_diagnostics.append({"symbol": order.symbol, "code": "TURNOVER_LIMIT", "reason": "남은 회전 한도 부족"})
                 break
             if notional > budget_left:
                 order.quantity = int(budget_left / order.price)
                 notional = order.quantity * order.price
                 order.reason += " (회전상한 부분 실행)"
             if order.quantity <= 0 or notional < min_trade:
+                self._plan_diagnostics.append({"symbol": order.symbol, "code": "MIN_TRADE_AFTER_ROUNDING", "reason": "정수 수량·회전 한도 적용 후 최소 거래액 미달"})
                 continue
             orders.append(order)
             total_trade_amount += notional
@@ -1011,7 +1057,14 @@ class BasketRebalancer:
                 remaining -= notional
                 total_trade_amount += notional
 
+        planned_quantities = {o.symbol: o.quantity for o in orders}
         orders = self._fit_cash_orders(orders, summary, prices, positions)
+        funded_quantities = {o.symbol: o.quantity for o in orders}
+        for symbol, quantity in planned_quantities.items():
+            if funded_quantities.get(symbol, 0) < quantity:
+                self._plan_diagnostics.append({"symbol": symbol, "code": "CASH_RESERVE", "reason": "거래 비용·현금 유보액을 반영해 주문 축소"})
+        ordered_symbols = {o.symbol for o in orders}
+        self._plan_diagnostics = [d for d in self._plan_diagnostics if d["symbol"] not in ordered_symbols or d["code"] == "CASH_RESERVE"]
         total_trade_amount = sum(o.quantity * o.price for o in orders)
         sells = [o for o in orders if o.action == "SELL"]
         buys = [o for o in orders if o.action == "BUY"]
@@ -1106,6 +1159,13 @@ class BasketRebalancer:
         """
         results = {"executed": 0, "skipped": 0, "failed": 0, "details": []}
         mode = str(self.config.trading.get("mode", "paper")).lower()
+        if mode != "live" and not dry_run and orders:
+            from core.trading_hours import TradingHours
+            check = TradingHours(self.config).can_place_order()
+            if not check["allowed"]:
+                results.update(skipped=len(orders), blocked=True, reason=check["reason"])
+                results["details"] = [{"order": repr(o), "status": "blocked", "reason": check["reason"]} for o in orders]
+                return results
         if mode == "live" and not dry_run and not live_confirmed and orders:
             reason = "live 리밸런싱은 운영자 확인 및 live gate 통과 후만 실행 가능합니다."
             logger.error(reason)
@@ -1190,6 +1250,7 @@ class BasketRebalancer:
                         mark_prices=mark_prices or None,
                         # 계좌 낙폭 가드는 이 바스켓이 자기 낙폭 규칙을 켜 둔 경우에만 넘긴다.
                         basket_drawdown_rule=self._has_drawdown_rule(),
+                        decision_context={"price": order.decision_price, "at": order.decision_at, "source": "basket_plan"},
                     )
                 else:
                     res = executor.execute_sell(
@@ -1197,6 +1258,7 @@ class BasketRebalancer:
                         reason=f"리밸런싱: {order.reason}", strategy=self.execution_strategy,
                         # 손절·트레일링 청산은 최소 보유 기간보다 우선한다(익절은 아님)
                         emergency=_is_protective_exit(order.reason),
+                        decision_context={"price": order.decision_price, "at": order.decision_at, "source": "basket_plan"},
                     )
 
                 if res.get("success"):
@@ -1256,6 +1318,8 @@ class BasketRebalancer:
                 lines.append("--- 계획된 주문 ---")
                 for o in orders:
                     lines.append(f"  {o.action:4} {o.symbol} {o.quantity}주 @{o.price:,.0f} | {o.reason}")
+            else:
+                lines.append("주문 없음: " + "; ".join(f"{d['symbol']} {d['reason']}" for d in getattr(self, "_plan_diagnostics", [])))
 
         return "\n".join(lines)
 
@@ -1290,6 +1354,13 @@ class BasketRebalancer:
                 if df is None or df.empty:
                     continue
                 entry = {"price": float(df["close"].iloc[-1])}
+                raw_date = df["date"].iloc[-1] if "date" in df.columns else df.index[-1]
+                # RangeIndex is not a quote timestamp.
+                entry["quote_date"] = str(raw_date)[:10] if hasattr(raw_date, "year") or isinstance(raw_date, str) else None
+                source_info = getattr(self.data_collector, "get_last_source_info", lambda: {})()
+                source = source_info.get("source") if isinstance(source_info, dict) else None
+                entry["source"] = source if isinstance(source, str) else "unknown"
+                entry["observed_at"] = datetime.now(_KST).replace(tzinfo=None).isoformat()
                 if "volume" in df.columns:
                     recent_vol = df["volume"].tail(20).dropna()
                     if len(recent_vol) > 0 and float(recent_vol.mean()) > 0:

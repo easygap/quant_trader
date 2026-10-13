@@ -1,0 +1,9 @@
+# Observational jobs run after trading work, in a separate bounded process.
+enabled: true
+retry_minutes: 60
+# Freshness follows completed trading sessions and the settled-close phase.
+minimum_free_mb: 256
+jobs:
+  market: {enabled: true, timeout_seconds: 150}
+  intelligence: {enabled: true, timeout_seconds: 180}
+  paper_validation: {enabled: true, timeout_seconds: 150}

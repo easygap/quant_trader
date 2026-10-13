@@ -54,7 +54,8 @@ class TestBuildWeeklySummary:
         f = _fields(build_weekly_summary(
             basket_name="b", eval_result=_eval(), missing_days=0, cycle_errors=0,
         ))
-        assert "무사고" in f["🛠 주간 이벤트"]
+        assert "무사고" not in f["🛠 주간 이벤트"]
+        assert "주문 거부 기록 미확인" in f["🛠 주간 이벤트"]
 
     def test_event_counts_with_incidents(self):
         f = _fields(build_weekly_summary(

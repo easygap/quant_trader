@@ -112,8 +112,13 @@ class StrategyEnsemble:
             except Exception as e:
                 logger.warning("전략 {} 로드 스킵: {}", name, e)
 
-    def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
-        """하위 전략 신호를 합성한 signal 컬럼을 포함한 DataFrame 반환."""
+    def analyze(self, df: pd.DataFrame, *, current_observation: bool = False,
+                symbol: str = None) -> pd.DataFrame:
+        """Historical analysis by default; current context is explicitly requested.
+
+        Components with current-only fundamentals may update their final row through
+        analyze_current(). They must never broadcast today's data into prior rows.
+        """
         if not self._strategies:
             analyzed = df.copy()
             analyzed["signal"] = "HOLD"
@@ -124,7 +129,10 @@ class StrategyEnsemble:
         base_df = None
         for name, strategy, _w in self._strategies:
             try:
-                strat_df = strategy.analyze(df.copy())
+                if current_observation and callable(getattr(strategy, "analyze_current", None)):
+                    strat_df = strategy.analyze_current(df.copy(), symbol=symbol)
+                else:
+                    strat_df = strategy.analyze(df.copy())
                 if strat_df.empty:
                     continue
                 if base_df is None:
@@ -269,7 +277,10 @@ class StrategyEnsemble:
         if not self._strategies:
             return {"signal": "HOLD", "score": 0, "details": {"ensemble": "전략 없음"}}
 
-        analyzed = self.analyze(df)
+        # generate_signal is the current decision API. An explicit historical
+        # boundary keeps the safe historical path; no wall-clock guessing occurs.
+        analyzed = self.analyze(df, current_observation=kwargs.get("as_of_date") is None,
+                                symbol=kwargs.get("symbol"))
         if analyzed.empty:
             return {"signal": "HOLD", "score": 0, "details": {"ensemble": "분석 결과 없음"}}
 

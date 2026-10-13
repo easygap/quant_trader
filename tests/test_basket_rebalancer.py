@@ -68,6 +68,12 @@ def mock_baskets_config():
         yield
 
 
+@pytest.fixture(autouse=True)
+def market_session(monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr("core.trading_hours._now_kst", lambda: datetime(2026, 10, 13, 10, 10))
+
+
 @pytest.fixture
 def rebalancer(mock_baskets_config):
     with patch("core.basket_rebalancer.PortfolioManager"):

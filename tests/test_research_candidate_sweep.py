@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import pytest
 
 
 def _minimal_bundle(candidates=None):
@@ -384,7 +385,9 @@ def test_oos_holdout_passes_for_robust_winner():
 
     def fake_eval(spec, start, end):
         is_train = start == "2023-01-01"
-        return {"sharpe": 1.5 if is_train else 1.1, "total_return": 40 if is_train else 25}
+        return {"sharpe": 1.5 if is_train else 1.1, "total_return": 40 if is_train else 25,
+                "benchmark_excess_return": 5, "benchmark_excess_sharpe": 0.2,
+                "benchmark_coverage_complete": True}
 
     out = evaluate_oos_holdout(
         [_FakeSpec("a"), _FakeSpec("b")],
@@ -409,6 +412,67 @@ def test_oos_holdout_empty_specs():
     )
     assert out["status"] == "no_specs"
     assert out["trials"] == 0
+
+
+def test_oos_positive_absolute_performance_does_not_hide_benchmark_failure():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+    out = evaluate_oos_holdout(
+        [_FakeSpec("winner")], train_start="2023-01-01", train_end="2024-12-31",
+        test_start="2025-01-01", test_end="2025-12-31",
+        evaluate_fn=lambda *args: {"sharpe": 2.0, "total_return": 50,
+                                  "benchmark_excess_return": -5, "benchmark_excess_sharpe": -0.2,
+                                  "benchmark_coverage_complete": True},
+    )
+    assert out["holdout_passes"] is False
+    assert out["validation_status"] == "failed"
+
+
+def test_oos_missing_benchmark_and_overlapping_windows_fail_closed():
+    from tools.research_candidate_sweep import evaluate_oos_holdout
+    kwargs = dict(specs=[_FakeSpec("a")], train_start="2023-01-01", train_end="2024-12-31",
+                  test_start="2025-01-01", test_end="2025-12-31",
+                  evaluate_fn=lambda *args: {"sharpe": 3.0, "total_return": 100})
+    result = evaluate_oos_holdout(**kwargs)
+    assert result["validation_status"] == "unavailable"
+    assert result["holdout_passes"] is False
+    kwargs["test_start"] = "2024-12-31"
+    kwargs["evaluate_fn"] = lambda *args: pytest.fail("overlapping windows must not execute")
+    assert evaluate_oos_holdout(**kwargs)["status"] == "invalid_windows"
+
+
+def test_dsr_uses_actual_observations_and_nonnormal_moments():
+    import numpy as np
+    import pandas as pd
+    from tools.research_candidate_sweep import calculate_research_metrics, annotate_multiple_testing
+    dates = pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-10", "2025-01-17", "2025-01-20"])
+    returns = np.array([0.01, -0.02, 0.005, 0.10, -0.03])
+    values = np.concatenate(([100.0], 100.0 * np.cumprod(1 + returns)))
+    metrics = calculate_research_metrics({"equity_curve": pd.DataFrame({"value": values}, index=dates)}, 100.0)
+    statistics = metrics["return_statistics"]
+    assert statistics["n_obs"] == 5
+    assert statistics["skew"] == pytest.approx(pd.Series(returns).skew())
+    assert statistics["kurtosis"] == pytest.approx(pd.Series(returns).kurt() + 3)
+    annotate_multiple_testing([{"metrics": metrics}], n_obs=999)
+    assert metrics["deflated_sharpe"]["n_obs"] == 5
+    assert metrics["deflated_sharpe"]["status"] == "observed"
+    assert metrics["deflated_sharpe"]["skew"] == statistics["skew"]
+
+
+def test_research_admission_never_substitutes_full_period_winner():
+    from tools.research_candidate_sweep import build_decision_summary, research_admission
+    oos = {"status": "ok", "validation_status": "passed", "selected_candidate_id": "train_winner",
+           "selected_train_deflated_sharpe": {"status": "observed", "dsr": 0.98, "passes": True}}
+    admission = research_admission({"survivorship_controlled": True}, oos)
+    records = [{"candidate_id": name, "alpha_pass": True, "promotion": {"status": "provisional_paper_candidate"}}
+               for name in ("full_period_winner", "train_winner")]
+    result = build_decision_summary(records, walk_forward_enabled=True, benchmark={"universe_size": 3}, admission=admission)
+    assert result["eligible_candidate_ids"] == ["train_winner"]
+    result = build_decision_summary(records[:1], walk_forward_enabled=True, benchmark={"universe_size": 3}, admission=admission)
+    assert result["action"] == "RESEARCH_VALIDATION_REQUIRED"
+    assert result["eligible_candidate_ids"] == []
+    oos["selected_train_deflated_sharpe"]["status"] = "approximate"
+    assert research_admission({"survivorship_controlled": True}, oos)["status"] == "unavailable"
+    assert research_admission({}, None)["status"] == "unavailable"
 
 
 def test_run_candidate_sweep_wires_oos_holdout(monkeypatch):

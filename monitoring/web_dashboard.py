@@ -3,7 +3,7 @@
 
 대시보드는 장부와 런타임 상태를 읽어 사용자가 오늘 해야 할 일, 장기 성과,
 실전 전환 준비도를 한 화면에서 이해하도록 돕는다. 웹에서 가능한 쓰기는
-적립금 기록뿐이며 매매와 설정 변경은 의도적으로 제공하지 않는다.
+적립금 기록과 연구 자료 갱신이며, 매매와 설정 변경은 제공하지 않는다.
 """
 
 from __future__ import annotations
@@ -199,6 +199,7 @@ def get_snapshots_json(days: int = 30, account_key: Optional[str] = None) -> dic
 def get_baskets_json() -> dict:
     """활성 바스켓별 원금·평가금·배치율·보유 현황을 DB에서만 읽는다."""
     from core.basket_deploy import effective_stock_fraction
+    from core.basket_observability import read_basket_diagnostics
     from core.basket_rebalancer import BasketRebalancer, rebalance_live_strategy_id
     from core.risk_overlays import (
         overlay_target_weights,
@@ -370,6 +371,9 @@ def get_baskets_json() -> dict:
                 "holdings_cost": holdings_cost,
                 "holdings_value": holdings_value,
                 "positions": positions,
+                **read_basket_diagnostics(
+                    basket_config, account_key, config.risk_params, ledger_mode,
+                ),
             }
         )
 
@@ -748,6 +752,10 @@ async def handle_api_basket_evaluation(request: web.Request) -> web.Response:
                 {
                     "basket": basket_name,
                     "verdict": result.get("verdict"),
+                    "entry_status": result.get("entry_status"),
+                    "operation_verdict": result.get("operation_verdict"),
+                    "recent_order_rejections": (result.get("metrics") or {}).get("recent_order_rejections"),
+                    "rules_window": result.get("rules_window"),
                     "paper_only": bool(result.get("paper_only", False)),
                     "review_note": result.get("review_note"),
                     "progress_days": result.get("progress_days"),
@@ -774,6 +782,8 @@ async def handle_api_basket_evaluation(request: web.Request) -> web.Response:
 
 
 def create_app() -> web.Application:
+    from monitoring.research_dashboard import register_research_routes
+
     web_mod = _require_aiohttp_web()
     app = web_mod.Application(middlewares=[web_mod.middleware(_security_headers)])
     app[_RUNTIME_CACHE_KEY] = _ReadCache()
@@ -786,6 +796,9 @@ def create_app() -> web.Application:
     app.router.add_post("/api/deposit", handle_api_deposit)
     app.router.add_get("/api/cash_flows", handle_api_cash_flows)
     app.router.add_get("/api/basket_evaluation", handle_api_basket_evaluation)
+    register_research_routes(app)
+    from monitoring.operations_dashboard import register_operations_routes
+    register_operations_routes(app)
     app.router.add_static(
         "/static/",
         path=str(_STATIC_PATH),

@@ -79,6 +79,15 @@ def test_benchmark_return_refuses_stale_last_bar(monkeypatch, fixed_target):
     assert DataCollector.fetch_benchmark_return("2026-06-10", "2026-09-22", "KS11") is None
 
 
+def test_close_comparison_requires_both_requested_dates(monkeypatch):
+    import FinanceDataReader as fdr
+    shifted = _frame(["2026-10-07", "2026-10-12"]).rename(columns={"close": "Close"})
+    monkeypatch.setattr(fdr, "DataReader", lambda *a, **k: shifted)
+    monkeypatch.setattr(dc_mod, "HAS_YF", False)
+    assert DataCollector.fetch_benchmark_return("2026-10-06", "2026-10-12", exact_boundaries=True) is None
+    assert DataCollector.fetch_benchmark_return("2026-10-07", "2026-10-12", exact_boundaries=True) == pytest.approx(1.0)
+
+
 def test_benchmark_return_uses_fresh_fallback(monkeypatch, fixed_target):
     import FinanceDataReader as fdr
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -4608,6 +4609,7 @@ def calculate_research_metrics(
             "ev_per_trade": 0,
             "cost_adjusted_cagr": -100,
             "turnover_per_year": 0,
+            "return_statistics": {"status": "unavailable", "reason": "empty_equity_curve", "n_obs": 0},
             **exposure_summary(eq),
             **exposure_matched_benchmark_metrics(eq, benchmark_daily_returns, capital),
         }
@@ -4619,7 +4621,7 @@ def calculate_research_metrics(
     final = float(eq["value"].iloc[-1])
     total_return = (final / capital - 1) * 100
     years = max(len(eq) / 252, 1 / 252)
-    daily_returns = eq["value"].pct_change().dropna()
+    daily_returns = eq["value"].pct_change(fill_method=None).dropna()
     std = float(daily_returns.std()) if len(daily_returns) > 1 else 0
     sharpe = (float(daily_returns.mean()) * 252 - 0.03) / (std * np.sqrt(252)) if std > 0 else 0
     peak = eq["value"].cummax()
@@ -4650,8 +4652,32 @@ def calculate_research_metrics(
         if final > 0 and capital > 0
         else -100,
         "turnover_per_year": round(notional / capital / years * 100, 1) if capital > 0 else 0,
+        "return_statistics": observed_return_statistics(eq, sharpe),
         **exposure_summary(eq),
         **exposure_matched_benchmark_metrics(eq, benchmark_daily_returns, capital),
+    }
+
+
+def observed_return_statistics(eq: pd.DataFrame, sharpe: float) -> dict[str, Any]:
+    """DSR inputs from actual equity observations, never calendar-day estimates."""
+    values = pd.to_numeric(eq["value"], errors="coerce")
+    dates = pd.to_datetime(eq.index, errors="coerce")
+    if (dates.isna().any() or dates.has_duplicates or not dates.is_monotonic_increasing
+            or not np.isfinite(values).all() or (values <= 0).any()):
+        return {"status": "unavailable", "reason": "invalid_equity_observations", "n_obs": 0}
+    returns = values.pct_change(fill_method=None).iloc[1:]
+    n_obs = len(returns)
+    if n_obs < 4 or not np.isfinite(returns).all() or float(returns.std()) <= 0:
+        return {"status": "unavailable", "reason": "insufficient_variable_returns", "n_obs": n_obs}
+    skew, kurtosis = float(returns.skew()), float(returns.kurt()) + 3.0
+    if not all(math.isfinite(x) for x in (skew, kurtosis, sharpe)):
+        return {"status": "unavailable", "reason": "nonfinite_return_moments", "n_obs": n_obs}
+    return {
+        "status": "observed", "n_obs": n_obs, "sharpe_annual": float(sharpe),
+        "skew": skew, "kurtosis": kurtosis, "periods_per_year": 252,
+        "first_return_date": dates[1].date().isoformat(),
+        "last_return_date": dates[-1].date().isoformat(),
+        "source": "equity_curve.pct_change", "kurtosis_convention": "pearson",
     }
 
 
@@ -4758,22 +4784,20 @@ def build_candidate_record(
     }
 
 
-def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int) -> dict[str, Any]:
-    """시행 집합(여러 변형) 전체의 Sharpe 분산으로 각 record에 deflated Sharpe를 부여한다.
+def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int | None = None) -> dict[str, Any]:
+    """Use observed per-candidate moments; legacy estimates cannot pass admission.
 
-    한 패밀리에서 N개 변형을 탐색해 '최고'를 고르면 in-sample Sharpe가 다중검정으로
-    구조적으로 부풀려진다. Bailey & López de Prado의 Deflated Sharpe Ratio로 시행 횟수에
-    맞춰 할인하여 각 record.metrics['deflated_sharpe']에 기록한다(랭킹/승격은 변경하지
-    않고 보고만 — 과적합 신호 노출용). skew/kurt는 집계 단계에서 수익률 시계열이 없어
-    정규(0/3)로 가정하며, 다중검정 할인이 주효과다.
+    Trial counts cover this invocation only. Repeated research and correlated trials
+    require a broader experiment ledger; this diagnostic does not establish alpha.
     """
     from backtest.statistical_validation import deflated_sharpe_ratio
     import statistics
 
     sharpes = [
-        float(r["metrics"]["sharpe"])
+        float((r["metrics"].get("return_statistics") or {}).get("sharpe_annual", r["metrics"]["sharpe"]))
         for r in records
         if isinstance((r.get("metrics") or {}).get("sharpe"), (int, float))
+        and math.isfinite(float(r["metrics"]["sharpe"]))
     ]
     n_trials = len(records)
     variance = statistics.pvariance(sharpes) if len(sharpes) >= 2 else 0.0
@@ -4781,23 +4805,38 @@ def annotate_multiple_testing(records: list[dict[str, Any]], n_obs: int) -> dict
     for r in records:
         metrics = r.get("metrics") or {}
         s = metrics.get("sharpe")
-        if not isinstance(s, (int, float)):
+        if not isinstance(s, (int, float)) or not math.isfinite(float(s)):
             continue
+        stats = metrics.get("return_statistics") or {}
+        observed = stats.get("status") == "observed"
+        count = stats.get("n_obs") if observed else n_obs
+        if count is None or int(count) < 4:
+            metrics["deflated_sharpe"] = {
+                "status": "unavailable", "reason": stats.get("reason", "observed_return_statistics_missing"),
+                "passes": False, "n_trials": n_trials,
+            }
+            continue
+        s = float(stats.get("sharpe_annual", s)) if observed else float(s)
         dsr = deflated_sharpe_ratio(
-            float(s), n_obs=int(n_obs), n_trials=n_trials,
+            s, n_obs=int(count), n_trials=n_trials,
             sharpe_variance_across_trials=variance,
+            skew=float(stats.get("skew", 0.0)), kurtosis=float(stats.get("kurtosis", 3.0)),
         )
+        dsr.update({"status": "observed" if observed else "approximate",
+                    "skew": stats.get("skew", 0.0), "kurtosis": stats.get("kurtosis", 3.0),
+                    "trial_scope": "current_sweep_only"})
         metrics["deflated_sharpe"] = dsr
         if best_dsr is None or float(s) > best_dsr.get("observed_sharpe_annual", float("-inf")):
             best_dsr = dsr
     return {
         "n_trials": n_trials,
         "sharpe_variance_across_trials": round(variance, 6),
-        "n_obs": int(n_obs),
+        "sharpe_variance_across_trials_raw": variance,
+        "n_obs": int(n_obs) if n_obs is not None else None,
         "best_by_sharpe_deflated": best_dsr,
         "note": (
-            "deflated Sharpe는 다중검정 보정 보고용이며 랭킹/승격 게이트를 바꾸지 않는다. "
-            "skew/kurt는 정규 가정."
+            "DSR은 실제 관측 수익률의 표본수·왜도·첨도를 사용한다. approximate/unavailable은 "
+            "연구 진입 심사를 통과하지 못한다. 시행수는 이번 실행만 포함하며 반복 탐색은 미통제다."
         ),
     }
 
@@ -4848,22 +4887,21 @@ def evaluate_oos_holdout(
     evaluate_fn,
     rank_fn=None,
 ) -> dict[str, Any]:
-    """진짜 out-of-time holdout 평가.
+    """Select using train metrics only, then replay one winner out of time.
 
-    지금 walk-forward는 전체 구간에서 고른 파라미터를 각 구간에 재평가하므로 사실상
-    전부 in-sample이라 변형 선택 과적합을 못 잡는다. 이 함수는 **train 구간 성과로만
-    변형을 고르고**, 한 번도 안 본 **test 구간 성과를 보고**한다. test_sharpe가
-    train_sharpe보다 크게 떨어지면 선택 과적합(selection overfitting) 신호다.
-
-    evaluate_fn(spec, start, end) -> metrics dict 를 주입받아 단위 테스트가 가능하다.
+    This does not certify an untouched dataset: previous runs may have inspected it.
     """
     rank_fn = rank_fn or rank_score
     if not specs:
         return {"status": "no_specs", "trials": 0}
+    boundaries = [pd.Timestamp(x) for x in (train_start, train_end, test_start, test_end)]
+    if not (boundaries[0] <= boundaries[1] < boundaries[2] <= boundaries[3]):
+        return {"status": "invalid_windows", "holdout_passes": False,
+                "reason": "train_and_test_must_be_ordered_and_nonoverlapping"}
 
     def _num(metrics: dict[str, Any], key: str):
         value = (metrics or {}).get(key)
-        return float(value) if isinstance(value, (int, float)) else None
+        return float(value) if isinstance(value, (int, float)) and math.isfinite(float(value)) else None
 
     scored = []
     for spec in specs:
@@ -4875,12 +4913,25 @@ def evaluate_oos_holdout(
             "train_rank_score": rank_fn(train_metrics),
         })
     # train 랭킹으로만 선택 (test는 절대 보지 않음)
+    if any(not math.isfinite(float(item["train_rank_score"])) for item in scored):
+        return {"status": "invalid_train_metrics", "holdout_passes": False}
+    train_records = [{"candidate_id": item["candidate_id"], "metrics": item["train_metrics"]} for item in scored]
+    train_multiple_testing = annotate_multiple_testing(train_records)
     scored.sort(key=lambda item: item["train_rank_score"], reverse=True)
     winner = scored[0]
     test_metrics = evaluate_fn(winner["spec"], test_start, test_end)
 
     train_sharpe = _num(winner["train_metrics"], "sharpe")
     test_sharpe = _num(test_metrics, "sharpe")
+    test_excess_return = _num(test_metrics, "benchmark_excess_return")
+    test_excess_sharpe = _num(test_metrics, "benchmark_excess_sharpe")
+    coverage = test_metrics.get("benchmark_coverage_complete") is True
+    missing = [name for name, value in (("sharpe", test_sharpe),
+               ("benchmark_excess_return", test_excess_return),
+               ("benchmark_excess_sharpe", test_excess_sharpe)) if value is None]
+    if not coverage:
+        missing.append("benchmark_coverage_complete")
+    passes = not missing and all(value > 0 for value in (test_sharpe, test_excess_return, test_excess_sharpe))
     sharpe_degradation = (
         round(train_sharpe - test_sharpe, 3)
         if train_sharpe is not None and test_sharpe is not None
@@ -4899,12 +4950,18 @@ def evaluate_oos_holdout(
         "test_total_return": _num(test_metrics, "total_return"),
         "train_benchmark_excess_return": _num(winner["train_metrics"], "benchmark_excess_return"),
         "test_benchmark_excess_return": _num(test_metrics, "benchmark_excess_return"),
+        "test_benchmark_excess_sharpe": test_excess_sharpe,
+        "test_benchmark_coverage_complete": coverage,
+        "validation_status": "unavailable" if missing else ("passed" if passes else "failed"),
+        "missing_metrics": missing,
+        "train_multiple_testing": train_multiple_testing,
+        "selected_train_deflated_sharpe": winner["train_metrics"].get("deflated_sharpe"),
+        "selected_train_return_statistics": winner["train_metrics"].get("return_statistics"),
         "sharpe_degradation": sharpe_degradation,
-        # holdout 통과: 선택된 변형이 untouched 구간에서도 양(+)의 Sharpe 유지
-        "holdout_passes": bool(test_sharpe is not None and test_sharpe > 0),
+        "holdout_passes": bool(passes),
         "note": (
-            "선택은 train 구간 rank_score만 사용, 성과는 test(untouched) 구간 기준. "
-            "test_sharpe가 train보다 크게 낮으면 선택 과적합 신호."
+            "선택은 train rank_score만 사용한다. test의 양의 Sharpe·동일 유니버스 초과수익·초과Sharpe를 "
+            "모두 요구한다. 과거 실행의 test 열람 여부는 인증하지 않는 out-of-time replay다."
         ),
     }
 
@@ -4990,11 +5047,35 @@ def sort_candidate_records(records: list[dict[str, Any]]) -> list[dict[str, Any]
     )
 
 
+def research_admission(universe_selection: dict, oos_holdout: dict | None) -> dict[str, Any]:
+    """Fail closed for recommendation, without changing runtime authorizations."""
+    checks = []
+    pit = universe_selection.get("survivorship_controlled")
+    checks.append({"name": "point_in_time_universe",
+                   "status": "passed" if pit is True else ("failed" if pit is False else "unavailable")})
+    oos = oos_holdout or {}
+    checks.append({"name": "out_of_time_benchmark_excess",
+                   "status": oos.get("validation_status", "unavailable") if oos.get("status") == "ok" else "unavailable"})
+    dsr = oos.get("selected_train_deflated_sharpe") or {}
+    dsr_status = "unavailable"
+    if dsr.get("status") == "observed" and isinstance(dsr.get("dsr"), (int, float)) and math.isfinite(dsr["dsr"]):
+        dsr_status = "passed" if dsr.get("passes") is True and dsr["dsr"] >= 0.95 else "failed"
+    checks.append({"name": "train_selection_deflated_sharpe", "status": dsr_status})
+    issues = [f"{check['name']}:{check['status']}" for check in checks if check["status"] != "passed"]
+    status = "passed" if not issues else ("failed" if any(c["status"] == "failed" for c in checks) else "unavailable")
+    return {"version": 1, "status": status, "checks": checks, "issues": issues,
+            "selected_candidate_id": oos.get("selected_candidate_id"),
+            "selection_window": oos.get("selection_window"), "holdout_window": oos.get("holdout_window"),
+            "limits": ["current_sweep_trial_count_only", "holdout_reuse_not_tracked",
+                       "research_screen_not_paper_or_live_authorization"]}
+
+
 def build_decision_summary(
     candidates: list[dict[str, Any]],
     *,
     walk_forward_enabled: bool,
     benchmark: dict[str, Any],
+    admission: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     eligible = [
         r for r in candidates
@@ -5026,10 +5107,24 @@ def build_decision_summary(
         }
 
     if eligible:
-        ids = [r["candidate_id"] for r in eligible]
+        selected = (admission or {}).get("selected_candidate_id")
+        ids = [r["candidate_id"] for r in eligible if r["candidate_id"] == selected]
+        if (admission or {}).get("status") != "passed" or not ids:
+            return {
+                "action": "RESEARCH_VALIDATION_REQUIRED",
+                "reason": "Canonical recommendation requires verified point-in-time data, train DSR and out-of-time benchmark excess for the train-selected candidate.",
+                "best_candidate_id": best_id, "selected_candidate_id": selected,
+                "eligible_candidate_ids": [],
+                "alpha_candidate_ids": [r["candidate_id"] for r in alpha_candidates],
+                "block_reasons": (admission or {}).get("issues", ["research_admission_missing"]) +
+                    (["train_selected_candidate_not_provisional"] if selected and not ids else []),
+                "next_actions": ["Resolve missing or failed research evidence before canonical evaluation.",
+                                 "Do not replace a failing train winner with a full-period winner."],
+            }
         return {
             "action": "RUN_CANONICAL_EVALUATION",
-            "reason": "At least one candidate has positive benchmark excess and provisional paper status.",
+            "reason": "The train-selected candidate passed research admission, benchmark excess and provisional quality checks.",
+            "selected_candidate_id": selected,
             "best_candidate_id": best_id,
             "eligible_candidate_ids": ids,
             "alpha_candidate_ids": [r["candidate_id"] for r in alpha_candidates],
@@ -5197,8 +5292,10 @@ def run_candidate_sweep(
     oos_holdout_split: str | None = None,
 ) -> dict[str, Any]:
     from config.config_loader import Config
+    from core.research_admission import research_code_fingerprint
 
     config = Config.get()
+    code_fingerprint = research_code_fingerprint()
     if symbols is None:
         universe_selection = {
             "source": "canonical_liquidity_universe",
@@ -5273,6 +5370,7 @@ def run_candidate_sweep(
             "run_id": run_id,
             "generated_at": datetime.now().isoformat(),
             "commit_hash": get_git_hash(),
+            "research_code_fingerprint": code_fingerprint,
             "config_yaml_hash": config.yaml_hash,
             "config_resolved_hash": config.resolved_hash,
             "eval_start": start,
@@ -5306,6 +5404,7 @@ def run_candidate_sweep(
                 "reason": empty_reason,
             },
             "decision": decision,
+            "research_admission": research_admission(universe_selection, None),
             "rejection_summary": [],
             "candidates": [],
             "summary": {
@@ -5360,51 +5459,38 @@ def run_candidate_sweep(
         records.append(build_candidate_record(spec, metrics, benchmark))
 
     ranked = sort_candidate_records(records)
-    # 다중검정(여러 변형 탐색)으로 부풀려진 Sharpe를 deflated Sharpe로 보고(랭킹 불변).
+    # Full-period DSR is descriptive. Admission uses the train-only DSR below.
     try:
-        import pandas as _pd
-        _n_obs = int(len(_pd.bdate_range(start, end)))
-        multiple_testing = annotate_multiple_testing(ranked, _n_obs)
+        multiple_testing = annotate_multiple_testing(ranked)
     except Exception as exc:  # 보고용이므로 실패해도 스윕을 막지 않는다.
         logger.warning("deflated sharpe 주석 실패(무시): {}", exc)
         multiple_testing = {"error": str(exc)}
     family_slug = candidate_family.lower().strip()
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{family_slug}"
-    eligible = [
-        r for r in ranked
-        if r.get("alpha_pass") and r.get("promotion", {}).get("status") == "provisional_paper_candidate"
-    ]
-    decision = build_decision_summary(
-        ranked,
-        walk_forward_enabled=include_walk_forward,
-        benchmark=benchmark,
-    )
     validation_warnings = compute_validation_warnings(ranked, multiple_testing, universe_selection)
     if validation_warnings:
         for _w in validation_warnings:
             logger.warning("validation warning: {}", _w)
 
-    # 진짜 out-of-time holdout: train 구간 성과로만 변형을 고르고 untouched test 구간
-    # 성과를 보고한다(선택 과적합 노출). split 날짜가 주어진 경우에만 수행.
+    # Out-of-time replay; prior human inspection/reuse is not certified.
     oos_holdout = None
     if oos_holdout_split:
         try:
             import pandas as _pd
 
-            def _slice_benchmark(_s, _e):
-                if benchmark_daily_returns is None or benchmark_daily_returns.empty:
-                    return benchmark_daily_returns
-                _idx = _pd.to_datetime(benchmark_daily_returns.index)
-                return benchmark_daily_returns[
-                    (_idx >= _pd.Timestamp(_s)) & (_idx <= _pd.Timestamp(_e))
-                ]
+            period_benchmarks = {}
 
             def _oos_eval(_spec, _s, _e):
-                return evaluate_candidate(
+                key = (_s, _e)
+                if key not in period_benchmarks:
+                    period_benchmarks[key] = buy_and_hold_benchmark_with_returns(symbols, _s, _e, capital)
+                period_benchmark, period_returns = period_benchmarks[key]
+                metrics = evaluate_candidate(
                     _spec, symbols, _s, _e, capital,
-                    _slice_benchmark(_s, _e),
+                    period_returns,
                     target_weight_collector=target_weight_collector,
                 )
+                return build_candidate_record(_spec, metrics, period_benchmark)["metrics"]
 
             # split 직전 영업일을 train 종료일로 사용.
             _split_ts = _pd.Timestamp(oos_holdout_split)
@@ -5429,12 +5515,17 @@ def run_candidate_sweep(
             logger.warning("OOS holdout 평가 실패(무시): {}", exc)
             oos_holdout = {"status": "error", "error": str(exc)}
 
+    admission = research_admission(universe_selection, oos_holdout)
+    decision = build_decision_summary(
+        ranked, walk_forward_enabled=include_walk_forward, benchmark=benchmark, admission=admission,
+    )
     return {
         "schema_version": 1,
         "artifact_type": "research_candidate_sweep_bundle",
         "run_id": run_id,
         "generated_at": datetime.now().isoformat(),
         "commit_hash": get_git_hash(),
+        "research_code_fingerprint": code_fingerprint,
         "config_yaml_hash": config.yaml_hash,
         "config_resolved_hash": config.resolved_hash,
         "eval_start": start,
@@ -5466,6 +5557,7 @@ def run_candidate_sweep(
             else {"enabled": False}
         ),
         "decision": decision,
+        "research_admission": admission,
         "multiple_testing": multiple_testing,
         "validation_warnings": validation_warnings,
         "oos_holdout": oos_holdout,
@@ -5473,7 +5565,7 @@ def run_candidate_sweep(
         "candidates": ranked,
         "summary": {
             "evaluated": len(ranked),
-            "eligible_for_canonical_eval": len(eligible),
+            "eligible_for_canonical_eval": len(decision.get("eligible_candidate_ids", [])),
             "best_candidate_id": ranked[0]["candidate_id"] if ranked else None,
             "decision_action": decision["action"],
         },
@@ -5611,7 +5703,7 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
             for _w in validation_warnings:
                 lines.append(f"- ⚠️ {_w}")
         else:
-            lines.append("- 경고 없음 (생존자 통제·deflated Sharpe 기준 통과)")
+            lines.append("- 추가 경고 없음. 연구 진입 판정은 아래 admission 상태를 확인하세요.")
         best_dsr = (multiple_testing or {}).get("best_by_sharpe_deflated") or {}
         if best_dsr:
             lines.append(
@@ -5630,6 +5722,15 @@ def write_candidate_artifacts(bundle: dict[str, Any], output_dir: Path = DEFAULT
                 f"검증구간={oos_holdout.get('holdout_window')}"
             )
 
+    admission = bundle.get("research_admission") or {}
+    lines.extend([
+        "", "## Research Admission",
+        f"- Status: {admission.get('status', 'unavailable')}",
+        f"- Train-selected candidate: {admission.get('selected_candidate_id') or 'unavailable'}",
+        f"- Issues: {', '.join(admission.get('issues', [])) or 'none reported'}",
+        "- Full-period ranking is descriptive; only the train-selected candidate can be recommended.",
+        "- Trial counts cover this sweep only; repeated holdout inspection is not certified.",
+    ])
     lines.extend([
         "",
         "## Ranking",

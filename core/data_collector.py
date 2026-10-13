@@ -256,7 +256,7 @@ class DataCollector:
 
     @staticmethod
     def fetch_benchmark_return(
-        start_date: str, end_date: str, symbol: str = "KS11"
+        start_date: str, end_date: str, symbol: str = "KS11", *, exact_boundaries: bool = False
     ) -> Optional[float]:
         """벤치마크 지수의 누적 수익률(%)을 반환. 실패 시 None (fail closed).
 
@@ -305,6 +305,12 @@ class DataCollector:
                     logger.warning("벤치마크 {} 쓸 수 있는 종가 부족({})", symbol, source)
                     continue
                 last_day = pd.Timestamp(closes.index.max()).date()
+                if exact_boundaries and (
+                    pd.Timestamp(closes.index.min()).date() != pd.Timestamp(start_date).date()
+                    or last_day != pd.Timestamp(end_date).date()
+                ):
+                    logger.warning("벤치마크 {} 비교 구간의 양 끝 종가 미확인({}): {}~{}", symbol, source, start_date, end_date)
+                    continue
                 if expected is not None and last_day < expected:
                     logger.warning(
                         "벤치마크 {} 자료가 {}에 멈춤(기준 거래일 {}, 소스 {}) — 이 값으로 계산하지 않는다",

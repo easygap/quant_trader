@@ -138,6 +138,20 @@ def test_backtest_path_never_calls_point_in_time_unsafe_filters(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("basis", [None, "interest_bearing_debt_to_equity_pct"])
+def test_live_fundamental_filter_passes_explicit_debt_definition(monkeypatch, basis):
+    import strategies.mean_reversion as mr
+
+    captured = []
+    monkeypatch.setattr(mr, "check_fundamental_filter", lambda symbol, **kwargs: captured.append(kwargs) or (True, "OK"))
+    filter_config = {"enabled": True, "debt_ratio_max": 200}
+    if basis is not None:
+        filter_config["debt_ratio_basis"] = basis
+    strategy = _strategy(fundamental_filter=filter_config)
+    assert strategy.generate_signal(_clean_case(), symbol="005930")["signal"] == "BUY"
+    assert captured[0]["debt_ratio_basis"] == (basis or "total_liabilities_to_equity_pct")
+
+
 def test_unmodelled_filters_warn_once_per_instance():
     from loguru import logger
 

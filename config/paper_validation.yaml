@@ -1,0 +1,20 @@
+# Forward paper observation protocol. These are research sample requirements,
+# not target returns, proof of profitability, or permission to use a live account.
+schema_version: 1
+protocol_version: "forward-paper-v2"
+minimum_observations: 120       # Adjacent-session, benchmark-matched returns.
+minimum_calendar_days: 180
+minimum_regime_observations: 20 # Separately required for rising/falling benchmark days.
+maximum_missing_ratio: 0.05
+maximum_capture_delay_sessions: 2
+# A new policy/code fingerprint starts a new cohort; past closes never seed it.
+# Price indices exclude dividends. They are opportunity-cost comparisons, not
+# cash/exposure-matched or risk-adjusted measures. Cash and defensive ETF weights
+# remain explicit in each cohort's immutable exposure policy.
+# NAVER's public web API supplies price indices, not a contracted exchange feed.
+# Provider and its implementation digest are fixed in the cohort protocol.
+baskets:
+  kr_diversified_hold:
+    benchmark: {symbol: "KS11", name: "KOSPI 가격지수 (NAVER 공개)", basis: "price_index", provider: "naver_public"}
+  kr_pocket:
+    benchmark: {symbol: "KS200", name: "KOSPI 200 가격지수 (NAVER 공개)", basis: "price_index", provider: "naver_public"}
