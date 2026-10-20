@@ -234,6 +234,10 @@ baskets:
       min_trade_amount: 50000
       max_turnover_ratio: 0.6
       deployment_band: 0.03
+      # 종목별 내림 대신 1주 단위 수량 조합을 함께 고른다(core/integer_allocation.py).
+      # 10/12 주식 ETF 26.7%·CD 61.2%(목표 47.5%·47.5%)에서 종목별 부족·초과가 모두 1주
+      # 미만이라 주문이 0건이었다. CD 2주를 팔아 주식 ETF 1주를 사면 주식 53.5%가 된다.
+      planner: integer
     holdings:
       "069500": 0.5    # KODEX 200 — 위험자산 슬리브(총자산의 47.5%)
       "357870": 0.5    # TIGER CD금리투자KIS(합성) — 파킹 슬리브(총자산의 47.5%)

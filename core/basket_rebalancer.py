@@ -963,6 +963,15 @@ class BasketRebalancer:
             self.basket, self.account_key, self._ledger_mode(),
         )
 
+        # 소액 ETF 계좌: 종목별 내림 대신 수량 조합을 함께 고른다(core/integer_allocation.py).
+        # 적용할 수 없으면(종목 수 초과 등) 아래 기존 계획기를 그대로 쓴다.
+        if str(self.rebalance_cfg.get("planner", "") or "").strip().lower() == "integer":
+            integer_orders = self._plan_integer(
+                summary, prices, positions, targets, min_trade, max_turnover, cooldown,
+            )
+            if integer_orders is not None:
+                return self._finalize_plan(integer_orders, summary, prices, positions, max_turnover_amount)
+
         # 1) 후보 거래를 먼저 모두 계산(회전율 예산 적용 전). 거래액은 실제 주문 명목금액 기준.
         candidates: list[tuple[RebalanceOrder, float]] = []
         for symbol in targets:
@@ -1150,6 +1159,10 @@ class BasketRebalancer:
                 remaining -= notional
                 total_trade_amount += notional
 
+        return self._finalize_plan(orders, summary, prices, positions, max_turnover_amount)
+
+    def _finalize_plan(self, orders, summary, prices, positions, max_turnover_amount):
+        """현금·비용 한도로 매수 수량을 맞추고 매도 → 매수 순서로 돌려준다."""
         planned_quantities = {o.symbol: o.quantity for o in orders}
         orders = self._fit_cash_orders(orders, summary, prices, positions)
         funded_quantities = {o.symbol: o.quantity for o in orders}
@@ -1169,6 +1182,97 @@ class BasketRebalancer:
         )
 
         return ordered
+
+    def _plan_integer(self, summary, prices, positions, targets, min_trade, max_turnover, cooldown):
+        """정수 주 조합 계획. 적용할 수 없으면 None(호출부가 기존 계획기를 쓴다)."""
+        from core.integer_allocation import choose_integer_holdings
+        from core.risk_manager import RiskManager
+
+        total_value = float(summary.get("total_value", 0) or 0)
+        pos_map = {p.symbol: p for p in positions}
+        held_value = sum(prices.get(p.symbol, p.avg_price) * p.quantity for p in positions)
+        cash = float(summary.get("cash", total_value - held_value))
+        div = (self._risk_params or {}).get("diversification", {}) or {}
+        try:
+            min_cash = float(self.basket.get("min_cash_ratio", div.get("min_cash_ratio", 0.20)))
+        except (TypeError, ValueError):
+            return None
+        stock_fraction = self._stock_fraction()
+        total_targets = {s: float(w) * stock_fraction for s, w in targets.items()}
+        defensive = (self.basket.get("overlays") or {}).get("defensive_symbol")
+
+        # 1주 매매 비용(슬리피지·수수료·세금 추정)을 실제 비용 모형으로 잰다. CD ETF 매도에는
+        # 매매차익 과세 상한이 붙어서, 같은 개선이면 매도 없이 사는 조합이 이기게 된다.
+        unit_costs = {}
+        try:
+            rm = RiskManager(SimpleNamespace(risk_params=self._risk_params))
+            snapshot = getattr(self, "_market_snapshot", None) or {}
+            for symbol in total_targets:
+                price = float(prices.get(symbol, 0) or 0)
+                if price <= 0:
+                    return None
+                pos = pos_map.get(symbol)
+                volume = snapshot.get(symbol, {}).get("avg_volume")
+                buy = rm.calculate_transaction_costs(price, 1, "BUY", symbol=symbol, avg_daily_volume=volume)
+                sell = rm.calculate_transaction_costs(
+                    price, 1, "SELL", symbol=symbol, avg_price=pos.avg_price if pos else None,
+                    avg_daily_volume=volume,
+                )
+                unit_costs[symbol] = {
+                    "buy": max(0.0, float(buy["execution_price"]) - price) + float(buy.get("commission", 0) or 0),
+                    "sell": max(0.0, price - float(sell["execution_price"])) + sum(
+                        float(sell.get(k, 0) or 0) for k in ("commission", "tax", "capital_gains_tax")
+                    ),
+                }
+        except Exception as exc:
+            logger.warning("정수 배분 비용 추정 실패 — 기본 비용률 사용: {}", exc)
+            unit_costs = None
+
+        plan = choose_integer_holdings(
+            total_value=total_value,
+            cash=cash,
+            prices={s: float(prices[s]) for s in total_targets},
+            current={s: int(pos_map[s].quantity) if s in pos_map else 0 for s in total_targets},
+            targets=total_targets,
+            min_cash_ratio=min_cash,
+            min_trade=float(min_trade),
+            max_turnover=float(max_turnover),
+            unit_costs=unit_costs,
+            defensive_symbol=defensive,
+            blocked_buys=set(cooldown or {}),
+        )
+        if plan is None:
+            return None
+        orders: list[RebalanceOrder] = []
+        for symbol, delta in plan.trades.items():
+            if delta == 0:
+                gap = plan.weights_after[symbol] - total_targets[symbol]
+                if abs(gap) >= 0.01:
+                    code = "COOLDOWN" if symbol in (cooldown or {}) and gap < 0 else "INTEGER_HOLD"
+                    self._plan_diagnostics.append({
+                        "symbol": symbol, "code": code, "price": float(prices[symbol]),
+                        "reason": (
+                            f"1주 단위라 지금 수량이 목표에 가장 가깝습니다 — 현재 "
+                            f"{plan.weights_after[symbol]:.1%}, 목표 {total_targets[symbol]:.1%}"
+                        ),
+                    })
+                continue
+            reason = (
+                f"비중 조정 ({plan.weights_before[symbol]:.1%} → {plan.weights_after[symbol]:.1%}, "
+                f"목표 {total_targets[symbol]:.1%}, 1주 단위 조합)"
+            )
+            orders.append(RebalanceOrder(
+                symbol=symbol, action="BUY" if delta > 0 else "SELL",
+                quantity=abs(int(delta)), price=float(prices[symbol]), reason=reason,
+            ))
+        if orders:
+            logger.info(
+                "바스켓 '{}' 정수 배분: 이탈 {:.5f} → {:.5f}, 거래 {:,.0f}원",
+                self.basket_name, plan.loss_before, plan.loss_after, plan.turnover,
+            )
+        # 매도 대금으로 매수하는 조합이므로 현금 맞춤(_fit_cash_orders)이 매도를 먼저 봐야 한다.
+        orders.sort(key=lambda o: 0 if o.action == "SELL" else 1)
+        return orders
 
     def _fit_cash_orders(self, orders, summary, prices, positions):
         """매도 후 남는 현금과 예상 비용 안에서 매수 수량을 정한다.

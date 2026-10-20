@@ -40,7 +40,9 @@ def test_quantity_uses_previous_close_and_unaffordable_gap_is_rejected(basket, m
     no_gap = replay(basket_rebalancer, stable, basket)
     gap = replay(basket_rebalancer, jumped, basket)
 
-    assert plans[0] == plans[1] == [("069500", 4, 30_000.0)]
+    # 목표 4.75주 — 정수 배분 계획기(2026-10-20)는 내림(4주) 대신 목표에 가장 가까운 5주를 고른다.
+    # 이 테스트의 요점은 수량 자체가 아니라 '전일 종가로 수량을 정한다'는 것이다.
+    assert plans[0] == plans[1] == [("069500", 5, 30_000.0)]
     assert no_gap.filled_orders.iloc[0] == 1
     assert gap.filled_orders.iloc[0] == 0
     assert gap.rejected_orders.iloc[0] == 1

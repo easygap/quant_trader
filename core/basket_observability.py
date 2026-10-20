@@ -64,8 +64,23 @@ def allocation_diagnostics(total, cash, positions, targets, defensive_symbol=Non
         assets.append({"asset": key, "label": label, "actual": actual, "target": target, "gap": actual - target})
     target_cash = max(0.0, 1 - sum(targets.values()))
     assets.append({"asset": "cash", "label": "현금", "actual": cash / total, "target": target_cash, "gap": cash / total - target_cash})
+    # CD 방어 자산과 현금은 위험이 거의 같다. 둘을 합친 안전 자산 비중이 목표 근처이고
+    # 남는 현금으로 방어 자산 1주를 더 살 수도 없다면, 둘 사이의 차이는 1주 단위 때문에
+    # 생긴 구조적 차이다 — 경보로 세지 않고 표시만 한다(조치할 수 없는 경보는 신호를 죽인다).
+    structural = set()
+    if defensive_symbol:
+        safe = [a for a in assets if a["asset"] in ("defensive", "cash")]
+        safe_gap = sum(a["gap"] for a in safe)
+        unit = next((float(p["price"]) for p in positions if p["symbol"] == defensive_symbol), None)
+        idle_cash = cash - target_cash * total
+        can_buy_one = unit is not None and unit > 0 and idle_cash >= unit
+        if abs(safe_gap) <= tolerance and not can_buy_one:
+            structural = {"defensive", "cash"}
+    for a in assets:
+        if a["asset"] in structural and abs(a["gap"]) > tolerance:
+            a["structural"] = True
     issues = [f"{a['label']} 비중 {a['actual']:.1%}, 목표 {a['target']:.1%} ({a['gap'] * 100:+.1f}%p)"
-              for a in assets if abs(a["gap"]) > tolerance]
+              for a in assets if abs(a["gap"]) > tolerance and a["asset"] not in structural]
     return {"status": "ATTENTION" if issues else "OK", "assets": assets, "issues": issues}
 
 
