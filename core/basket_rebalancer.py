@@ -189,13 +189,15 @@ class BasketRebalancer:
         ).values())
 
     def _has_drawdown_rule(self) -> bool:
-        """이 바스켓이 자기 낙폭 규칙(overlays.drawdown_guard)을 켜 두었는지."""
-        cfg = getattr(self, "_overlay_cfg", None)
-        if cfg is None:
-            from core.risk_overlays import parse_overlay_config
+        """계좌 낙폭·일일 손실 매수 차단을 이 바스켓의 규칙에 맡기는지.
 
-            cfg = parse_overlay_config(getattr(self, "basket", None) or {})
-        return bool(cfg.drawdown.enabled)
+        자기 낙폭 규칙(overlays.drawdown_guard)을 켰거나, risk.account_drawdown_guard:
+        delegate로 '선언 비중까지만 되산다'고 정한 바스켓이다. 판단 규칙은
+        core.basket_risk.delegates_account_drawdown_guard 한 곳에 둔다(평가·화면도 같은 함수).
+        """
+        from core.basket_risk import delegates_account_drawdown_guard
+
+        return delegates_account_drawdown_guard(getattr(self, "basket", None) or {})
 
     def _overlay_scale(self) -> float:
         decision = self.overlay_decision()
@@ -809,7 +811,8 @@ class BasketRebalancer:
             account_key=self.account_key,
             mode=self._ledger_mode(),
         )
-        hits = evaluate_basket_stops(self.basket, positions, prices)
+        relative_context = self._relative_stop_context(positions)
+        hits = evaluate_basket_stops(self.basket, positions, prices, relative_context)
         orders: list[RebalanceOrder] = []
         for hit in hits:
             logger.warning(
@@ -824,6 +827,96 @@ class BasketRebalancer:
                 reason=f"{RISK_EXIT_TAG} {hit['action']}: {hit['reason']}",
             ))
         return orders
+
+    def _relative_stop_context(self, positions) -> dict | None:
+        """상대 손절에 필요한 비교 종목 가격(지금·매입 시점). 상대 손절이 아니면 None.
+
+        매입 시점 수준은 현재 보유 구간의 매수 기록마다 그날 비교 종목 종가를 수량 가중
+        평균해 만든다(평균 매입가와 같은 규칙). 지금 가격은 보유 종목 시세와 같은 날짜여야
+        한다 — 날짜가 다르면 하루 치 시장 움직임이 상대 수익률에 섞인다. 맞추지 못하면
+        price를 비워 두고(그날 상대 손절 판단 보류) 사유를 남긴다.
+        """
+        from core.basket_risk import basket_risk_config, relative_stop_basis, stop_basis
+
+        kind, benchmark = stop_basis(self.basket)
+        if kind != "relative" or basket_risk_config(self.basket)["stop_loss_pct"] is None:
+            return None
+        held = {
+            str(p.symbol): int(getattr(p, "quantity", 0) or 0)
+            for p in positions or [] if int(getattr(p, "quantity", 0) or 0) > 0
+        }
+        context = {"benchmark": benchmark, "price": None, "basis": {}, "issues": []}
+        if not held:
+            return context
+        try:
+            from database.repositories import get_trade_history
+
+            trades = get_trade_history(mode=self._ledger_mode(), account_key=self.account_key)
+        except Exception as exc:
+            context["issues"].append(f"매매 기록 조회 실패: {exc}")
+            trades = []
+        buy_days = [
+            getattr(t, "executed_at", None) for t in trades
+            if str(getattr(t, "symbol", "")) in held and str(getattr(t, "action", "")).upper() == "BUY"
+            and getattr(t, "executed_at", None) is not None
+        ]
+        start_day = (min(buy_days) if buy_days else datetime.now(_KST)) - timedelta(days=14)
+        end_day = datetime.now(_KST)
+        closes: dict = {}
+        latest = None
+        try:
+            frame = self.data_collector.fetch_korean_stock(
+                benchmark, start_day.strftime("%Y-%m-%d"), end_day.strftime("%Y-%m-%d"),
+            )
+            if frame is not None and not frame.empty and "close" in frame.columns:
+                import pandas as pd
+
+                days = pd.to_datetime(frame["date"] if "date" in frame.columns else frame.index, errors="coerce")
+                for day, close in zip(days, frame["close"].tolist()):
+                    if not pd.isna(day):
+                        closes[day.date()] = close
+                if closes:
+                    latest = max(closes)
+        except Exception as exc:
+            context["issues"].append(f"{benchmark} 조회 실패: {exc}")
+
+        quote_days = set()
+        snapshot = getattr(self, "_market_snapshot", None) or {}
+        for symbol in held:
+            quote = (snapshot.get(symbol) or {}).get("quote_date")
+            if quote:
+                quote_days.add(str(quote)[:10])
+        if latest is None:
+            context["issues"].append(f"{benchmark} 가격 없음 — 오늘 상대 손절 판단 보류")
+        elif quote_days and quote_days != {str(latest)}:
+            context["issues"].append(
+                f"{benchmark} 기준일 {latest}가 보유 종목 시세 {sorted(quote_days)}와 달라 오늘 상대 손절 판단 보류"
+            )
+        else:
+            context["price"] = closes[latest]
+
+        basis = relative_stop_basis(trades, closes)
+        for symbol, quantity in held.items():
+            entry = basis.get(symbol)
+            if not entry or entry.get("quantity") != quantity:
+                context["issues"].append(f"{symbol} 매수 기록과 보유 수량이 달라 절대 기준으로 판단")
+                continue
+            context["basis"][symbol] = entry.get("basis")
+            if entry.get("missing"):
+                context["issues"].append(f"{symbol} 매입일 {benchmark} 종가 없음({', '.join(entry['missing'])})")
+        if context["issues"]:
+            logger.warning("바스켓 '{}' 상대 손절 자료 문제: {}", self.basket_name, "; ".join(context["issues"]))
+            try:
+                from core.cycle_observability import record_event_once_per_day
+
+                record_event_once_per_day(
+                    "RELATIVE_STOP_DATA_ISSUE",
+                    f"바스켓 '{self.basket_name}' 상대 손절 자료 문제: " + "; ".join(context["issues"]),
+                    severity="warning", strategy=self.account_key, mode=self._ledger_mode(),
+                )
+            except Exception as exc:
+                logger.warning("상대 손절 자료 문제 기록 실패: {}", exc)
+        return context
 
     # ------------------------------------------------------------------
     # 리밸런싱 주문 계획

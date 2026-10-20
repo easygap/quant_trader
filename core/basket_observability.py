@@ -18,7 +18,9 @@ def snapshot_entry_status(snapshot, basket, risk_params):
         return result
     result["measured_at"] = str(snapshot.get("created_at") or snapshot.get("date") or "")
     # An explicit basket drawdown rule owns both MDD and daily-loss policy.
-    delegated = bool(((basket.get("overlays") or {}).get("drawdown_guard") or {}).get("enabled"))
+    from core.basket_risk import delegates_account_drawdown_guard
+
+    delegated = delegates_account_drawdown_guard(basket or {})
     limits = risk_params.get("drawdown") or {}
     if not delegated:
         for field, limit_field, label in (
