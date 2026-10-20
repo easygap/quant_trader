@@ -5,6 +5,8 @@
 > **최종 수정**: 2026-07-06 (weekly_report 모드, 사이클 관측성·집계 배치율 감시·성과 귀속 분해 반영 — 한 달 운영 리뷰 후속. 이전: 2026-06-10 guide/health/deploy_check)
 > **참고**: 전체 아키텍처·지표 공식·전략 상세·시스템 진단은 루트의 `quant_trader_design.md` 참고.
 
+> **2026-10-20 추가**: [투자 방식 조사와 운용 개선](MARKET_RESEARCH_20261020.md). 바스켓 `risk:`에 `stop_basis`(absolute|relative)·`stop_benchmark`·`account_drawdown_guard`(block|delegate), `rebalance:`에 `planner: integer`(종목 5개 이하 정수 수량 조합 계획, `core/integer_allocation.py`)가 생겼다. 주문 직전에 시세 기준일·전일 대비 ±30%를 확인하고(`BasketRebalancer._quote_guard_reason`), 평가 지표에 `money_weighted_return_pct`가 들어간다. 근거: [대형주 손절·낙폭 차단 점검](HOLD_RISK_REVIEW_20261020.md).
+
 > **2026-10-13 추가**: [시장 관찰·투자 가설·연구 후보 검증](INVESTMENT_RESEARCH_20261013.md). `tools/market_research.py`와 `tools/research_evidence.py`는 주문 경로 밖에서 연구 자료를 관리한다. `/api/research`는 저장 자료만 조회하며 `/api/research/refresh`는 시간 제한이 있는 별도 수집 프로세스를 실행한다. 새 canonical 승격에는 `--research-admission-artifact`로 후보·자본·코드·설정·기간·유니버스가 일치하는 연구 근거가 필요하다.
 
 ---
