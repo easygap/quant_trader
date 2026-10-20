@@ -6,6 +6,7 @@
 DB는 conftest가 격리한 임시 DB를 쓴다.
 """
 
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -68,6 +69,9 @@ def _seed_snapshots(account, prev_total, last_total, deposit):
     )
     if deposit:
         # 직전 스냅샷 측정(created_at) 뒤의 입금 — TWR 분모에 더해 중화돼야 한다.
+        # 같은 시계 틱 안에서 기록하면 입금 시각이 직전 측정 시각과 같아져 (after, until]
+        # 구간에서 빠진다(전체 실행에서 가끔 실패). 시계가 넘어간 뒤 입금한다.
+        time.sleep(0.05)
         record_cash_flow(deposit, account_key=account, note="audit deposit", mode="paper")
 
 

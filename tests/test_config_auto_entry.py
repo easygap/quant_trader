@@ -185,9 +185,12 @@ class TestEnvFileFallback:
             ]),
             encoding="utf-8",
         )
-        monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
-        monkeypatch.delenv("KIS_ACCOUNT_NO", raising=False)
-        monkeypatch.delenv("QUOTED_VALUE", raising=False)
+        # 없던 변수를 delenv(raising=False)만 하면 monkeypatch가 아무것도 기록하지 않아,
+        # 아래 로더가 넣은 값이 테스트가 끝나도 남는다. 그러면 뒤 테스트의 디스코드 알림이
+        # discord.test로 발송을 시도해 실패했다. 먼저 setenv로 원래 상태를 기록해 둔다.
+        for name in ("DISCORD_WEBHOOK_URL", "KIS_ACCOUNT_NO", "QUOTED_VALUE"):
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
         monkeypatch.setenv("EXISTING_VALUE", "from-env")
 
         _load_env_file_fallback(env_path)

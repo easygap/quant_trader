@@ -117,14 +117,12 @@ def test_backfill_is_wired_with_resolved_capital_before_status(cycle, monkeypatc
 
     main.run_rebalance(_args())
 
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo
-
     assert "backfill" in calls, "결측 보충이 호출되지 않았다"
     assert calls["backfill"]["initial_capital"] == 300_000.0
     assert calls["backfill"]["account_key"] == "basket_rebalance:kr_test"
-    kst_today = datetime.now(ZoneInfo("Asia/Seoul")).date()
-    assert calls["backfill"]["until"] == kst_today - timedelta(days=1)
+    # 사이클은 고정해 둔 시계(2026-10-13 10:10)로 '오늘'을 정한다. 실제 날짜와 비교하면
+    # 이 테스트를 만든 날에만 통과한다(10/14부터 매일 실패했다).
+    assert calls["backfill"]["until"] == date(2026, 10, 12)
     # 오버레이 판단(상태 보고에서 계산·캐시)보다 먼저 보충돼야 한다
     assert order.index("backfill") < order.index("status")
 
