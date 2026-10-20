@@ -3,6 +3,10 @@
 Usage: python tools/verify_basket_snapshot_fixes.py --source-db <snapshot.db>
        --prices-dir <dated CSVs> --out-dir <new verification directory>
 Never uses the source DB as the runtime ledger, and prohibits network access.
+
+2026-10-20 정책 변경(정수 배분 계획기, 대형주 계좌 낙폭 가드 위임, 시세 기준일 점검) 뒤에도
+10/13 검증을 그대로 재현할 수 있게, 이 도구 안에서만 10/13 당시 정책으로 고정한다.
+새 정책의 검증은 tools/verify_policy_changes_20261020.py.
 """
 import argparse
 from contextlib import ExitStack
@@ -70,6 +74,10 @@ def main():
     def make(name):
         rb = BasketRebalancer(name, config=cfg)
         rb.overlay_decision = lambda: OverlayDecision(scale=1.0) if name == "kr_pocket" else None
+        # 10/13 당시 정책으로 고정: 종목별 내림 계획기, 전역 낙폭 가드 적용.
+        rb.rebalance_cfg = {k: v for k, v in rb.rebalance_cfg.items() if k != "planner"}
+        rb.basket = {**rb.basket, "risk": {k: v for k, v in (rb.basket.get("risk") or {}).items()
+                                           if k != "account_drawdown_guard"}}
         snapshot = {s: {"price": float(frames[s].iloc[-1]["close"]), "avg_volume": float(frames[s].volume.tail(20).mean()),
                         "quote_date": "2026-10-12", "source": "frozen_csv", "observed_at": "2026-10-12T10:10:00"}
                     for s in rb.holdings if s in frames}
@@ -88,6 +96,13 @@ def main():
         stack.enter_context(patch.object(DataCollector, "fetch_korean_stock", fetch))
         stack.enter_context(patch.object(DataCollector, "get_last_source_info", return_value={"source": "frozen_csv"}))
         stack.enter_context(patch("core.data_collector.SECTOR_MAP_CACHE_PATH", output / "sector_map.json"))
+        # 10/12 종가를 10/13 주문에 쓰는 재현이다. 시세 기준일 점검(10/20 추가)은 이 재현의 범위 밖.
+        stack.enter_context(patch.object(BasketRebalancer, "_quote_guard_reason", return_value=None))
+        # 10/13 당시에는 자기 낙폭 규칙(overlays.drawdown_guard)이 있는 바스켓만 계좌 가드를 넘겼다.
+        stack.enter_context(patch(
+            "core.basket_risk.delegates_account_drawdown_guard",
+            lambda basket: bool((((basket or {}).get("overlays") or {}).get("drawdown_guard") or {}).get("enabled")),
+        ))
         pocket = make("kr_pocket")
         orders = pocket.plan_rebalance()
         assert orders == []

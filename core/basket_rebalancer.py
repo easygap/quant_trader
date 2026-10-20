@@ -1417,6 +1417,22 @@ class BasketRebalancer:
                 results["details"].append({"order": repr(order), "status": "dry_run"})
                 continue
 
+            stale = self._quote_guard_reason(order, snapshot)
+            if stale:
+                logger.warning("리밸런싱 주문 보류 {} {} {}주: {}", order.symbol, order.action, order.quantity, stale)
+                results["skipped"] += 1
+                results["details"].append({"order": repr(order), "status": "blocked", "reason": stale})
+                try:
+                    from core.cycle_observability import record_event_once_per_day
+
+                    record_event_once_per_day(
+                        "STALE_QUOTE_BLOCKED", f"바스켓 '{self.basket_name}' {order.symbol} 주문 보류: {stale}",
+                        severity="warning", strategy=self.account_key, mode=self._ledger_mode(),
+                    )
+                except Exception as exc:
+                    logger.warning("시세 가드 기록 실패: {}", exc)
+                continue
+
             try:
                 if order.action == "BUY":
                     available_cash = self.portfolio_mgr.get_available_cash()
@@ -1482,6 +1498,38 @@ class BasketRebalancer:
             results["executed"], results["skipped"], results["failed"],
         )
         return results
+
+    # 국내 주식·ETF의 하루 가격제한폭(±30%)을 넘는 변화는 시세 자료 오류로 본다.
+    _MAX_DAILY_MOVE = 0.30
+
+    def _quote_guard_reason(self, order, snapshot: dict) -> str | None:
+        """주문 직전 시세 점검. 문제가 있으면 보류 사유, 없으면 None.
+
+        - 시세 기준일이 오늘(KST)이 아니면 오래된 가격으로 주문하지 않는다. 9/17~10/12처럼
+          공급자 자료가 멈추면 전날 가격으로 수량을 정하고 체결까지 그 가격으로 기록된다.
+        - 전일 종가 대비 ±30%를 넘는 가격은 가격제한폭 밖이라 자료 오류로 본다.
+        기준일 정보가 없는 시세(테스트용 고정 시세 등)는 기존처럼 통과시킨다.
+        """
+        from core.trading_hours import _now_kst
+
+        quote = (snapshot or {}).get(order.symbol) or {}
+        quote_date = quote.get("quote_date")
+        # 거래 시간 판정과 같은 시계를 쓴다(장중 여부와 '오늘'이 서로 다른 시계를 보면 안 된다).
+        today = _now_kst().date().isoformat()
+        if quote_date and str(quote_date)[:10] != today:
+            return f"시세 기준일 {str(quote_date)[:10]} — 오늘({today}) 시세가 아니어서 주문하지 않음"
+        prev_close = quote.get("prev_close")
+        try:
+            if prev_close and float(prev_close) > 0:
+                move = float(order.price) / float(prev_close) - 1.0
+                if abs(move) > self._MAX_DAILY_MOVE:
+                    return (
+                        f"주문 가격 {float(order.price):,.0f}원이 전일 종가 {float(prev_close):,.0f}원 대비 "
+                        f"{move:+.1%} — 가격제한폭 밖이라 시세 자료 오류로 보고 주문하지 않음"
+                    )
+        except (TypeError, ValueError):
+            return "주문 가격 확인 실패"
+        return None
 
     # ------------------------------------------------------------------
     # 리포트
@@ -1558,6 +1606,13 @@ class BasketRebalancer:
                 source = source_info.get("source") if isinstance(source_info, dict) else None
                 entry["source"] = source if isinstance(source, str) else "unknown"
                 entry["observed_at"] = datetime.now(_KST).replace(tzinfo=None).isoformat()
+                if len(df) >= 2:
+                    try:
+                        prev_close = float(df["close"].iloc[-2])
+                        if math.isfinite(prev_close) and prev_close > 0:
+                            entry["prev_close"] = prev_close
+                    except (TypeError, ValueError):
+                        pass
                 if "volume" in df.columns:
                     recent_vol = df["volume"].tail(20).dropna()
                     if len(recent_vol) > 0 and float(recent_vol.mean()) > 0:
