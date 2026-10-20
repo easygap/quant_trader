@@ -1009,6 +1009,7 @@ class KISApi:
         quantity: int,
         price: int = 0,
         order_type: str = "00",
+        exchange_id: str = "KRX",
     ) -> Optional[Dict[str, Any]]:
         """
         매수 주문
@@ -1018,6 +1019,7 @@ class KISApi:
             quantity: 주문 수량
             price: 주문 가격 (0: 시장가)
             order_type: "00"(지정가), "01"(시장가)
+            exchange_id: 거래소ID구분코드 KRX | NXT | SOR (모의투자는 KRX만 지원)
 
         Returns:
             주문 결과 딕셔너리
@@ -1030,8 +1032,10 @@ class KISApi:
             raise PermissionError(
                 "실계좌 주문은 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
             )
-        # 모의투자 vs 실전 거래 ID
-        tr_id = "VTTC0802U" if self.use_mock else "TTTC0802U"
+        # 모의투자 vs 실전 거래 ID — 대체거래소(NXT) 도입 뒤의 현행 주문 규격(TTTC0012U,
+        # 거래소ID구분코드 필수). 예전 TTTC0802U는 KRX 전용으로 동작했고, 취소(TTTC0013U)는
+        # 이미 새 규격이라 같은 주문의 접수·취소가 서로 다른 규격을 쓰고 있었다.
+        tr_id = "VTTC0012U" if self.use_mock else "TTTC0012U"
 
         body = {
             "CANO": self.cano,
@@ -1040,6 +1044,7 @@ class KISApi:
             "ORD_DVSN": order_type,
             "ORD_QTY": str(quantity),
             "ORD_UNPR": str(price),
+            "EXCG_ID_DVSN_CD": self._order_exchange(exchange_id),
         }
 
         data = self._request(
@@ -1064,6 +1069,7 @@ class KISApi:
         quantity: int,
         price: int = 0,
         order_type: str = "00",
+        exchange_id: str = "KRX",
     ) -> Optional[Dict[str, Any]]:
         """
         매도 주문
@@ -1073,6 +1079,7 @@ class KISApi:
             quantity: 주문 수량
             price: 주문 가격 (0: 시장가)
             order_type: "00"(지정가), "01"(시장가)
+            exchange_id: 거래소ID구분코드 KRX | NXT | SOR (모의투자는 KRX만 지원)
 
         Returns:
             주문 결과 딕셔너리
@@ -1085,7 +1092,7 @@ class KISApi:
             raise PermissionError(
                 "실계좌 주문은 OrderExecutor 안전 게이트를 통해서만 제출할 수 있습니다."
             )
-        tr_id = "VTTC0801U" if self.use_mock else "TTTC0801U"
+        tr_id = "VTTC0011U" if self.use_mock else "TTTC0011U"
 
         body = {
             "CANO": self.cano,
@@ -1094,6 +1101,7 @@ class KISApi:
             "ORD_DVSN": order_type,
             "ORD_QTY": str(quantity),
             "ORD_UNPR": str(price),
+            "EXCG_ID_DVSN_CD": self._order_exchange(exchange_id),
         }
 
         data = self._request(
@@ -1193,6 +1201,15 @@ class KISApi:
         msg = data.get("msg1", "알 수 없는 오류") if data else "API 응답 없음"
         logger.error("미체결 주문 취소 실패: {} - {}", normalized_order_no, msg)
         return None
+
+    def _order_exchange(self, exchange_id: str) -> str:
+        """주문 거래소 코드. 모의투자는 KRX 주문만 받으므로 다른 값은 미리 막는다."""
+        code = str(exchange_id or "KRX").strip().upper()
+        if code not in {"KRX", "NXT", "SOR"}:
+            raise ValueError("거래소ID구분코드는 KRX, NXT, SOR 중 하나여야 합니다.")
+        if self.use_mock and code != "KRX":
+            raise ValueError("모의투자 주문은 KRX만 지원합니다.")
+        return code
 
     @staticmethod
     def _odno_from_order_output(order_output: Optional[Dict[str, Any]]) -> str:
