@@ -92,3 +92,36 @@ class TestBuildWeeklySummary:
         names = [f["name"] for f in out["fields"]]
         assert "🔎 귀속 분해" not in names  # 귀속 데이터 없으면 생략
         assert "🛠 주간 이벤트" in names    # 이벤트 필드는 항상
+
+
+def test_weekly_summary_shows_money_weighted_return_next_to_twr():
+    """적립 계좌: 시간가중(운용 규칙)과 넣은 돈 기준(금액가중)을 함께 보여 준다."""
+    from core.weekly_report import build_weekly_summary
+
+    out = build_weekly_summary(
+        basket_name="kr_pocket",
+        eval_result={"verdict": "WAIT", "metrics": {
+            "nav_return_pct": -9.89, "money_weighted_return_pct": -9.81, "contributed_capital": 400_000.0,
+        }},
+    )
+    perf = next(f for f in out["fields"] if f["name"] == "💰 성과")["value"]
+    assert "누적 -9.89%" in perf
+    assert "넣은 돈 400,000원 기준 -9.81%" in perf
+
+
+def test_money_weighted_metrics_match_modified_dietz():
+    from datetime import date
+
+    from core.basket_evaluation import money_weighted_metrics
+
+    # 7/10 30만 원 시작, 8/26 10만 원 입금, 10/20 평가 365,267원
+    flows = [(date(2026, 8, 26), 100_000.0)]
+    m = money_weighted_metrics(300_000.0, flows, date(2026, 7, 10), date(2026, 10, 20), 365_267.0)
+    weight = (date(2026, 10, 20) - date(2026, 8, 26)).days / (date(2026, 10, 20) - date(2026, 7, 10)).days
+    expected = (365_267 - 400_000) / (300_000 + 100_000 * weight) * 100
+    assert m["contributed_capital"] == 400_000.0
+    assert abs(m["money_weighted_return_pct"] - expected) < 1e-9
+    # 입금이 없으면 단순 수익률과 같다
+    plain = money_weighted_metrics(10_000_000.0, [], date(2026, 6, 10), date(2026, 10, 20), 8_647_654.0)
+    assert abs(plain["money_weighted_return_pct"] - (8_647_654 / 10_000_000 - 1) * 100) < 1e-9
+    assert money_weighted_metrics(300_000.0, [], date(2026, 7, 10), date(2026, 10, 20), None)["money_weighted_return_pct"] is None
