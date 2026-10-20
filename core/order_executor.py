@@ -1107,12 +1107,14 @@ class OrderExecutor:
             평균단가로 잰다 — paper에서는 시장이 움직여도 값이 변하지 않아, 하락장에선
             낙폭을 작게 보고(9/22 kr_diversified_hold 9.7%, 실제로는 12.9%) 평가익이
             쌓이면 가짜 '일일 손실'로 매수를 막는다(6/15 원장 재현 -5.5%).
-        delegated: 자기 낙폭 규칙(overlays.drawdown_guard — 리밸런서가 배수로 적용)을
-            켜 둔 바스켓의 목표 비중 주문. 계좌 단위 MDD·일일 손실 가드는 재량 매매용
-            안전판이라, 이런 주문은 그 바스켓 규칙을 따른다. 상관 거부권(#456)·노출
-            상한(#457)과 같은 원칙이다. 규칙을 꺼 둔 바스켓(kr_diversified_hold)은
-            넘기지 않는다 — 넘기면 계좌 가드를 아무도 적용하지 않게 된다. 판정은 계속
-            계산해 로그로 남긴다.
+        delegated: 낙폭 정책을 스스로 정한 바스켓의 목표 비중 주문
+            (core.basket_risk.delegates_account_drawdown_guard). 자기 낙폭 규칙
+            (overlays.drawdown_guard — 리밸런서가 배수로 적용)을 켰거나, 낙폭과 무관하게
+            선언한 주식 비중까지만 되사기로 한 바스켓(risk.account_drawdown_guard:
+            delegate)이다. 계좌 단위 MDD·일일 손실 가드는 재량 매매용 안전판이라, 이런
+            주문은 그 바스켓 규칙을 따른다. 상관 거부권(#456)·노출 상한(#457)과 같은
+            원칙이다. 넘겨도 노출 상한(설계 비중 + 밴드)은 아래 분산 검사가 그대로 막는다.
+            어느 쪽도 정하지 않은 바스켓은 넘기지 않는다. 판정은 계속 계산해 로그로 남긴다.
         """
         decision = self._drawdown_guard_decision(action, mark_prices=mark_prices)
         if (

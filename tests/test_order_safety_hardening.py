@@ -968,3 +968,52 @@ def test_executor_treats_unconfirmed_mock_domain_as_real_money():
     executor = _executor_without_external_initialization(config=config, mode="live")
 
     assert executor._is_real_money_live() is True
+
+
+@pytest.mark.parametrize("use_mock, buy_tr, sell_tr", [
+    (False, "TTTC0012U", "TTTC0011U"),
+    (True, "VTTC0012U", "VTTC0011U"),
+])
+def test_cash_orders_use_current_kis_order_spec(use_mock, buy_tr, sell_tr):
+    """현금 주문은 현행 KIS 규격(TTTC0012U·0011U + 거래소ID구분코드)을 쓴다.
+
+    예전 TTTC0802U·0801U는 대체거래소 도입 전 규격이다. 취소(TTTC0013U)는 이미 새 규격이라
+    같은 주문의 접수와 취소가 서로 다른 규격을 쓰고 있었다(2026-10-20 공식 예제 대조).
+    """
+    api = object.__new__(KISApi)
+    api.use_mock = use_mock
+    api.base_url = (
+        "https://openapivts.koreainvestment.com:29443" if use_mock
+        else "https://openapi.koreainvestment.com:9443"
+    )
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    calls = []
+    api._request = lambda *args, **kwargs: calls.append((args, kwargs)) or {
+        "rt_cd": "0", "output": {"ODNO": "1"},
+    }
+
+    with authorized_kis_order_submission():
+        api.buy_order("069500", 1, 86_755)
+        api.sell_order("357870", 2, 58_235)
+
+    (buy_args, buy_kwargs), (sell_args, sell_kwargs) = calls
+    assert buy_args[1] == sell_args[1] == "/uapi/domestic-stock/v1/trading/order-cash"
+    assert buy_args[2] == buy_tr and sell_args[2] == sell_tr
+    assert buy_kwargs["body"]["EXCG_ID_DVSN_CD"] == "KRX"
+    assert sell_kwargs["body"]["EXCG_ID_DVSN_CD"] == "KRX"
+    assert buy_kwargs["idempotent"] is False and sell_kwargs["idempotent"] is False
+
+
+def test_mock_orders_reject_non_krx_exchange():
+    """모의투자는 KRX 주문만 받는다 — NXT·SOR를 모의에서 검증했다고 착각하지 않게 막는다."""
+    api = object.__new__(KISApi)
+    api.use_mock = True
+    api.base_url = "https://openapivts.koreainvestment.com:29443"
+    api.cano = "12345678"
+    api.acnt_prdt_cd = "01"
+    api._request = lambda *args, **kwargs: {"rt_cd": "0", "output": {}}
+
+    with authorized_kis_order_submission():
+        with pytest.raises(ValueError, match="KRX"):
+            api.buy_order("069500", 1, 86_755, exchange_id="NXT")

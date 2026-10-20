@@ -16,13 +16,23 @@
 baskets.yaml 예:
     risk:
       stop_loss_pct: 0.20        # 진입가 대비 -20%에서 청산 (0/미지정이면 손절 없음)
+      stop_basis: relative       # absolute(기본) | relative — 같은 기간 시장 대비로 잴지
+      stop_benchmark: "069500"   # relative일 때 비교할 종목 (기본 KODEX 200)
       take_profit_pct: 0         # 0/미지정이면 익절 없음 (buy&hold 기본)
       trailing_stop_pct: 0       # 0/미지정이면 트레일링 없음
+      account_drawdown_guard: delegate  # block(기본) | delegate — 계좌 낙폭 매수 차단을 맡길지
+
+상대 손절(2026-10-20): 평균 매입가 대비 -25% 손절은 시장 전체가 빠질 때 연달아 걸린다.
+10/15 삼성전자·현대차가 그렇게 팔렸는데 그 기간 KODEX 200도 -30% 가까이 빠져 있었다.
+'한 종목이 포트폴리오를 망가뜨리는 것을 막는다'는 원래 목적에 맞게 같은 보유 기간의
+시장 수익률로 나눠서 잰다. 2014-07~2026-10 비교는 docs/HOLD_RISK_REVIEW_20261020.md.
 """
 
 from __future__ import annotations
 
-from typing import Any
+import math
+from datetime import date, datetime
+from typing import Any, Iterable
 
 from loguru import logger
 
@@ -119,6 +129,127 @@ def symbols_in_reentry_cooldown(
     return blocked
 
 
+_STOP_BASES = ("absolute", "relative")
+DEFAULT_STOP_BENCHMARK = "069500"
+_ACCOUNT_GUARD_MODES = ("block", "delegate")
+
+
+def stop_basis(basket_cfg: dict[str, Any]) -> tuple[str, str | None]:
+    """손절을 무엇에 비춰 재는가 — (기준, 비교 종목).
+
+    absolute(기본): 평균 매입가 대비 하락률.
+    relative: 같은 보유 기간 비교 종목(기본 069500) 수익률 대비 초과 하락률. 시장 전체가
+      내릴 때는 걸리지 않고 시장보다 손절 비율만큼 더 빠진 종목만 판다.
+    모르는 값은 기존 동작(absolute)으로 처리하고 경고를 남긴다.
+    """
+    risk_cfg = (basket_cfg or {}).get("risk") or {}
+    raw = str(risk_cfg.get("stop_basis") or "absolute").strip().lower()
+    if raw not in _STOP_BASES:
+        logger.warning("바스켓 손절 기준 {!r}을 알 수 없어 absolute로 처리", raw)
+        raw = "absolute"
+    if raw != "relative":
+        return "absolute", None
+    bench = str(risk_cfg.get("stop_benchmark") or DEFAULT_STOP_BENCHMARK).strip()
+    return "relative", bench or DEFAULT_STOP_BENCHMARK
+
+
+def delegates_account_drawdown_guard(basket_cfg: dict[str, Any]) -> bool:
+    """계좌 단위 낙폭·일일 손실 매수 차단을 이 바스켓의 규칙에 맡기는가.
+
+    - overlays.drawdown_guard가 켜져 있으면 낙폭이 커질 때 목표 주식 비중 자체가 줄어든다
+      (kr_pocket). 그 바스켓이 낙폭 정책을 갖고 있으니 계좌 가드를 맡긴다.
+    - risk.account_drawdown_guard: delegate는 낙폭과 상관없이 선언한 주식 비중까지만
+      되사겠다는 결정이다. 주문 단계의 노출 상한(설계 비중 + 밴드)은 그대로 검사한다.
+      전역 가드에 막히면 손절·비중 초과 매도로 생긴 현금이 돌아가지 못해 비중이 한쪽으로만
+      줄어든다(2026-10: 설계 60%가 45%로, 2014~2026 비교에서 연 0.3~1.0%p 손해).
+    둘 다 아니면 전역 가드가 매수를 막는다(기존 동작).
+    """
+    cfg = basket_cfg or {}
+    overlay = ((cfg.get("overlays") or {}).get("drawdown_guard") or {})
+    if bool(overlay.get("enabled")):
+        return True
+    raw = str(((cfg.get("risk") or {}).get("account_drawdown_guard") or "block")).strip().lower()
+    if raw not in _ACCOUNT_GUARD_MODES:
+        logger.warning("account_drawdown_guard={!r}를 알 수 없어 block으로 처리", raw)
+        return False
+    return raw == "delegate"
+
+
+def _as_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def relative_stop_basis(
+    trades: Iterable[Any],
+    benchmark_closes: dict[Any, float],
+    *,
+    max_gap_days: int = 7,
+) -> dict[str, dict[str, Any]]:
+    """현재 보유 구간의 매수마다 그날 비교 종목 종가를 수량 가중 평균한다.
+
+    평균 매입가와 같은 규칙(매도는 평균을 바꾸지 않고, 수량이 0이 되면 새 보유 구간)을
+    써야 '종목 수익률 ÷ 같은 기간 시장 수익률'이 평균 매입가 기준 손익과 짝이 맞는다.
+    매수일 종가가 없으면 그 전 max_gap_days 안의 마지막 종가를 쓰고, 그것도 없으면
+    basis를 None으로 둔다(호출부는 절대 기준으로 대신 판단한다).
+
+    반환 {symbol: {"basis": float | None, "quantity": int, "missing": [날짜 문자열]}}
+    """
+    closes: dict[date, float] = {}
+    for key, value in (benchmark_closes or {}).items():
+        day = _as_date(key)
+        try:
+            close = float(value)
+        except (TypeError, ValueError):
+            continue
+        if day is not None and math.isfinite(close) and close > 0:
+            closes[day] = close
+    ordered_days = sorted(closes)
+
+    def close_on(day: date) -> float | None:
+        if day in closes:
+            return closes[day]
+        earlier = [d for d in ordered_days if d < day and (day - d).days <= max_gap_days]
+        return closes[earlier[-1]] if earlier else None
+
+    def _when(trade):
+        return getattr(trade, "executed_at", None) or datetime.min
+
+    state: dict[str, dict[str, Any]] = {}
+    for trade in sorted(list(trades or []), key=_when):
+        symbol = str(getattr(trade, "symbol", "") or "")
+        action = str(getattr(trade, "action", "") or "").upper()
+        try:
+            qty = int(getattr(trade, "quantity", 0) or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if not symbol or qty <= 0 or action not in ("BUY", "SELL"):
+            continue
+        entry = state.setdefault(symbol, {"basis": 0.0, "quantity": 0, "missing": []})
+        if action == "SELL":
+            entry["quantity"] -= qty
+            if entry["quantity"] <= 0:
+                state[symbol] = {"basis": 0.0, "quantity": 0, "missing": []}
+            continue
+        day = _as_date(_when(trade))
+        close = close_on(day) if day else None
+        if close is None:
+            entry["missing"].append(str(day))
+        elif entry["basis"] is not None:
+            held = entry["quantity"]
+            entry["basis"] = (entry["basis"] * held + close * qty) / (held + qty)
+        entry["quantity"] += qty
+        if entry["missing"]:
+            entry["basis"] = None
+    return {s: e for s, e in state.items() if e["quantity"] > 0}
+
+
 def basket_risk_config(basket_cfg: dict[str, Any]) -> dict[str, float | None]:
     """바스켓의 리스크 정책을 정규화해 반환한다.
 
@@ -174,17 +305,29 @@ def basket_risk_levels(
             return None
         return round(entry * (1 + direction * pct), 0)
 
+    # 상대 손절은 시장이 움직이면 손절 가격도 움직인다. 고정 가격을 적어 두면 장부에는
+    # 절대 기준처럼 보이므로 비워 둔다(판단은 evaluate_basket_stops가 매번 다시 한다).
+    relative = stop_basis(basket_cfg)[0] == "relative"
     return {
-        "stop_loss_price": _level(cfg["stop_loss_pct"], -1),
+        "stop_loss_price": None if relative else _level(cfg["stop_loss_pct"], -1),
         "take_profit_price": _level(cfg["take_profit_pct"], +1),
         "trailing_stop_price": _level(cfg["trailing_stop_pct"], -1),
     }
+
+
+def _positive(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def evaluate_basket_stops(
     basket_cfg: dict[str, Any],
     positions: list[Any],
     prices: dict[str, float],
+    relative_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """보유 포지션을 바스켓 정책에 비춰 평가하고 청산 대상을 반환한다.
 
@@ -195,12 +338,20 @@ def evaluate_basket_stops(
     트레일링은 포지션의 highest_price(고점)를 기준으로 한다. 고점 정보가 없으면
     진입가를 고점으로 보아 손절과 같아지므로, 그 경우 트레일링은 건너뛴다.
 
+    relative_context: stop_basis가 relative일 때 {"benchmark", "price"(지금 비교 종목
+    가격), "basis"({종목: 매입 시점 비교 종목 평균})}. 비교 자료가 없는 종목은 절대
+    기준으로 대신 판단한다 — 자료 문제로 큰 개별 손실 방어까지 꺼지지 않게 한다.
+
     반환: [{symbol, action, price, quantity, avg_price, level, reason}] — action은
     "STOP_LOSS" | "TAKE_PROFIT" | "TRAILING_STOP".
     """
     cfg = basket_risk_config(basket_cfg)
     if not any(v is not None for v in cfg.values()):
         return []
+    basis_kind, benchmark = stop_basis(basket_cfg)
+    ctx = relative_context or {}
+    bench_now = _positive(ctx.get("price"))
+    bench_basis = ctx.get("basis") or {}
 
     hits: list[dict[str, Any]] = []
     for pos in positions or []:
@@ -240,16 +391,47 @@ def evaluate_basket_stops(
                 continue
 
         sl_pct = cfg["stop_loss_pct"]
-        if sl_pct is not None:
-            level = avg_price * (1 - sl_pct)
-            if price <= level:
-                hits.append({
-                    "symbol": symbol, "action": "STOP_LOSS", "price": float(price),
-                    "quantity": quantity, "avg_price": avg_price, "level": round(level, 0),
-                    "reason": (
-                        f"손절: 현재가 {price:,.0f} ≤ 손절선 {level:,.0f} "
-                        f"(진입가 {avg_price:,.0f} -{sl_pct:.0%})"
-                    ),
-                })
+        if sl_pct is None:
+            continue
+        note = ""
+        if basis_kind == "relative":
+            if bench_now is None:
+                # 지금 시장 수준을 모르면 상대 손절을 판단할 수 없다. 절대 기준으로 대신
+                # 팔면 시장 전체 하락에 손절이 몰리는 바로 그 일을 자료 장애가 만든다 —
+                # 오늘은 판단을 보류하고(다음 사이클에 다시 본다) 호출부가 사유를 남긴다.
+                continue
+            start = _positive(bench_basis.get(symbol))
+            if start is not None:
+                own = price / avg_price - 1.0
+                market = bench_now / start - 1.0
+                relative = (1.0 + own) / (1.0 + market) - 1.0
+                if relative <= -sl_pct:
+                    # 지금 시장 수준에서 상대 손절이 걸리는 가격(참고용)
+                    level = avg_price * (1 - sl_pct) * (bench_now / start)
+                    hits.append({
+                        "symbol": symbol, "action": "STOP_LOSS", "price": float(price),
+                        "quantity": quantity, "avg_price": avg_price, "level": round(level, 0),
+                        "basis": "relative", "relative_return": round(relative, 4),
+                        "reason": (
+                            f"시장 대비 손절: 종목 {own:+.1%} · {benchmark} {market:+.1%} "
+                            f"→ 상대 {relative:+.1%} ≤ -{sl_pct:.0%} (진입가 {avg_price:,.0f})"
+                        ),
+                    })
+                continue
+            # 매수 기록과 보유 수량이 맞지 않는 등 이 종목의 매입 시점 시장 수준만 모르는
+            # 경우다. 종목 하나의 문제라 절대 기준으로 대신 판단한다.
+            note = f" — 매입 시점 {benchmark} 자료가 없어 절대 기준으로 판단"
+            logger.warning("바스켓 상대 손절: {} 매입 시점 비교 자료 없음 — 절대 기준으로 판단", symbol)
+        level = avg_price * (1 - sl_pct)
+        if price <= level:
+            hits.append({
+                "symbol": symbol, "action": "STOP_LOSS", "price": float(price),
+                "quantity": quantity, "avg_price": avg_price, "level": round(level, 0),
+                "basis": "absolute",
+                "reason": (
+                    f"손절: 현재가 {price:,.0f} ≤ 손절선 {level:,.0f} "
+                    f"(진입가 {avg_price:,.0f} -{sl_pct:.0%}){note}"
+                ),
+            })
 
     return hits

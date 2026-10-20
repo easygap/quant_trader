@@ -28,6 +28,7 @@ verdict:
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from loguru import logger
@@ -329,6 +330,34 @@ def time_weighted_capital(
     return max(weighted, 1.0)
 
 
+def money_weighted_metrics(
+    starting_capital: float,
+    flows: list,
+    operation_start: Any,
+    end_day: Any,
+    end_value: float | None,
+) -> dict[str, float | None]:
+    """넣은 돈 기준 수익률(Modified Dietz) — 같은 기간의 시간가중 수익률과 나란히 본다.
+
+    (기말 평가액 − 원금 − 입금 합) ÷ (원금 + 각 입금 × 남은 기간 비율). 입금이 없으면
+    단순 수익률과 같다. 연환산하지 않는다(몇 달짜리 기록을 연율로 키우면 과장된다).
+    """
+    try:
+        start = float(starting_capital)
+        end = None if end_value is None else float(end_value)
+    except (TypeError, ValueError):
+        return {"money_weighted_return_pct": None, "contributed_capital": None}
+    deposits = sum(float(amount) for _, amount in (flows or []))
+    contributed = start + deposits
+    if end is None or not math.isfinite(end) or contributed <= 0:
+        return {"money_weighted_return_pct": None, "contributed_capital": contributed}
+    denominator = time_weighted_capital(start, flows, operation_start, end_day)
+    return {
+        "money_weighted_return_pct": (end - contributed) / denominator * 100,
+        "contributed_capital": contributed,
+    }
+
+
 def decompose_return_gap(
     nav_return_pct: float | None,
     design_return_pct: float | None,
@@ -526,10 +555,12 @@ def collect_basket_paper_evaluation(
     # 흐름 0건이면 아래 두 값은 기존과 완전히 동일하다(하위 호환).
     from database.repositories import get_cash_flows, has_cash_flows
     account_has_flows = has_cash_flows(account_key=basket_key, mode="paper")
+    starting_capital = initial_capital
+    account_flows = get_cash_flows(account_key=basket_key, mode="paper") if account_has_flows else []
     if account_has_flows:
         initial_capital = time_weighted_capital(
             initial_capital,
-            get_cash_flows(account_key=basket_key, mode="paper"),
+            account_flows,
             operation_start,
             today,
         )
@@ -586,6 +617,13 @@ def collect_basket_paper_evaluation(
 
     promotion = basket_cfg.get("promotion") or {}
     result.setdefault("metrics", {})["close_comparison"] = comparison
+    # 시간가중(TWR)은 운용 규칙의 성과, 금액가중은 '넣은 돈 기준' 성과다. 적립 계좌는 돈이
+    # 들어온 시점에 따라 둘이 갈린다(자본시장연구원 26-04: 개인 계좌는 금액가중 기준 수익 계좌
+    # 비율이 시간가중보다 낮았다). 둘을 함께 보여 주되 판정에는 쓰지 않는다.
+    result["metrics"].update(money_weighted_metrics(
+        starting_capital, account_flows, operation_start, nav_end,
+        float(snaps[-1].total_value) if snaps else None,
+    ))
     result["metrics"]["comparison_basis_note"] = (
         "별도 종가 평가 기준" if comparison else "동일 시점 종가 평가 기록 부족 — 벤치마크·귀속 비교 보류"
     )

@@ -1,0 +1,1164 @@
+{
+ "as_of": "2026-10-20",
+ "windows": {
+  "2012-01-02": {
+   "symbols": [
+    "005930",
+    "035420",
+    "005380",
+    "051910",
+    "005490",
+    "055550",
+    "035720",
+    "012330",
+    "105560"
+   ],
+   "benchmark": "069500",
+   "start": "2014-07-25",
+   "end": "2026-10-19",
+   "days": 2999,
+   "results": {
+    "static": {
+     "years": 12.24,
+     "cagr_pct": 5.58,
+     "period_return_pct": 94.34,
+     "vol_pct": 13.65,
+     "sharpe": 0.48,
+     "mdd_pct": -28.6,
+     "calmar": 0.2,
+     "worst_year_pct": -14.52,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 46.6,
+     "avg_exposure_pct": 60.6,
+     "turnover_per_year_pct": 20.2,
+     "final_value": 19433873,
+     "contributed": 10000000,
+     "profit": 9433873,
+     "yearly": {
+      "2014": -7.75,
+      "2015": -2.84,
+      "2016": 6.49,
+      "2017": 18.63,
+      "2018": -14.52,
+      "2019": 10.99,
+      "2020": 29.78,
+      "2021": 9.15,
+      "2022": -13.76,
+      "2023": 13.41,
+      "2024": -6.47,
+      "2025": 30.75,
+      "2026": 6.77
+     },
+     "label": "손절 없음 · 차단 없음",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {},
+     "min_stock_weight_pct": 13.2
+    },
+    "lock15": {
+     "years": 12.24,
+     "cagr_pct": 5.26,
+     "period_return_pct": 87.24,
+     "vol_pct": 13.58,
+     "sharpe": 0.46,
+     "mdd_pct": -27.63,
+     "calmar": 0.19,
+     "worst_year_pct": -14.52,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 46.6,
+     "avg_exposure_pct": 60.8,
+     "turnover_per_year_pct": 17.6,
+     "final_value": 18724107,
+     "contributed": 10000000,
+     "profit": 8724107,
+     "yearly": {
+      "2014": -7.75,
+      "2015": -2.84,
+      "2016": 6.49,
+      "2017": 18.63,
+      "2018": -14.52,
+      "2019": 10.99,
+      "2020": 29.84,
+      "2021": 7.28,
+      "2022": -14.39,
+      "2023": 12.18,
+      "2024": -5.27,
+      "2025": 28.18,
+      "2026": 7.3
+     },
+     "label": "계좌 낙폭 15% 매수 차단만",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 713,
+     "locked_days_pct": 23.8,
+     "blocked_buy_orders": 264,
+     "after_stop": {},
+     "min_stock_weight_pct": 13.2
+    },
+    "abs25": {
+     "years": 12.24,
+     "cagr_pct": 5.51,
+     "period_return_pct": 92.85,
+     "vol_pct": 13.34,
+     "sharpe": 0.48,
+     "mdd_pct": -26.21,
+     "calmar": 0.21,
+     "worst_year_pct": -15.09,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 47.3,
+     "avg_exposure_pct": 60.7,
+     "turnover_per_year_pct": 42.9,
+     "final_value": 19285302,
+     "contributed": 10000000,
+     "profit": 9285302,
+     "yearly": {
+      "2014": -8.27,
+      "2015": -1.93,
+      "2016": 6.28,
+      "2017": 18.89,
+      "2018": -15.09,
+      "2019": 12.35,
+      "2020": 25.72,
+      "2021": 8.37,
+      "2022": -14.68,
+      "2023": 13.94,
+      "2024": -7.05,
+      "2025": 34.02,
+      "2026": 7.81
+     },
+     "label": "절대 손절 -25%만",
+     "stop_events": 17,
+     "stop_realized_krw": -3875434,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 16,
+       "mean_excess_pct": 2.79,
+       "rebound_share_pct": 62.5
+      },
+      "60d": {
+       "events": 16,
+       "mean_excess_pct": 1.25,
+       "rebound_share_pct": 43.8
+      },
+      "120d": {
+       "events": 16,
+       "mean_excess_pct": 2.74,
+       "rebound_share_pct": 50.0
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    },
+    "abs25_lock15": {
+     "years": 12.24,
+     "cagr_pct": 4.12,
+     "period_return_pct": 63.82,
+     "vol_pct": 13.01,
+     "sharpe": 0.38,
+     "mdd_pct": -27.7,
+     "calmar": 0.15,
+     "worst_year_pct": -17.24,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 47.3,
+     "avg_exposure_pct": 58.8,
+     "turnover_per_year_pct": 41.9,
+     "final_value": 16382096,
+     "contributed": 10000000,
+     "profit": 6382096,
+     "yearly": {
+      "2014": -8.27,
+      "2015": -4.8,
+      "2016": 6.1,
+      "2017": 19.06,
+      "2018": -17.24,
+      "2019": 8.27,
+      "2020": 21.29,
+      "2021": 7.14,
+      "2022": -13.93,
+      "2023": 12.65,
+      "2024": -7.59,
+      "2025": 32.56,
+      "2026": 7.37
+     },
+     "label": "절대 손절 + 낙폭 차단 (운영 규칙)",
+     "stop_events": 20,
+     "stop_realized_krw": -4013910,
+     "locked_days": 1018,
+     "locked_days_pct": 33.9,
+     "blocked_buy_orders": 1106,
+     "after_stop": {
+      "20d": {
+       "events": 20,
+       "mean_excess_pct": 6.22,
+       "rebound_share_pct": 60.0
+      },
+      "60d": {
+       "events": 20,
+       "mean_excess_pct": 3.37,
+       "rebound_share_pct": 50.0
+      },
+      "120d": {
+       "events": 19,
+       "mean_excess_pct": 7.7,
+       "rebound_share_pct": 63.2
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    },
+    "rel25": {
+     "years": 12.24,
+     "cagr_pct": 6.19,
+     "period_return_pct": 108.6,
+     "vol_pct": 13.22,
+     "sharpe": 0.53,
+     "mdd_pct": -27.99,
+     "calmar": 0.22,
+     "worst_year_pct": -15.21,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 48.0,
+     "avg_exposure_pct": 60.3,
+     "turnover_per_year_pct": 84.3,
+     "final_value": 20860248,
+     "contributed": 10000000,
+     "profit": 10860248,
+     "yearly": {
+      "2014": -8.21,
+      "2015": -1.44,
+      "2016": 6.83,
+      "2017": 16.78,
+      "2018": -15.21,
+      "2019": 11.63,
+      "2020": 33.36,
+      "2021": 7.18,
+      "2022": -13.29,
+      "2023": 13.49,
+      "2024": -6.19,
+      "2025": 29.13,
+      "2026": 14.6
+     },
+     "label": "시장 대비 상대 손절 -25%",
+     "stop_events": 32,
+     "stop_realized_krw": 673890,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 32,
+       "mean_excess_pct": -2.16,
+       "rebound_share_pct": 53.1
+      },
+      "60d": {
+       "events": 32,
+       "mean_excess_pct": -0.77,
+       "rebound_share_pct": 46.9
+      },
+      "120d": {
+       "events": 24,
+       "mean_excess_pct": -5.75,
+       "rebound_share_pct": 54.2
+      }
+     },
+     "min_stock_weight_pct": 7.7
+    },
+    "rel25_lock15": {
+     "years": 12.24,
+     "cagr_pct": 5.44,
+     "period_return_pct": 91.25,
+     "vol_pct": 12.24,
+     "sharpe": 0.51,
+     "mdd_pct": -28.97,
+     "calmar": 0.19,
+     "worst_year_pct": -16.68,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 47.3,
+     "avg_exposure_pct": 57.2,
+     "turnover_per_year_pct": 88.5,
+     "final_value": 19125500,
+     "contributed": 10000000,
+     "profit": 9125500,
+     "yearly": {
+      "2014": -8.21,
+      "2015": -1.39,
+      "2016": 7.38,
+      "2017": 16.67,
+      "2018": -15.81,
+      "2019": 10.32,
+      "2020": 27.33,
+      "2021": 7.73,
+      "2022": -16.68,
+      "2023": 12.6,
+      "2024": -4.32,
+      "2025": 30.66,
+      "2026": 12.86
+     },
+     "label": "상대 손절 + 낙폭 차단",
+     "stop_events": 35,
+     "stop_realized_krw": -987480,
+     "locked_days": 933,
+     "locked_days_pct": 31.1,
+     "blocked_buy_orders": 1712,
+     "after_stop": {
+      "20d": {
+       "events": 35,
+       "mean_excess_pct": -0.7,
+       "rebound_share_pct": 51.4
+      },
+      "60d": {
+       "events": 35,
+       "mean_excess_pct": 0.59,
+       "rebound_share_pct": 48.6
+      },
+      "120d": {
+       "events": 27,
+       "mean_excess_pct": -2.36,
+       "rebound_share_pct": 59.3
+      }
+     },
+     "min_stock_weight_pct": 6.8
+    }
+   }
+  },
+  "2021-12-01": {
+   "symbols": [
+    "005930",
+    "035420",
+    "005380",
+    "051910",
+    "005490",
+    "055550",
+    "035720",
+    "012330",
+    "105560"
+   ],
+   "benchmark": "069500",
+   "start": "2021-12-01",
+   "end": "2026-10-19",
+   "days": 1192,
+   "results": {
+    "static": {
+     "years": 4.88,
+     "cagr_pct": 5.99,
+     "period_return_pct": 32.84,
+     "vol_pct": 16.28,
+     "sharpe": 0.45,
+     "mdd_pct": -20.86,
+     "calmar": 0.29,
+     "worst_year_pct": -14.62,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 49.2,
+     "avg_exposure_pct": 60.3,
+     "turnover_per_year_pct": 38.2,
+     "final_value": 13283863,
+     "contributed": 10000000,
+     "profit": 3283863,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.62,
+      "2023": 15.19,
+      "2024": -5.12,
+      "2025": 33.02,
+      "2026": 8.23
+     },
+     "label": "손절 없음 · 차단 없음",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {},
+     "min_stock_weight_pct": 14.8
+    },
+    "lock15": {
+     "years": 4.88,
+     "cagr_pct": 4.95,
+     "period_return_pct": 26.61,
+     "vol_pct": 16.31,
+     "sharpe": 0.39,
+     "mdd_pct": -21.76,
+     "calmar": 0.23,
+     "worst_year_pct": -14.69,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 50.8,
+     "avg_exposure_pct": 60.3,
+     "turnover_per_year_pct": 31.8,
+     "final_value": 12661035,
+     "contributed": 10000000,
+     "profit": 2661035,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.69,
+      "2023": 17.24,
+      "2024": -8.23,
+      "2025": 30.36,
+      "2026": 7.03
+     },
+     "label": "계좌 낙폭 15% 매수 차단만",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 69,
+     "locked_days_pct": 5.8,
+     "blocked_buy_orders": 5,
+     "after_stop": {},
+     "min_stock_weight_pct": 14.8
+    },
+    "abs25": {
+     "years": 4.88,
+     "cagr_pct": 5.09,
+     "period_return_pct": 27.42,
+     "vol_pct": 16.3,
+     "sharpe": 0.4,
+     "mdd_pct": -21.53,
+     "calmar": 0.24,
+     "worst_year_pct": -17.31,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 47.5,
+     "avg_exposure_pct": 60.7,
+     "turnover_per_year_pct": 77.4,
+     "final_value": 12741525,
+     "contributed": 10000000,
+     "profit": 2741525,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -17.31,
+      "2023": 15.76,
+      "2024": -6.07,
+      "2025": 32.19,
+      "2026": 8.43
+     },
+     "label": "절대 손절 -25%만",
+     "stop_events": 14,
+     "stop_realized_krw": -2486426,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 14,
+       "mean_excess_pct": -0.15,
+       "rebound_share_pct": 42.9
+      },
+      "60d": {
+       "events": 14,
+       "mean_excess_pct": 2.39,
+       "rebound_share_pct": 50.0
+      },
+      "120d": {
+       "events": 14,
+       "mean_excess_pct": -0.83,
+       "rebound_share_pct": 50.0
+      }
+     },
+     "min_stock_weight_pct": 14.8
+    },
+    "abs25_lock15": {
+     "years": 4.88,
+     "cagr_pct": 3.46,
+     "period_return_pct": 18.04,
+     "vol_pct": 16.03,
+     "sharpe": 0.3,
+     "mdd_pct": -22.26,
+     "calmar": 0.16,
+     "worst_year_pct": -17.5,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 50.8,
+     "avg_exposure_pct": 59.7,
+     "turnover_per_year_pct": 69.8,
+     "final_value": 11803554,
+     "contributed": 10000000,
+     "profit": 1803554,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -17.5,
+      "2023": 10.41,
+      "2024": -5.3,
+      "2025": 31.58,
+      "2026": 5.18
+     },
+     "label": "절대 손절 + 낙폭 차단 (운영 규칙)",
+     "stop_events": 14,
+     "stop_realized_krw": -2511018,
+     "locked_days": 248,
+     "locked_days_pct": 20.8,
+     "blocked_buy_orders": 213,
+     "after_stop": {
+      "20d": {
+       "events": 14,
+       "mean_excess_pct": -2.28,
+       "rebound_share_pct": 28.6
+      },
+      "60d": {
+       "events": 14,
+       "mean_excess_pct": 3.25,
+       "rebound_share_pct": 57.1
+      },
+      "120d": {
+       "events": 14,
+       "mean_excess_pct": -1.65,
+       "rebound_share_pct": 50.0
+      }
+     },
+     "min_stock_weight_pct": 14.8
+    },
+    "rel25": {
+     "years": 4.88,
+     "cagr_pct": 6.2,
+     "period_return_pct": 34.11,
+     "vol_pct": 15.05,
+     "sharpe": 0.49,
+     "mdd_pct": -19.09,
+     "calmar": 0.32,
+     "worst_year_pct": -14.4,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 47.5,
+     "avg_exposure_pct": 59.9,
+     "turnover_per_year_pct": 146.5,
+     "final_value": 13410708,
+     "contributed": 10000000,
+     "profit": 3410708,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.4,
+      "2023": 15.77,
+      "2024": -7.44,
+      "2025": 30.32,
+      "2026": 13.47
+     },
+     "label": "시장 대비 상대 손절 -25%",
+     "stop_events": 23,
+     "stop_realized_krw": 191615,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 23,
+       "mean_excess_pct": -5.38,
+       "rebound_share_pct": 34.8
+      },
+      "60d": {
+       "events": 23,
+       "mean_excess_pct": -3.26,
+       "rebound_share_pct": 39.1
+      },
+      "120d": {
+       "events": 15,
+       "mean_excess_pct": -15.89,
+       "rebound_share_pct": 46.7
+      }
+     },
+     "min_stock_weight_pct": 7.0
+    },
+    "rel25_lock15": {
+     "years": 4.88,
+     "cagr_pct": 6.2,
+     "period_return_pct": 34.11,
+     "vol_pct": 15.05,
+     "sharpe": 0.49,
+     "mdd_pct": -19.09,
+     "calmar": 0.32,
+     "worst_year_pct": -14.4,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 47.5,
+     "avg_exposure_pct": 59.9,
+     "turnover_per_year_pct": 146.5,
+     "final_value": 13410708,
+     "contributed": 10000000,
+     "profit": 3410708,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.4,
+      "2023": 15.77,
+      "2024": -7.44,
+      "2025": 30.32,
+      "2026": 13.47
+     },
+     "label": "상대 손절 + 낙폭 차단",
+     "stop_events": 23,
+     "stop_realized_krw": 191615,
+     "locked_days": 48,
+     "locked_days_pct": 4.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 23,
+       "mean_excess_pct": -5.38,
+       "rebound_share_pct": 34.8
+      },
+      "60d": {
+       "events": 23,
+       "mean_excess_pct": -3.26,
+       "rebound_share_pct": 39.1
+      },
+      "120d": {
+       "events": 15,
+       "mean_excess_pct": -15.89,
+       "rebound_share_pct": 46.7
+      }
+     },
+     "min_stock_weight_pct": 7.0
+    }
+   }
+  }
+ },
+ "sensitivity": {
+  "2012-01-02": {
+   "symbols": [
+    "005930",
+    "035420",
+    "005380",
+    "051910",
+    "005490",
+    "055550",
+    "035720",
+    "012330",
+    "105560"
+   ],
+   "benchmark": "069500",
+   "start": "2014-07-25",
+   "end": "2026-10-19",
+   "days": 2999,
+   "results": {
+    "static": {
+     "years": 12.24,
+     "cagr_pct": 5.58,
+     "period_return_pct": 94.34,
+     "vol_pct": 13.65,
+     "sharpe": 0.48,
+     "mdd_pct": -28.6,
+     "calmar": 0.2,
+     "worst_year_pct": -14.52,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 46.6,
+     "avg_exposure_pct": 60.6,
+     "turnover_per_year_pct": 20.2,
+     "final_value": 19433873,
+     "contributed": 10000000,
+     "profit": 9433873,
+     "yearly": {
+      "2014": -7.75,
+      "2015": -2.84,
+      "2016": 6.49,
+      "2017": 18.63,
+      "2018": -14.52,
+      "2019": 10.99,
+      "2020": 29.78,
+      "2021": 9.15,
+      "2022": -13.76,
+      "2023": 13.41,
+      "2024": -6.47,
+      "2025": 30.75,
+      "2026": 6.77
+     },
+     "label": "손절 없음 · 차단 없음",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {},
+     "min_stock_weight_pct": 13.2
+    },
+    "abs20": {
+     "years": 12.24,
+     "cagr_pct": 5.42,
+     "period_return_pct": 90.86,
+     "vol_pct": 13.38,
+     "sharpe": 0.47,
+     "mdd_pct": -25.0,
+     "calmar": 0.22,
+     "worst_year_pct": -14.52,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 45.9,
+     "avg_exposure_pct": 60.6,
+     "turnover_per_year_pct": 53.8,
+     "final_value": 19086102,
+     "contributed": 10000000,
+     "profit": 9086102,
+     "yearly": {
+      "2014": -8.93,
+      "2015": -5.52,
+      "2016": 7.98,
+      "2017": 19.01,
+      "2018": -14.19,
+      "2019": 12.43,
+      "2020": 25.83,
+      "2021": 9.25,
+      "2022": -14.52,
+      "2023": 17.25,
+      "2024": -7.95,
+      "2025": 32.48,
+      "2026": 6.48
+     },
+     "label": "절대 손절 -20%",
+     "stop_events": 24,
+     "stop_realized_krw": -4255777,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 24,
+       "mean_excess_pct": 5.86,
+       "rebound_share_pct": 66.7
+      },
+      "60d": {
+       "events": 24,
+       "mean_excess_pct": 4.45,
+       "rebound_share_pct": 58.3
+      },
+      "120d": {
+       "events": 23,
+       "mean_excess_pct": 0.81,
+       "rebound_share_pct": 47.8
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    },
+    "abs30": {
+     "years": 12.24,
+     "cagr_pct": 5.43,
+     "period_return_pct": 91.03,
+     "vol_pct": 13.62,
+     "sharpe": 0.47,
+     "mdd_pct": -28.92,
+     "calmar": 0.19,
+     "worst_year_pct": -16.06,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 46.6,
+     "avg_exposure_pct": 61.3,
+     "turnover_per_year_pct": 34.1,
+     "final_value": 19102896,
+     "contributed": 10000000,
+     "profit": 9102896,
+     "yearly": {
+      "2014": -8.13,
+      "2015": -2.53,
+      "2016": 7.46,
+      "2017": 19.83,
+      "2018": -16.06,
+      "2019": 12.06,
+      "2020": 27.24,
+      "2021": 9.04,
+      "2022": -14.47,
+      "2023": 13.8,
+      "2024": -7.77,
+      "2025": 33.04,
+      "2026": 6.32
+     },
+     "label": "절대 손절 -30%",
+     "stop_events": 12,
+     "stop_realized_krw": -3055400,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 12,
+       "mean_excess_pct": 2.32,
+       "rebound_share_pct": 50.0
+      },
+      "60d": {
+       "events": 12,
+       "mean_excess_pct": 2.84,
+       "rebound_share_pct": 66.7
+      },
+      "120d": {
+       "events": 12,
+       "mean_excess_pct": 8.28,
+       "rebound_share_pct": 50.0
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    },
+    "rel20": {
+     "years": 12.24,
+     "cagr_pct": 5.36,
+     "period_return_pct": 89.54,
+     "vol_pct": 12.91,
+     "sharpe": 0.48,
+     "mdd_pct": -26.72,
+     "calmar": 0.2,
+     "worst_year_pct": -14.86,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 48.6,
+     "avg_exposure_pct": 59.7,
+     "turnover_per_year_pct": 100.7,
+     "final_value": 18953609,
+     "contributed": 10000000,
+     "profit": 8953609,
+     "yearly": {
+      "2014": -8.34,
+      "2015": -5.16,
+      "2016": 6.34,
+      "2017": 16.64,
+      "2018": -14.86,
+      "2019": 11.82,
+      "2020": 32.26,
+      "2021": 6.33,
+      "2022": -14.85,
+      "2023": 15.94,
+      "2024": -7.28,
+      "2025": 25.93,
+      "2026": 13.9
+     },
+     "label": "상대 손절 -20%",
+     "stop_events": 47,
+     "stop_realized_krw": -1347189,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 45,
+       "mean_excess_pct": -0.5,
+       "rebound_share_pct": 51.1
+      },
+      "60d": {
+       "events": 45,
+       "mean_excess_pct": -0.7,
+       "rebound_share_pct": 48.9
+      },
+      "120d": {
+       "events": 37,
+       "mean_excess_pct": -9.01,
+       "rebound_share_pct": 35.1
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    },
+    "rel30": {
+     "years": 12.24,
+     "cagr_pct": 5.22,
+     "period_return_pct": 86.44,
+     "vol_pct": 13.0,
+     "sharpe": 0.47,
+     "mdd_pct": -28.49,
+     "calmar": 0.18,
+     "worst_year_pct": -15.34,
+     "losing_years": 5,
+     "total_years": 13,
+     "negative_months_pct": 47.3,
+     "avg_exposure_pct": 60.7,
+     "turnover_per_year_pct": 78.2,
+     "final_value": 18643783,
+     "contributed": 10000000,
+     "profit": 8643783,
+     "yearly": {
+      "2014": -8.04,
+      "2015": -1.03,
+      "2016": 7.02,
+      "2017": 15.65,
+      "2018": -15.34,
+      "2019": 12.37,
+      "2020": 29.85,
+      "2021": 5.41,
+      "2022": -15.16,
+      "2023": 12.52,
+      "2024": -7.08,
+      "2025": 31.79,
+      "2026": 8.72
+     },
+     "label": "상대 손절 -30%",
+     "stop_events": 27,
+     "stop_realized_krw": 51602,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 27,
+       "mean_excess_pct": 1.69,
+       "rebound_share_pct": 48.1
+      },
+      "60d": {
+       "events": 27,
+       "mean_excess_pct": 3.9,
+       "rebound_share_pct": 59.3
+      },
+      "120d": {
+       "events": 20,
+       "mean_excess_pct": -5.71,
+       "rebound_share_pct": 60.0
+      }
+     },
+     "min_stock_weight_pct": 13.2
+    }
+   }
+  },
+  "2021-12-01": {
+   "symbols": [
+    "005930",
+    "035420",
+    "005380",
+    "051910",
+    "005490",
+    "055550",
+    "035720",
+    "012330",
+    "105560"
+   ],
+   "benchmark": "069500",
+   "start": "2021-12-01",
+   "end": "2026-10-19",
+   "days": 1192,
+   "results": {
+    "static": {
+     "years": 4.88,
+     "cagr_pct": 5.99,
+     "period_return_pct": 32.84,
+     "vol_pct": 16.28,
+     "sharpe": 0.45,
+     "mdd_pct": -20.86,
+     "calmar": 0.29,
+     "worst_year_pct": -14.62,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 49.2,
+     "avg_exposure_pct": 60.3,
+     "turnover_per_year_pct": 38.2,
+     "final_value": 13283863,
+     "contributed": 10000000,
+     "profit": 3283863,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.62,
+      "2023": 15.19,
+      "2024": -5.12,
+      "2025": 33.02,
+      "2026": 8.23
+     },
+     "label": "손절 없음 · 차단 없음",
+     "stop_events": 0,
+     "stop_realized_krw": 0,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {},
+     "min_stock_weight_pct": 14.8
+    },
+    "abs20": {
+     "years": 4.88,
+     "cagr_pct": 5.49,
+     "period_return_pct": 29.84,
+     "vol_pct": 16.31,
+     "sharpe": 0.42,
+     "mdd_pct": -22.52,
+     "calmar": 0.24,
+     "worst_year_pct": -14.4,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 49.2,
+     "avg_exposure_pct": 60.7,
+     "turnover_per_year_pct": 89.8,
+     "final_value": 12983634,
+     "contributed": 10000000,
+     "profit": 2983634,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.4,
+      "2023": 14.6,
+      "2024": -6.9,
+      "2025": 34.36,
+      "2026": 7.01
+     },
+     "label": "절대 손절 -20%",
+     "stop_events": 17,
+     "stop_realized_krw": -2599363,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 17,
+       "mean_excess_pct": -1.57,
+       "rebound_share_pct": 47.1
+      },
+      "60d": {
+       "events": 17,
+       "mean_excess_pct": -1.35,
+       "rebound_share_pct": 41.2
+      },
+      "120d": {
+       "events": 16,
+       "mean_excess_pct": -5.74,
+       "rebound_share_pct": 37.5
+      }
+     },
+     "min_stock_weight_pct": 14.8
+    },
+    "abs30": {
+     "years": 4.88,
+     "cagr_pct": 4.78,
+     "period_return_pct": 25.61,
+     "vol_pct": 16.51,
+     "sharpe": 0.37,
+     "mdd_pct": -21.42,
+     "calmar": 0.22,
+     "worst_year_pct": -17.13,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 47.5,
+     "avg_exposure_pct": 62.0,
+     "turnover_per_year_pct": 65.3,
+     "final_value": 12560644,
+     "contributed": 10000000,
+     "profit": 2560644,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -17.13,
+      "2023": 15.65,
+      "2024": -7.69,
+      "2025": 33.14,
+      "2026": 7.85
+     },
+     "label": "절대 손절 -30%",
+     "stop_events": 11,
+     "stop_realized_krw": -2418732,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 11,
+       "mean_excess_pct": 1.84,
+       "rebound_share_pct": 63.6
+      },
+      "60d": {
+       "events": 11,
+       "mean_excess_pct": 6.37,
+       "rebound_share_pct": 54.5
+      },
+      "120d": {
+       "events": 11,
+       "mean_excess_pct": 2.98,
+       "rebound_share_pct": 54.5
+      }
+     },
+     "min_stock_weight_pct": 14.8
+    },
+    "rel20": {
+     "years": 4.88,
+     "cagr_pct": 6.07,
+     "period_return_pct": 33.32,
+     "vol_pct": 14.6,
+     "sharpe": 0.49,
+     "mdd_pct": -19.3,
+     "calmar": 0.31,
+     "worst_year_pct": -14.98,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 44.1,
+     "avg_exposure_pct": 58.1,
+     "turnover_per_year_pct": 186.5,
+     "final_value": 13332296,
+     "contributed": 10000000,
+     "profit": 3332296,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.98,
+      "2023": 18.9,
+      "2024": -5.35,
+      "2025": 26.07,
+      "2026": 11.78
+     },
+     "label": "상대 손절 -20%",
+     "stop_events": 33,
+     "stop_realized_krw": -467472,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 32,
+       "mean_excess_pct": -7.07,
+       "rebound_share_pct": 31.2
+      },
+      "60d": {
+       "events": 32,
+       "mean_excess_pct": -8.18,
+       "rebound_share_pct": 31.2
+      },
+      "120d": {
+       "events": 24,
+       "mean_excess_pct": -19.44,
+       "rebound_share_pct": 29.2
+      }
+     },
+     "min_stock_weight_pct": 14.8
+    },
+    "rel30": {
+     "years": 4.88,
+     "cagr_pct": 6.69,
+     "period_return_pct": 37.16,
+     "vol_pct": 15.43,
+     "sharpe": 0.51,
+     "mdd_pct": -19.08,
+     "calmar": 0.35,
+     "worst_year_pct": -14.81,
+     "losing_years": 3,
+     "total_years": 6,
+     "negative_months_pct": 45.8,
+     "avg_exposure_pct": 59.7,
+     "turnover_per_year_pct": 119.4,
+     "final_value": 13715659,
+     "contributed": 10000000,
+     "profit": 3715659,
+     "yearly": {
+      "2021": -1.13,
+      "2022": -14.81,
+      "2023": 18.39,
+      "2024": -3.87,
+      "2025": 30.44,
+      "2026": 9.68
+     },
+     "label": "상대 손절 -30%",
+     "stop_events": 18,
+     "stop_realized_krw": 785350,
+     "locked_days": 0,
+     "locked_days_pct": 0.0,
+     "blocked_buy_orders": 0,
+     "after_stop": {
+      "20d": {
+       "events": 18,
+       "mean_excess_pct": -6.12,
+       "rebound_share_pct": 22.2
+      },
+      "60d": {
+       "events": 18,
+       "mean_excess_pct": -5.23,
+       "rebound_share_pct": 38.9
+      },
+      "120d": {
+       "events": 11,
+       "mean_excess_pct": -18.38,
+       "rebound_share_pct": 45.5
+      }
+     },
+     "min_stock_weight_pct": 13.8
+    }
+   }
+  }
+ }
+}

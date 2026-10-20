@@ -54,6 +54,11 @@ def build_weekly_summary(
         perf.append(f"주간 {week_nav_change_pct:+.2f}%")
     if nav is not None:
         perf.append(f"누적 {nav:+.2f}%")
+    # 적립 계좌는 넣은 돈 기준 수익률이 운용 규칙의 수익률(시간가중)과 갈린다 — 같이 보여 준다.
+    money_weighted = m.get("money_weighted_return_pct")
+    contributed = m.get("contributed_capital")
+    if money_weighted is not None and contributed is not None:
+        perf.append(f"넣은 돈 {contributed:,.0f}원 기준 {money_weighted:+.2f}%")
     if perf:
         fields.append({"name": "💰 성과", "value": " · ".join(perf), "inline": False})
 
