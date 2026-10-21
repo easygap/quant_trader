@@ -741,7 +741,8 @@ def read_paper_validation(output_dir=None):
     code. An explicit artifact directory retains its own historical policy context.
     """
     result = {"schema_version": 1, "research_only": True, "automatic_live_promotion": False,
-              "status": "not_started", "updated_at": None, "cohorts": [], "issues": [], "limitations": LIMITATIONS}
+              "status": "not_started", "updated_at": None, "cohorts": [], "performance_history": [],
+              "issues": [], "limitations": LIMITATIONS}
     try:
         events = _load_events(_directory(output_dir))
         if not events:
@@ -805,6 +806,11 @@ def read_paper_validation(output_dir=None):
                 row["status"] = "stale"
                 row["issues"] = sorted(set(row["issues"]) | {"collection_stale"})
         result["cohorts"] = sorted(summaries.values(), key=lambda row: (not row["active"], row["basket"], row["started_at"]), reverse=False)
+        from core.paper_performance import build_performance_history
+        try:
+            result["performance_history"] = build_performance_history(events, summaries, _calendar())
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            result["issues"].append("performance_history_unavailable")
         result["status"] = ("unavailable" if result["issues"] else "data_gaps" if any(row["status"] in {"data_gaps", "stale"} for row in active)
                             else "observing" if active else "inactive")
         return result
