@@ -1640,15 +1640,17 @@ def test_daily_loss_baseline_skips_when_only_today_snapshot(fresh_db):
     되면서 일일 손실 한도 가드가 조용히 무력화됐다.
     """
     from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     from core.order_executor import OrderExecutor
     from database.models import get_session, PortfolioSnapshot
 
     executor = OrderExecutor(account_key="daily_loss_baseline_test")
+    today = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
 
     # 오늘 스냅샷만 1개 — 기준값은 None 이어야 한다(가드는 일일 손실 점검만 skip).
     session = get_session()
     session.add(PortfolioSnapshot(
-        account_key="daily_loss_baseline_test", date=datetime.now(),
+        account_key="daily_loss_baseline_test", date=today,
         total_value=9_000_000, cash=9_000_000, invested=0,
         daily_return=0.0, cumulative_return=-10.0, mdd=-10.0, position_count=0,
     ))
@@ -1659,7 +1661,7 @@ def test_daily_loss_baseline_skips_when_only_today_snapshot(fresh_db):
     # 전일 스냅샷을 추가하면 그 값(전일 평가금액)을 기준으로 쓴다.
     session = get_session()
     session.add(PortfolioSnapshot(
-        account_key="daily_loss_baseline_test", date=datetime.now() - timedelta(days=1),
+        account_key="daily_loss_baseline_test", date=today - timedelta(days=1),
         total_value=10_000_000, cash=10_000_000, invested=0,
         daily_return=0.0, cumulative_return=0.0, mdd=0.0, position_count=0,
     ))

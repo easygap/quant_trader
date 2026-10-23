@@ -220,10 +220,12 @@ def record_event_once_per_day(
 
     반환: 새로 기록했으면 True, 중복이라 건너뛰었거나 기록 실패면 False.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
-    now = now or datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+    now = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    if now.tzinfo is not None:
+        now = now.astimezone(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     try:
         from database.models import OperationEvent, get_session
@@ -234,6 +236,7 @@ def record_event_once_per_day(
                 OperationEvent.event_type == event_type,
                 OperationEvent.mode == mode,
                 OperationEvent.created_at >= day_start,
+                OperationEvent.created_at < day_start + timedelta(days=1),
             )
             for col, val in (
                 (OperationEvent.strategy, strategy),
@@ -261,6 +264,7 @@ def record_event_once_per_day(
                 message=message,
                 detail=dedupe_key,
                 mode=mode,
+                created_at=now,
             ))
             session.commit()
         finally:

@@ -306,6 +306,30 @@ def test_event_once_per_day_dedupes_same_cause():
                                      dedupe_key="사유 A", **kw) is True
 
 
+@pytest.mark.parametrize("stamp", ["2026-10-22T23:58:00+00:00", "2026-10-23T08:58:00+09:00", "2026-10-23T08:58:00"])
+def test_event_dedupe_uses_one_kst_clock_for_query_and_insert(monkeypatch, stamp):
+    from core.cycle_observability import record_event_once_per_day
+    from database.models import OperationEvent, get_session
+
+    # UTC 호스트의 기본 저장 시각과 한국 날짜가 다른 상황을 고정해 재현한다.
+    monkeypatch.setattr(OperationEvent.created_at.default, "arg", lambda ctx: datetime(2026, 10, 22, 23, 58))
+    kw = dict(strategy=f"kst_dedupe:{stamp}", mode="paper", dedupe_key="same_cause", now=datetime.fromisoformat(stamp))
+    assert record_event_once_per_day("ORDER_REJECTED", "검증용 이벤트", **kw) is True
+    assert record_event_once_per_day("ORDER_REJECTED", "검증용 이벤트", **kw) is False
+    session = get_session()
+    try:
+        saved = session.query(OperationEvent).filter_by(strategy=kw["strategy"]).one()
+        assert saved.created_at == datetime(2026, 10, 23, 8, 58)
+    finally:
+        session.close()
+
+    # 다른 날의 기록은 중복이 아니다. 미래 행도 과거 날짜의 기록을 막지 않는다.
+    for day in (24, 22):
+        kw["now"] = datetime(2026, 10, day, 8, 58)
+        assert record_event_once_per_day("ORDER_REJECTED", "검증용 이벤트", **kw) is True
+        assert record_event_once_per_day("ORDER_REJECTED", "검증용 이벤트", **kw) is False
+
+
 # ------------------------------------------------------------------ 커버리지 게이트
 
 def test_coverage_gate_uses_measured_days_not_reconstructed():
