@@ -152,7 +152,7 @@ class TestTrendFilter:
         from datetime import datetime
         closes = [100.0] * 200 + [50.0]
         rb = _make(_basket(self.overlays), closes)
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(_KST).strftime("%Y-%m-%d")
         dates = list(pd.bdate_range(end=_previous_session(), periods=200)) + [pd.Timestamp(today)]
         rb.data_collector.fetch_korean_stock = lambda symbol, start_date=None, end_date=None: pd.DataFrame({"date": dates, "close": closes})
         got = rb._fetch_index_closes("KS200", 200)

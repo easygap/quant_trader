@@ -5,7 +5,7 @@ provider exceptions and stderr are never copied to the durable status report.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -55,6 +55,31 @@ def _save(report, directory):
         temporary.unlink(missing_ok=True)
 
 
+def _checked_close_session(report):
+    """Honor an early successful close without rewriting its saved attempt time."""
+    expected = report.get("expected_close_session", "")
+    try:
+        job = report["jobs"]["close"]
+        result = job["result"]
+        coverage = result["coverage"]
+        session = result["last_completed_session"]
+        count = coverage["expected"]
+        if (job["status"] == job["data_status"] == "completed" and job["returncode"] == 0
+                and session == result["expected_session"] == coverage["session"]
+                and coverage["status"] == "complete"
+                and type(count) is int and count > 0
+                and coverage["present"] == count and coverage["missing"] == 0
+                and len(coverage["baskets"]) == count
+                and all(row["status"] == "present" and row["close_count"] > 0
+                        and row["latest_close_session"] == session for row in coverage["baskets"])
+                and date.fromisoformat(session).isoformat() == session
+                and session <= datetime.fromisoformat(report["updated_at"]).astimezone(KST).date().isoformat()):
+            return max(expected, session)
+    except (KeyError, TypeError, ValueError):
+        pass  # Incomplete/old child reports cannot establish a newer close.
+    return expected
+
+
 def read_daily_observation(output_dir=None, *, now=None):
     """Read saved execution status without starting a collector or opening a DB."""
     try:
@@ -67,9 +92,11 @@ def read_daily_observation(output_dir=None, *, now=None):
             raise ValueError("invalid daily observation report")
         if report["status"] == "running" and current - stamp > timedelta(minutes=20):
             return {**report, "status": "interrupted", "issues": ["일일 관측 실행의 완료 기록이 없습니다."]}
-        if report.get("expected_close_session", "") < _expected_session(current):
-            return {**report, "status": "stale", "issues": ["새 거래일의 종가 관측 실행이 필요합니다."]}
-        return report
+        checked_session = _checked_close_session(report)
+        if checked_session < _expected_session(current):
+            return {**report, "expected_close_session": checked_session,
+                    "status": "stale", "issues": ["새 거래일의 종가 관측 실행이 필요합니다."]}
+        return {**report, "expected_close_session": checked_session}
     except FileNotFoundError:
         return {"status": "not_started", "issues": ["아직 종가·수집 통합 실행 기록이 없습니다."]}
     except (OSError, ValueError, TypeError, KeyError):
@@ -152,6 +179,7 @@ def run_daily_observation(output_dir=None):
         if report["status"] == "completed" and report["jobs"]["close"]["status"] == "awaiting_close":
             report["status"] = "awaiting_close"
         report["updated_at"] = _now().isoformat()
+        report["expected_close_session"] = _checked_close_session(report)
         _save(report, directory)
         # One small audit record per attempt; no raw logs or database copies.
         runs = directory / "runs"

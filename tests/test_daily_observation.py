@@ -6,6 +6,8 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from core import daily_observation as daily
 
 
@@ -72,6 +74,91 @@ def test_weekend_keeps_friday_expected_close_and_monday_is_due_only_after_schedu
     assert daily._expected_session(kst("2026-10-19T08:30")) == "2026-10-16"
     assert daily._expected_session(kst("2026-10-19T16:29")) == "2026-10-16"
     assert daily._expected_session(kst("2026-10-19T16:30")) == "2026-10-19"
+
+
+def early_completed_report():
+    # Mirrors the October 22 run: a confirmed close at 16:27, before the 16:30 due time.
+    return {
+        "schema_version": 1, "status": "attention", "updated_at": "2026-10-22T16:27:44+09:00",
+        "expected_close_session": "2026-10-21", "issues": [],
+        "jobs": {"close": {
+            "status": "completed", "data_status": "completed", "returncode": 0,
+            "result": {"expected_session": "2026-10-22", "last_completed_session": "2026-10-22",
+                       "coverage": {"session": "2026-10-22", "status": "complete", "expected": 2,
+                                    "present": 2, "missing": 0, "baskets": [
+                                        {"basket": name, "status": "present", "close_count": 1,
+                                         "latest_close_session": "2026-10-22"}
+                                        for name in ("hold", "pocket")]}}},
+                 "research": {"status": "attention"}},
+    }
+
+
+def test_early_close_remains_current_after_schedule_without_rewriting_saved_report(tmp_path, monkeypatch):
+    report = early_completed_report()
+    daily._save(report, tmp_path)
+    original = (tmp_path / "latest.json").read_bytes()
+    monkeypatch.setattr(daily, "_run_child", Mock(side_effect=AssertionError("read must not collect")))
+
+    for stamp in ("2026-10-22T16:29:00+09:00", "2026-10-22T16:31:00+09:00", "2026-10-23T08:30:00+09:00"):
+        result = daily.read_daily_observation(tmp_path, now=datetime.fromisoformat(stamp))
+        assert result["status"] == "attention"  # A separate research failure remains visible.
+        assert result["expected_close_session"] == "2026-10-22"
+        assert result["jobs"] == report["jobs"]
+    assert (tmp_path / "latest.json").read_bytes() == original
+
+    next_close_due = datetime.fromisoformat("2026-10-23T16:31:00+09:00")
+    stale = daily.read_daily_observation(tmp_path, now=next_close_due)
+    assert stale["status"] == "stale"
+    assert stale["expected_close_session"] == "2026-10-22"
+
+
+@pytest.mark.parametrize("path,value", [
+    (("status",), "attention"),
+    (("data_status",), "partial"),
+    (("returncode",), 2),
+    (("result", "expected_session"), "2026-10-21"),
+    (("result", "last_completed_session"), "2026-10-21"),
+    (("result", "coverage", "status"), "partial"),
+    (("result", "coverage", "session"), "2026-10-21"),
+    (("result", "coverage", "expected"), 0),
+    (("result", "coverage", "present"), 1),
+    (("result", "coverage", "missing"), 1),
+    (("result", "coverage", "baskets"), []),
+    (("result", "coverage", "baskets", 1, "latest_close_session"), "2026-10-21"),
+    (("result", "coverage", "baskets", 1, "close_count"), 0),
+])
+def test_partial_or_inconsistent_close_cannot_hide_a_missing_session(tmp_path, path, value):
+    report = early_completed_report()
+    target = report["jobs"]["close"]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    daily._save(report, tmp_path)
+    now = datetime.fromisoformat("2026-10-22T16:31:00+09:00")
+    assert daily.read_daily_observation(tmp_path, now=now)["status"] == "stale"
+
+
+def test_future_close_date_cannot_advance_observed_session(tmp_path):
+    report = json.loads(json.dumps(early_completed_report()).replace("2026-10-22", "2026-10-23"))
+    report["updated_at"] = "2026-10-22T16:27:44+09:00"
+    daily._save(report, tmp_path)
+    now = datetime.fromisoformat("2026-10-22T16:31:00+09:00")
+    assert daily.read_daily_observation(tmp_path, now=now)["status"] == "stale"
+
+
+def test_runner_saves_completed_session_when_it_starts_before_schedule(monkeypatch, tmp_path):
+    setup(monkeypatch)
+    now = datetime.fromisoformat("2026-10-22T16:27:44+09:00")
+    monkeypatch.setattr(daily, "_now", lambda: now)
+    close = early_completed_report()["jobs"]["close"]
+    monkeypatch.setattr(daily, "_run_child", Mock(side_effect=[
+        (0, {"status": "completed", **close["result"]}), (1, {"status": "attention"}),
+    ]))
+    result = daily.run_daily_observation(tmp_path)
+    assert result["expected_close_session"] == "2026-10-22"
+    assert result["status"] == "attention"
+    assert json.loads((tmp_path / "latest.json").read_text(encoding="utf-8")) == result
+    assert json.loads(next((tmp_path / "runs").glob("*.json")).read_text(encoding="utf-8")) == result
 
 
 def test_overlapping_observation_does_not_spawn(monkeypatch, tmp_path):
